@@ -1,0 +1,11 @@
+.env
+*.pickle
+token.pickle
+credentials.json
+payout_cache.json
+data/
+logs/
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/

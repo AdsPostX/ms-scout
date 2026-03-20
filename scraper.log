@@ -1,0 +1,264 @@
+/Users/siddharthshah/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+/Users/siddharthshah/Library/Python/3.9/lib/python/site-packages/google/oauth2/__init__.py:40: FutureWarning: You are using a Python version 3.9 past its end of life. Google will update google-auth with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade your Python version, and then update google-auth.
+  warnings.warn(eol_message.format("3.9"), FutureWarning)
+/Users/siddharthshah/Library/Python/3.9/lib/python/site-packages/google/auth/__init__.py:54: FutureWarning: You are using a Python version 3.9 past its end of life. Google will update google-auth with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade your Python version, and then update google-auth.
+  warnings.warn(eol_message.format("3.9"), FutureWarning)
+/Users/siddharthshah/Library/Python/3.9/lib/python/site-packages/google/api_core/_python_version_support.py:246: FutureWarning: You are using a non-supported Python version (3.9.6). Google will not post any further updates to google.api_core supporting this Python version. Please upgrade to the latest Python version, or at least Python 3.10, and then update google.api_core.
+  warnings.warn(message, FutureWarning)
+2026-03-19 07:01:39 [INFO] Impact: fetching campaigns...
+2026-03-19 07:01:53 [INFO] Impact: fetching category data from Ads endpoint...
+2026-03-19 07:01:58 [INFO] Impact: category labels loaded for 18 campaigns
+2026-03-19 07:01:58 [INFO] Impact payout enrichment: fetching Actions for 232 new campaigns (0 already cached)...
+2026-03-19 07:01:58 [WARNING]   Campaign 799: status 404
+2026-03-19 07:01:59 [WARNING]   Campaign 4767: status 404
+2026-03-19 07:01:59 [WARNING]   Campaign 10462: status 404
+2026-03-19 07:02:00 [WARNING]   Campaign 13264: status 404
+2026-03-19 07:02:00 [WARNING]   Campaign 1546: status 404
+2026-03-19 07:02:01 [WARNING]   Campaign 4515: status 404
+2026-03-19 07:02:01 [WARNING]   Campaign 2075: status 404
+2026-03-19 07:02:02 [WARNING]   Campaign 2085: status 404
+2026-03-19 07:02:02 [WARNING]   Campaign 2322: status 404
+2026-03-19 07:02:03 [WARNING]   Campaign 2456: status 404
+2026-03-19 07:02:03 [WARNING]   Campaign 3022: status 404
+2026-03-19 07:02:04 [WARNING]   Campaign 3065: status 404
+2026-03-19 07:02:04 [WARNING]   Campaign 3334: status 404
+2026-03-19 07:02:05 [WARNING]   Campaign 3411: status 404
+2026-03-19 07:02:05 [WARNING]   Campaign 4415: status 404
+2026-03-19 07:02:06 [WARNING]   Campaign 4662: status 404
+2026-03-19 07:02:06 [WARNING]   Campaign 4851: status 404
+2026-03-19 07:02:07 [WARNING]   Campaign 5359: status 404
+2026-03-19 07:02:07 [WARNING]   Campaign 10168: status 404
+2026-03-19 07:02:08 [WARNING]   Campaign 4464: status 404
+2026-03-19 07:02:08 [WARNING]   Campaign 12206: status 404
+2026-03-19 07:02:09 [WARNING]   Campaign 4694: status 404
+2026-03-19 07:02:09 [WARNING]   Campaign 4724: status 404
+2026-03-19 07:02:10 [WARNING]   Campaign 4723: status 404
+2026-03-19 07:02:10 [WARNING]   Campaign 4972: status 404
+2026-03-19 07:02:10 [WARNING]   Campaign 5084: status 404
+2026-03-19 07:02:11 [WARNING]   Campaign 5119: status 404
+2026-03-19 07:02:11 [WARNING]   Campaign 5136: status 404
+2026-03-19 07:02:12 [WARNING]   Campaign 5361: status 404
+2026-03-19 07:02:41 [WARNING]   Campaign 5683: status 404
+2026-03-19 07:02:42 [WARNING]   Campaign 7412: status 404
+2026-03-19 07:02:42 [WARNING]   Campaign 7915: status 404
+2026-03-19 07:02:42 [WARNING]   Campaign 11371: status 404
+2026-03-19 07:02:43 [WARNING]   Campaign 8259: status 404
+2026-03-19 07:02:43 [WARNING]   Campaign 8310: status 404
+2026-03-19 07:02:44 [WARNING]   Campaign 8652: status 404
+2026-03-19 07:02:44 [WARNING]   Campaign 9260: status 404
+2026-03-19 07:02:45 [WARNING]   Campaign 9251: status 404
+2026-03-19 07:02:45 [WARNING]   Campaign 9320: status 404
+2026-03-19 07:02:46 [WARNING]   Campaign 9326: status 404
+2026-03-19 07:02:46 [WARNING]   Campaign 9329: status 404
+2026-03-19 07:02:47 [WARNING]   Campaign 9358: status 404
+2026-03-19 07:02:47 [WARNING]   Campaign 9383: status 404
+2026-03-19 07:02:48 [WARNING]   Campaign 9398: status 404
+2026-03-19 07:02:48 [WARNING]   Campaign 9488: status 404
+2026-03-19 07:02:49 [WARNING]   Campaign 9663: status 404
+2026-03-19 07:02:49 [WARNING]   Campaign 9676: status 404
+2026-03-19 07:02:50 [WARNING]   Campaign 43094: status 404
+2026-03-19 07:02:50 [WARNING]   Campaign 33188: status 404
+2026-03-19 07:02:51 [WARNING]   Campaign 10034: status 404
+2026-03-19 07:02:51 [WARNING]   Campaign 10068: status 404
+2026-03-19 07:02:52 [WARNING]   Campaign 10159: status 404
+2026-03-19 07:02:52 [WARNING]   Campaign 10301: status 404
+2026-03-19 07:02:52 [WARNING]   Campaign 10298: status 404
+2026-03-19 07:02:53 [WARNING]   Campaign 10350: status 404
+2026-03-19 07:02:53 [WARNING]   Campaign 10402: status 404
+2026-03-19 07:02:54 [WARNING]   Campaign 10435: status 404
+2026-03-19 07:02:54 [WARNING]   Campaign 10542: status 404
+2026-03-19 07:02:55 [WARNING]   Campaign 12310: status 404
+2026-03-19 07:02:55 [WARNING]   Campaign 10564: status 404
+2026-03-19 07:02:56 [WARNING]   Campaign 10583: status 404
+2026-03-19 07:02:56 [WARNING]   Campaign 10592: status 404
+2026-03-19 07:02:57 [WARNING]   Campaign 10706: status 404
+2026-03-19 07:02:57 [WARNING]   Campaign 10765: status 404
+2026-03-19 07:02:58 [WARNING]   Campaign 11046: status 404
+2026-03-19 07:02:59 [WARNING]   Campaign 11372: status 404
+2026-03-19 07:02:59 [WARNING]   Campaign 31746: status 404
+2026-03-19 07:03:00 [WARNING]   Campaign 11575: status 404
+2026-03-19 07:03:01 [WARNING]   Campaign 11638: status 404
+2026-03-19 07:03:02 [WARNING]   Campaign 11829: status 404
+2026-03-19 07:03:02 [WARNING]   Campaign 11838: status 404
+2026-03-19 07:03:03 [WARNING]   Campaign 11856: status 404
+2026-03-19 07:03:04 [WARNING]   Campaign 11881: status 404
+2026-03-19 07:03:04 [WARNING]   Campaign 12182: status 404
+2026-03-19 07:03:05 [WARNING]   Campaign 12231: status 404
+2026-03-19 07:03:05 [WARNING]   Campaign 12268: status 404
+2026-03-19 07:03:06 [WARNING]   Campaign 12274: status 404
+2026-03-19 07:03:06 [WARNING]   Campaign 12396: status 404
+2026-03-19 07:03:07 [WARNING]   Campaign 12488: status 404
+2026-03-19 07:03:07 [WARNING]   Campaign 12549: status 404
+2026-03-19 07:03:08 [WARNING]   Campaign 12584: status 404
+2026-03-19 07:03:08 [WARNING]   Campaign 12855: status 404
+2026-03-19 07:03:09 [WARNING]   Campaign 16668: status 404
+2026-03-19 07:03:10 [WARNING]   Campaign 12770: status 404
+2026-03-19 07:03:10 [WARNING]   Campaign 12792: status 404
+2026-03-19 07:03:10 [WARNING]   Campaign 12834: status 404
+2026-03-19 07:03:11 [WARNING]   Campaign 12849: status 404
+2026-03-19 07:03:11 [WARNING]   Campaign 12872: status 404
+2026-03-19 07:03:12 [WARNING]   Campaign 12893: status 404
+2026-03-19 07:03:12 [WARNING]   Campaign 12970: status 404
+2026-03-19 07:03:13 [WARNING]   Campaign 12989: status 404
+2026-03-19 07:03:13 [WARNING]   Campaign 13053: status 404
+2026-03-19 07:03:14 [WARNING]   Campaign 13144: status 404
+2026-03-19 07:03:14 [WARNING]   Campaign 13451: status 404
+2026-03-19 07:03:15 [WARNING]   Campaign 13589: status 404
+2026-03-19 07:03:15 [WARNING]   Campaign 13623: status 404
+2026-03-19 07:03:16 [WARNING]   Campaign 13624: status 404
+2026-03-19 07:03:16 [WARNING]   Campaign 13686: status 404
+2026-03-19 07:03:16 [WARNING]   Campaign 13852: status 404
+2026-03-19 07:03:17 [WARNING]   Campaign 13973: status 404
+2026-03-19 07:03:17 [WARNING]   Campaign 14028: status 404
+2026-03-19 07:03:18 [WARNING]   Campaign 14093: status 404
+2026-03-19 07:03:18 [WARNING]   Campaign 14102: status 404
+2026-03-19 07:03:19 [WARNING]   Campaign 14143: status 404
+2026-03-19 07:03:19 [WARNING]   Campaign 14334: status 404
+2026-03-19 07:03:20 [WARNING]   Campaign 21952: status 404
+2026-03-19 07:03:20 [WARNING]   Campaign 14491: status 404
+2026-03-19 07:03:21 [WARNING]   Campaign 14516: status 404
+2026-03-19 07:03:21 [WARNING]   Campaign 14695: status 404
+2026-03-19 07:03:22 [WARNING]   Campaign 16435: status 404
+2026-03-19 07:03:22 [WARNING]   Campaign 15271: status 404
+2026-03-19 07:03:23 [WARNING]   Campaign 15290: status 404
+2026-03-19 07:03:25 [WARNING]   Campaign 15362: status 404
+2026-03-19 07:03:25 [WARNING]   Campaign 15415: status 404
+2026-03-19 07:03:26 [WARNING]   Campaign 15432: status 404
+2026-03-19 07:03:26 [WARNING]   Campaign 15470: status 404
+2026-03-19 07:03:27 [WARNING]   Campaign 15962: status 404
+2026-03-19 07:03:27 [WARNING]   Campaign 15964: status 404
+2026-03-19 07:03:28 [WARNING]   Campaign 18108: status 404
+2026-03-19 07:03:28 [WARNING]   Campaign 15994: status 404
+2026-03-19 07:03:29 [WARNING]   Campaign 16021: status 404
+2026-03-19 08:09:08 [WARNING]   Campaign 16050: ('Connection aborted.', TimeoutError(60, 'Operation timed out'))
+2026-03-19 08:09:11 [WARNING]   Campaign 16056: HTTPSConnectionPool(host='api.impact.com', port=443): Max retries exceeded with url: /Mediapartners/IRaeoLyqZi6F3467599vfbsEvLkSKJhtQ1/Campaigns/16056/Actions (Caused by NameResolutionError("HTTPSConnection(host='api.impact.com', port=443): Failed to resolve 'api.impact.com' ([Errno 8] nodename nor servname provided, or not known)"))
+2026-03-19 08:09:17 [WARNING]   Campaign 16252: status 404
+2026-03-19 08:09:18 [WARNING]   Campaign 16274: status 404
+2026-03-19 08:09:21 [WARNING]   Campaign 16284: status 404
+2026-03-19 08:09:22 [WARNING]   Campaign 16372: status 404
+2026-03-19 08:09:23 [WARNING]   Campaign 16446: status 404
+2026-03-19 08:09:24 [WARNING]   Campaign 16605: status 404
+2026-03-19 08:09:25 [WARNING]   Campaign 16613: status 404
+2026-03-19 08:09:25 [WARNING]   Campaign 16734: status 404
+2026-03-19 08:09:26 [WARNING]   Campaign 16802: status 404
+2026-03-19 08:09:26 [WARNING]   Campaign 16803: status 404
+2026-03-19 08:09:27 [WARNING]   Campaign 16852: status 404
+2026-03-19 08:09:27 [WARNING]   Campaign 21285: status 404
+2026-03-19 08:09:29 [WARNING]   Campaign 16891: status 404
+2026-03-19 08:09:29 [WARNING]   Campaign 17136: status 404
+2026-03-19 08:09:29 [WARNING]   Campaign 17295: status 404
+2026-03-19 08:09:30 [WARNING]   Campaign 17369: status 404
+2026-03-19 08:09:30 [WARNING]   Campaign 17425: status 404
+2026-03-19 08:09:31 [WARNING]   Campaign 17634: status 404
+2026-03-19 08:09:31 [WARNING]   Campaign 17866: status 404
+2026-03-19 08:09:31 [WARNING]   Campaign 17985: status 404
+2026-03-19 08:09:32 [WARNING]   Campaign 18660: status 404
+2026-03-19 08:09:32 [WARNING]   Campaign 18278: status 404
+2026-03-19 08:09:33 [WARNING]   Campaign 18310: status 404
+2026-03-19 08:09:33 [WARNING]   Campaign 18350: status 404
+2026-03-19 08:09:34 [WARNING]   Campaign 18372: status 404
+2026-03-19 08:09:34 [WARNING]   Campaign 18374: status 404
+2026-03-19 08:09:35 [WARNING]   Campaign 18495: status 404
+2026-03-19 08:09:35 [WARNING]   Campaign 18800: status 404
+2026-03-19 08:09:36 [WARNING]   Campaign 18898: status 404
+2026-03-19 08:09:36 [WARNING]   Campaign 18926: status 404
+2026-03-19 08:09:37 [WARNING]   Campaign 18980: status 404
+2026-03-19 08:09:37 [WARNING]   Campaign 18981: status 404
+2026-03-19 08:09:38 [WARNING]   Campaign 18982: status 404
+2026-03-19 08:09:38 [WARNING]   Campaign 18979: status 404
+2026-03-19 08:09:38 [WARNING]   Campaign 19119: status 404
+2026-03-19 08:09:39 [WARNING]   Campaign 19183: status 404
+2026-03-19 08:09:39 [WARNING]   Campaign 19254: status 404
+2026-03-19 08:09:40 [WARNING]   Campaign 19270: status 404
+2026-03-19 08:09:40 [WARNING]   Campaign 19348: status 404
+2026-03-19 08:09:40 [WARNING]   Campaign 19373: status 404
+2026-03-19 08:09:41 [WARNING]   Campaign 19450: status 404
+2026-03-19 08:09:41 [WARNING]   Campaign 19493: status 404
+2026-03-19 08:09:42 [WARNING]   Campaign 20021: status 404
+2026-03-19 08:09:42 [WARNING]   Campaign 20020: status 404
+2026-03-19 08:09:42 [WARNING]   Campaign 20049: status 404
+2026-03-19 08:09:43 [WARNING]   Campaign 20086: status 404
+2026-03-19 08:09:43 [WARNING]   Campaign 20466: status 404
+2026-03-19 08:09:44 [WARNING]   Campaign 20475: status 404
+2026-03-19 08:09:44 [WARNING]   Campaign 20541: status 404
+2026-03-19 08:09:44 [WARNING]   Campaign 20549: status 404
+2026-03-19 08:09:45 [WARNING]   Campaign 20591: status 404
+2026-03-19 08:09:45 [WARNING]   Campaign 20713: status 404
+2026-03-19 08:09:46 [WARNING]   Campaign 20672: status 404
+2026-03-19 08:09:46 [WARNING]   Campaign 20741: status 404
+2026-03-19 08:09:46 [WARNING]   Campaign 20800: status 404
+2026-03-19 08:09:47 [WARNING]   Campaign 20954: status 404
+2026-03-19 08:09:47 [WARNING]   Campaign 21012: status 404
+2026-03-19 08:09:47 [WARNING]   Campaign 21044: status 404
+2026-03-19 08:09:48 [WARNING]   Campaign 21130: status 404
+2026-03-19 08:09:48 [WARNING]   Campaign 21196: status 404
+2026-03-19 08:09:49 [WARNING]   Campaign 21234: status 404
+2026-03-19 08:09:49 [WARNING]   Campaign 21595: status 404
+2026-03-19 08:09:49 [WARNING]   Campaign 21910: status 404
+2026-03-19 08:09:50 [WARNING]   Campaign 22216: status 404
+2026-03-19 08:09:50 [WARNING]   Campaign 22203: status 404
+2026-03-19 08:09:50 [WARNING]   Campaign 22315: status 404
+2026-03-19 08:09:51 [WARNING]   Campaign 22930: status 404
+2026-03-19 08:09:51 [WARNING]   Campaign 22965: status 404
+2026-03-19 08:09:52 [WARNING]   Campaign 23039: status 404
+2026-03-19 08:09:52 [WARNING]   Campaign 23041: status 404
+2026-03-19 08:09:52 [WARNING]   Campaign 23636: status 404
+2026-03-19 08:09:53 [WARNING]   Campaign 23855: status 404
+2026-03-19 08:09:53 [WARNING]   Campaign 24328: status 404
+2026-03-19 08:09:54 [WARNING]   Campaign 24460: status 404
+2026-03-19 08:09:54 [WARNING]   Campaign 24680: status 404
+2026-03-19 08:09:54 [WARNING]   Campaign 25045: status 404
+2026-03-19 08:09:55 [WARNING]   Campaign 25056: status 404
+2026-03-19 08:09:55 [WARNING]   Campaign 25109: status 404
+2026-03-19 08:09:56 [WARNING]   Campaign 25199: status 404
+2026-03-19 08:09:56 [WARNING]   Campaign 26578: status 404
+2026-03-19 08:09:56 [WARNING]   Campaign 25533: status 404
+2026-03-19 08:09:57 [WARNING]   Campaign 25615: status 404
+2026-03-19 08:09:57 [WARNING]   Campaign 25666: status 404
+2026-03-19 08:09:57 [WARNING]   Campaign 25752: status 404
+2026-03-19 08:09:58 [WARNING]   Campaign 25972: status 404
+2026-03-19 08:09:58 [WARNING]   Campaign 26034: status 404
+2026-03-19 08:09:59 [WARNING]   Campaign 26155: status 404
+2026-03-19 08:09:59 [WARNING]   Campaign 26176: status 404
+2026-03-19 08:10:00 [WARNING]   Campaign 26195: status 404
+2026-03-19 08:10:00 [WARNING]   Campaign 26746: status 404
+2026-03-19 08:10:00 [WARNING]   Campaign 27128: status 404
+2026-03-19 08:10:01 [WARNING]   Campaign 27299: status 404
+2026-03-19 08:10:01 [WARNING]   Campaign 28083: status 404
+2026-03-19 08:10:01 [WARNING]   Campaign 30284: status 404
+2026-03-19 08:10:02 [WARNING]   Campaign 30644: status 404
+2026-03-19 08:10:02 [WARNING]   Campaign 30835: status 404
+2026-03-19 08:10:03 [WARNING]   Campaign 31551: status 404
+2026-03-19 08:10:03 [WARNING]   Campaign 32031: status 404
+2026-03-19 08:10:03 [WARNING]   Campaign 33100: status 404
+2026-03-19 08:10:04 [WARNING]   Campaign 37074: status 404
+2026-03-19 08:10:04 [WARNING]   Campaign 39811: status 404
+2026-03-19 08:10:05 [WARNING]   Campaign 40113: status 404
+2026-03-19 08:10:05 [WARNING]   Campaign 41352: status 404
+2026-03-19 08:10:05 [WARNING]   Campaign 41962: status 404
+2026-03-19 08:10:06 [WARNING]   Campaign 42918: status 404
+2026-03-19 08:10:07 [WARNING]   Campaign 43966: status 404
+2026-03-19 08:10:07 [WARNING]   Campaign 44261: status 404
+2026-03-19 08:10:08 [WARNING]   Campaign 47371: status 404
+2026-03-19 08:10:08 [WARNING]   Campaign 47633: status 404
+2026-03-19 08:10:08 [INFO] Payout cache saved: 0 campaigns
+2026-03-19 08:10:08 [INFO] Impact: 0/232 offers enriched with payout data
+2026-03-19 08:10:08 [INFO] Impact: 232 offers fetched
+2026-03-19 08:10:08 [INFO] FlexOffers: fetching advertisers...
+2026-03-19 08:10:12 [INFO] FlexOffers: 43 offers fetched
+2026-03-19 08:10:12 [INFO] MaxBounty: authenticating via REST API...
+2026-03-19 08:10:13 [INFO] MaxBounty: fetching campaigns across 5 lists...
+2026-03-19 08:10:13 [INFO] MaxBounty: recentlyApproved → 0 unique campaigns so far
+2026-03-19 08:10:17 [INFO] MaxBounty: top → 513 unique campaigns so far
+2026-03-19 08:10:18 [INFO] MaxBounty: popular → 513 unique campaigns so far
+2026-03-19 08:10:18 [INFO] MaxBounty: suggested → 513 unique campaigns so far
+2026-03-19 08:10:18 [INFO] MaxBounty: bookmarked → 513 unique campaigns so far
+2026-03-19 08:10:18 [INFO] MaxBounty: 513 offers fetched
+2026-03-19 08:10:18 [INFO] Total offers collected: 788
+2026-03-19 08:10:18 [INFO] After cleaning (active only, normalized): 729 offers
+2026-03-19 08:10:18 [INFO] NOTION_TOKEN not set — skipping Notion. Set it to enable Notion output.
+2026-03-19 08:10:18 [INFO] Writing to Google Sheets: 729 active offers to Latest, 788 total to History...
+2026-03-19 08:10:19 [INFO] file_cache is only supported with oauth2client<4.0.0
+2026-03-19 08:10:21 [INFO] Latest tab: updated with 729 active rows
+2026-03-19 08:10:22 [INFO] History tab: appended 788 rows for 2026-03-19
