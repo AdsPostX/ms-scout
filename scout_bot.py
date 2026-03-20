@@ -61,11 +61,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     web = WebClient(token=BOT_TOKEN)
 
-    # Show typing indicator
-    web.chat_postMessage(
+    # Post a placeholder, then replace it with the real response
+    placeholder = web.chat_postMessage(
         channel=channel,
         thread_ts=thread_ts,
-        text="Searching...",
+        text="_Searching inventory..._",
     )
 
     try:
@@ -74,11 +74,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         log.error(f"Agent error: {e}")
         response = f"Something went wrong: {e}"
 
-    # Replace the "Searching..." message with the real response
-    # (Slack doesn't support true typing indicators for bots, so we just post)
-    web.chat_postMessage(
+    # Update the placeholder in-place — single clean message, no double-post
+    web.chat_update(
         channel=channel,
-        thread_ts=thread_ts,
+        ts=placeholder["ts"],
         text=response,
         mrkdwn=True,
     )
