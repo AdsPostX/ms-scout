@@ -16,7 +16,7 @@ from slack_sdk.web import WebClient
 
 from scout_agent import ask
 
-load_dotenv()
+load_dotenv(override=True)
 
 logging.basicConfig(
     level=logging.INFO,
