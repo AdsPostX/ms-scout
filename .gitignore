@@ -3,8 +3,10 @@
 token.pickle
 credentials.json
 payout_cache.json
+ms_session.json
 data/
 logs/
+scraper.log
 __pycache__/
 *.pyc
 .venv/

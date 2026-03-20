@@ -108,6 +108,8 @@ OFFER_FIELDS = [
     "category",
     "geo",
     "tracking_url",
+    "icon_url",      # 150x150 creative (for Slack brief + MS platform upload)
+    "hero_url",      # wide banner creative, target 1000x280
     "status",
     "date_scraped",
 ]
@@ -216,18 +218,17 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
 
 # --- Impact -----------------------------------------------------------------
 
-def _fetch_impact_category_map() -> dict:
+def _fetch_impact_ads_data() -> tuple:
     """
-    Fetch Impact Ads endpoint and return a dict keyed by CampaignId → category label.
-    The Ads endpoint has a 'Labels' field (e.g. "Payments,Capital,US") — best available
-    proxy for category since the Campaigns endpoint has no category field.
-
-    NOTE: Payout data is NOT in the Ads endpoint. It lives in the per-campaign
-    /Campaigns/{id}/Actions sub-endpoint (232 extra calls for 232 campaigns — deferred
-    to a future enrichment pass).
+    Fetch Impact /Ads endpoint in a single pass.
+    Returns (cat_map, creative_map):
+      - cat_map:      {campaign_id: label_string}   e.g. "Payments,Capital,US"
+      - creative_map: {campaign_id: {"icon_url": str, "hero_url": str}}
+        icon = closest to 150x150 square; hero = widest banner (target 1000x280)
     """
     url = f"https://api.impact.com/Mediapartners/{IMPACT_SID}/Ads"
     cat_map = {}
+    creative_map = {}  # cid → {icon_url, hero_url, _best_icon_area_diff, _best_hero_width}
     page = 1
 
     while True:
@@ -239,7 +240,7 @@ def _fetch_impact_category_map() -> dict:
             timeout=30,
         )
         if not resp.ok:
-            log.warning(f"Impact Ads endpoint returned {resp.status_code} — category data unavailable")
+            log.warning(f"Impact Ads endpoint returned {resp.status_code} — ads data unavailable")
             break
 
         data = resp.json()
@@ -252,17 +253,25 @@ def _fetch_impact_category_map() -> dict:
 
         for ad in ads:
             cid = str(ad.get("CampaignId", ""))
+            if not cid:
+                continue
+
+            # Category labels
             labels = ad.get("Labels", "")
-            if cid and labels and cid not in cat_map:
-                cat_map[cid] = labels  # e.g. "Payments,Capital,US"
+            if labels and cid not in cat_map:
+                cat_map[cid] = labels
+
+            # Impact /Ads returns link/text ads — CreativeUrl/ImageUrl are empty for most campaigns.
+            # Creative images are sourced via OG scrape at brief time instead.
+            # (Creative map intentionally left empty — fallback handled in draft_campaign_brief)
 
         total = int(data.get("@totalrecords", 0))
         if page * 1000 >= total:
             break
         page += 1
 
-    log.info(f"Impact: category labels loaded for {len(cat_map)} campaigns")
-    return cat_map
+    log.info(f"Impact: ads data loaded — {len(cat_map)} categories (creatives via OG scrape at brief time)")
+    return cat_map, creative_map
 
 
 def _fetch_impact_campaigns_raw() -> list:
@@ -303,9 +312,9 @@ def fetch_impact() -> list:
     log.info("Impact: fetching campaigns...")
     campaigns_all = _fetch_impact_campaigns_raw()
 
-    # Fetch category labels from /Ads endpoint (Labels field is best available proxy)
-    log.info("Impact: fetching category data from Ads endpoint...")
-    cat_map = _fetch_impact_category_map()
+    # Fetch category labels + creative URLs from /Ads endpoint in one pass
+    log.info("Impact: fetching ads data (categories + creatives)...")
+    cat_map, creative_map = _fetch_impact_ads_data()
 
     offers = []
     for c in campaigns_all:
@@ -316,6 +325,7 @@ def fetch_impact() -> list:
         geo = ", ".join(r.title() for r in regions) if regions else "US"
 
         o = empty_offer()
+        creatives = creative_map.get(cid, {})
         o["network"]      = "impact"
         o["offer_id"]     = cid
         o["advertiser"]   = c.get("CampaignName", "")
@@ -326,6 +336,8 @@ def fetch_impact() -> list:
         o["category"]     = cat_map.get(cid, "")
         o["geo"]          = geo
         o["tracking_url"] = c.get("TrackingLink", "")
+        o["icon_url"]     = creatives.get("icon_url", "")
+        o["hero_url"]     = creatives.get("hero_url", "")
         o["status"]       = c.get("ContractStatus", "")
         o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
         offers.append(o)
@@ -416,6 +428,8 @@ def fetch_flexoffers() -> list:
             raw_payout = f"{payout_str} {payout_type}".strip() if payout_type else payout_str
 
             o = empty_offer()
+            logo = (a.get("logoUrl") or a.get("logo_url") or
+                    a.get("thumbnailUrl") or a.get("imageUrl") or "")
             o["network"]      = "flexoffers"
             o["offer_id"]     = str(a.get("id", ""))
             o["advertiser"]   = a.get("name", "")
@@ -427,6 +441,8 @@ def fetch_flexoffers() -> list:
             o["category"]     = a.get("categoryNames", "")
             o["geo"]          = a.get("country", "US")
             o["tracking_url"] = a.get("deeplinkURL", a.get("defaultUrl", ""))
+            o["icon_url"]     = logo
+            o["hero_url"]     = logo
             o["status"]       = a.get("applicationStatus", a.get("programStatus", ""))
             o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
             offers.append(o)
@@ -538,6 +554,9 @@ def fetch_maxbounty() -> list:
         o["geo"]          = "US"  # MaxBounty is a US-centric CPA network; list API omits geo
         o["_raw_payout"]  = f"{payout} {rate_type}".strip() if payout != "" else ""
         o["tracking_url"] = c.get("landing_page_sample", "")
+        thumbnail = c.get("thumbnail", "")
+        o["icon_url"]     = thumbnail   # MaxBounty CDN thumbnail URL
+        o["hero_url"]     = thumbnail   # same image used for both until we get banner
         o["status"]       = c.get("affiliate_campaign_status", c.get("status", ""))
         o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
         offers.append(o)
@@ -950,6 +969,11 @@ def write_notion(offers: list):
             log.warning(f"Notion error [{ukey}]: {e}")
             errors += 1
         time.sleep(0.4)  # stay safely under 3 req/sec rate limit
+
+        # Progress log every 50 offers so the terminal doesn't look stuck
+        n = created + updated + errors
+        if n % 50 == 0:
+            log.info(f"Notion: {n}/{len(offers)} processed ({created} created, {updated} updated, {errors} errors)...")
 
     log.info(f"Notion: {created} created, {updated} updated, {errors} errors")
 
