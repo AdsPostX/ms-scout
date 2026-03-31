@@ -190,11 +190,11 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
             )
             if resp.ok:
                 data = resp.json()
-                payouts = (data.get("Terms") or {}).get("EventPayouts", [])
+                payouts = data.get("PayoutTermsList", [])
                 if payouts:
                     best = payouts[0]  # first action type is the primary conversion
-                    payout = str(best.get("DefaultPayout", ""))
-                    category = best.get("EventCategory", "")
+                    payout = str(best.get("PayoutAmount", ""))
+                    category = best.get("TrackerType", "")
                     payout_type = _CATEGORY_TO_PTYPE.get(category, category)
                     merged[str(cid)] = {"payout": payout, "payout_type": payout_type}
                     if DEBUG and idx % 25 == 0:
@@ -1138,6 +1138,14 @@ def main():
         import json as _json
         _json.dump(cleaned, f, default=str)
     log.info(f"Scout snapshot written: {len(cleaned)} offers → {snapshot_path}")
+
+    # Post SCOUT Sniper weekly digest to Slack
+    try:
+        import scout_digest
+        log.info("Posting SCOUT Sniper digest...")
+        scout_digest.post_digest()
+    except Exception as e:
+        log.warning(f"SCOUT Sniper digest failed (non-fatal): {e}")
 
 
 if __name__ == "__main__":

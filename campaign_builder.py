@@ -1,10 +1,15 @@
 """
 campaign_builder.py — MS Platform Campaign Builder
-Automates the Create Offer form via Playwright (headless Chromium).
+Single-shot: fill all 4 tabs, save with Test Offer ON, return the offer URL.
+
+Architecture
+────────────
+Fill once → save → post link to Slack.
+Test Offer is ON so the offer is invisible to real users until ops reviews it
+in the platform and flips it live. That IS the human approval gate — no
+double-fill, no screenshot approval step, no in-memory state to lose.
 
 Setup (one-time):
-  pip install playwright
-  playwright install chromium
   python campaign_builder.py --login   ← opens browser, log in, saves session
 
 Triggered by scout_bot.py when user says "@Scout launch this".
@@ -14,6 +19,7 @@ import asyncio
 import logging
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import threading
@@ -23,23 +29,8 @@ import requests
 
 log = logging.getLogger("campaign_builder")
 
-MS_PLATFORM_URL = os.getenv("MS_PLATFORM_URL", "")
+MS_PLATFORM_URL = os.getenv("MS_PLATFORM_URL", "https://app.momentscience.com")
 SESSION_FILE    = pathlib.Path(__file__).parent / "ms_session.json"
-
-# ── In-memory approval state ──────────────────────────────────────────────────
-_PENDING_APPROVALS: dict = {}  # thread_ts → {"brief_data": {...}, "copy": {...}}
-
-
-def store_pending_approval(thread_ts: str, brief_data: dict, copy: dict):
-    _PENDING_APPROVALS[thread_ts] = {"brief_data": brief_data, "copy": copy}
-
-
-def get_pending_approval(thread_ts: str) -> dict:
-    return _PENDING_APPROVALS.get(thread_ts)
-
-
-def clear_pending_approval(thread_ts: str):
-    _PENDING_APPROVALS.pop(thread_ts, None)
 
 
 # ── Playwright helpers ────────────────────────────────────────────────────────
@@ -102,7 +93,10 @@ async def _fill_tab1_content(page, brief_data: dict, copy: dict):
     titles       = copy.get("titles", [""])
     ctas         = copy.get("ctas", [{"yes": "Get Started", "no": "No Thanks"}])
 
-    internal_name = f"{advertiser} — {brief_data.get('network','').title()} — {datetime.today().strftime('%Y-%m-%d')}"
+    internal_name = (
+        f"{advertiser} — {brief_data.get('network','').title()} "
+        f"— {datetime.today().strftime('%Y-%m-%d')}"
+    )
 
     await _fill_field(page, "Internal Offer Name", internal_name[:100])
     await _fill_field(page, "Partner Offer Name",  advertiser[:80])
@@ -115,14 +109,13 @@ async def _fill_tab1_content(page, brief_data: dict, copy: dict):
     await _fill_field(page, "Positive CTA",        ctas[0].get("yes", "")[:25])
     await _fill_field(page, "Negative CTA",        ctas[0].get("no", "No Thanks")[:25])
 
-    # Goal Type
+    # Goal Type — CPC for click-based, CPA otherwise
     goal_type = "CPC" if "click" in payout_type else "CPA"
     try:
         await page.locator("select").filter(has_text="CPA").select_option(goal_type)
     except Exception:
         pass
 
-    # Goal Amount
     if payout_num and payout_num > 0:
         await _fill_field(page, "Goal", str(payout_num))
 
@@ -139,7 +132,7 @@ async def _fill_tab2_config(page, brief_data: dict):
     icon_url      = brief_data.get("icon_url", "")
     hero_url      = brief_data.get("hero_url", "")
 
-    # Network dropdown
+    # Network dropdown — try both native select and React custom select
     if network_label:
         try:
             await page.get_by_label("Network", exact=False).first.select_option(label=network_label)
@@ -147,13 +140,13 @@ async def _fill_tab2_config(page, brief_data: dict):
             try:
                 await page.locator(".network-select, select[aria-label*='Network']").select_option(label=network_label)
             except Exception:
-                pass
+                log.warning(f"Could not set network dropdown to {network_label!r}")
 
     await _fill_field(page, "Network Offer ID", offer_id)
 
-    # Toggles
+    # Toggles — Perkswall enabled, Test Offer ON (safety gate until ops reviews)
     await _toggle_on(page, "Perkswall Enabled")
-    await _toggle_on(page, "Test Offer")   # stays ON until human approves
+    await _toggle_on(page, "Test Offer")
 
     # Creative uploads
     if icon_url:
@@ -210,10 +203,62 @@ async def _fill_tab4_targeting(page, brief_data: dict):
 
 # ── Core build flow ───────────────────────────────────────────────────────────
 
-async def _build_offer_async(brief_data: dict, copy: dict) -> bytes:
+def _is_logged_out(url: str, title: str) -> bool:
+    """Detect if Playwright landed on the login page."""
+    low_url   = url.lower()
+    low_title = title.lower()
+    return (
+        "sign in" in low_title
+        or "login" in low_url
+        or "sign-in" in low_url
+        or "sign_in" in low_url
+        or "auth" in low_url
+    )
+
+
+async def _open_create_offer(page):
+    """Navigate to the Create Offer form, handling the session check."""
+    base = (MS_PLATFORM_URL or "https://app.momentscience.com").rstrip("/")
+
+    for path in ["/offers/create", "/offer/create", "/campaigns/create"]:
+        await page.goto(f"{base}{path}", timeout=20_000)
+        await page.wait_for_load_state("networkidle", timeout=15_000)
+        title = await page.title()
+        if not _is_logged_out(page.url, title):
+            log.info(f"Landed on create form at {page.url}")
+            return
+
+    raise RuntimeError("SESSION_EXPIRED")
+
+
+async def _fill_form_all_tabs(page, brief_data: dict, copy: dict):
+    """Fill all 4 tabs in order."""
+    await _fill_tab1_content(page, brief_data, copy)
+
+    for tab_name in ["Configuration", "Tracking", "Targeting"]:
+        tab = page.get_by_role("tab", name=tab_name)
+        if await tab.count():
+            await tab.click()
+            await page.wait_for_load_state("networkidle", timeout=10_000)
+        if tab_name == "Configuration":
+            await _fill_tab2_config(page, brief_data)
+        elif tab_name == "Tracking":
+            await _fill_tab3_tracking(page, brief_data)
+        elif tab_name == "Targeting":
+            await _fill_tab4_targeting(page, brief_data)
+
+
+async def _build_and_save_async(brief_data: dict, copy: dict) -> str:
     """
-    Fill all 4 tabs of Create Offer form. Returns screenshot PNG bytes.
-    Does NOT click Save — waits for human approval.
+    Single-shot: fill all 4 tabs, click Save, return the new offer URL.
+
+    Test Offer is forced ON — the offer is invisible to real users until
+    ops reviews it in the platform and manually flips it live.
+    That is the human approval gate. No second Playwright run needed.
+
+    Raises:
+        RuntimeError("SESSION_EXPIRED") if session needs refresh
+        RuntimeError("SAVE_BUTTON_NOT_FOUND") if MS platform UI changed
     """
     if not SESSION_FILE.exists():
         raise RuntimeError(
@@ -230,157 +275,140 @@ async def _build_offer_async(brief_data: dict, copy: dict) -> bytes:
         context = await browser.new_context(storage_state=str(SESSION_FILE))
         page    = await context.new_page()
 
-        await page.goto(f"{MS_PLATFORM_URL}/offers/create")
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        try:
+            await _open_create_offer(page)
+            await _fill_form_all_tabs(page, brief_data, copy)
 
-        # Tab 1
-        await _fill_tab1_content(page, brief_data, copy)
+            # Save — match "Save", "Submit", or "Create" buttons
+            save_btn = page.get_by_role("button", name=re.compile(r"Save|Submit|Create", re.I))
+            if not await save_btn.count():
+                raise RuntimeError("SAVE_BUTTON_NOT_FOUND")
 
-        # Tab 2
-        await page.get_by_role("tab", name="Configuration").click()
-        await page.wait_for_load_state("networkidle")
-        await _fill_tab2_config(page, brief_data)
+            await save_btn.first.click()
+            await page.wait_for_load_state("networkidle", timeout=20_000)
 
-        # Tab 3
-        await page.get_by_role("tab", name="Tracking").click()
-        await page.wait_for_load_state("networkidle")
-        await _fill_tab3_tracking(page, brief_data)
-
-        # Tab 4
-        await page.get_by_role("tab", name="Targeting").click()
-        await page.wait_for_load_state("networkidle")
-        await _fill_tab4_targeting(page, brief_data)
-
-        # Screenshot the full form state
-        screenshot = await page.screenshot(full_page=False)
-        await browser.close()
-        return screenshot
+            offer_url = page.url
+            log.info(f"Offer saved — landed on: {offer_url}")
+            return offer_url
+        finally:
+            await browser.close()
 
 
-async def _submit_offer_async(brief_data: dict, copy: dict):
-    """Fill and SAVE the offer. Called after human approves."""
-    if not SESSION_FILE.exists():
-        raise RuntimeError("No MS platform session found.")
-    if not MS_PLATFORM_URL:
-        raise RuntimeError("MS_PLATFORM_URL not set in .env")
+# ── Public API (sync wrapper for scout_bot.py) ────────────────────────────────
 
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(storage_state=str(SESSION_FILE))
-        page    = await context.new_page()
-
-        await page.goto(f"{MS_PLATFORM_URL}/offers/create")
-        await page.wait_for_load_state("networkidle", timeout=15000)
-
-        await _fill_tab1_content(page, brief_data, copy)
-
-        await page.get_by_role("tab", name="Configuration").click()
-        await page.wait_for_load_state("networkidle")
-        await _fill_tab2_config(page, brief_data)
-
-        await page.get_by_role("tab", name="Tracking").click()
-        await page.wait_for_load_state("networkidle")
-        await _fill_tab3_tracking(page, brief_data)
-
-        await page.get_by_role("tab", name="Targeting").click()
-        await page.wait_for_load_state("networkidle")
-        await _fill_tab4_targeting(page, brief_data)
-
-        # Click Save
-        await page.get_by_role("button", name="Save").click()
-        await page.wait_for_load_state("networkidle", timeout=10000)
-        await browser.close()
-
-
-# ── Public API (sync wrappers for scout_bot.py) ───────────────────────────────
-
-def launch_offer_in_background(brief_data: dict, copy: dict,
-                                slack_channel: str, slack_thread_ts: str,
-                                web_client):
+def build_offer_in_background(
+    brief_data: dict,
+    copy: dict,
+    slack_channel: str,
+    slack_thread_ts: str,
+    web_client,
+):
     """
-    Run Playwright in a background thread.
-    Posts screenshot + approval prompt to Slack when form is filled.
+    Run the single-shot Playwright build in a background thread.
+    Posts a confirmation with a direct link to the saved offer when done.
     """
     def _run():
+        advertiser = brief_data.get("advertiser", "Offer")
         try:
-            screenshot = asyncio.run(_build_offer_async(brief_data, copy))
+            offer_url = asyncio.run(_build_and_save_async(brief_data, copy))
 
-            # Store for approval
-            store_pending_approval(slack_thread_ts, brief_data, copy)
+            base = (MS_PLATFORM_URL or "https://app.momentscience.com").rstrip("/")
+            if offer_url and not offer_url.startswith("http"):
+                offer_url = f"{base}{offer_url}"
 
-            advertiser = brief_data.get("advertiser", "Offer")
-            web_client.files_upload_v2(
-                channel=slack_channel,
-                thread_ts=slack_thread_ts,
-                content=screenshot,
-                filename="campaign_preview.png",
-                initial_comment=(
-                    f"*{advertiser}* — form filled, Test Offer is ON.\n"
-                    f"Review the preview above, then reply `@Scout approve` to save and go live."
-                ),
-            )
-        except Exception as e:
-            log.error(f"Campaign builder background error: {e}")
+            link = f"<{offer_url}|View in MS Platform>" if offer_url else "Check the MS platform"
+
             web_client.chat_postMessage(
                 channel=slack_channel,
                 thread_ts=slack_thread_ts,
-                text=f"Campaign builder error: {e}",
-            )
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def submit_pending_offer(thread_ts: str, slack_channel: str, web_client) -> bool:
-    """Submit a pending offer after human approval. Returns False if nothing pending."""
-    pending = get_pending_approval(thread_ts)
-    if not pending:
-        return False
-
-    brief_data = pending["brief_data"]
-    copy       = pending["copy"]
-    advertiser = brief_data.get("advertiser", "Offer")
-
-    def _run():
-        try:
-            asyncio.run(_submit_offer_async(brief_data, copy))
-            clear_pending_approval(thread_ts)
-            web_client.chat_postMessage(
-                channel=slack_channel,
-                thread_ts=thread_ts,
                 text=(
-                    f"*{advertiser}* saved to the MS platform. "
-                    f"Test Offer is ON — review it in the platform, then turn Test Offer OFF to go fully live."
+                    f":white_check_mark: *{advertiser}* is saved.\n"
+                    f"{link}\n"
+                    f"_Test Offer is ON — review it in the platform, then flip Test Offer OFF to go live._"
                 ),
             )
+
+        except RuntimeError as e:
+            err = str(e)
+            if "SESSION_EXPIRED" in err:
+                web_client.chat_postMessage(
+                    channel=slack_channel,
+                    thread_ts=slack_thread_ts,
+                    text=(
+                        ":lock: *MS platform session expired.*\n"
+                        "Run this in your terminal to re-authenticate:\n"
+                        "```python campaign_builder.py --login```\n"
+                        "_The brief is saved — just say `@Scout launch this` again after logging in._"
+                    ),
+                )
+            elif "SAVE_BUTTON_NOT_FOUND" in err:
+                web_client.chat_postMessage(
+                    channel=slack_channel,
+                    thread_ts=slack_thread_ts,
+                    text=(
+                        ":warning: *Could not find the Save button on the MS platform form.*\n"
+                        "The platform UI may have changed. Flagging for a selector update."
+                    ),
+                )
+            else:
+                log.error(f"Campaign builder error: {err}")
+                web_client.chat_postMessage(
+                    channel=slack_channel,
+                    thread_ts=slack_thread_ts,
+                    text=f":x: Campaign builder error: {err}",
+                )
         except Exception as e:
-            log.error(f"Submit error: {e}")
+            log.error(f"Campaign builder background error: {e}", exc_info=True)
             web_client.chat_postMessage(
                 channel=slack_channel,
-                thread_ts=thread_ts,
-                text=f"Submit failed: {e}",
+                thread_ts=slack_thread_ts,
+                text=f":x: Campaign builder error: {e}",
             )
 
     threading.Thread(target=_run, daemon=True).start()
-    return True
 
 
 # ── Login helper ──────────────────────────────────────────────────────────────
 
 async def _login_and_save():
+    """
+    Open a visible browser window to app.momentscience.com.
+    Waits for you to log in, then saves the session automatically.
+    """
     from playwright.async_api import async_playwright
+
+    target = (MS_PLATFORM_URL or "https://app.momentscience.com").rstrip("/")
+    print(f"\nOpening {target} ...")
+    print("Log in with your MS credentials.")
+    print("The window will close and session will save automatically once you reach the dashboard.\n")
+
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
+        # Let Playwright use its own managed Chromium — no executable_path override.
+        browser = await p.chromium.launch(headless=False, args=["--no-sandbox"])
         context = await browser.new_context()
         page    = await context.new_page()
-        await page.goto(MS_PLATFORM_URL or "https://app.momentscience.com")
-        print("\nLog in to the MS platform in the browser window that just opened.")
-        print("When you're fully logged in and on the main dashboard, press Enter here...")
-        input()
+        await page.goto(target)
+
+        # Auto-detect successful login (up to 3 minutes)
+        logged_in = False
+        for _ in range(180):
+            await asyncio.sleep(1)
+            url   = page.url
+            title = await page.title()
+            if not _is_logged_out(url, title):
+                print(f"Logged in — dashboard detected at {url}")
+                logged_in = True
+                break
+
+        if not logged_in:
+            print("Timed out waiting for login. Please try again.")
+            await browser.close()
+            return
+
         await context.storage_state(path=str(SESSION_FILE))
+        print(f"\nSession saved → {SESSION_FILE}")
+        print("You can now use '@Scout launch this' in Slack.\n")
         await browser.close()
-        print(f"Session saved to {SESSION_FILE}")
 
 
 if __name__ == "__main__":
