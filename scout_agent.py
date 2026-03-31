@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -904,6 +905,91 @@ def _validated_tracking_url(network: str, platform_url: str, scraper_url: str) -
     return "Not available — pull from network portal"
 
 
+# ── Brand image sourcing ──────────────────────────────────────────────────────
+# Auto-sources logo + icon so brief creators don't have to hunt for assets.
+#
+# Priority chain (never fake — empty string beats a wrong/blurry image):
+#   hero_url: MS CDN  →  App Store 512px  →  Google gstatic 256px  →  ""
+#   icon_url: MS CDN  →  Google gstatic 256px  →  App Store 512px  →  ""
+#
+# Why these two sources:
+#   - App Store (itunes.apple.com/search): 512x512 standardized square icon,
+#     brand colors, no API key, most major advertisers have an iOS app.
+#   - Google gstatic favicon: resolves from domain, no API key, 256px option,
+#     best for the 24px icon slot where quality matters less.
+#   - Clearbit logo API (logo.clearbit.com): defunct — DNS returns NXDOMAIN.
+#     Clearbit autocomplete still works and gives us the domain for gstatic.
+
+def _clearbit_domain(advertiser_name: str) -> str:
+    """
+    Resolve brand name → domain via Clearbit's free autocomplete API.
+    The logo field in their response is null — use the domain to construct
+    a Google gstatic favicon URL instead. Returns "" on failure.
+    """
+    query = urllib.parse.quote(advertiser_name.strip())
+    url = f"https://autocomplete.clearbit.com/v1/companies/suggest?query={query}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Scout/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+        if data:
+            return data[0].get("domain", "")
+    except Exception as e:
+        log.debug(f"Clearbit domain lookup failed for '{advertiser_name}': {e}")
+    return ""
+
+
+def _google_favicon(domain: str, size: int = 256) -> str:
+    """
+    Construct a Google gstatic favicon URL for a given domain.
+    Use the direct t3.gstatic.com URL to avoid a redirect.
+    Size 256 is the max offered and looks fine at Slack's 24px icon slot.
+    """
+    enc = urllib.parse.quote(domain)
+    return f"https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://{enc}&size={size}"
+
+
+def _app_store_icon(advertiser_name: str) -> str:
+    """
+    Search the iTunes Search API for a matching iOS app icon (512x512).
+    Free, no API key. Matches on significant words in the app name.
+    Returns "" if no strong match found.
+    """
+    query = urllib.parse.quote(advertiser_name.strip())
+    url = f"https://itunes.apple.com/search?term={query}&entity=software&limit=5&country=us"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Scout/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+        results = data.get("results", [])
+        if not results:
+            return ""
+        # Prefer results where the app name contains a significant word from the advertiser
+        name_words = {w.lower() for w in advertiser_name.split() if len(w) > 3}
+        for result in results:
+            track = (result.get("trackName") or "").lower()
+            if name_words and any(w in track for w in name_words):
+                return result.get("artworkUrl512", "")
+        return results[0].get("artworkUrl512", "")
+    except Exception as e:
+        log.debug(f"App Store icon lookup failed for '{advertiser_name}': {e}")
+    return ""
+
+
+def _validate_image_url(url: str) -> bool:
+    """HEAD check — returns True only if the URL resolves to an image."""
+    if not url or not url.startswith("http"):
+        return False
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Scout/1.0"}, method="HEAD"
+        )
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return "image" in r.headers.get("Content-Type", "")
+    except Exception:
+        return False
+
+
 def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
     """
     Fetch all offer details needed to generate a campaign brief.
@@ -976,11 +1062,30 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
     except Exception as e:
         log.warning(f"draft_campaign_brief: platform lookup failed: {e}")
 
-    # CDN image from MS platform is the only reliable creative source.
-    # OG scraping is removed — it returns advertiser homepage heroes, not ad creatives,
-    # and blocks the event thread for up to 8s on a slow URL.
+    # Image sourcing — see _clearbit_domain / _app_store_icon / _google_favicon for source rationale
     if platform_image:
-        icon_url = hero_url = platform_image
+        hero_url = icon_url = platform_image
+    else:
+        advertiser_name = o.get("advertiser", "")
+        app_icon = _app_store_icon(advertiser_name)
+        domain   = _clearbit_domain(advertiser_name)
+        favicon  = _google_favicon(domain) if domain else ""
+
+        # hero: App Store 512px > gstatic 256px > empty
+        if app_icon:
+            hero_url = app_icon
+        elif favicon and _validate_image_url(favicon):
+            hero_url = favicon
+
+        # icon: App Store > gstatic > empty
+        # App Store preferred over gstatic because it's matched by brand name,
+        # not domain — avoids wrong favicon when Clearbit autocomplete is off
+        # (e.g., "Square" resolves to squarespace.com via Clearbit, but the
+        # App Store correctly returns Square's payments app)
+        if app_icon:
+            icon_url = app_icon
+        elif favicon and _validate_image_url(favicon):
+            icon_url = favicon
 
     # Proactive fallback intelligence — surface at brief creation (highest-intent moment)
     fallback = get_fallback_candidates(o.get("advertiser", ""), category=o.get("category"))
