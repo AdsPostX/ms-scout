@@ -62,13 +62,15 @@ def _load_performance_benchmarks() -> dict:
 
         # Single query: join campaigns → conversions → impressions
         # Pull category + payout_type directly from the campaigns table (source of truth)
+        # Note: from_airbyte_campaigns has 'categories' (plural), no 'payout_type' column.
+        # Payout type is known at score time from offer._payout_type_norm, not from ClickHouse.
+        # Tiers 3/4 are keyed by category only — still real MS data, just without payout_type split.
         offer_query = """
         SELECT
             c.id,
             c.adv_name,
             trim(c.internal_network_name)        AS impact_id,
-            coalesce(c.category, '')              AS category,
-            coalesce(c.payout_type, '')           AS payout_type,
+            coalesce(c.categories, '')            AS category,
             imp.impression_count,
             round(conv.conversion_count / nullIf(imp.impression_count, 0) * 100, 4) AS cvr_pct,
             round(conv.total_revenue    / nullIf(imp.impression_count, 0) * 1000, 2) AS rpm
@@ -99,99 +101,63 @@ def _load_performance_benchmarks() -> dict:
         by_offer: dict = {}
         # Tier 2: advertiser-level (all offers from same adv_name)
         by_adv: dict = {}
-        # Tier 3: (category, payout_type) combos — real data, not keyword guesses
-        by_cat_payout: dict = {}
-        # Tier 4: payout_type only — broadest real fallback
-        by_payout: dict = {}
+        # Tier 3: category — real avg CVR across all offers in this category on MS
+        by_cat: dict = {}
 
-        for _id, adv_name, impact_id, category, payout_type, impressions, cvr_pct, rpm in rows:
+        for _id, adv_name, impact_id, category, impressions, cvr_pct, rpm in rows:
             cvr = float(cvr_pct or 0)
             rpm_val = float(rpm or 0)
             imp = int(impressions or 0)
             entry = {"adv_name": adv_name, "cvr_pct": cvr, "rpm": rpm_val, "impressions": imp,
-                     "category": category, "payout_type": payout_type}
+                     "category": category}
 
             # Tier 1
             if impact_id:
                 by_offer[impact_id] = entry
 
-            # Tier 2 — keep the highest-impression offer per advertiser as representative
+            # Tier 2 — keep the highest-RPM offer per advertiser as representative.
+            # Highest RPM (not highest impressions) is the right benchmark: it reflects what
+            # a well-matched new offer from this advertiser could realistically achieve on MS.
             adv_key = (adv_name or "").lower().strip()
-            if adv_key and (adv_key not in by_adv or imp > by_adv[adv_key]["impressions"]):
+            if adv_key and (adv_key not in by_adv or rpm_val > by_adv[adv_key]["rpm"]):
                 by_adv[adv_key] = entry
 
-            # Tier 3 — accumulate for averaging
+            # Tier 3 — accumulate by category for averaging
             cat_key = (category or "").strip()
-            pt_key = (payout_type or "").strip()
-            if cat_key and pt_key:
-                k = (cat_key, pt_key)
-                if k not in by_cat_payout:
-                    by_cat_payout[k] = {"total_cvr": 0.0, "total_rpm": 0.0, "count": 0}
-                by_cat_payout[k]["total_cvr"] += cvr
-                by_cat_payout[k]["total_rpm"] += rpm_val
-                by_cat_payout[k]["count"] += 1
+            if cat_key:
+                if cat_key not in by_cat:
+                    by_cat[cat_key] = {"total_cvr": 0.0, "total_rpm": 0.0, "count": 0}
+                by_cat[cat_key]["total_cvr"] += cvr
+                by_cat[cat_key]["total_rpm"] += rpm_val
+                by_cat[cat_key]["count"] += 1
 
-            # Tier 4 — accumulate for averaging
-            if pt_key:
-                if pt_key not in by_payout:
-                    by_payout[pt_key] = {"total_cvr": 0.0, "total_rpm": 0.0, "count": 0}
-                by_payout[pt_key]["total_cvr"] += cvr
-                by_payout[pt_key]["total_rpm"] += rpm_val
-                by_payout[pt_key]["count"] += 1
-
-        # Finalise averaged tiers
-        cat_payout_benchmarks = {
-            k: {
-                "avg_cvr_pct": round(v["total_cvr"] / v["count"], 4),
-                "avg_rpm":     round(v["total_rpm"] / v["count"], 2),
-                "sample_campaigns": v["count"],
-            }
-            for k, v in by_cat_payout.items() if v["count"] > 0
-        }
-        payout_benchmarks = {
-            k: {
-                "avg_cvr_pct": round(v["total_cvr"] / v["count"], 4),
-                "avg_rpm":     round(v["total_rpm"] / v["count"], 2),
-                "sample_campaigns": v["count"],
-            }
-            for k, v in by_payout.items() if v["count"] > 0
-        }
-
-        # Also build the legacy by_category key for backward compat with any callers
-        # that still read benchmarks["by_category"] — aggregate from tier 3
-        by_category: dict = {}
-        for (cat, _pt), v in by_cat_payout.items():
-            if cat not in by_category:
-                by_category[cat] = {"total_cvr": 0.0, "total_rpm": 0.0, "count": 0}
-            by_category[cat]["total_cvr"] += v["avg_cvr_pct"] * v["sample_campaigns"]
-            by_category[cat]["total_rpm"]  += v["avg_rpm"]     * v["sample_campaigns"]
-            by_category[cat]["count"]      += v["sample_campaigns"]
+        # Finalise averaged tier 3
         category_benchmarks = {
             cat: {
                 "avg_cvr_pct": round(v["total_cvr"] / v["count"], 4),
                 "avg_rpm":     round(v["total_rpm"] / v["count"], 2),
                 "sample_campaigns": v["count"],
             }
-            for cat, v in by_category.items() if v["count"] > 0
+            for cat, v in by_cat.items() if v["count"] > 0
         }
 
         result = {
             "by_offer_impact_id":    by_offer,
             "by_adv_name":           by_adv,
-            "by_category_payout":    cat_payout_benchmarks,
-            "by_payout_type":        payout_benchmarks,
-            "by_category":           category_benchmarks,  # legacy compat
+            "by_category_payout":    {},          # not available without payout_type column
+            "by_payout_type":        {},          # not available without payout_type column
+            "by_category":           category_benchmarks,
         }
         log.info(
             f"Benchmarks loaded: {len(by_offer)} offers, {len(by_adv)} advertisers, "
-            f"{len(cat_payout_benchmarks)} cat×payout combos, {len(payout_benchmarks)} payout types"
+            f"{len(category_benchmarks)} categories"
         )
         return result
 
     except Exception as e:
         log.warning(f"Could not load performance benchmarks from ClickHouse: {e}")
         return {"by_offer_impact_id": {}, "by_adv_name": {}, "by_category_payout": {},
-                "by_payout_type": {}, "by_category": {}}
+                "by_payout_type": {}, "by_category": {}}  # empty — will use no-data path in _scout_score
 
 
 def _get_benchmarks() -> dict:
@@ -243,8 +209,7 @@ def _scout_score(offer: dict, benchmarks: dict) -> float:
 
     by_offer     = benchmarks.get("by_offer_impact_id", {})
     by_adv       = benchmarks.get("by_adv_name", {})
-    by_cat_pt    = benchmarks.get("by_category_payout", {})
-    by_pt        = benchmarks.get("by_payout_type", {})
+    by_cat       = benchmarks.get("by_category", {})
 
     # ── Tier 1: exact offer ───────────────────────────────────────────────────
     if offer_id in by_offer:
@@ -260,19 +225,12 @@ def _scout_score(offer: dict, benchmarks: dict) -> float:
         confidence = 0.85
         source = f"Same advertiser benchmark ({bench['impressions']:,} impressions)"
 
-    # ── Tier 3: category × payout type ───────────────────────────────────────
-    elif (category, payout_type) in by_cat_pt:
-        bench = by_cat_pt[(category, payout_type)]
+    # ── Tier 3: category average — real CVR across this category on MS ────────
+    elif category and category in by_cat:
+        bench = by_cat[category]
         cvr   = bench["avg_cvr_pct"] / 100
-        confidence = 0.70
-        source = f"{category} {payout_type} benchmark ({bench['sample_campaigns']} offers)"
-
-    # ── Tier 4: payout type only ──────────────────────────────────────────────
-    elif payout_type in by_pt:
-        bench = by_pt[payout_type]
-        cvr   = bench["avg_cvr_pct"] / 100
-        confidence = 0.50
-        source = f"{payout_type} avg across all categories ({bench['sample_campaigns']} offers)"
+        confidence = 0.65
+        source = f"{category} category benchmark ({bench['sample_campaigns']} offers)"
 
     else:
         # No real data at any tier — return 0 so caller shows "Not estimated"
