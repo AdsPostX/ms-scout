@@ -292,6 +292,43 @@ def _is_help_query(query: str) -> bool:
     return False
 
 
+def _text_to_blocks(text: str) -> list:
+    """
+    Convert mrkdwn response text into Block Kit blocks.
+    - Lines of '---' → divider block between sections
+    - Lines starting with '>' → context block (gray, smaller)
+    - Everything else → section block
+    Falls back to a single section block if no --- separators found.
+    """
+    parts = re.split(r'\n\s*---\s*\n', text.strip())
+    if len(parts) == 1:
+        # No separators — single section block
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+    blocks = []
+    for i, part in enumerate(parts):
+        part = part.strip()
+        if not part:
+            continue
+        body_lines, context_lines = [], []
+        for line in part.split('\n'):
+            if line.startswith('>'):
+                context_lines.append(line[1:].strip())
+            else:
+                body_lines.append(line)
+        body = '\n'.join(body_lines).strip()
+        if body:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
+        if context_lines:
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": ' · '.join(context_lines)}],
+            })
+        if i < len(parts) - 1:
+            blocks.append({"type": "divider"})
+    return blocks or [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+
 def _build_suggestion_buttons(suggestions: list) -> list:
     """Build a Slack actions block with 2-3 contextual follow-up suggestion buttons."""
     if not suggestions:
@@ -299,7 +336,7 @@ def _build_suggestion_buttons(suggestions: list) -> list:
     buttons = [
         {
             "type": "button",
-            "text": {"type": "plain_text", "text": s[:74], "emoji": False},
+            "text": {"type": "plain_text", "text": s[:30], "emoji": False},
             "value": s,
             "action_id": f"scout_suggestion_{i}",
         }
@@ -1012,24 +1049,14 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     else:
         # Plain text response — with optional suggestion buttons
         response_text = response if isinstance(response, str) else str(response)
+        content_blocks = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
-        if suggestion_blocks:
-            web.chat_update(
-                channel=channel,
-                ts=placeholder["ts"],
-                text=response_text,
-                blocks=[
-                    {"type": "section", "text": {"type": "mrkdwn", "text": response_text}},
-                    *suggestion_blocks,
-                ],
-            )
-        else:
-            web.chat_update(
-                channel=channel,
-                ts=placeholder["ts"],
-                text=response_text,
-                mrkdwn=True,
-            )
+        web.chat_update(
+            channel=channel,
+            ts=placeholder["ts"],
+            text=response_text,  # fallback for notifications
+            blocks=[*content_blocks, *suggestion_blocks],
+        )
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 
 
