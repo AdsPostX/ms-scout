@@ -128,17 +128,43 @@ def _merge_thread_context(thread_ts: str, new_data: dict):
 
 
 _LOADING_MESSAGES = [
-    "_Digging through 700+ offers..._",
-    "_Checking if anyone's already running this..._",
-    "_Asking ClickHouse nicely..._",
-    "_Cross-referencing payout data..._",
-    "_Doing the math so you don't have to..._",
-    "_Scanning the networks..._",
-    "_Pulling real CVR data..._",
-    "_Sorting by RPM, not vibes..._",
-    "_One sec — running the numbers..._",
-    "_Consulting the oracle (ClickHouse)..._",
-    "_Finding what AdOps should look at this week..._",
+    # Data ops
+    "_Interrogating ClickHouse until it confesses..._",
+    "_Bribing the affiliate networks for better rates..._",
+    "_Vigorously cross-referencing things..._",
+    "_Doing math so advanced it scared the last analyst..._",
+    "_Asking MaxBounty to explain itself..._",
+    "_Aggressively filtering out the garbage..._",
+    "_Speed-running the Impact catalog..._",
+    "_Telepathically downloading CVR benchmarks..._",
+    "_Professionally judging low-payout offers..._",
+    "_Refusing to guess and actually querying the data..._",
+    "_Converting raw SQL into something humans can feel..._",
+    # MomentScience flavor
+    "_Turning post-transaction moments into money (allegedly)..._",
+    "_Manifesting a 15% RPM lift for you specifically..._",
+    "_Making the RPM go brrr..._",
+    "_Finding what your publishers are leaving on the table..._",
+    "_Quietly outperforming every other SDK on the confirmation page..._",
+    "_Doing what the SDK does but with words..._",
+    "_Treating your thank-you page like a revenue line item..._",
+    "_AdOps is sleeping. Scout is not._",
+    "_Making MomentScience look good, one query at a time..._",
+    # Self-aware / personality
+    "_One moment — Scout is having a moment..._",
+    "_Thinking very hard thoughts about offer performance..._",
+    "_Approximately 40% confident this will be good news..._",
+    "_Running this through seven layers of analysis (three are real)..._",
+    "_Lovingly nagging ClickHouse for one more row..._",
+    "_Sorting by RPM, not vibes (vibes are terrible analytics)..._",
+    "_Gently terrorizing the affiliate APIs..._",
+    "_This is taking longer than expected, which means it's thorough..._",
+    "_Consulting 47 data sources and their weird rate limits..._",
+    "_Forensic accounting but for ad performance..._",
+    "_Reverse-engineering what competitors are too slow to notice..._",
+    "_Asking the data what it wants to be when it grows up..._",
+    "_Pretending this is easy (it is not)..._",
+    "_Almost done — and by 'almost' Scout means it just started..._",
 ]
 
 
@@ -199,6 +225,8 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     ctas         = copy.get("ctas", [])
     title        = copy.get("title", "") or (titles[0] if titles else "")
     title_backup = copy.get("title_backup", "") or (titles[1] if len(titles) > 1 else "")
+    description  = copy.get("description", "")
+    short_desc   = copy.get("short_desc", "")
     cta          = copy.get("cta") or (ctas[0] if ctas else None)
     targeting    = copy.get("targeting", "")
     bottom       = copy.get("bottom_line", "")
@@ -257,10 +285,22 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     if title:
         title_text = f"*Headline:* {title}"
         if title_backup:
-            title_text += f"\n_Backup: {title_backup}_"
+            title_text += f"\n_A/B: {title_backup}_"
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": title_text},
+        })
+
+    if description:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Description:* {description}"},
+        })
+
+    if short_desc:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Short:* {short_desc}"},
         })
 
     if cta:

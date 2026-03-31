@@ -379,30 +379,50 @@ Rules:
 - No double quotes inside suggestion strings
 
 CAMPAIGN BRIEF MODE (Intent 9 only):
-1. Call draft_campaign_brief() with the advertiser name
-2. Headline — post-transaction tone, under 60 chars:
-   - If platform_title is non-empty: use it as "title" (it's live on the platform already).
-     Add "title_backup" ONLY if you can substantially improve on it.
-   - If platform_title is empty: generate the best headline. Good: "You just unlocked 3 months free"
-3. CTA Yes/No — 4-6 words max, 25-char platform limit:
-   - If platform_cta_yes is non-empty: use it as-is for "yes", platform_cta_no for "no"
-   - If empty: generate one strong pair. Yes = desire/action. No = loss aversion, not dismissal.
-     The "no" should make declining feel like leaving something behind — not a neutral opt-out.
-     Good nos: "I'll pass on this", "Keep paying full price", "I'll miss out", "Skip my free trial"
-     Bad nos: "No Thanks", "Skip", "Not Now" — these are invisible, they don't make the user feel anything
-4. One targeting note with CVR data if available
-5. Output ONLY this JSON — no other text:
-6. After the JSON, if fallback_same_brand is non-empty, add ONE line:
+1. Call draft_campaign_brief() with the advertiser name.
+
+2. COPY RULES — performance-based post-transaction placements. All copy must pass these:
+   - Value Clarity > Cleverness: the incentive must be obvious in ≤3 seconds
+   - Subtle Urgency only: "Today", "Start now", "Risk-free" OK. Countdown language, false scarcity: never.
+   - Trust First: sound like a legit brand. Not an arbitrage funnel. No hype, no hidden conditions.
+   - Mobile-first: every field must read instantly on a small screen
+
+3. Headline ("title") — ~50 chars, benefit-driven, post-transaction tone:
+   - If platform_title is non-empty: use it (it's live). Add title_backup ONLY if you can substantially improve.
+   - If empty: generate the best headline. Lead with the incentive. "You just qualified for a free Square reader" > "Square has a great offer"
+
+4. Offer Description ("description") — 150–170 chars EXACTLY:
+   - What the user gets + the hook/incentive + risk removal if applicable (free trial, cancel anytime)
+   - Light urgency only. No countdown language. No vague promises.
+   - Example: "Accept Square's free card reader — no monthly fees, no contracts. Start processing payments today with zero upfront cost."
+
+5. Short Description ("short_desc") — ~50 chars, punchy and factual:
+   - Condensed version. Emotionally resonant but not hypey.
+   - Used in tiles, cards, notification text. Must work without surrounding context.
+   - Example: "Free Square reader — no fees, no contracts."
+
+6. CTA Yes/No — 4–6 words, 25-char platform limit:
+   - If platform_cta_yes is non-empty: use as-is. Same for no.
+   - If empty: Yes = desire/action ("Claim Free Reader", "Get Started Free").
+     No = loss aversion — makes declining feel like leaving something behind, not a neutral opt-out.
+     Good nos: "I'll miss out", "Keep paying full price", "Skip my free reader", "I'll pass on this"
+     Bad nos: "No Thanks", "Skip", "Not Now" — invisible, zero emotional weight
+
+7. One targeting note with CVR data if available.
+8. Output ONLY this JSON — no other text:
+9. After the JSON, if fallback_same_brand is non-empty, add ONE line:
    "Backup plan: [advertiser] also on [network] — plug-and-play if this source hits cap."
-   If only fallback_category_subs, add: "If this goes dark, next best in [category]: [name] ($X payout)."
-   Skip entirely if both are empty.
+   If only fallback_category_subs: "If this goes dark, next best in [category]: [name] ($X payout)."
+   Skip if both are empty.
 
 <<<BRIEF_JSON
 {
-  "title": "The one headline we're going with",
-  "title_backup": "Backup for A/B testing",
-  "cta": {"yes": "Claim My Reward", "no": "No Thanks"},
-  "targeting": "one-line targeting recommendation with CVR data if available",
+  "title": "~50 char benefit-driven headline",
+  "title_backup": "A/B variant — only if substantially different",
+  "description": "150-170 char offer description with hook + risk removal if applicable",
+  "short_desc": "~50 char punchy condensed version for tiles/cards",
+  "cta": {"yes": "Claim Free Reader", "no": "I'll miss out"},
+  "targeting": "one-line with CVR data if available",
   "bottom_line": "one sentence on why this offer is worth running right now"
 }
 BRIEF_JSON>>>"""
