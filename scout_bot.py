@@ -268,8 +268,7 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
         {"type": "mrkdwn", "text": f"*Geo*\n{geo or 'Not specified'}"},
         {"type": "mrkdwn", "text": f"*Est. RPM*\n{rpm_display}"},
     ]
-    if performance:
-        stat_fields.append({"type": "mrkdwn", "text": f"*Performance*\n{performance}"})
+    # Performance field omitted — RPM already carries the confidence qualifier (est./no prior data)
     blocks.append({"type": "section", "fields": stat_fields})
 
     # Risk flag — surface before copy so it's not missed
@@ -310,13 +309,13 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
         })
 
     # ── Details ───────────────────────────────────────────────────────────────
+    # Targeting omitted — geo is in stats, category in header, score in RPM.
+    # Only surface what isn't already visible above.
     detail_parts = []
     if restrictions:
         # Normalize multi-line internal_notes into a single line for scannability
         r = " · ".join(line.strip() for line in restrictions.splitlines() if line.strip())
         detail_parts.append(f":warning: *Restrictions:* {r}")
-    if targeting:
-        detail_parts.append(f"*Targeting:* {targeting}")
     if tracking_url and tracking_url != "Not available — pull from network portal":
         detail_parts.append(f"*Tracking URL:* `{tracking_url}`")
     if offer_id:
@@ -340,12 +339,7 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     footer_parts = []
     if bottom:
         footer_parts.append(f"_{bottom}_")
-
-    # Clean handoff line — no automation promise, just the next step
-    if portal_url:
-        footer_parts.append(f"Ready to build? <{portal_url}|Open in {network}> to pull creatives, then add to the MS platform.")
-    else:
-        footer_parts.append("Ready to build? Pull creatives from the network portal and add to the MS platform.")
+    # "Ready to build?" removed — Creatives field already tells you exactly what to do
 
     context_elements.append({"type": "mrkdwn", "text": "\n".join(footer_parts)})
     blocks.append({"type": "context", "elements": context_elements})
