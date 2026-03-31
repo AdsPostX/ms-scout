@@ -387,6 +387,7 @@ CAMPAIGN BRIEF MODE (Intent 9 only):
    - Subtle Urgency only: "Today", "Start now", "Risk-free" OK. Countdown language, false scarcity: never.
    - Trust First: sound like a legit brand. Not an arbitrage funnel. No hype, no hidden conditions.
    - Mobile-first: every field must read instantly on a small screen
+   - No em dashes (—) or en dashes (–) anywhere in copy. Use a period, comma, or rewrite the sentence.
 
 3. Headline ("title") — ~50 chars, benefit-driven, post-transaction tone:
    - If platform_title is non-empty: use it (it's live). Add title_backup ONLY if you can substantially improve.
