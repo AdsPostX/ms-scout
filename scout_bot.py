@@ -163,10 +163,14 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     portal_url   = brief_data.get("portal_url", "")
     risk_flag    = brief_data.get("risk_flag", "")
 
-    titles    = copy.get("titles", [])
-    ctas      = copy.get("ctas", [])
-    targeting = copy.get("targeting", "")
-    bottom    = copy.get("bottom_line", "")
+    # Support both old schema (titles/ctas lists) and new schema (title/cta single)
+    titles       = copy.get("titles", [])
+    ctas         = copy.get("ctas", [])
+    title        = copy.get("title", "") or (titles[0] if titles else "")
+    title_backup = copy.get("title_backup", "") or (titles[1] if len(titles) > 1 else "")
+    cta          = copy.get("cta") or (ctas[0] if ctas else None)
+    targeting    = copy.get("targeting", "")
+    bottom       = copy.get("bottom_line", "")
 
     blocks = []
 
@@ -219,18 +223,19 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     blocks.append({"type": "divider"})
 
     # ── Copy ─────────────────────────────────────────────────────────────────
-    if titles:
-        title_lines = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+    if title:
+        title_text = f"*Headline:* {title}"
+        if title_backup:
+            title_text += f"\n_Backup: {title_backup}_"
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Title options:*\n{title_lines}"},
+            "text": {"type": "mrkdwn", "text": title_text},
         })
 
-    if ctas:
-        cta_lines = "\n".join(f'• Yes: "{c.get("yes","")}" / No: "{c.get("no","")}"' for c in ctas)
+    if cta:
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*CTA options:*\n{cta_lines}"},
+            "text": {"type": "mrkdwn", "text": f"*CTA:* \"{cta.get('yes', '')}\" / \"{cta.get('no', '')}\""},
         })
 
     # ── Details ───────────────────────────────────────────────────────────────

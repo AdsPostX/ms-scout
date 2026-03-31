@@ -376,9 +376,9 @@ Rules:
 
 CAMPAIGN BRIEF MODE (Intent 9 only):
 1. Call draft_campaign_brief() with the advertiser name
-2. Generate 3 headline variants — post-transaction tone, under 60 chars
+2. Commit to ONE headline — post-transaction tone, under 60 chars. Add one backup for A/B.
    Good: "You just unlocked 3 months free"  Bad: "Get SiriusXM today"
-3. Generate 2 CTA Yes/No pairs (4-6 words max, 25-char platform limit)
+3. Commit to ONE CTA Yes/No pair (4-6 words max, 25-char platform limit)
 4. One targeting note with CVR data if available
 5. Output ONLY this JSON — no other text:
 6. After the JSON, if fallback_same_brand is non-empty, add ONE line:
@@ -388,11 +388,9 @@ CAMPAIGN BRIEF MODE (Intent 9 only):
 
 <<<BRIEF_JSON
 {
-  "titles": ["title 1", "title 2", "title 3"],
-  "ctas": [
-    {"yes": "CTA option A", "no": "No Thanks"},
-    {"yes": "CTA option B", "no": "Skip"}
-  ],
+  "title": "The one headline we're going with",
+  "title_backup": "Backup for A/B testing",
+  "cta": {"yes": "Claim My Reward", "no": "No Thanks"},
   "targeting": "one-line targeting recommendation with CVR data if available",
   "bottom_line": "one sentence on why this offer is worth running right now"
 }
@@ -833,8 +831,8 @@ def _get_risk_flag(advertiser: str, category: str, description: str) -> str:
 def _network_portal_url(network: str, offer_id: str) -> str:
     """Construct a direct link to the offer in the network's portal."""
     n = network.lower()
-    if n == "maxbounty" and offer_id:
-        return f"https://www.maxbounty.com/campaigns/detail/{offer_id}"
+    if n == "maxbounty":
+        return ""  # URL structure changed post-mrge acquisition — use Offer ID for manual lookup
     elif n == "impact":
         return "https://app.impact.com"
     elif n == "flexoffers" and offer_id:
@@ -1021,65 +1019,106 @@ def get_publisher_competitive_landscape(
 
         weekly_impressions = int(sum(r[1] for r in vol_rows) / max(len(vol_rows), 1)) if vol_rows else 0
 
-        # Step 3: campaigns currently running on this publisher with RPM.
-        # IMPORTANT: aggregate impressions and conversions independently before joining.
-        # Row-level JOIN (impressions × conversions on session_id) causes fan-out:
-        # a session with 3 impressions + 1 conversion produces count(cv.id)=3, not 1.
-        camp_rows = ch.query(f"""
+        # Step 3: provisioned offers — what's assigned to this publisher account.
+        # from_airbyte_publisher_campaigns is the source of truth for "what's set up."
+        # Impressions tell us which of those are actively serving right now.
+        prov_rows = ch.query(f"""
             SELECT
+                pc.campaign_id,
                 c.adv_name,
-                imp.campaign_id,
-                imp.impressions,
-                coalesce(cv.conversions, 0) AS conversions,
-                coalesce(cv.total_revenue, 0) AS total_revenue,
-                round(coalesce(cv.total_revenue, 0) / nullIf(imp.impressions, 0) * 1000, 2) AS rpm
-            FROM (
+                pc.payout
+            FROM default.from_airbyte_publisher_campaigns pc
+            JOIN default.from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
+            WHERE pc.user_id = {pub_id_int}
+              AND pc.deleted_at IS NULL
+              AND pc.is_active = true
+              AND c.deleted_at IS NULL
+            ORDER BY pc.created_at DESC
+            LIMIT 50
+        """).result_rows
+
+        # Step 4: determine which provisioned campaigns have recent impressions (serving now).
+        serving_map: dict = {}  # campaign_id → impression count
+        rpm_map: dict = {}      # campaign_id → RPM (only for serving campaigns)
+
+        if prov_rows:
+            prov_ids = [str(r[0]) for r in prov_rows]
+            id_list = ", ".join(f"'{cid}'" for cid in prov_ids)
+
+            serving_rows = ch.query(f"""
                 SELECT campaign_id, count() AS impressions
                 FROM default.adpx_impressions_details
                 PREWHERE pid = '{pub_pid}'
                 WHERE created_at >= today() - 14
+                  AND campaign_id IN ({id_list})
                 GROUP BY campaign_id
-            ) imp
-            JOIN default.from_airbyte_campaigns c ON toInt64(imp.campaign_id) = toInt64(c.id)
-            LEFT JOIN (
-                SELECT cv.campaign_id,
-                       count() AS conversions,
-                       sum(toFloat64OrNull(cv.revenue)) AS total_revenue
-                FROM default.adpx_conversionsdetails cv
-                WHERE cv.session_id IN (
-                    SELECT session_id
-                    FROM default.adpx_impressions_details
-                    PREWHERE pid = '{pub_pid}'
-                    WHERE created_at >= today() - 14
-                )
-                  AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - 28)
-                GROUP BY cv.campaign_id
-            ) cv ON toInt64(imp.campaign_id) = toInt64(cv.campaign_id)
-            WHERE c.deleted_at IS NULL
-              AND imp.impressions >= 50
-            ORDER BY rpm DESC NULLS LAST
-            LIMIT 20
-        """).result_rows
+            """).result_rows
+            serving_map = {str(r[0]): int(r[1]) for r in serving_rows}
 
+            if serving_map:
+                sids = list(serving_map.keys())
+                sids_str = ", ".join(f"'{cid}'" for cid in sids)
+                rpm_rows = ch.query(f"""
+                    SELECT
+                        imp.campaign_id,
+                        round(coalesce(cv.total_revenue, 0) / nullIf(imp.impressions, 0) * 1000, 2) AS rpm
+                    FROM (
+                        SELECT campaign_id, count() AS impressions
+                        FROM default.adpx_impressions_details
+                        PREWHERE pid = '{pub_pid}'
+                        WHERE created_at >= today() - 14
+                          AND campaign_id IN ({sids_str})
+                        GROUP BY campaign_id
+                    ) imp
+                    LEFT JOIN (
+                        SELECT cv.campaign_id,
+                               sum(toFloat64OrNull(cv.revenue)) AS total_revenue
+                        FROM default.adpx_conversionsdetails cv
+                        WHERE cv.session_id IN (
+                            SELECT session_id
+                            FROM default.adpx_impressions_details
+                            PREWHERE pid = '{pub_pid}'
+                            WHERE created_at >= today() - 14
+                              AND campaign_id IN ({sids_str})
+                        )
+                          AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - 28)
+                        GROUP BY cv.campaign_id
+                    ) cv ON toInt64(imp.campaign_id) = toInt64(cv.campaign_id)
+                """).result_rows
+                rpm_map = {str(r[0]): float(r[1] or 0) for r in rpm_rows}
+
+        # Build unified list — serving first (by RPM), then provisioned-only (by payout desc).
         competitors = []
-        for row in camp_rows:
-            adv_name, campaign_id, impressions, conversions, _revenue, rpm = row
+        for row in prov_rows:
+            campaign_id, adv_name, payout = row
+            cid = str(campaign_id)
+            impressions_2w = serving_map.get(cid, 0)
+            is_serving = impressions_2w > 0
+            rpm = rpm_map.get(cid, 0.0)
             competitors.append({
                 "advertiser": adv_name,
-                "campaign_id": str(campaign_id),
-                "impressions_2w": int(impressions),
-                "conversions_2w": int(conversions),
-                "rpm": float(rpm or 0),
+                "campaign_id": cid,
+                "provisioned": True,
+                "is_serving": is_serving,
+                "impressions_2w": impressions_2w,
+                "rpm": rpm,
+                "payout": float(payout) if payout else None,
             })
+        competitors.sort(key=lambda x: (0 if x["is_serving"] else 1, -x["rpm"], -(x["payout"] or 0)))
 
+        serving_count = sum(1 for c in competitors if c["is_serving"])
         result = {
             "publisher": pub_full_name,
             "publisher_id": pub_id_int,
-            "publisher_pid": pub_pid,  # numeric string — used as pid in impressions table
+            "publisher_pid": pub_pid,
             "weekly_impressions_avg": weekly_impressions,
             "projected_impressions_2w": weekly_impressions * weeks,
-            "active_competitors": competitors,
-            "competitor_count": len(competitors),
+            "provisioned_campaigns": competitors,
+            "provisioned_count": len(competitors),
+            "serving_count": serving_count,
+            # payout_scenario logic below expects active_competitors
+            "active_competitors": [c for c in competitors if c["is_serving"]],
+            "competitor_count": serving_count,
         }
 
         # Step 4: if offer + payout provided, compute rank scenarios
