@@ -354,6 +354,30 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     context_elements.append({"type": "mrkdwn", "text": "\n".join(footer_parts)})
     blocks.append({"type": "context", "elements": context_elements})
 
+    # ── Add to Queue button ───────────────────────────────────────────────────
+    # Only rendered when thread_ts is known (i.e., a real @Scout mention, not a preview).
+    # Packs enough data in value so the handler can write the queue item without
+    # re-fetching the brief — keeps the click instant.
+    if thread_ts:
+        btn_val = json.dumps({
+            "advertiser":   advertiser,
+            "offer_id":     offer_id,
+            "payout":       payout,
+            "network":      network,
+            "tracking_url": tracking_url,
+            "thread_ts":    thread_ts,
+        }, separators=(",", ":"))[:2900]
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type":      "button",
+                "text":      {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
+                "style":     "primary",
+                "action_id": "scout_brief_queue",
+                "value":     btn_val,
+            }],
+        })
+
     return blocks
 
 
@@ -754,6 +778,67 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     log.info(f"Approved: {advertiser} ({offer_id}) by {user_id}, list_write={added_to_list}")
 
 
+def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
+    """
+    Handle 'Add to Queue' click from an @Scout-built brief card.
+
+    The brief is already in Slack — we just need to:
+      1. Guard against double-queueing (idempotent)
+      2. Write to Slack Demand Queue list
+      3. Record in launched_offers.json for lifecycle tracking
+      4. Post a confirmation in-thread
+    """
+    try:
+        data = json.loads(action.get("value", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        log.warning("scout_brief_queue: could not parse action value")
+        return
+
+    channel    = (payload.get("container") or {}).get("channel_id") or \
+                 (payload.get("channel") or {}).get("id", "")
+    message_ts = (payload.get("container") or {}).get("message_ts") or \
+                 (payload.get("message") or {}).get("ts", "")
+    user_id    = (payload.get("user") or {}).get("id", "unknown")
+
+    advertiser   = data.get("advertiser", "Offer")
+    thread_ts    = data.get("thread_ts") or message_ts
+    thread_url   = _slack_thread_url(channel, thread_ts)
+
+    # Idempotent: don't double-queue the same advertiser
+    state = _load_launched_offers()
+    if advertiser in state and state[advertiser].get("status") == "queued":
+        web.chat_postMessage(
+            channel=channel, thread_ts=thread_ts,
+            text=f":information_source: *{advertiser}* is already in the queue.",
+        )
+        return
+
+    brief_data = {
+        "advertiser":   advertiser,
+        "payout":       data.get("payout", ""),
+        "payout_num":   0,
+        "network":      data.get("network", ""),
+        "tracking_url": data.get("tracking_url", ""),
+    }
+
+    # Write to Slack List + lifecycle tracker
+    added = _try_add_to_demand_queue(web, brief_data, user_id, thread_url)
+    _record_queued_offer(advertiser, brief_data, user_id, thread_url)
+
+    if added:
+        confirm = (
+            f":white_check_mark: *{advertiser}* added to queue by <@{user_id}> — "
+            f"<{thread_url}|brief is in this thread>"
+        )
+    else:
+        confirm = (
+            f":white_check_mark: *{advertiser}* approved by <@{user_id}> · "
+            f"<{QUEUE_LIST_URL}|Add to Demand Queue →>"
+        )
+    web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=confirm)
+    log.info(f"Brief queued: {advertiser} by {user_id}, list_write={added}")
+
+
 def _handle_reject(action: dict, payload: dict, web: WebClient):
     """Handle ✕ Skip button click from SCOUT Sniper digest."""
     import scout_digest
@@ -936,6 +1021,10 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         return
     if action_id == "scout_reject":
         _handle_reject(action, payload, web)
+        return
+    # ── Brief "Add to Queue" button (from @Scout build a brief for X) ─────────
+    if action_id == "scout_brief_queue":
+        _handle_brief_queue(action, payload, web)
         return
 
     # ── App Home "Try it" buttons ─────────────────────────────────────────────
