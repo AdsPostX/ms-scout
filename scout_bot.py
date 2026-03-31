@@ -249,18 +249,28 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     })
 
     # ── 2-col stats grid ──────────────────────────────────────────────────────
-    # RPM confidence: only show a number when it's grounded in real MS data
-    # or a category benchmark. Never show a bare estimate as if it's a fact.
-    has_real_data    = performance and "Real MS data" in performance
-    has_cat_benchmark = performance and "benchmark" in performance
-    if score_rpm and has_real_data:
+    # RPM display reflects the confidence tier from _scout_score():
+    #   score=0 + risk_flag present  → "Not estimated" (high-friction offer suppressed)
+    #   score=0, no risk flag        → "N/A" (no data at any tier)
+    #   real MS data                 → "$X,XXX" (no qualifier — it's measured)
+    #   same-advertiser benchmark    → "~$X,XXX est." (1 step removed)
+    #   category×payout benchmark    → "~$X,XXX est." (grounded but indirect)
+    #   payout-type-only fallback    → "~$X,XXX est. (broad avg)" (lowest real signal)
+    _HIGH_FRICTION_TAGS = ("B2B intent", "Loan/credit", "Medical program", "Biz-opp", "Insurance")
+    is_high_friction = any(tag in (risk_flag or "") for tag in _HIGH_FRICTION_TAGS)
+
+    if not score_rpm and is_high_friction:
+        rpm_display = "Not estimated\n_conversion complexity too high_"
+    elif not score_rpm:
+        rpm_display = "N/A\n_no MS data at any tier_"
+    elif performance and "Real MS data" in performance:
         rpm_display = f"${score_rpm:,.0f}"
-    elif score_rpm and has_cat_benchmark:
+    elif performance and "advertiser benchmark" in performance:
         rpm_display = f"~${score_rpm:,.0f} est."
-    elif score_rpm:
-        rpm_display = f"~${score_rpm:,.0f} est.\n_no prior data_"
+    elif performance and "benchmark" in performance:
+        rpm_display = f"~${score_rpm:,.0f} est."
     else:
-        rpm_display = "N/A"
+        rpm_display = f"~${score_rpm:,.0f} est.\n_broad avg_"
 
     stat_fields = [
         {"type": "mrkdwn", "text": f"*Network*\n{network}"},
@@ -1323,6 +1333,62 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 
 
+def _check_stale_queue(web: WebClient) -> None:
+    """
+    Daily background check: any offer approved 7+ days ago with status 'queued'
+    (never went live) gets a Slack nudge in the original approval thread.
+
+    Runs every 24h via a daemon thread started in main(). Silent on failures
+    so a bad entry never crashes the bot.
+    """
+    STALE_DAYS = 7
+    while True:
+        time.sleep(86_400)  # 24 hours
+        try:
+            state = _load_launched_offers()
+            now = datetime.now(timezone.utc)
+            for advertiser, entry in state.items():
+                if entry.get("status") != "queued":
+                    continue
+                approved_at_str = entry.get("approved_at", "")
+                if not approved_at_str:
+                    continue
+                try:
+                    approved_at = datetime.fromisoformat(approved_at_str).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                age_days = (now - approved_at).days
+                if age_days < STALE_DAYS:
+                    continue
+
+                thread_url = entry.get("thread_url", "")
+                payout     = entry.get("payout", "")
+                network    = entry.get("network", "")
+
+                # Find the original approval channel + thread from the URL
+                # thread_url format: https://momentscience.slack.com/archives/C.../p...
+                import re as _re
+                m = _re.search(r'/archives/([A-Z0-9]+)/p(\d+)', thread_url)
+                if not m:
+                    log.debug(f"Stale queue: can't parse thread URL for {advertiser}")
+                    continue
+
+                channel   = m.group(1)
+                ts_raw    = m.group(2)
+                thread_ts = f"{ts_raw[:10]}.{ts_raw[10:]}"
+
+                msg = (
+                    f":hourglass: *{advertiser}* has been in the queue for *{age_days} days* "
+                    f"({payout} · {network}) with no impressions detected.\n"
+                    f"Still in progress? Reply to confirm — or Reject to free the slot."
+                )
+                web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+                log.info(f"Stale queue nudge sent for {advertiser} ({age_days} days)")
+
+        except Exception as e:
+            log.warning(f"Stale queue check failed: {e}")
+
+
 def main():
     global _BOT_USER_ID
     if not BOT_TOKEN or not APP_TOKEN:
@@ -1332,6 +1398,9 @@ def main():
     _BOT_USER_ID  = web_client.auth_test()["user_id"]
     socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
+
+    # Background: daily stale queue alerts (daemon thread dies cleanly on exit)
+    threading.Thread(target=_check_stale_queue, args=(web_client,), daemon=True).start()
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
