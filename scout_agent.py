@@ -25,10 +25,12 @@ log = logging.getLogger("scout_agent")
 
 SNAPSHOT_PATH = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
 
-# ── Performance benchmark cache (loaded once at startup) ─────────────────────
+# ── Performance benchmark cache (refreshed hourly) ───────────────────────────
 # Maps: category → {cvr_pct, rpm, sample_size}
 #        offer_impact_id → {cvr_pct, rpm, adv_name}
 _BENCHMARKS: dict = {}
+_BENCHMARKS_LOADED_AT: float = 0.0
+_BENCHMARKS_TTL = 3600  # 1 hour
 
 def _load_performance_benchmarks() -> dict:
     """
@@ -133,9 +135,10 @@ def _load_performance_benchmarks() -> dict:
 
 
 def _get_benchmarks() -> dict:
-    global _BENCHMARKS
-    if not _BENCHMARKS:
+    global _BENCHMARKS, _BENCHMARKS_LOADED_AT
+    if not _BENCHMARKS or (time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL:
         _BENCHMARKS = _load_performance_benchmarks()
+        _BENCHMARKS_LOADED_AT = time.time()
     return _BENCHMARKS
 
 

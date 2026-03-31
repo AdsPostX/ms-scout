@@ -1,23 +1,15 @@
 """
 offer_scraper.py
-MVP: Affiliate Network Offer Scraper → Google Sheets (Drive)
+Affiliate Network Offer Scraper → Notion + JSON snapshot
 
-Networks supported (v1):
+Networks supported:
   - Impact       [HTTP Basic Auth]
   - FlexOffers   [API Key, domain-based]
   - MaxBounty    [REST API: email + password → JWT token (2hr TTL)]
 
-Output: Google Sheet with two tabs
-  - "Latest"  : overwritten each run with today's full offer set
-  - "History" : appended on each run (date-stamped rows)
-
-Setup:
-  1. pip install requests google-api-python-client google-auth-oauthlib
-  2. Create a Google Cloud project, enable Drive + Sheets APIs
-  3. Download credentials.json (OAuth2 desktop app) into this directory
-  4. Set environment variables (see CONFIG section below)
-  5. Run once manually to complete OAuth flow → token.pickle is saved
-  6. Schedule with cron or the MomentScience schedule skill
+Output:
+  - Notion database (primary)
+  - data/offers_latest.json (for Scout intelligence bot)
 
 Usage:
   python offer_scraper.py               # run all networks
@@ -26,9 +18,7 @@ Usage:
 
 import os
 import re
-import csv
 import json
-import pickle
 import logging
 import argparse
 import requests
@@ -38,12 +28,6 @@ from typing import Optional
 
 from dotenv import load_dotenv
 load_dotenv()
-
-# Google API
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
 
 # ---------------------------------------------------------------------------
 # CONFIG — loaded from .env file (see .env.example) or environment variables
@@ -57,11 +41,7 @@ FLEXOFFERS_DOMAIN_ID = os.environ.get("FLEXOFFERS_DOMAIN_ID", "")
 MAXBOUNTY_EMAIL    = os.environ.get("MAXBOUNTY_EMAIL", "")
 MAXBOUNTY_PASSWORD = os.environ.get("MAXBOUNTY_PASSWORD", "")
 
-# Google Sheets — create a blank Sheet, copy the ID from its URL
-# e.g. https://docs.google.com/spreadsheets/d/THIS_PART_HERE/edit
-SHEET_ID            = os.environ.get("GSHEET_ID", "")
-
-# Notion — preferred output destination
+# Notion — primary output destination
 # Setup: notion.so/my-integrations → create integration → copy secret_... token
 #        Then share the "Offer Inventory — MS Network" database with that integration
 NOTION_TOKEN        = os.environ.get("NOTION_TOKEN", "")
@@ -72,11 +52,6 @@ CH_HOST             = os.environ.get("CH_HOST", "")
 CH_USER             = os.environ.get("CH_USER", "")
 CH_PASSWORD         = os.environ.get("CH_PASSWORD", "")
 CH_DATABASE         = os.environ.get("CH_DATABASE", "default")
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
-]
 
 DEBUG = False  # set to True via --debug flag at runtime
 
@@ -978,85 +953,6 @@ def write_notion(offers: list):
     log.info(f"Notion: {created} created, {updated} updated, {errors} errors")
 
 
-def _get_sheets_service():
-    creds = None
-    token_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "token.pickle")
-    creds_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json")
-
-    if os.path.exists(token_path):
-        with open(token_path, "rb") as f:
-            creds = pickle.load(f)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(token_path, "wb") as f:
-            pickle.dump(creds, f)
-
-    return build("sheets", "v4", credentials=creds)
-
-
-def write_to_sheets(cleaned_offers: list, raw_offers: list):
-    """
-    Write offers to Google Sheets.
-    - Latest tab: cleaned_offers (active only, normalized) — overwritten each run
-    - History tab: raw_offers (full snapshot including expired) — appended each run
-    """
-    if not SHEET_ID:
-        log.error("GSHEET_ID not set — skipping Google Sheets upload")
-        _write_local_csv(cleaned_offers)
-        return
-
-    log.info(f"Writing to Google Sheets: {len(cleaned_offers)} active offers to Latest, "
-             f"{len(raw_offers)} total to History...")
-    service = _get_sheets_service()
-    sheet = service.spreadsheets()
-
-    header      = OFFER_FIELDS
-    latest_rows = [[o.get(f, "") for f in OFFER_FIELDS] for o in cleaned_offers]
-    history_rows = [[o.get(f, "") for f in OFFER_FIELDS] for o in raw_offers]
-    today       = datetime.today().strftime("%Y-%m-%d")
-
-    # --- Tab 1: "Latest" — clear and overwrite with active/cleaned offers ---
-    try:
-        sheet.values().clear(
-            spreadsheetId=SHEET_ID,
-            range="Latest!A:Z",
-        ).execute()
-        sheet.values().update(
-            spreadsheetId=SHEET_ID,
-            range="Latest!A1",
-            valueInputOption="RAW",
-            body={"values": [header] + latest_rows},
-        ).execute()
-        log.info(f"Latest tab: updated with {len(cleaned_offers)} active rows")
-    except Exception as e:
-        log.warning(f"Latest tab write failed: {e}")
-
-    # --- Tab 2: "History" — append full raw snapshot ---
-    try:
-        sheet.values().append(
-            spreadsheetId=SHEET_ID,
-            range="History!A1",
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": history_rows},
-        ).execute()
-        log.info(f"History tab: appended {len(raw_offers)} rows for {today}")
-    except Exception as e:
-        log.warning(f"History tab append failed: {e}")
-
-
-def _write_local_csv(offers: list, filename: str = None):
-    filename = filename or f"offers_{datetime.today().strftime('%Y-%m-%d')}.csv"
-    with open(filename, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=OFFER_FIELDS)
-        writer.writeheader()
-        writer.writerows(offers)
-    log.info(f"Fallback: written to {filename}")
 
 
 # ---------------------------------------------------------------------------
@@ -1121,14 +1017,11 @@ def main():
         log.warning("No active offers collected — nothing written")
         return
 
-    # Write to Notion if token is configured (preferred)
+    # Write to Notion if token is configured
     if NOTION_TOKEN:
         write_notion(cleaned)
     else:
         log.info("NOTION_TOKEN not set — skipping Notion. Set it to enable Notion output.")
-
-    # Always write to Sheets as fallback/backup
-    write_to_sheets(cleaned, all_offers)  # Latest=active cleaned, History=full raw snapshot
 
     # Write JSON snapshot for Scout (offer intelligence bot)
     import pathlib
