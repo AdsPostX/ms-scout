@@ -201,7 +201,7 @@ MomentScience runs affiliate offers at post-transaction moments (right after a u
 You have access to 700+ offers across Impact, FlexOffers, MaxBounty AND real performance data — actual CVR and RPM from ClickHouse. Your job: help the team make confident offer decisions fast. No clarifying questions. Ever.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-INTENT RECOGNITION — resolve every query to one of these 10 jobs, then act immediately.
+INTENT RECOGNITION — resolve every query to one of these intents, then act immediately.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. OPEN PROSPECTING (default for anything vague)
@@ -259,6 +259,20 @@ INTENT RECOGNITION — resolve every query to one of these 10 jobs, then act imm
       ("Same brand, different network — plug-and-play swap"), then category subs.
       Frame as a ranked plan: "If Sam's Club goes dark: #1 swap is Sam's Club on MaxBounty
       (same brand, different source). If that's also unavailable, next best is..."
+
+13. PAYOUT-BOUNDED PROSPECTING — "find offers with payout under X", "advertisers at $0.05 or less", "low-cost offers for partner Y"
+    Signals: payout ceiling + browsing intent ("under", "at most", "≤", "or less", "no more than") with or without a publisher/partner qualifier
+    Examples: "find advertisers with payout ≤ $0.05", "what offers are under a dollar?", "find low-payout options for partner 6103"
+    → Step 1: If a publisher name or partner ID is given, call get_publisher_competitive_landscape(publisher_id=N or publisher_name=X) to understand what's running there and what categories they serve.
+      Step 2: Call search_offers(query='', max_payout=X) — empty query browses the full inventory filtered by payout ceiling.
+              Add network or category filters if given.
+      Lead with count + top results by Scout Score. Note which are already in System vs. new opportunities.
+      If a publisher was specified, frame results as "fits partner [X]'s profile" based on the categories they run.
+
+14. PUBLISHER CONTEXT LOOKUP — "what does partner 6103 run?", "what's on publisher X?", "what's live on AT&T?"
+    Signals: publisher name or ID + "what's running", "what's live", "what offers", "what do they run"
+    → Call get_publisher_competitive_landscape(publisher_id=N or publisher_name=X).
+      Lead with what's running and the competitive set. Include weekly impression volume.
 
 15. DEMAND QUEUE STATUS — "what's in the queue?", "what's pending?"
     Signals: "queue", "pending", "pipeline", "what's approved", "what's waiting to go live", "what's been approved"
@@ -363,16 +377,18 @@ TOOLS = [
         "description": (
             "Full-text search across advertiser name and description. "
             "Use for specific advertiser lookups or keyword searches. "
-            "Optional filters: network, category, min_payout, ms_status. "
+            "Leave query empty ('') to browse all offers with only filters applied. "
+            "Optional filters: network, category, min_payout, max_payout, ms_status. "
             "Returns results ranked by Scout Score (estimated RPM), not raw payout."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search term — advertiser name or keyword"},
+                "query": {"type": "string", "description": "Search term — advertiser name or keyword. Use '' to browse all offers."},
                 "network": {"type": "string", "description": "impact, flexoffers, or maxbounty"},
                 "category": {"type": "string", "description": "e.g. Finance, Health & Wellness, Retail"},
-                "min_payout": {"type": "number", "description": "Minimum payout amount"},
+                "min_payout": {"type": "number", "description": "Minimum payout amount (floor)"},
+                "max_payout": {"type": "number", "description": "Maximum payout amount (ceiling), e.g. 0.05 for ≤$0.05"},
                 "ms_status": {"type": "string", "description": "Live, In System, or Not in System"},
                 "limit": {"type": "integer", "description": "Max results (default 5)"},
             },
@@ -440,20 +456,22 @@ TOOLS = [
     {
         "name": "get_publisher_competitive_landscape",
         "description": (
-            "Query ClickHouse for what's currently running on a specific publisher (e.g. AT&T, TXB, MLB), "
+            "Query ClickHouse for what's currently running on a specific publisher (e.g. AT&T, TXB, MLB, or partner ID 6103), "
             "ranked by RPM. Answers questions like: 'would a higher payout help us win more AT&T impressions?', "
-            "'how competitive is the TurboTax offer on AT&T?', 'how many impressions would we get?'. "
-            "Supply offer_name + hypothetical_payout to get a rank-change + impression share projection."
+            "'how competitive is the TurboTax offer on AT&T?', 'how many impressions would we get?', "
+            "'what does partner 6103 run?'. "
+            "Supply offer_name + hypothetical_payout to get a rank-change + impression share projection. "
+            "Use publisher_id when a numeric partner ID is given (e.g. 6103); use publisher_name otherwise."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "publisher_name": {"type": "string", "description": "Publisher name (partial match OK) e.g. 'AT&T', 'TXB'"},
+                "publisher_name": {"type": "string", "description": "Publisher name (partial match OK) e.g. 'AT&T', 'TXB'. Omit if using publisher_id."},
+                "publisher_id": {"type": "integer", "description": "Numeric publisher/partner ID (e.g. 6103). Use when the user provides a partner number."},
                 "offer_name": {"type": "string", "description": "Optional: offer/advertiser to rank in the competitive set e.g. 'TurboTax'"},
                 "hypothetical_payout": {"type": "number", "description": "Optional: new payout to test (e.g. 40.0 for $40 CPA)"},
                 "weeks": {"type": "integer", "description": "Optional: projection window in weeks (default 2)"},
             },
-            "required": ["publisher_name"],
         },
     },
     {
@@ -543,6 +561,7 @@ def search_offers(
     network: str = None,
     category: str = None,
     min_payout: float = None,
+    max_payout: float = None,
     ms_status: str = None,
     limit: int = 5,
 ) -> list:
@@ -560,6 +579,8 @@ def search_offers(
             continue
         payout_num = o.get("_payout_num") or 0
         if min_payout and payout_num < min_payout:
+            continue
+        if max_payout is not None and payout_num > max_payout:
             continue
         if ms_status and _norm(o.get("_ms_status", "")) != _norm(ms_status):
             continue
@@ -869,7 +890,8 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
 
 
 def get_publisher_competitive_landscape(
-    publisher_name: str,
+    publisher_name: str = None,
+    publisher_id: int = None,
     offer_name: str = None,
     hypothetical_payout: float = None,
     weeks: int = 2,
@@ -893,20 +915,36 @@ def get_publisher_competitive_landscape(
             secure=True,
         )
 
-        # Step 1: find publisher by name — publishers live in from_airbyte_users.
+        # Step 1: find publisher — by numeric ID or name.
         # IMPORTANT: adpx_impressions_details.pid stores the numeric user id as a string,
         # NOT the hex sdk_id. Always use str(id) as the pid for impression queries.
-        pub_rows = ch.query(f"""
-            SELECT id, organization, sdk_id
-            FROM default.from_airbyte_users
-            WHERE (lower(organization) LIKE lower('%{publisher_name}%')
-                OR lower(username) LIKE lower('%{publisher_name}%'))
-              AND deletedAt IS NULL
-              AND sdk_id IS NOT NULL
-              AND sdk_id != ''
-            ORDER BY createdAt ASC
-            LIMIT 10
-        """).result_rows
+        if not publisher_name and not publisher_id:
+            return {"error": "Provide either publisher_name or publisher_id."}
+
+        if publisher_id:
+            pub_rows = ch.query(f"""
+                SELECT id, organization, sdk_id
+                FROM default.from_airbyte_users
+                WHERE id = {int(publisher_id)}
+                  AND deletedAt IS NULL
+                  AND sdk_id IS NOT NULL
+                  AND sdk_id != ''
+                LIMIT 1
+            """).result_rows
+            if not pub_rows:
+                return {"error": f"No publisher found with ID {publisher_id}."}
+        else:
+            pub_rows = ch.query(f"""
+                SELECT id, organization, sdk_id
+                FROM default.from_airbyte_users
+                WHERE (lower(organization) LIKE lower('%{publisher_name}%')
+                    OR lower(username) LIKE lower('%{publisher_name}%'))
+                  AND deletedAt IS NULL
+                  AND sdk_id IS NOT NULL
+                  AND sdk_id != ''
+                ORDER BY createdAt ASC
+                LIMIT 10
+            """).result_rows
 
         if not pub_rows:
             return {"error": f"No publisher found matching '{publisher_name}'. Try a shorter name e.g. 'AT&T' or 'TXB'."}
