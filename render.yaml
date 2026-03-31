@@ -6,14 +6,6 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python scout_bot.py
 
-    # Persistent disk — mounts at the exact path the code already uses for state files.
-    # Survives deploys: launched_offers.json, pending_briefs.json, thread_context.json,
-    # digest_state.json, offers_latest.json all live here.
-    disk:
-      name: scout-data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1
-
     envVars:
       # Slack
       - key: SLACK_BOT_TOKEN
