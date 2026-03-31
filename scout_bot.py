@@ -10,6 +10,8 @@ import os
 import pathlib
 import random
 import re
+import threading
+import time
 
 from dotenv import load_dotenv
 from slack_sdk.socket_mode import SocketModeClient
@@ -132,13 +134,40 @@ _LOADING_MESSAGES = [
     "_Cross-referencing payout data..._",
     "_Doing the math so you don't have to..._",
     "_Scanning the networks..._",
-    "_Checking what AT&T is serving right now..._",
     "_Pulling real CVR data..._",
     "_Sorting by RPM, not vibes..._",
     "_One sec — running the numbers..._",
     "_Consulting the oracle (ClickHouse)..._",
     "_Finding what AdOps should look at this week..._",
 ]
+
+
+def _rotating_status(web: WebClient, channel: str, ts: str, interval: float = 4.0):
+    """
+    Rotates the loading placeholder message every `interval` seconds.
+    Returns a stop() callable — call it when the real response is ready.
+    Each update appends elapsed time so the user knows Scout isn't frozen.
+    """
+    stop_event = threading.Event()
+    start = time.monotonic()
+    msgs = _LOADING_MESSAGES[:]
+    random.shuffle(msgs)
+    idx = [0]
+
+    def _run():
+        while not stop_event.wait(interval):
+            elapsed = int(time.monotonic() - start)
+            msg = msgs[idx[0] % len(msgs)]
+            # Strip trailing _ for italic, append elapsed, re-wrap
+            core = msg.strip("_")
+            try:
+                web.chat_update(channel=channel, ts=ts, text=f"_{core}_ · {elapsed}s")
+            except Exception:
+                pass
+            idx[0] += 1
+
+    threading.Thread(target=_run, daemon=True).start()
+    return stop_event.set
 
 
 def _strip_mention(text: str) -> str:
@@ -725,6 +754,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         thread_ts=thread_ts,
         text=random.choice(_LOADING_MESSAGES),
     )
+    stop_rotating = _rotating_status(web, channel, placeholder["ts"])
 
     # Build thread history (mirrors handle_event)
     history = []
@@ -771,6 +801,8 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         log.error(f"suggestion ask failed: {e}")
         web.chat_update(channel=channel, ts=placeholder["ts"], text=f"Something went wrong: {e}")
         return
+    finally:
+        stop_rotating()
 
     _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
 
@@ -999,8 +1031,12 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
             thread_ts=thread_ts,
             text=random.choice(_LOADING_MESSAGES),
         )
+        stop_rotating = _rotating_status(web, dm_channel, placeholder["ts"])
 
-        response, suggestions = ask([{"role": "user", "content": query}])
+        try:
+            response = ask(query)
+        finally:
+            stop_rotating()
 
         if isinstance(response, dict) and response.get("type") == "brief":
             brief_data = response["brief_data"]
@@ -1010,14 +1046,22 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
                 channel=dm_channel, ts=placeholder["ts"],
                 text="Campaign Brief", blocks=blocks,
             )
-        else:
-            response_text    = response if isinstance(response, str) else str(response)
+        elif isinstance(response, dict) and response.get("type") == "text_with_context":
+            response_text    = response.get("text", "")
+            suggestions      = response.get("suggestions", [])
             content_blocks   = _text_to_blocks(response_text)
             suggestion_blocks = _build_suggestion_buttons(suggestions)
             web.chat_update(
                 channel=dm_channel, ts=placeholder["ts"],
                 text=response_text,
                 blocks=[*content_blocks, *suggestion_blocks],
+            )
+        else:
+            response_text = response if isinstance(response, str) else str(response)
+            web.chat_update(
+                channel=dm_channel, ts=placeholder["ts"],
+                text=response_text,
+                blocks=_text_to_blocks(response_text),
             )
         log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
     except Exception as e:
@@ -1154,18 +1198,21 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             ] + history
             log.info(f"Injected thread context for {thread_ts}: {ctx_line}")
 
-    # Post placeholder — rotates through loading messages so it doesn't feel like a spinner
+    # Post placeholder — rotates + shows elapsed time while ask() runs
     placeholder = web.chat_postMessage(
         channel=channel,
         thread_ts=thread_ts,
         text=random.choice(_LOADING_MESSAGES),
     )
+    stop_rotating = _rotating_status(web, channel, placeholder["ts"])
 
     try:
         response = ask(query, history=history)
     except Exception as e:
         log.error(f"Agent error: {e}")
         response = f"Something went wrong: {e}"
+    finally:
+        stop_rotating()
 
     # ── Route response: brief (Block Kit) vs text_with_context vs plain text ────
     # Track the active thread per channel so top-level follow-ups retain context
