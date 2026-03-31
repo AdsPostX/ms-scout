@@ -14,14 +14,25 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from typing import Optional
-
 import anthropic
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
 log = logging.getLogger("scout_agent")
+
+
+def _get_ch_client():
+    """Create a ClickHouse client from env vars. Import is local so startup never fails."""
+    import clickhouse_connect
+    return clickhouse_connect.get_client(
+        host=os.getenv("CH_HOST", ""),
+        user=os.getenv("CH_USER", "analytics"),
+        password=os.getenv("CH_PASSWORD", ""),
+        database=os.getenv("CH_DATABASE", "default"),
+        secure=True,
+    )
+
 
 SNAPSHOT_PATH = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
 
@@ -39,14 +50,7 @@ def _load_performance_benchmarks() -> dict:
     Gracefully returns empty dict if ClickHouse is unavailable.
     """
     try:
-        import clickhouse_connect
-        ch = clickhouse_connect.get_client(
-            host=os.getenv("CH_HOST", ""),
-            user=os.getenv("CH_USER", "analytics"),
-            password=os.getenv("CH_PASSWORD", ""),
-            database=os.getenv("CH_DATABASE", "default"),
-            secure=True,
-        )
+        ch = _get_ch_client()
 
         # Offer-level: CVR + RPM for campaigns with enough data
         offer_query = """
@@ -376,9 +380,13 @@ Rules:
 
 CAMPAIGN BRIEF MODE (Intent 9 only):
 1. Call draft_campaign_brief() with the advertiser name
-2. Commit to ONE headline — post-transaction tone, under 60 chars. Add one backup for A/B.
-   Good: "You just unlocked 3 months free"  Bad: "Get SiriusXM today"
-3. Commit to ONE CTA Yes/No pair (4-6 words max, 25-char platform limit)
+2. Headline — post-transaction tone, under 60 chars:
+   - If platform_title is non-empty: use it as "title" (it's live on the platform already).
+     Add "title_backup" ONLY if you can substantially improve on it.
+   - If platform_title is empty: generate the best headline. Good: "You just unlocked 3 months free"
+3. CTA Yes/No — 4-6 words max, 25-char platform limit:
+   - If platform_cta_yes is non-empty: use it as-is for "yes", platform_cta_no for "no"
+   - If empty: generate one strong pair
 4. One targeting note with CVR data if available
 5. Output ONLY this JSON — no other text:
 6. After the JSON, if fallback_same_brand is non-empty, add ONE line:
@@ -883,6 +891,49 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
 
     score = _scout_score(o, benchmarks)
 
+    # Pull platform copy + CDN images from MS ClickHouse.
+    # The MS platform has approved title/CTA/tracking URL already — use them as source of truth.
+    platform_title = platform_cta_yes = platform_cta_no = ""
+    platform_landing_url = restrictions = platform_image = ""
+    try:
+        ch = _get_ch_client()
+        p_rows = ch.query(
+            """
+            SELECT id, title, cta_yes, cta_no, landing_url, internal_notes
+            FROM default.from_airbyte_campaigns
+            WHERE lower(adv_name) LIKE lower(concat('%', {adv:String}, '%'))
+              AND deleted_at IS NULL
+              AND status != 'inactive'
+            ORDER BY id DESC LIMIT 1
+            """,
+            parameters={"adv": o.get("advertiser", "")},
+        ).result_rows
+        if p_rows:
+            ms_id, platform_title, platform_cta_yes, platform_cta_no, platform_landing_url, ms_notes = p_rows[0]
+            platform_title = platform_title or ""
+            platform_cta_yes = platform_cta_yes or ""
+            platform_cta_no = platform_cta_no or ""
+            platform_landing_url = platform_landing_url or ""
+            restrictions = (ms_notes or "").strip()
+            # CDN image: prefer publisher-specific creative, fall back to campaign-level
+            img_rows = ch.query(
+                "SELECT url FROM default.from_airbyte_publisher_campaign_images"
+                " WHERE campaign_id = {cid:Int64} AND deleted_at IS NULL LIMIT 1",
+                parameters={"cid": int(ms_id)},
+            ).result_rows
+            if img_rows:
+                platform_image = img_rows[0][0] or ""
+    except Exception as e:
+        log.warning(f"draft_campaign_brief: platform lookup failed: {e}")
+
+    # Use CDN image when available; fall back to network-sourced icons then OG scrape
+    if platform_image:
+        icon_url = hero_url = platform_image
+    elif not icon_url and o.get("tracking_url"):
+        log.info(f"draft_campaign_brief: scraping OG image for {o.get('advertiser')}")
+        og = _scrape_og_image(o.get("tracking_url", ""))
+        icon_url = hero_url = og
+
     # Proactive fallback intelligence — surface at brief creation (highest-intent moment)
     fallback = get_fallback_candidates(o.get("advertiser", ""), category=o.get("category"))
     fallback_same_brand = fallback.get("same_brand_alts", [])[:1]
@@ -896,7 +947,7 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
         "payout_num": o.get("_payout_num"),
         "payout_type": o.get("_payout_type_norm") or "",
         "geo": o.get("geo"),
-        "tracking_url": o.get("tracking_url") or "Not available — pull from network portal",
+        "tracking_url": platform_landing_url or o.get("tracking_url") or "Not available — pull from network portal",
         "description": (o.get("description") or "")[:300],
         "category": o.get("category"),
         "ms_status": o.get("_ms_status"),
@@ -910,6 +961,11 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
         ),
         "icon_url": icon_url,
         "hero_url": hero_url,
+        # Platform copy — use these directly; generate only when empty
+        "platform_title": platform_title,
+        "platform_cta_yes": platform_cta_yes,
+        "platform_cta_no": platform_cta_no,
+        "restrictions": restrictions,
         "fallback_same_brand": fallback_same_brand,
         "fallback_category_subs": fallback_category_subs,
     }
@@ -932,14 +988,7 @@ def get_publisher_competitive_landscape(
                   At $35 it ranks #5 (~7% share). AT&T runs ~180K impressions/week."
     """
     try:
-        import clickhouse_connect
-        ch = clickhouse_connect.get_client(
-            host=os.getenv("CH_HOST", ""),
-            user=os.getenv("CH_USER", "analytics"),
-            password=os.getenv("CH_PASSWORD", ""),
-            database=os.getenv("CH_DATABASE", "default"),
-            secure=True,
-        )
+        ch = _get_ch_client()
 
         # Step 1: find publisher — by numeric ID or name.
         # IMPORTANT: adpx_impressions_details.pid stores the numeric user id as a string,
@@ -960,17 +1009,20 @@ def get_publisher_competitive_landscape(
             if not pub_rows:
                 return {"error": f"No publisher found with ID {publisher_id}."}
         else:
-            pub_rows = ch.query(f"""
+            pub_rows = ch.query(
+                """
                 SELECT id, organization, sdk_id
                 FROM default.from_airbyte_users
-                WHERE (lower(organization) LIKE lower('%{publisher_name}%')
-                    OR lower(username) LIKE lower('%{publisher_name}%'))
+                WHERE (lower(organization) LIKE lower(concat('%', {name:String}, '%'))
+                    OR lower(username) LIKE lower(concat('%', {name:String}, '%')))
                   AND deletedAt IS NULL
                   AND sdk_id IS NOT NULL
                   AND sdk_id != ''
                 ORDER BY createdAt ASC
                 LIMIT 10
-            """).result_rows
+                """,
+                parameters={"name": publisher_name},
+            ).result_rows
 
         if not pub_rows:
             return {"error": f"No publisher found matching '{publisher_name}'. Try a shorter name e.g. 'AT&T' or 'TXB'."}
@@ -1125,23 +1177,16 @@ def get_publisher_competitive_landscape(
         if offer_name and hypothetical_payout is not None:
             benchmarks = _get_benchmarks()
 
-            def _est_rpm(payout: float) -> float:
-                """Estimate RPM for the offer at a given payout using benchmark CVR."""
-                by_cat = benchmarks.get("by_category", {})
-                # TurboTax → Finance category
-                for cat_name, cat_data in by_cat.items():
-                    if "finance" in cat_name.lower() or "tax" in cat_name.lower():
-                        cvr = cat_data.get("avg_cvr_pct", 0) / 100
-                        return round(payout * cvr * 1000, 2)
-                return round(payout * 0.02 * 1000, 2)  # fallback 2% CVR
+            # Find the offer from snapshot — use it to get category/network context for scoring
+            matched_offer = next(
+                (o for o in _load_offers() if offer_name.lower() in (o.get("advertiser") or "").lower()),
+                None,
+            )
+            current_payout = matched_offer.get("_payout_num") if matched_offer else None
 
-            # Find the offer's current payout from offer snapshot
-            offers = _load_offers()
-            current_payout = None
-            for o in offers:
-                if offer_name.lower() in (o.get("advertiser") or "").lower():
-                    current_payout = o.get("_payout_num")
-                    break
+            def _est_rpm(payout: float) -> float:
+                synth = {**(matched_offer or {}), "_payout_num": payout}
+                return round(_scout_score(synth, benchmarks), 2)
 
             hyp_rpm = _est_rpm(hypothetical_payout)
             cur_rpm = _est_rpm(current_payout) if current_payout else None
@@ -1282,14 +1327,7 @@ def get_demand_queue_status() -> dict:
     # Batch ClickHouse check: impressions per advertiser since approved_at
     impression_counts: dict = {}
     try:
-        import clickhouse_connect
-        ch = clickhouse_connect.get_client(
-            host=os.getenv("CH_HOST", ""),
-            user=os.getenv("CH_USER", "analytics"),
-            password=os.getenv("CH_PASSWORD", ""),
-            database=os.getenv("CH_DATABASE", "default"),
-            secure=True,
-        )
+        ch = _get_ch_client()
         # Find campaign IDs matching each advertiser name, then count impressions
         # since that offer's approved_at date
         for item in pending:

@@ -193,17 +193,13 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
 
 # --- Impact -----------------------------------------------------------------
 
-def _fetch_impact_ads_data() -> tuple:
+def _fetch_impact_ads_data() -> dict:
     """
     Fetch Impact /Ads endpoint in a single pass.
-    Returns (cat_map, creative_map):
-      - cat_map:      {campaign_id: label_string}   e.g. "Payments,Capital,US"
-      - creative_map: {campaign_id: {"icon_url": str, "hero_url": str}}
-        icon = closest to 150x150 square; hero = widest banner (target 1000x280)
+    Returns cat_map: {campaign_id: label_string}  e.g. "Payments,Capital,US"
     """
     url = f"https://api.impact.com/Mediapartners/{IMPACT_SID}/Ads"
     cat_map = {}
-    creative_map = {}  # cid → {icon_url, hero_url, _best_icon_area_diff, _best_hero_width}
     page = 1
 
     while True:
@@ -236,17 +232,13 @@ def _fetch_impact_ads_data() -> tuple:
             if labels and cid not in cat_map:
                 cat_map[cid] = labels
 
-            # Impact /Ads returns link/text ads — CreativeUrl/ImageUrl are empty for most campaigns.
-            # Creative images are sourced via OG scrape at brief time instead.
-            # (Creative map intentionally left empty — fallback handled in draft_campaign_brief)
-
         total = int(data.get("@totalrecords", 0))
         if page * 1000 >= total:
             break
         page += 1
 
-    log.info(f"Impact: ads data loaded — {len(cat_map)} categories (creatives via OG scrape at brief time)")
-    return cat_map, creative_map
+    log.info(f"Impact: ads data loaded — {len(cat_map)} categories")
+    return cat_map
 
 
 def _fetch_impact_campaigns_raw() -> list:
@@ -287,9 +279,8 @@ def fetch_impact() -> list:
     log.info("Impact: fetching campaigns...")
     campaigns_all = _fetch_impact_campaigns_raw()
 
-    # Fetch category labels + creative URLs from /Ads endpoint in one pass
-    log.info("Impact: fetching ads data (categories + creatives)...")
-    cat_map, creative_map = _fetch_impact_ads_data()
+    log.info("Impact: fetching ads data (categories)...")
+    cat_map = _fetch_impact_ads_data()
 
     offers = []
     for c in campaigns_all:
@@ -300,7 +291,6 @@ def fetch_impact() -> list:
         geo = ", ".join(r.title() for r in regions) if regions else "US"
 
         o = empty_offer()
-        creatives = creative_map.get(cid, {})
         o["network"]      = "impact"
         o["offer_id"]     = cid
         o["advertiser"]   = c.get("CampaignName", "")
@@ -311,8 +301,8 @@ def fetch_impact() -> list:
         o["category"]     = cat_map.get(cid, "")
         o["geo"]          = geo
         o["tracking_url"] = c.get("TrackingLink", "")
-        o["icon_url"]     = creatives.get("icon_url", "")
-        o["hero_url"]     = creatives.get("hero_url", "")
+        o["icon_url"]     = ""
+        o["hero_url"]     = ""
         o["status"]       = c.get("ContractStatus", "")
         o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
         offers.append(o)
@@ -540,9 +530,6 @@ def fetch_maxbounty() -> list:
     return offers
 
 
-# ---------------------------------------------------------------------------
-# GOOGLE SHEETS OUTPUT
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # DATA NORMALIZATION — applied before writing to any destination
@@ -970,7 +957,7 @@ def main():
     parser.add_argument("--network", choices=list(NETWORK_MAP.keys()),
                         help="Run a single network (default: all)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Fetch but don't write to Sheets (prints count only)")
+                        help="Fetch and clean but don't write any output files")
     parser.add_argument("--debug", action="store_true",
                         help="Print raw first record from each network (for field mapping inspection)")
     parser.add_argument("--enrich-payouts", action="store_true",
@@ -1024,12 +1011,10 @@ def main():
         log.info("NOTION_TOKEN not set — skipping Notion. Set it to enable Notion output.")
 
     # Write JSON snapshot for Scout (offer intelligence bot)
-    import pathlib
     snapshot_path = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
     snapshot_path.parent.mkdir(exist_ok=True)
     with open(snapshot_path, "w") as f:
-        import json as _json
-        _json.dump(cleaned, f, default=str)
+        json.dump(cleaned, f, default=str)
     log.info(f"Scout snapshot written: {len(cleaned)} offers → {snapshot_path}")
 
     # Post SCOUT Sniper weekly digest to Slack

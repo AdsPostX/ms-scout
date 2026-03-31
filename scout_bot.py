@@ -36,6 +36,7 @@ APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 # never cause "No brief found" on the Launch button click.
 _STATE_FILE = pathlib.Path(__file__).parent / "data" / "pending_briefs.json"
 _LAST_THREAD_PER_CHANNEL: dict = {}  # channel → thread_ts
+_BOT_USER_ID: str = ""  # cached at startup — never changes
 
 
 def _load_briefs() -> dict:
@@ -118,8 +119,8 @@ def _merge_thread_context(thread_ts: str, new_data: dict):
             if s not in seen:
                 seen.append(s)
         ctx["scenarios_run"] = seen
-    from datetime import datetime
-    ctx["last_updated"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    from datetime import datetime, timezone
+    ctx["last_updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     existing[thread_ts] = ctx
     _save_thread_contexts(existing)
 
@@ -162,6 +163,7 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     score_rpm    = brief_data.get("scout_score_rpm", 0)
     portal_url   = brief_data.get("portal_url", "")
     risk_flag    = brief_data.get("risk_flag", "")
+    restrictions = brief_data.get("restrictions", "")
 
     # Support both old schema (titles/ctas lists) and new schema (title/cta single)
     titles       = copy.get("titles", [])
@@ -240,6 +242,10 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
 
     # ── Details ───────────────────────────────────────────────────────────────
     detail_parts = []
+    if restrictions:
+        # Normalize multi-line internal_notes into a single line for scannability
+        r = " · ".join(line.strip() for line in restrictions.splitlines() if line.strip())
+        detail_parts.append(f":warning: *Restrictions:* {r}")
     if targeting:
         detail_parts.append(f"*Targeting:* {targeting}")
     if tracking_url and tracking_url != "Not available — pull from network portal":
@@ -724,7 +730,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     history = []
     try:
         replies = web.conversations_replies(channel=channel, ts=thread_ts, limit=50)
-        bot_id  = web.auth_test()["user_id"]
+        bot_id  = _BOT_USER_ID
         for m in replies.get("messages", []):
             role = "assistant" if (m.get("bot_id") or m.get("user") == bot_id) else "user"
             txt  = _strip_mention(m.get("text", "")).strip()
@@ -927,7 +933,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     if effective_thread_ts:
         try:
             replies = web.conversations_replies(channel=channel, ts=effective_thread_ts, limit=50)
-            bot_id  = web.auth_test()["user_id"]
+            bot_id  = _BOT_USER_ID
             for msg in replies.get("messages", []):
                 if msg.get("ts") == msg_ts:
                     break
@@ -1066,10 +1072,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
 
 def main():
+    global _BOT_USER_ID
     if not BOT_TOKEN or not APP_TOKEN:
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env")
 
     web_client    = WebClient(token=BOT_TOKEN)
+    _BOT_USER_ID  = web_client.auth_test()["user_id"]
     socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
 

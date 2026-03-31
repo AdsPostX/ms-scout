@@ -509,57 +509,6 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
     return text[0].upper() + text[1:] if text else text
 
 
-# ── Copy brief for queue record ────────────────────────────────────────────────
-
-def generate_copy_brief(offer: dict, payout_cache: dict) -> dict:
-    """
-    Generates template copy for the queue record.
-    AdOps refines before building. Character limits per Ali's spec:
-    - Headline: ≤45 chars (no hard limit, but keep tight)
-    - Short desc: ≤45 chars optimal, 60 max (wraps to 2 lines above 60)
-    """
-    offer_id    = str(offer.get("offer_id", ""))
-    advertiser  = offer.get("advertiser", "")
-    description = (offer.get("description") or "").strip()[:200]
-    payout_data = payout_cache.get(offer_id, {})
-    payout_type = payout_data.get("payout_type", "")
-
-    try:
-        payout = float(payout_data.get("payout") or 0)
-        payout_str = f"${payout:,.0f}"
-    except (ValueError, TypeError):
-        payout, payout_str = 0.0, "an exclusive offer"
-
-    # Headline ≤45 chars — tight brand + hook
-    raw_headline = f"{advertiser} — {payout_str} {payout_type}".strip(" —")
-    headline = raw_headline[:45]
-
-    # Short description ≤45 chars (trim to last full word, add ellipsis if cut)
-    raw_short = description or f"Exclusive offer from {advertiser}"
-    if len(raw_short) > 45:
-        trimmed   = raw_short[:44].rsplit(" ", 1)[0].rstrip(".,;")
-        short_desc = trimmed + "…"
-    else:
-        short_desc = raw_short
-
-    # CTA — action-oriented, payout-type aware
-    cta_map = {
-        "CPL":        "Get started",
-        "CPS":        "Shop now",
-        "CPA":        "Claim offer",
-        "MOBILE_APP": "Download now",
-    }
-    cta_yes = cta_map.get(payout_type, "Learn more")
-
-    return {
-        "headline":    headline,
-        "short_desc":  short_desc,
-        "description": description or f"Exclusive offer from {advertiser}",
-        "cta_yes":     cta_yes,
-        "cta_no":      "Maybe later",
-    }
-
-
 # ── OG image prefetch ──────────────────────────────────────────────────────────
 
 def _prefetch_offer_images(scored_offers: list[tuple[float, dict]]) -> dict[str, str]:
