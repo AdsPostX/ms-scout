@@ -848,6 +848,39 @@ def _network_portal_url(network: str, offer_id: str) -> str:
     return ""
 
 
+_TRACKING_DOMAINS = {
+    # Known affiliate tracking domains — URLs on these are real tracking links
+    "impact.com", "sjv.io", "pxf.io", "bn5x.net", "ibfwsl.net",
+    "maxbounty.com", "flexoffers.com", "jdoqocy.com", "tkqlhce.com",
+    "launchingdeals.com", "adspostx.com", "pubtailer.com",
+    "collectsavings.com", "referral.", "go.",
+}
+
+_CLICK_ID_PATTERNS = ("{click_id}", "{subid}", "subId", "clickid", "click_id", "aff_id")
+
+
+def _validated_tracking_url(network: str, platform_url: str, scraper_url: str) -> str:
+    """
+    Return the best tracking URL for the brief, or a fallback message.
+    Platform URL (from MS) is always preferred — it has {click_id} template.
+    Scraper URL is only used if it looks like a real affiliate link, not the advertiser's site.
+    """
+    if platform_url:
+        return platform_url
+
+    if scraper_url:
+        url_lower = scraper_url.lower()
+        # Accept if it looks like a tracking link: known domain or click_id pattern
+        if any(d in url_lower for d in _TRACKING_DOMAINS):
+            return scraper_url
+        if any(p.lower() in url_lower for p in _CLICK_ID_PATTERNS):
+            return scraper_url
+        # Reject — it's the advertiser's website, not an affiliate link
+        log.info(f"Rejected non-tracking URL for {network} offer: {scraper_url[:60]}")
+
+    return "Not available — pull from network portal"
+
+
 def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
     """
     Fetch all offer details needed to generate a campaign brief.
@@ -880,14 +913,8 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
     else:
         perf_context = "No MS performance data yet for this advertiser/category"
 
-    # Creative URLs: MaxBounty/FlexOffers have CDN thumbnails; Impact falls back to OG scrape
     icon_url = o.get("icon_url", "")
     hero_url = o.get("hero_url", "")
-    if not icon_url and o.get("tracking_url"):
-        log.info(f"draft_campaign_brief: scraping OG image for {o.get('advertiser')}")
-        og = _scrape_og_image(o.get("tracking_url", ""))
-        icon_url = og
-        hero_url = og
 
     score = _scout_score(o, benchmarks)
 
@@ -926,13 +953,11 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
     except Exception as e:
         log.warning(f"draft_campaign_brief: platform lookup failed: {e}")
 
-    # Use CDN image when available; fall back to network-sourced icons then OG scrape
+    # CDN image from MS platform is the only reliable creative source.
+    # OG scraping is removed — it returns advertiser homepage heroes, not ad creatives,
+    # and blocks the event thread for up to 8s on a slow URL.
     if platform_image:
         icon_url = hero_url = platform_image
-    elif not icon_url and o.get("tracking_url"):
-        log.info(f"draft_campaign_brief: scraping OG image for {o.get('advertiser')}")
-        og = _scrape_og_image(o.get("tracking_url", ""))
-        icon_url = hero_url = og
 
     # Proactive fallback intelligence — surface at brief creation (highest-intent moment)
     fallback = get_fallback_candidates(o.get("advertiser", ""), category=o.get("category"))
@@ -947,7 +972,7 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
         "payout_num": o.get("_payout_num"),
         "payout_type": o.get("_payout_type_norm") or "",
         "geo": o.get("geo"),
-        "tracking_url": platform_landing_url or o.get("tracking_url") or "Not available — pull from network portal",
+        "tracking_url": _validated_tracking_url(net, platform_landing_url, o.get("tracking_url", "")),
         "description": (o.get("description") or "")[:300],
         "category": o.get("category"),
         "ms_status": o.get("_ms_status"),
@@ -1574,11 +1599,13 @@ def ask(user_message: str, history: list = None) -> str:
                     except Exception as e:
                         log.warning(f"Failed to parse BRIEF_JSON: {e} — extracting from plain text")
 
-                # Fallback: extract copy from Claude's plain-text response
-                if not copy_data or not copy_data.get("titles"):
+                # Fallback: extract copy from Claude's plain-text response.
+                # Check both new schema (title) and old schema (titles) — either means we have copy.
+                has_copy = copy_data and (copy_data.get("title") or copy_data.get("titles"))
+                if not has_copy:
                     copy_data = _extract_copy_from_text(text)
                     log.info(f"Extracted copy from plain text for {brief_data.get('advertiser')}: "
-                             f"{len(copy_data.get('titles', []))} titles, {len(copy_data.get('ctas', []))} CTAs")
+                             f"title={bool(copy_data.get('title'))}, titles={len(copy_data.get('titles', []))}")
 
                 return {
                     "type": "brief",
