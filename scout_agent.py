@@ -386,7 +386,10 @@ CAMPAIGN BRIEF MODE (Intent 9 only):
    - If platform_title is empty: generate the best headline. Good: "You just unlocked 3 months free"
 3. CTA Yes/No — 4-6 words max, 25-char platform limit:
    - If platform_cta_yes is non-empty: use it as-is for "yes", platform_cta_no for "no"
-   - If empty: generate one strong pair
+   - If empty: generate one strong pair. Yes = desire/action. No = loss aversion, not dismissal.
+     The "no" should make declining feel like leaving something behind — not a neutral opt-out.
+     Good nos: "I'll pass on this", "Keep paying full price", "I'll miss out", "Skip my free trial"
+     Bad nos: "No Thanks", "Skip", "Not Now" — these are invisible, they don't make the user feel anything
 4. One targeting note with CVR data if available
 5. Output ONLY this JSON — no other text:
 6. After the JSON, if fallback_same_brand is non-empty, add ONE line:
