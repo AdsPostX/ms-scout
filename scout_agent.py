@@ -274,6 +274,16 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
     → Call get_publisher_competitive_landscape(publisher_id=N or publisher_name=X).
       Lead with what's running and the competitive set. Include weekly impression volume.
 
+17. CROSS-NETWORK PAYOUT ARBITRAGE — "find these on other networks at better rates", "what are we running for partner X and can we get better payouts?"
+    Signals: publisher name/ID + "other networks" + "better payout/rate/deal" OR "of the offers running for X, find them on other networks"
+    Examples: "of the offers running for Constant Contact (partner 6103), find them on other networks at better payouts"
+    → Step 1: Call get_publisher_competitive_landscape(publisher_id=N or publisher_name=X) — get the active_competitors list.
+      Step 2: For each advertiser in active_competitors, call search_offers(query=advertiser_name).
+              Do NOT call search_offers once with an empty query — call it once per advertiser to get cross-network matches.
+      Step 3: Compare payouts. For each advertiser found on another network, show: current network + payout vs. alternative network + payout.
+      Lead with actionable swaps: "Microsoft Home Office: currently on [network] at $X. Also on [other network] at $Y (+Z%)."
+      If an advertiser isn't in the inventory at all, say so clearly — don't omit it.
+
 15. DEMAND QUEUE STATUS — "what's in the queue?", "what's pending?"
     Signals: "queue", "pending", "pipeline", "what's approved", "what's waiting to go live", "what's been approved"
     → Call get_demand_queue_status(). Lead with count and any likely-live flags.
