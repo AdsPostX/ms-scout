@@ -862,6 +862,166 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         _handle_reject(action, payload, web)
         return
 
+    # ── App Home "Try it" buttons ─────────────────────────────────────────────
+    if action_id == "home_try_query":
+        user_id = payload.get("user", {}).get("id", "")
+        query   = action.get("value", "").strip()
+        if user_id and query:
+            _handle_home_try_query(web, user_id, query)
+        return
+
+
+# ── App Home tutorial ─────────────────────────────────────────────────────────
+
+# Five real, working queries organized by JTBD.
+# Values are real advertisers/partners confirmed in the MS platform.
+_HOME_EXAMPLES = [
+    {
+        "jtbd":        "Prep for a publisher call",
+        "description": "Get the full account picture: every provisioned offer, which are serving, what to pitch.",
+        "query":       "What's provisioned and running for Constant Contact (partner 6103)?",
+    },
+    {
+        "jtbd":        "Find better payouts for an advertiser we're already running",
+        "description": "Check if Capital One Shopping exists on MaxBounty or FlexOffers at a higher rate.",
+        "query":       "Find Capital One Shopping on other networks — is there a better payout?",
+    },
+    {
+        "jtbd":        "Build a campaign brief",
+        "description": "Get campaign-ready copy, tracking URL, and RPM estimate. One click to add to the queue.",
+        "query":       "Build a brief for Square",
+    },
+    {
+        "jtbd":        "Browse top offers in a vertical",
+        "description": "Find the highest Scout Score Finance offers available right now.",
+        "query":       "What are the top Finance offers by Scout Score?",
+    },
+    {
+        "jtbd":        "Check the demand pipeline",
+        "description": "See what's pending approval or waiting to go live.",
+        "query":       "What's in the demand queue?",
+    },
+]
+
+
+def _build_home_view() -> dict:
+    """Build the Slack App Home tab — persistent tutorial + interactive examples."""
+    blocks: list = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "Scout — MomentScience Offer Intelligence", "emoji": False},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "Mention *@Scout* in any channel and ask in plain English. "
+                    "Scout has access to the full offer inventory across Impact, MaxBounty, and FlexOffers "
+                    "— plus live performance data and publisher account details from the MS platform.\n\n"
+                    "*New here? Click any* *→ Try it* *button below to see a real answer in your DMs.*"
+                ),
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*5 things you can do right now*"},
+        },
+    ]
+
+    for ex in _HOME_EXAMPLES:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{ex['jtbd']}*\n{ex['description']}\n```{ex['query']}```",
+            },
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Try it →", "emoji": False},
+                "action_id": "home_try_query",
+                "value":     ex["query"],
+            },
+        })
+
+    blocks += [
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "*How Scout works*\n"
+                    "• Ask anything in plain English — no special syntax or commands\n"
+                    "• Scout remembers context *within a thread* — ask follow-ups naturally\n"
+                    "• After any result, Scout surfaces suggested next steps as clickable buttons\n"
+                    "• Type `@Scout help` from any channel for a quick reference card\n"
+                    "• Data: offer inventory refreshes daily · performance data is live from MS"
+                ),
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": "_Networks: Impact · MaxBounty · FlexOffers · Publisher data from the MS platform_",
+            }],
+        },
+    ]
+
+    return {"type": "home", "blocks": blocks}
+
+
+def _handle_home_try_query(web: WebClient, user_id: str, query: str):
+    """
+    Execute an example query from App Home.
+    Opens a DM with the user, posts the query for context, then runs it through Scout.
+    The user sees a real answer — learns by doing, not by reading docs.
+    """
+    try:
+        dm_channel = web.conversations_open(users=[user_id])["channel"]["id"]
+
+        # Post the query as context so the user knows what was asked
+        intro = web.chat_postMessage(
+            channel=dm_channel,
+            text=f"Try it: {query}",
+            blocks=[{
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Example query:*\n_{query}_"},
+            }],
+        )
+        thread_ts = intro["ts"]
+
+        placeholder = web.chat_postMessage(
+            channel=dm_channel,
+            thread_ts=thread_ts,
+            text=random.choice(_LOADING_MESSAGES),
+        )
+
+        response, suggestions = ask([{"role": "user", "content": query}])
+
+        if isinstance(response, dict) and response.get("type") == "brief":
+            brief_data = response["brief_data"]
+            copy       = response["copy"]
+            blocks     = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
+            web.chat_update(
+                channel=dm_channel, ts=placeholder["ts"],
+                text="Campaign Brief", blocks=blocks,
+            )
+        else:
+            response_text    = response if isinstance(response, str) else str(response)
+            content_blocks   = _text_to_blocks(response_text)
+            suggestion_blocks = _build_suggestion_buttons(suggestions)
+            web.chat_update(
+                channel=dm_channel, ts=placeholder["ts"],
+                text=response_text,
+                blocks=[*content_blocks, *suggestion_blocks],
+            )
+        log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
+    except Exception as e:
+        log.warning(f"_handle_home_try_query failed for {user_id}: {e}")
 
 
 # ── Main event handler ────────────────────────────────────────────────────────
@@ -881,6 +1041,17 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         return
 
     event = req.payload.get("event", {})
+
+    # ── App Home tab opened ───────────────────────────────────────────────────
+    if event.get("type") == "app_home_opened":
+        user_id = event.get("user", "")
+        if user_id:
+            try:
+                web.views_publish(user_id=user_id, view=_build_home_view())
+            except Exception as e:
+                log.warning(f"app_home_opened: views_publish failed: {e}")
+        return
+
     if event.get("type") != "app_mention":
         return
 
