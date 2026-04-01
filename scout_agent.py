@@ -264,7 +264,8 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. BRIEF BUILDING — "build a brief for X"
-   Signals: "build", "create a brief", "draft", "let's do", "I like X", "set up X", "I want to run X"
+   Signals: "build", "create a brief", "draft", "let's do [offer/advertiser]", "I like X", "set up X", "I want to run X"
+   NOTE: "let's do" only triggers this intent when followed by an advertiser/offer name. "let's do the projection/analysis/breakdown for [publisher]" is Intent 12 or 18 — NOT brief building.
    → Call draft_campaign_brief(advertiser=X). Generate copy, CTAs, targeting note. Output ONLY the JSON block (see format below).
 
 2. DEMAND QUEUE STATUS — "what's in the queue?", "what's pending?"
@@ -315,8 +316,10 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
 
 12. PUBLISHER COMPETITIVE INTELLIGENCE — "would a higher payout win more AT&T impressions?"
     Signals: publisher name + payout change + impression share/volume/allocation/compete/win
+    Also triggers on: "let's do the projection/analysis/breakdown for [publisher]", "look at historic traffic for [publisher]", "performance of [offer] on [publisher]"
     Examples: "would $40 CPA let TurboTax compete on AT&T?", "how much inventory would X get on Y?",
-              "if we raise payout to $40 what happens on AT&T first 2 weeks of April?"
+              "if we raise payout to $40 what happens on AT&T first 2 weeks of April?",
+              "let's do the projection for AT&T — look at historic traffic trends and performance of Disney+"
     → Call get_publisher_competitive_landscape(publisher_name=Y, offer_name=X, hypothetical_payout=N).
       Lead with the rank change and projected impressions. Be direct: "At $40, TurboTax ranks #3 of 8 — ~12% share = ~22K impressions over 2 weeks."
       Always compare current vs. hypothetical. Include the weekly impression volume so RevOps can size the opportunity.
@@ -356,6 +359,15 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
 17. OPEN PROSPECTING (catch-all fallback)
     Signals: greetings, "what's new", "what should we look at", "holler", "show me something", "what's good", "any ideas", no clear subject
     → Call get_top_opportunities() immediately. Lead with top 2-3 untapped offers by Scout Score.
+
+18. REVENUE / GROSS PROJECTION — "what is the projected revenue for Disney+ in April?"
+    Signals: "projected revenue", "gross revenue", "how much will X make", "revenue for [offer] in [month]",
+             "revenue forecast", "monthly revenue for X", "how much does X generate", "revenue projection for X across all partners"
+    → Call get_advertiser_revenue_projection(advertiser_name=X, month="April 2026").
+      Lead with the total projected gross revenue, then break it down by publisher.
+      Always flag cap warnings and campaigns ending before month-end.
+      Format: "$52K projected gross revenue for Disney+ in April across 22 publishers.
+               AT&T Payment Confirmation drives 68% (~$35K). ⚠️ Campaign 3752 ends Mar 31 — excluded."
 
 DEFAULT RULE: When the intent is unclear, always default to Intent 17 (open prospecting). Call get_top_opportunities() and show results. A confident answer to a slightly wrong interpretation is infinitely more useful than asking "what do you mean?"
 
@@ -659,6 +671,25 @@ TOOLS = [
                 "advertiser": {"type": "string", "description": "Advertiser name (partial match OK)"},
             },
             "required": ["advertiser"],
+        },
+    },
+    {
+        "name": "get_advertiser_revenue_projection",
+        "description": (
+            "Project gross revenue for a specific advertiser across ALL MS publisher partners for a target month. "
+            "Uses last 30 days as the baseline (avg daily revenue × days in month). "
+            "Checks campaign end dates (warns if campaigns end before month-end) and monthly budget caps. "
+            "Returns: projected total revenue, breakdown by publisher, cap warnings, end-date warnings. "
+            "Use for: 'projected revenue for Disney+ in April', 'how much will TurboTax generate this month', "
+            "'gross revenue forecast for X across all partners', 'what's the April projection for X'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "advertiser_name": {"type": "string", "description": "Advertiser/offer name (partial match OK) e.g. 'Disney+', 'TurboTax'"},
+                "month": {"type": "string", "description": "Target month e.g. 'April 2026' or '2026-04'. Defaults to next calendar month."},
+            },
+            "required": ["advertiser_name"],
         },
     },
     {
@@ -1748,6 +1779,180 @@ def mark_offer_launched(advertiser: str) -> dict:
     }
 
 
+def get_advertiser_revenue_projection(
+    advertiser_name: str,
+    month: str = None,
+) -> dict:
+    """
+    Project gross revenue for an advertiser across all MS publishers for a target month.
+
+    Uses last 30 days as the baseline (avg daily revenue × days in month).
+    Checks:
+      - Campaign end dates (excludes/warns on campaigns ending before month)
+      - Monthly budget caps from capping_config JSON
+    Returns projected totals, publisher breakdown, cap warnings, end-date warnings.
+    """
+    import calendar as _cal
+    import json as _json
+    from datetime import date
+
+    ch = _get_ch_client()
+    today = date.today()
+
+    # ── Parse target month ────────────────────────────────────────────────────
+    target_year, target_month_num = today.year, today.month + 1
+    if target_month_num > 12:
+        target_month_num, target_year = 1, today.year + 1
+
+    if month:
+        import re as _re
+        m = _re.search(r'(\d{4})[/-](\d{1,2})', month)
+        if m:
+            target_year, target_month_num = int(m.group(1)), int(m.group(2))
+        else:
+            month_map = {n.lower(): i for i, n in enumerate(_cal.month_name) if n}
+            for name, num in month_map.items():
+                if name in month.lower():
+                    target_month_num = num
+                    yr = _re.search(r'\d{4}', month)
+                    if yr:
+                        target_year = int(yr.group())
+                    break
+
+    days_in_month = _cal.monthrange(target_year, target_month_num)[1]
+    month_start   = date(target_year, target_month_num, 1)
+    month_end     = date(target_year, target_month_num, days_in_month)
+    month_label   = f"{_cal.month_name[target_month_num]} {target_year}"
+
+    # ── Step 1: 30-day baseline — impressions + revenue per publisher ─────────
+    baseline_rows = []
+    try:
+        result = ch.query(
+            """
+            SELECT
+                cast(i.pid AS String)          AS publisher_pid,
+                any(u.organization)            AS publisher_name,
+                count()                        AS impressions_30d,
+                count(DISTINCT i.session_id)   AS sessions_30d,
+                coalesce(sum(toFloat64OrNull(cd.revenue)), 0) AS revenue_30d,
+                coalesce(sum(toFloat64OrNull(cd.payout)),  0) AS payout_30d,
+                count(cd.id)                   AS conversions_30d
+            FROM adpx_impressions_details i
+            JOIN from_airbyte_campaigns c
+                ON i.campaign_id = cast(c.id AS UInt64)
+            LEFT JOIN from_airbyte_users u
+                ON cast(i.pid AS UInt64) = u.id
+            LEFT JOIN adpx_conversionsdetails cd
+                ON i.session_id = cd.session_id
+                AND cd.campaign_id = i.campaign_id
+                AND toYYYYMM(cd.created_at) >= toYYYYMM(today() - 44)
+            WHERE c.adv_name ILIKE %(adv)s
+              AND c.deleted_at IS NULL
+              AND i.created_at >= today() - 30
+              AND toYYYYMM(i.created_at) >= toYYYYMM(today() - 30)
+            GROUP BY publisher_pid
+            ORDER BY revenue_30d DESC
+            LIMIT 30
+            """,
+            parameters={"adv": f"%{advertiser_name}%"},
+        )
+        baseline_rows = result.result_rows
+    except Exception as e:
+        log.warning(f"get_advertiser_revenue_projection baseline failed: {e}")
+        return {"error": str(e), "advertiser": advertiser_name, "month": month_label}
+
+    if not baseline_rows:
+        return {
+            "advertiser": advertiser_name,
+            "month": month_label,
+            "error": f"No impression data for '{advertiser_name}' in the last 30 days. Check spelling or try a partial name.",
+        }
+
+    # ── Step 2: Campaign end dates + monthly caps ─────────────────────────────
+    cap_warnings       = []
+    end_date_warnings  = []
+    monthly_cap_total  = None
+
+    try:
+        cap_result = ch.query(
+            """
+            SELECT id, adv_name, end_date, capping_config
+            FROM from_airbyte_campaigns
+            WHERE adv_name ILIKE %(adv)s
+              AND deleted_at IS NULL
+              AND (end_date IS NULL OR end_date >= %(month_start)s)
+            """,
+            parameters={"adv": f"%{advertiser_name}%", "month_start": str(month_start)},
+        )
+        for row in cap_result.result_rows:
+            cid, adv, end_dt, cap_cfg = row
+            if end_dt and end_dt < month_end:
+                end_date_warnings.append(
+                    f"Campaign {cid} ends {end_dt} — won't run full month"
+                )
+            if cap_cfg:
+                try:
+                    cfg = _json.loads(cap_cfg) if isinstance(cap_cfg, str) else cap_cfg
+                    mb = (cfg.get("month") or {}).get("budget")
+                    if mb and float(mb) > 0:
+                        cap_warnings.append(
+                            f"Campaign {cid}: ${float(mb):,.0f} monthly budget cap"
+                        )
+                        monthly_cap_total = (monthly_cap_total or 0) + float(mb)
+                except Exception:
+                    pass
+    except Exception as e:
+        log.warning(f"get_advertiser_revenue_projection cap query failed: {e}")
+
+    # ── Step 3: Projection ────────────────────────────────────────────────────
+    total_revenue_30d     = sum(r[4] for r in baseline_rows)
+    total_payout_30d      = sum(r[5] for r in baseline_rows)
+    total_impressions_30d = sum(r[2] for r in baseline_rows)
+    total_conversions_30d = sum(r[6] for r in baseline_rows)
+
+    projected_revenue = (total_revenue_30d / 30) * days_in_month
+    projected_payout  = (total_payout_30d  / 30) * days_in_month
+    cap_applied = False
+    if monthly_cap_total and projected_revenue > monthly_cap_total:
+        projected_revenue = monthly_cap_total
+        cap_applied = True
+
+    by_publisher = []
+    for row in baseline_rows[:10]:
+        pub_pid, pub_name, impr, sess, rev, pay, convs = row
+        by_publisher.append({
+            "publisher":          pub_name or f"Partner {pub_pid}",
+            "publisher_id":       pub_pid,
+            "impressions_30d":    impr,
+            "revenue_30d":        round(rev, 2),
+            "projected_revenue":  round((rev / 30) * days_in_month, 2),
+            "conversions_30d":    convs,
+            "share_pct":          round(rev / total_revenue_30d * 100, 1) if total_revenue_30d else 0,
+        })
+
+    return {
+        "advertiser":             advertiser_name,
+        "month":                  month_label,
+        "days_in_month":          days_in_month,
+        "publisher_count":        len(baseline_rows),
+        # Actuals (30-day)
+        "revenue_30d":            round(total_revenue_30d, 2),
+        "payout_30d":             round(total_payout_30d, 2),
+        "impressions_30d":        total_impressions_30d,
+        "conversions_30d":        total_conversions_30d,
+        # Projections
+        "projected_revenue":      round(projected_revenue, 2),
+        "projected_payout":       round(projected_payout, 2),
+        "projected_impressions":  int((total_impressions_30d / 30) * days_in_month),
+        "cap_applied":            cap_applied,
+        # Breakdown + warnings
+        "by_publisher":           by_publisher,
+        "cap_warnings":           cap_warnings,
+        "end_date_warnings":      end_date_warnings,
+        "methodology":            "30-day avg daily revenue × days in month. Campaigns ending before month excluded.",
+    }
+
+
 def get_scout_status() -> dict:
     """
     System health snapshot: benchmark freshness, offer inventory, queue depth,
@@ -1836,6 +2041,7 @@ TOOL_MAP = {
     "get_demand_queue_status": get_demand_queue_status,
     "mark_offer_launched": mark_offer_launched,
     "get_scout_status": get_scout_status,
+    "get_advertiser_revenue_projection": get_advertiser_revenue_projection,
 }
 
 
