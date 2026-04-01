@@ -142,48 +142,188 @@ def _merge_thread_context(thread_ts: str, new_data: dict):
     _save_thread_contexts(existing)
 
 
-_LOADING_MESSAGES = [
-    # Data ops
-    "_Interrogating ClickHouse until it confesses..._",
-    "_Bribing the affiliate networks for better rates..._",
-    "_Vigorously cross-referencing things..._",
-    "_Doing math so advanced it scared the last analyst..._",
-    "_Asking MaxBounty to explain itself..._",
-    "_Aggressively filtering out the garbage..._",
-    "_Speed-running the Impact catalog..._",
-    "_Telepathically downloading CVR benchmarks..._",
-    "_Professionally judging low-payout offers..._",
-    "_Refusing to guess and actually querying the data..._",
-    "_Converting raw SQL into something humans can feel..._",
-    # MomentScience flavor
-    "_Turning post-transaction moments into money (allegedly)..._",
-    "_Manifesting a 15% RPM lift for you specifically..._",
-    "_Making the RPM go brrr..._",
-    "_Finding what your publishers are leaving on the table..._",
-    "_Quietly outperforming every other SDK on the confirmation page..._",
-    "_Doing what the SDK does but with words..._",
-    "_Treating your thank-you page like a revenue line item..._",
-    "_AdOps is sleeping. Scout is not._",
-    "_Making MomentScience look good, one query at a time..._",
-    # Self-aware / personality
-    "_One moment — Scout is having a moment..._",
-    "_Thinking very hard thoughts about offer performance..._",
-    "_Approximately 40% confident this will be good news..._",
-    "_Running this through seven layers of analysis (three are real)..._",
-    "_Lovingly nagging ClickHouse for one more row..._",
-    "_Sorting by RPM, not vibes (vibes are terrible analytics)..._",
-    "_Gently terrorizing the affiliate APIs..._",
-    "_This is taking longer than expected, which means it's thorough..._",
-    "_Consulting 47 data sources and their weird rate limits..._",
-    "_Forensic accounting but for ad performance..._",
-    "_Reverse-engineering what competitors are too slow to notice..._",
-    "_Asking the data what it wants to be when it grows up..._",
-    "_Pretending this is easy (it is not)..._",
-    "_Almost done — and by 'almost' Scout means it just started..._",
-]
+# ── Loading message pools ─────────────────────────────────────────────────────
+# Each entry: {"text": "...", "tone": "grind" | "late"}
+# tone="late" messages only appear after 9 PM Chicago time.
+# Pools are selected by query context; Giphy tag varies per pool.
+
+_MESSAGE_POOLS: dict[str, list[dict]] = {
+    # Brief / campaign building requests
+    "pool_brief": [
+        {"text": "_🎯 Matching offer to user at the exact moment they're most likely to convert..._", "tone": "grind"},
+        {"text": "_Treating your thank-you page like a revenue line item..._",                        "tone": "grind"},
+        {"text": "_The confirmation page is prime real estate. Treating it accordingly..._",          "tone": "grind"},
+        {"text": "_📈 Quietly outperforming every other SDK on the confirmation page..._",            "tone": "grind"},
+        {"text": "_Doing what the SDK does but with words..._",                                       "tone": "grind"},
+        {"text": "_The sale just closed. The real work just started..._",                             "tone": "grind"},
+        {"text": "_Finding what your publishers are leaving on the table..._",                        "tone": "grind"},
+        {"text": "_💰 Manifesting a 15% RPM lift for you specifically..._",                          "tone": "grind"},
+        {"text": "_Building this brief so good it'll basically sell itself..._",                      "tone": "late"},
+        {"text": "_It's late. The confirmation page does not care. Neither does Scout..._",           "tone": "late"},
+    ],
+    # Data / performance queries
+    "pool_data": [
+        {"text": "_🔍 Interrogating ClickHouse until it confesses..._",                              "tone": "grind"},
+        {"text": "_Doing math so advanced it scared the last analyst..._",                           "tone": "grind"},
+        {"text": "_📊 Converting raw SQL into something humans can feel..._",                        "tone": "grind"},
+        {"text": "_🕵️ Forensic accounting but for ad performance..._",                               "tone": "grind"},
+        {"text": "_Consulting 47 data sources and their weird rate limits..._",                      "tone": "grind"},
+        {"text": "_Refusing to guess and actually querying the data..._",                            "tone": "grind"},
+        {"text": "_Sorting by RPM, not vibes (vibes are terrible analytics)..._",                   "tone": "grind"},
+        {"text": "_Running this through seven layers of analysis (three are real)..._",              "tone": "grind"},
+        {"text": "_Making decisions your BI dashboard is too cowardly to make..._",                  "tone": "grind"},
+        {"text": "_🧠 The AI is confident. The AI is always confident. Question the AI..._",        "tone": "late"},
+        {"text": "_Lovingly nagging ClickHouse for one more row at this hour..._",                   "tone": "late"},
+    ],
+    # Queue / ops / status queries
+    "pool_ops": [
+        {"text": "_AdOps is sleeping. Scout is not._",                                               "tone": "grind"},
+        {"text": "_📡 Pinging every network so you don't have to..._",                              "tone": "grind"},
+        {"text": "_Making MomentScience look good, one query at a time..._",                         "tone": "grind"},
+        {"text": "_Reverse-engineering what competitors are too slow to notice..._",                 "tone": "grind"},
+        {"text": "_AdOps is definitely asleep. Scout is very much not._",                            "tone": "late"},
+        {"text": "_The queue doesn't close at 5. Neither does Scout..._",                            "tone": "late"},
+    ],
+    # Publisher / partner / network queries
+    "pool_publisher": [
+        {"text": "_Asking MaxBounty to explain itself..._",                                          "tone": "grind"},
+        {"text": "_Speed-running the Impact catalog..._",                                            "tone": "grind"},
+        {"text": "_⏳ Waiting for FlexOffers to respond. This is normal..._",                       "tone": "grind"},
+        {"text": "_Bribing the affiliate networks for better rates..._",                             "tone": "grind"},
+        {"text": "_🤝 Diplomatically informing the affiliate networks their tracking is... fine..._","tone": "grind"},
+        {"text": "_Aggressively filtering out the garbage..._",                                      "tone": "grind"},
+        {"text": "_Professionally judging low-payout offers and finding them wanting..._",           "tone": "grind"},
+        {"text": "_The affiliate networks are asleep. Their APIs unfortunately are not..._",         "tone": "late"},
+    ],
+    # Generic catch-all
+    "pool_generic": [
+        {"text": "_One moment — Scout is having a moment..._",                                       "tone": "grind"},
+        {"text": "_Approximately 40% confident this will be good news..._",                          "tone": "grind"},
+        {"text": "_Pretending this is easy (it is not)..._",                                         "tone": "grind"},
+        {"text": "_Almost done — and by 'almost' Scout means it just started..._",                   "tone": "grind"},
+        {"text": "_This is taking longer than expected, which means it's thorough..._",              "tone": "grind"},
+        {"text": "_Vigorously cross-referencing things..._",                                         "tone": "grind"},
+        {"text": "_Turning post-transaction moments into money (allegedly)..._",                     "tone": "grind"},
+        {"text": "_Telepathically downloading CVR benchmarks..._",                                   "tone": "grind"},
+        {"text": "_Gently terrorizing the affiliate APIs..._",                                       "tone": "grind"},
+        {"text": "_⚡ Running night queries. Scout doesn't have a bedtime..._",                     "tone": "late"},
+        {"text": "_Probably should have waited until morning. Scout disagrees..._",                  "tone": "late"},
+    ],
+}
+
+# Flat list for _rotating_status (all grind-tone messages, pool-agnostic)
+_LOADING_MESSAGES = [e["text"] for pool in _MESSAGE_POOLS.values() for e in pool if e["tone"] == "grind"]
+
+# ── Giphy integration ─────────────────────────────────────────────────────────
+_GIPHY_CACHE: dict[str, tuple[str, float]] = {}  # tag → (url, fetched_at)
+_GIPHY_CACHE_TTL = 600  # 10 minutes — keeps well under 100 calls/hr free limit
 
 
-def _rotating_status(web: WebClient, channel: str, ts: str, interval: float = 4.0):
+def _fetch_giphy_url(tag: str) -> str | None:
+    """Fetch a random animated GIF URL for the given tag. Returns None on any failure."""
+    api_key = os.getenv("GIPHY_API_KEY", "")
+    if not api_key:
+        return None
+    # Serve from cache if fresh
+    cached_url, cached_at = _GIPHY_CACHE.get(tag, ("", 0.0))
+    if cached_url and (time.time() - cached_at) < _GIPHY_CACHE_TTL:
+        return cached_url
+    try:
+        import urllib.request as _ur
+        import urllib.parse as _up
+        import json as _json
+        url = (
+            f"https://api.giphy.com/v1/gifs/random"
+            f"?api_key={api_key}&tag={_up.quote(tag)}&rating=g"
+        )
+        with _ur.urlopen(url, timeout=3) as r:
+            data = _json.loads(r.read())
+        gif_url = data["data"]["images"]["fixed_height"]["url"]
+        _GIPHY_CACHE[tag] = (gif_url, time.time())
+        return gif_url
+    except Exception:
+        return None
+
+
+def _pick_loading_message(query: str = "") -> tuple[str, str]:
+    """
+    Pick a context-aware loading message + Giphy tag based on query content and time of day.
+    Late-night (9 PM–6 AM Chicago): pull from late-tone entries.
+    Returns (message_text, giphy_tag).
+    """
+    from datetime import datetime
+    import pytz
+
+    try:
+        chicago = pytz.timezone("America/Chicago")
+        hour = datetime.now(chicago).hour
+        is_late = hour >= 21 or hour < 6
+    except Exception:
+        is_late = False
+
+    q = (query or "").lower()
+
+    if any(w in q for w in ("brief", "campaign", "build a brief", "draft")):
+        pool_key, giphy_tag = "pool_brief", "working hard"
+    elif any(w in q for w in ("queue", "status", "pending", "live", "launch", "enter")):
+        pool_key, giphy_tag = "pool_ops", "waiting"
+    elif any(w in q for w in ("performance", "rpm", "cvr", "revenue", "data", "benchmark", "report")):
+        pool_key, giphy_tag = "pool_data", "math"
+    elif any(w in q for w in ("publisher", "partner", "integration", "maxbounty", "impact", "flexoffers", "network")):
+        pool_key, giphy_tag = "pool_publisher", "thinking"
+    else:
+        pool_key, giphy_tag = "pool_generic", "loading"
+
+    pool = _MESSAGE_POOLS[pool_key]
+    tone = "late" if is_late else "grind"
+    candidates = [e for e in pool if e["tone"] == tone] or pool  # fallback to all if tone not found
+    return random.choice(candidates)["text"], giphy_tag
+
+
+def _clean_error(err: Exception) -> tuple[str, str]:
+    """
+    Convert a raw exception into a (human_message, giphy_tag) pair.
+    Strips Anthropic API JSON blobs — never dumps them to Slack.
+    """
+    s = str(err)
+    if "429" in s or "rate_limit" in s:
+        msg  = "Scout hit the rate limit — give it 60 seconds and try again."
+        tags = ["too much", "overwhelmed", "slow down", "traffic"]
+    elif "529" in s or "overloaded" in s:
+        msg  = "Anthropic is slammed right now — try again in a minute."
+        tags = ["overloaded", "busy", "crowded", "too many people"]
+    elif "timeout" in s.lower() or "timed out" in s.lower():
+        msg  = "Scout timed out — try a narrower question."
+        tags = ["waiting", "slow", "timeout"]
+    elif "connection" in s.lower() or "network" in s.lower():
+        msg  = "Network hiccup — try again."
+        tags = ["disconnected", "no signal", "network"]
+    else:
+        msg  = "Something broke — try again, or rephrase the question."
+        tags = ["fail", "oops", "broken", "nope", "whoops"]
+    return msg, random.choice(tags)
+
+
+def _post_error_update(web: WebClient, channel: str, ts: str, err: Exception) -> None:
+    """Replace the loading placeholder with a GIF + clean human error message."""
+    msg, tag = _clean_error(err)
+    gif_url  = _fetch_giphy_url(tag)
+    blocks: list = []
+    if gif_url:
+        blocks.append({"type": "image", "image_url": gif_url, "alt_text": "oops"})
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f":warning: {msg}"}})
+    try:
+        web.chat_update(channel=channel, ts=ts, text=msg, blocks=blocks)
+    except Exception as _e:
+        log.warning(f"_post_error_update: could not update {channel}:{ts}: {_e}")
+
+
+def _rotating_status(
+    web: WebClient,
+    channel: str,
+    ts: str,
+    interval: float = 4.0,
+):
     """
     Rotates the loading placeholder message every `interval` seconds.
     Returns a stop() callable — call it when the real response is ready.
@@ -199,10 +339,11 @@ def _rotating_status(web: WebClient, channel: str, ts: str, interval: float = 4.
         while not stop_event.wait(interval):
             elapsed = int(time.monotonic() - start)
             msg = msgs[idx[0] % len(msgs)]
-            # Strip trailing _ for italic, append elapsed, re-wrap
+            # Strip italic markers, append elapsed, re-wrap
             core = msg.strip("_")
+            update_text = f"_{core}_ · {elapsed}s"
             try:
-                web.chat_update(channel=channel, ts=ts, text=f"_{core}_ · {elapsed}s")
+                web.chat_update(channel=channel, ts=ts, text=update_text)
             except Exception:
                 pass
             idx[0] += 1
@@ -218,27 +359,65 @@ def _strip_mention(text: str) -> str:
 
 # ── Block Kit brief builder ───────────────────────────────────────────────────
 
-def _check_url_async(web: WebClient, channel: str, thread_ts: str, tracking_url: str) -> None:
+def _run_preflight_qa(  # replaces _check_url_async (removed — this is a strict superset)
+    web: WebClient,
+    channel: str,
+    thread_ts: str,
+    brief_data: dict,
+) -> None:
     """
-    Check tracking URL reachability in a background thread and post the result
-    as a follow-up message. Non-blocking — never delays brief card display.
-    Only called for real URLs (not 'Not available...' strings).
+    Run pre-flight quality checks in a background thread and post consolidated
+    results as a single follow-up message. Never blocks brief display.
+
+    Checks:
+      1. Tracking URL resolution
+      2. Advertiser history on MS platform (from ClickHouse benchmarks)
     """
     def _run():
+        import urllib.request
+        checks: list[str] = []
+
+        # 1. URL resolution
+        tracking_url = (brief_data.get("tracking_url") or "").strip()
+        if tracking_url and not tracking_url.startswith("Not available"):
+            try:
+                req = urllib.request.Request(
+                    tracking_url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    if r.status < 400:
+                        checks.append(":white_check_mark: URL resolves")
+                    else:
+                        checks.append(f":warning: URL returned HTTP {r.status}")
+            except Exception:
+                checks.append(":warning: URL did not resolve — verify tracking link before entry")
+
+        # 2. Advertiser history on MS platform
         try:
-            import urllib.request
-            req = urllib.request.Request(
-                tracking_url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"}
-            )
-            with urllib.request.urlopen(req, timeout=5) as r:
-                badge = "✓ resolves" if r.status < 400 else f"⚠ HTTP {r.status}"
+            from scout_agent import _get_benchmarks
+            benchmarks = _get_benchmarks()
+            adv_key = (brief_data.get("advertiser") or "").lower().strip()
+            by_adv = benchmarks.get("by_adv_name", {})
+            if adv_key and adv_key in by_adv:
+                hist = by_adv[adv_key]
+                rpm = hist.get("rpm", 0)
+                cvr = hist.get("cvr_pct", 0)
+                checks.append(
+                    f":bar_chart: MS history: ${rpm:,.0f} RPM · {cvr:.2f}% CVR "
+                    f"({hist.get('impressions', 0):,} impressions)"
+                )
+            else:
+                checks.append(":new: No prior MS data — first run for this advertiser")
         except Exception:
-            badge = "⚠ did not resolve"
+            pass
+
+        if not checks:
+            return
         try:
             web.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
-                text=f"_Tracking URL: {badge}_",
+                text=":mag: *Pre-flight:* " + "  ·  ".join(checks),
                 unfurl_links=False,
             )
         except Exception:
@@ -748,6 +927,7 @@ def _record_queued_offer(
     user_id: str,
     thread_url: str,
     notion_url: str = "",
+    copy_data: dict | None = None,
 ):
     """Persist approval state so the lifecycle (queue → live → notify) can close the loop.
 
@@ -773,6 +953,16 @@ def _record_queued_offer(
         "scout_score_estimated":  brief_data.get("scout_score_rpm", 0),
         "performance_context":    brief_data.get("performance_context", ""),
         "performance_recap_sent": False,
+        # Campaign Builder fields — stored so /scout-enter can reconstruct the form
+        # without re-fetching or requiring the original brief thread to still exist.
+        "tracking_url":           brief_data.get("tracking_url", ""),
+        "offer_id":               str(brief_data.get("offer_id", "")),
+        "payout_type":            brief_data.get("payout_type", "CPA"),
+        "risk_flag":              brief_data.get("risk_flag", ""),
+        "title":                  (copy_data or {}).get("t") or (copy_data or {}).get("title", ""),
+        "description":            (copy_data or {}).get("d") or (copy_data or {}).get("description", ""),
+        "cta_yes":                (copy_data or {}).get("cy") or (copy_data or {}).get("cta_yes", ""),
+        "cta_no":                 (copy_data or {}).get("cn") or (copy_data or {}).get("cta_no", ""),
     }
     _save_launched_offers(state)
 
@@ -985,7 +1175,7 @@ def _update_brief_card_queued(
         msg = messages[0]
         blocks = list(msg.get("blocks") or [])
 
-        # Remove the actions block that contains scout_brief_queue button
+        # Remove the actions block that contains the queue button
         blocks = [
             b for b in blocks
             if not (b.get("type") == "actions" and
@@ -1094,11 +1284,6 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     brief_ts = (brief_resp.get("ts") or "")
     brief_channel = channel
 
-    # Async tracking URL check — posts result as a follow-up, never blocks brief display
-    _real_url = (brief_data.get("tracking_url") or "").strip()
-    if _real_url and not _real_url.startswith("Not available"):
-        _check_url_async(web, channel, brief_ts, _real_url)
-
     # 5. Write to Notion queue + update brief card in-place with ⏳ status
     copy_data = {
         "t":   copy.get("title", ""),
@@ -1118,7 +1303,13 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     )
 
     # 6. Persist approval state (for lifecycle tracking + launch notification)
-    _record_queued_offer(advertiser, brief_data, user_id, thread_url, notion_url=notion_url or "")
+    _record_queued_offer(
+        advertiser, brief_data, user_id, thread_url,
+        notion_url=notion_url or "", copy_data=copy_data,
+    )
+
+    # Pre-flight QA in background — URL check + MS history, posts consolidated result
+    _run_preflight_qa(web, channel, brief_ts, brief_data)
 
     # 7. Confirm in the digest thread
     notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
@@ -1193,12 +1384,13 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
         brief_channel=channel,
         brief_ts=message_ts,
     )
-    _record_queued_offer(advertiser, brief_data, user_id, thread_url, notion_url=notion_url or "")
+    _record_queued_offer(
+        advertiser, brief_data, user_id, thread_url,
+        notion_url=notion_url or "", copy_data=copy_data,
+    )
 
-    # Async tracking URL check — posts result as a follow-up, never blocks brief display
-    _real_url = (data.get("tracking_url", "") or "").strip()
-    if _real_url and not _real_url.startswith("Not available"):
-        _check_url_async(web, channel, thread_ts, _real_url)
+    # Pre-flight QA in background — URL check + MS history, posts consolidated result
+    _run_preflight_qa(web, channel, thread_ts, brief_data)
 
     notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
     confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
@@ -1245,10 +1437,11 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     if not query or not channel or not thread_ts:
         return
 
+    _msg_text, _giphy_tag = _pick_loading_message(query)
     placeholder = web.chat_postMessage(
         channel=channel,
         thread_ts=thread_ts,
-        text=random.choice(_LOADING_MESSAGES),
+        text=_msg_text,
     )
     stop_rotating = _rotating_status(web, channel, placeholder["ts"])
 
@@ -1295,7 +1488,8 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         response = ask(query, history=history)
     except Exception as e:
         log.error(f"suggestion ask failed: {e}")
-        web.chat_update(channel=channel, ts=placeholder["ts"], text=f"Something went wrong: {e}")
+        stop_rotating()
+        _post_error_update(web, channel, placeholder["ts"], e)
         return
     finally:
         stop_rotating()
@@ -1346,17 +1540,18 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
             msg += f"\n{tags}"
         web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
+    _reveal_gif = _fetch_giphy_url(_giphy_tag)
+    _gif_block = [{"type": "image", "image_url": _reveal_gif, "alt_text": "Scout"}] if _reveal_gif else []
+
     suggestion_blocks = _build_suggestion_buttons(sugg)
-    if suggestion_blocks:
-        web.chat_update(
-            channel=channel, ts=placeholder["ts"], text=response_text,
-            blocks=[
-                {"type": "section", "text": {"type": "mrkdwn", "text": response_text}},
-                *suggestion_blocks,
-            ],
-        )
-    else:
-        web.chat_update(channel=channel, ts=placeholder["ts"], text=response_text, mrkdwn=True)
+    web.chat_update(
+        channel=channel, ts=placeholder["ts"], text=response_text,
+        blocks=[
+            *_gif_block,
+            {"type": "section", "text": {"type": "mrkdwn", "text": response_text}},
+            *suggestion_blocks,
+        ],
+    )
     log.info(f"Suggestion answered in {channel} (thread {thread_ts}): {query!r}")
 
 
@@ -1514,9 +1709,10 @@ def _build_home_view() -> dict:
                     "*Ask @Scout anything in plain English*\n"
                     "Mention @Scout in any channel. Scout remembers context within a thread.\n\n"
                     "*Quick commands (slash, any channel — ephemeral):*\n"
+                    "• `/scout-pub [publisher]` — publisher performance card\n"
                     "• `/scout-queue` — current queue status\n"
-                    "• `/scout-status` — system health\n"
-                    "• `@Scout status` — same as /scout-status, in-thread\n\n"
+                    "• `/scout-enter [advertiser or URL]` — MS Platform entry card\n"
+                    "• `/scout-status` — system health\n\n"
                     "*Try an example →*"
                 ),
             },
@@ -1570,10 +1766,11 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
         )
         thread_ts = intro["ts"]
 
+        _msg_text, _giphy_tag = _pick_loading_message(query)
         placeholder = web.chat_postMessage(
             channel=dm_channel,
             thread_ts=thread_ts,
-            text=random.choice(_LOADING_MESSAGES),
+            text=_msg_text,
         )
         stop_rotating = _rotating_status(web, dm_channel, placeholder["ts"])
 
@@ -1590,22 +1787,21 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
                 channel=dm_channel, ts=placeholder["ts"],
                 text="Campaign Brief", blocks=blocks,
             )
-        elif isinstance(response, dict) and response.get("type") == "text_with_context":
-            response_text    = response.get("text", "")
-            suggestions      = response.get("suggestions", [])
-            content_blocks   = _text_to_blocks(response_text)
-            suggestion_blocks = _build_suggestion_buttons(suggestions)
-            web.chat_update(
-                channel=dm_channel, ts=placeholder["ts"],
-                text=response_text,
-                blocks=[*content_blocks, *suggestion_blocks],
-            )
         else:
-            response_text = response if isinstance(response, str) else str(response)
+            if isinstance(response, dict) and response.get("type") == "text_with_context":
+                response_text     = response.get("text", "")
+                suggestions       = response.get("suggestions", [])
+                suggestion_blocks = _build_suggestion_buttons(suggestions)
+            else:
+                response_text     = response if isinstance(response, str) else str(response)
+                suggestion_blocks = []
+            _reveal_gif = _fetch_giphy_url(_giphy_tag)
+            _gif_block  = [{"type": "image", "image_url": _reveal_gif, "alt_text": "Scout"}] if _reveal_gif else []
+            content_blocks = _text_to_blocks(response_text)
             web.chat_update(
                 channel=dm_channel, ts=placeholder["ts"],
                 text=response_text,
-                blocks=_text_to_blocks(response_text),
+                blocks=[*_gif_block, *content_blocks, *suggestion_blocks],
             )
         log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
     except Exception as e:
@@ -1619,10 +1815,12 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
     Handle Scout slash commands. All responses are ephemeral — only the caller sees them.
     Commands must be registered at api.slack.com/apps → Scout → Slash Commands.
 
+    /scout-pub    — Publisher performance card (ClickHouse, no AI)
     /scout-queue  — Show the current demand queue with Notion links
+    /scout-enter  — MS Platform entry card for a queued offer
     /scout-status — System health: benchmark freshness, offer count, ClickHouse status
     """
-    from scout_agent import get_demand_queue_status, get_scout_status
+    from scout_agent import get_demand_queue_status, get_scout_status, get_publisher_competitive_landscape
 
     payload  = req.payload
     command  = payload.get("command", "")
@@ -1677,10 +1875,162 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 lines.append(f":warning: {w}")
             web.chat_postEphemeral(channel=channel, user=user_id, text="\n".join(lines))
 
+        elif command == "/scout-enter":
+            # Formatted entry card for a queued offer — all fields pre-formatted
+            # for easy copy into MS Platform. No Playwright; human does the entry.
+            # Usage: /scout-enter TurboTax
+            # NOTE: Register at api.slack.com/apps → Scout → Slash Commands
+            text_arg = payload.get("text", "").strip()
+            if not text_arg:
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id,
+                    text="Usage: `/scout-enter TurboTax` or `/scout-enter https://tracking.link/...`",
+                )
+                return
+            state = _load_launched_offers()
+            # Accept a tracking URL or an advertiser name
+            if text_arg.startswith("http"):
+                key = next(
+                    (k for k, v in state.items() if text_arg in (v.get("tracking_url") or "")),
+                    None,
+                )
+            else:
+                key = next(
+                    (k for k in state if text_arg.lower() in k.lower() or k.lower() in text_arg.lower()),
+                    None,
+                )
+            if not key:
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id,
+                    text=f":x: No queued offer found matching `{text_arg}`. Run `/scout-queue` to see exact names, or paste the tracking URL.",
+                )
+                return
+            entry     = state[key]
+            status    = entry.get("status", "unknown")
+            notion_lk = f" · <{entry['notion_url']}|Notion page>" if entry.get("notion_url") else ""
+            title       = entry.get("title", "_not saved_")
+            description = entry.get("description", "_not saved_")
+            cta_yes     = entry.get("cta_yes", "_not saved_")
+            cta_no      = entry.get("cta_no", "_not saved_")
+            tracking    = entry.get("tracking_url", "_not saved_")
+            offer_id    = entry.get("offer_id", "_not saved_")
+            network     = entry.get("network", "")
+            payout      = entry.get("payout", "")
+            payout_type = entry.get("payout_type", "CPA")
+            risk_flag   = entry.get("risk_flag", "")
+
+            lines = [
+                f":clipboard: *MS Entry Card — {key}* ({status}){notion_lk}",
+                "",
+                f"*Internal Name:* `{key} — {network} — (today's date)`",
+                f"*Network:* `{network}`  *Offer ID:* `{offer_id}`",
+                f"*Goal Type:* `{payout_type}`  *Payout:* `{payout}`",
+                f"*Destination:* `{tracking}`",
+                "",
+                f"*Headline:* `{title}`",
+                f"*Description:* `{description}`",
+                f"*Positive CTA:* `{cta_yes}`",
+                f"*Negative CTA:* `{cta_no}`",
+            ]
+            if risk_flag:
+                lines.append(f"\n:warning: *Risk flag:* {risk_flag}")
+            lines.append("\n_Copy each field above into MS Platform. Toggle Test Offer ON until reviewed._")
+            entry_text = "\n".join(lines)
+            web.chat_postEphemeral(
+                channel=channel, user=user_id,
+                text=entry_text,
+                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": entry_text}}],
+            )
+
+        elif command == "/scout-pub":
+            # Publisher performance terminal — direct ClickHouse, no AI.
+            # Usage: /scout-pub AT&T   or   /scout-pub 953
+            # Register at api.slack.com/apps → Scout → Slash Commands
+            text_arg = payload.get("text", "").strip()
+            if not text_arg:
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id,
+                    text="Usage: `/scout-pub AT&T` or `/scout-pub 953` (publisher ID)",
+                )
+                return
+
+            # Numeric → publisher_id; otherwise → name fuzzy match
+            pub_kwargs = (
+                {"publisher_id": int(text_arg)} if text_arg.isdigit()
+                else {"publisher_name": text_arg}
+            )
+            try:
+                data = get_publisher_competitive_landscape(**pub_kwargs)
+            except Exception as e:
+                log.warning(f"/scout-pub lookup failed for {text_arg!r}: {e}")
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id,
+                    text=f":warning: Publisher data unavailable right now — try `@Scout {text_arg} performance` instead.",
+                )
+                return
+
+            if not data or not data.get("publisher"):
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id,
+                    text=f":x: No publisher found matching `{text_arg}`. Try the ID (e.g. `953`) or `/scout-queue` to check names.",
+                )
+                return
+
+            pub_name     = data["publisher"]
+            pub_id       = data.get("publisher_id", "")
+            weekly_impr  = data.get("weekly_impressions_avg", 0)
+            serving      = data.get("active_competitors", [])
+            provisioned  = len(data.get("provisioned_campaigns", []))
+            serving_cnt  = data.get("serving_count", len(serving))
+
+            # Format weekly impressions
+            def _fmt_num(n):
+                if n >= 1_000_000:
+                    return f"{n/1_000_000:.1f}M"
+                if n >= 1_000:
+                    return f"{n/1_000:.0f}K"
+                return str(int(n))
+
+            header = (
+                f":bar_chart: *{pub_name}* (ID: {pub_id})\n"
+                f"~{_fmt_num(weekly_impr)} impr/week  ·  "
+                f"{provisioned} provisioned  ·  {serving_cnt} serving"
+            )
+
+            # Top serving campaigns ranked by RPM
+            campaign_lines = []
+            for camp in serving[:8]:
+                adv   = camp.get("advertiser", "Unknown")
+                rpm   = camp.get("rpm") or 0
+                impr  = camp.get("impressions_2w") or 0
+                pay   = camp.get("payout") or camp.get("provisioned", "")
+                rpm_s = f"${rpm:,.0f} RPM" if rpm else "no conv. data"
+                line  = f":large_green_circle: {adv} — {rpm_s} · {_fmt_num(impr)} impr"
+                if pay:
+                    line += f" · {pay}"
+                campaign_lines.append(line)
+
+            extra = serving_cnt - len(campaign_lines)
+            if extra > 0:
+                campaign_lines.append(f"_{extra} more serving_")
+
+            if not campaign_lines:
+                campaign_lines = ["_No campaigns serving in last 14 days_"]
+
+            body = "\n".join(campaign_lines)
+            tip  = f"_Tip: `@Scout rank [offer] on {pub_name.split()[0]} at $X` for payout scenarios_"
+            full_text = f"{header}\n\n{body}\n\n{tip}"
+
+            web.chat_postEphemeral(
+                channel=channel, user=user_id,
+                text=full_text,
+                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": full_text}}],
+            )
+
         else:
             web.chat_postEphemeral(
                 channel=channel, user=user_id,
-                text=f"Unknown command `{command}`. Try `/scout-queue` or `/scout-status`.",
+                text=f"Unknown command `{command}`. Try `/scout-pub`, `/scout-queue`, `/scout-enter`, or `/scout-status`.",
             )
     except Exception as e:
         log.error(f"_handle_slash_command error ({command}): {e}")
@@ -1828,11 +2178,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             ] + history
             log.info(f"Injected thread context for {thread_ts}: {ctx_line}")
 
-    # Post placeholder — rotates + shows elapsed time while ask() runs
+    # Post placeholder — text only while ask() runs; GIF appears at reveal
+    _msg_text, _giphy_tag = _pick_loading_message(query)
     placeholder = web.chat_postMessage(
         channel=channel,
         thread_ts=thread_ts,
-        text=random.choice(_LOADING_MESSAGES),
+        text=_msg_text,
     )
     stop_rotating = _rotating_status(web, channel, placeholder["ts"])
 
@@ -1840,7 +2191,9 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         response = ask(query, history=history)
     except Exception as e:
         log.error(f"Agent error: {e}")
-        response = f"Something went wrong: {e}"
+        stop_rotating()
+        _post_error_update(web, channel, placeholder["ts"], e)
+        return
     finally:
         stop_rotating()
 
@@ -1915,21 +2268,23 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         )
         log.info(f"Posted Block Kit brief for {brief_data.get('advertiser')} in {channel}")
 
-        # Async tracking URL check — posts result as a follow-up, never blocks brief display
+        # Async tracking URL check — fires when brief is first shown, before any queue action
         _real_url = (brief_data.get("tracking_url", "") or "").strip()
         if _real_url and not _real_url.startswith("Not available"):
-            _check_url_async(web, channel, thread_ts, _real_url)
+            _run_preflight_qa(web, channel, thread_ts, brief_data)
 
     else:
-        # Plain text response — with optional suggestion buttons
+        # Plain text response — GIF reveal first, then content, then suggestion buttons
         response_text = response if isinstance(response, str) else str(response)
         content_blocks = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
+        _reveal_gif = _fetch_giphy_url(_giphy_tag)
+        _gif_block  = [{"type": "image", "image_url": _reveal_gif, "alt_text": "Scout"}] if _reveal_gif else []
         web.chat_update(
             channel=channel,
             ts=placeholder["ts"],
             text=response_text,  # fallback for notifications
-            blocks=[*content_blocks, *suggestion_blocks],
+            blocks=[*_gif_block, *content_blocks, *suggestion_blocks],
         )
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 

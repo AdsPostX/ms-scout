@@ -48,3 +48,5 @@ services:
         sync: false
       - key: MS_PLATFORM_URL
         sync: false
+      - key: GIPHY_API_KEY
+        sync: false
