@@ -410,6 +410,18 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
       Then show recent changes from the audit log: "Paused 2 days ago by admin. Previously active for 14 days."
       End: ":zap: *Action:* [relevant next step]"
 
+21. FREE-FORM DATA QUERY — any question not covered by intents 1–20
+    Signals: any specific analytical question about revenue, performance, campaigns, publishers,
+             caps, schedules, payouts, or operations that requires a custom query;
+             "show me", "give me a breakdown of", "list all", "how many", "what's the average",
+             "run-rate", "daily average", "which campaigns end", "what's the cap for", "payout for X on Y"
+    → Write SQL using the DATA DICTIONARY. Call run_sql_query(sql=..., description=...).
+      After results: format clearly using the standard Slack format.
+      Always add a sourcing callout as the last line before the ACTION LINE:
+      "> Queried: [description] — live ClickHouse"
+      If the query fails, show the error and suggest a corrected approach. Never silently fail.
+      LEAD with the most important number from the result, bolded.
+
 DEFAULT RULE: When the intent is unclear, always default to Intent 17 (open prospecting). Call get_top_opportunities() and show results. A confident answer to a slightly wrong interpretation is infinitely more useful than asking "what do you mean?"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -546,7 +558,205 @@ COPY SOURCING RULE (highest priority):
   "targeting": "one-line with CVR data if available",
   "bottom_line": "one sentence on why this offer is worth running right now"
 }
-BRIEF_JSON>>>"""
+BRIEF_JSON>>>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CLICKHOUSE DATA DICTIONARY — complete schema reference
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Use this when writing SQL via run_sql_query or interpreting tool results.
+
+── EVENT TABLES (large, partitioned by toYYYYMM(created_at)) ──────────────
+
+adpx_sdk_sessions  [460M rows]
+  One row per SDK session = one user visit to a publisher's confirmation page.
+  PRIMARY SORT: (user_id, created_at, id)
+  CRITICAL: session_id (String UUID) is the JOIN KEY to all other event tables.
+            id (UInt64) is a row key only — NEVER use as a join key.
+  MATERIALIZED COLS (no runtime JSON extraction needed):
+    placement, country, state, city, zipcode, version, nexos, os, device
+  KEY COLS: user_id (UInt64, publisher), pub_user_id (loyalty member ID),
+    is_offerwall (Bool), is_embedded (Bool), is_mou (Bool),
+    subid, tags (Array), source, browser, fingerprint,
+    parent_session_id (for retargeting/session lineage), conversions (pre-computed count)
+
+adpx_impressions_details  [582M rows]
+  One row per offer impression served to a user.
+  PRIMARY SORT: (pid, campaign_id, created_at, id)
+  PUBLISHER ID: pid (String) — NOT user_id. Join to users with: i.pid = toString(u.id)
+  KEY COLS: session_id (join key), campaign_id, offer_id, position (carousel slot 1/2/3)
+
+adpx_tracked_clicks  [17M rows]
+  One row per click on an offer in the carousel.
+  PRIMARY SORT: (user_id, campaign_id, created_at, id)
+  KEY COLS: session_id (join key), campaign_id, offer_id,
+    position (Int32 — which carousel slot was clicked, 1/2/3),
+    is_converted (Bool — did this click result in a conversion?),
+    pub_cost_cents (UInt64 — cost to publisher),
+    os, device, browser, user_agent, fingerprint,
+    is_offerwall (Bool), is_mou (Bool), is_embedded (Bool)
+
+adpx_conversionsdetails  [1.7M rows]
+  One row per conversion event.
+  PRIMARY SORT: (user_id, campaign_id, created_at, id)
+  CRITICAL: revenue and payout are stored as STRINGS — always cast: toFloat64OrNull(revenue)
+  KEY COLS: session_id (join key), campaign_id, offer_id,
+    revenue (String → cast), payout (String → cast)
+  DOWNSTREAM LAG: Add 14-day window beyond session date range when querying conversions.
+
+adpx_system_activity_logs  [115K rows]
+  Audit trail for every dashboard change (campaigns paused/resumed, budgets changed, etc.)
+  KEY COLS: entity (what was changed), type (change type), admin_id,
+    old_data (JSON String — state before), new_data (JSON String — state after),
+    user_type, user_role, created_at
+  USE FOR: "is X paused?", "when was X changed?", "who made this change?"
+
+── CONFIGURATION TABLES (synced from main app DB via Airbyte) ─────────────
+
+from_airbyte_campaigns  [4.75K rows]
+  Master offer/campaign table. One row per campaign.
+  JOIN: toInt64(campaign_id) = c.id  (campaign_id in event tables is UInt64; c.id is Int64)
+  KEY COLS: id, adv_name, title, status, categories, end_date, start_date,
+    capping_config (JSON: {"month": {"budget": N}} — monthly revenue cap),
+    pacing_config (JSON — daily pacing rules),
+    schedule_days (JSON — day-of-week serving schedule),
+    geo_whitelist, geo_blacklist, platforms (iOS/Android/Web), os, browsers,
+    is_offerwall_only, offerwall_enabled, perkswallet_enabled,
+    network_id (FK to from_airbyte_networks), internal_network_name (Impact offer ID),
+    max_impressions, max_positive_cta, conversion_events,
+    force_priority_till (Date — force priority until this date),
+    open_to_marketplace (Bool), is_incent (Bool), is_rewarded (Bool),
+    is_direct_sold (Bool), is_citrusad (Bool), is_rich_media (Bool),
+    landing_url, useraction_url, useraction_cta,
+    adv_description, offer_description, mini_description, terms_and_conditions,
+    loyaltyboost_requirements, internal_notes, owner_id, advertiser_id, partner_id,
+    deleted_at (NULL = active, non-NULL = deleted/archived)
+
+from_airbyte_publisher_campaigns  [96K rows]
+  Publisher-campaign associations. One row per publisher×campaign pairing.
+  This is the operational table — controls how each offer runs on each publisher.
+  KEY COLS: id, campaign_id (FK to campaigns), user_id (FK to users/publishers),
+    is_active (Bool — whether the offer is currently serving on this publisher),
+    payout (Int64 cents — publisher-specific payout override; NULL = use campaign default),
+    priority (Int64 — higher = more impressions),
+    multiplier (Decimal — RPM multiplier),
+    force_priority (Bool), max_impressions, max_positive_cta,
+    capping_config (JSON — publisher-level monthly budget cap),
+    pacing_config, schedule_days, geo_whitelist, geo_blacklist,
+    platforms, os, browsers, categories, goals,
+    conversion_events, is_offerwall_only,
+    stats_by_position (JSON — pre-computed performance stats by carousel slot),
+    useraction_cta, useraction_url, deleted_at, updated_at
+
+from_airbyte_users  [5.45K rows]
+  Publisher/user registry. id = publisher_id (matches user_id in event tables).
+  KEY COLS: id (UInt64 publisher ID), organization (publisher name), is_test
+
+from_airbyte_networks  [177 rows]
+  Affiliate network registry (Impact, CJ, MaxBounty, FlexOffers, etc.)
+  KEY COLS: id, name, slug, postback_url, parameters, user_id (who owns it)
+
+from_airbyte_placements  [160 rows]
+  Publisher placement registry. A placement = named location where offers appear.
+  KEY COLS: id, user_id (publisher_id), slug (e.g. "fuel_hub", "transaction_receipt"),
+    display_name (human-readable), is_default, is_auto_generated
+
+from_airbyte_campaign_serving_groups  [255 rows]
+  Named groups of campaigns that share caps/schedules.
+  KEY COLS: id, name, is_active, is_test, capping_config, pacing_config, schedule_days, exclude_group
+
+from_airbyte_grouped_campaign_specs  [1.33K rows]
+  Maps campaigns to serving groups. group_id → campaign_id.
+  KEY COLS: id, group_id (FK to serving_groups), campaign_id (FK to campaigns)
+
+from_airbyte_placement_sequence_rules  [200 rows]
+  Controls offer ordering within a placement.
+  KEY COLS: id, placement_id, sequence_rule_id, weight, is_active, user_id
+
+from_airbyte_partner_categories  [111 rows]
+  Publisher classification/taxonomy.
+  KEY COLS: id, user_id (publisher_id), tier, approval, traffic_type,
+    integration_type, custom_creatives
+
+from_airbyte_publisher_delivery_channel_settings  [33 rows]
+  Delivery channel config per publisher (e.g. web vs app vs offerwall channel).
+  KEY COLS: id, user_id (publisher_id), channel_name, weight, enabled, enable_force_priority
+
+from_airbyte_publisher_nexos_settings  [29 rows]
+  Nexos feature flag per publisher.
+  KEY COLS: id, user_id (publisher_id), is_enabled, enabled_percentage
+
+from_airbyte_user_selected_perks  [3.14K rows]
+  Perkswall offer selections — when a loyalty member actively picks a perk.
+  This is NOT a conversion — it's pre-conversion intent/engagement.
+  KEY COLS: id, user_id (publisher_id), campaign_id, session_id,
+    pub_user_id (loyalty member ID), metadata (JSON), created_at
+
+from_airbyte_custom_reports  [742 rows]
+  Saved report definitions.
+  KEY COLS: id, report_name, report_type, publisher_id, admin_id,
+    metrics, attributes, range, offer_units, selected_campaigns, selected_publishers
+
+from_airbyte_custom_report_runs  [2.21K rows]
+  Report execution history (when reports were run, results).
+
+from_airbyte_publisher_campaign_images  [1.03K rows]
+  Images attached to publisher campaign creatives.
+
+from_airbyte_perkswall_themes  [1.43K rows]
+  Perkswall visual theme configurations per publisher.
+
+from_airbyte_placement_themes  [227 rows]
+  Visual theme configs per placement.
+
+mv_adpx_campaigns  (materialized view)
+  Lightweight: id, internal_name, is_test. Use for campaign name resolution.
+
+mv_adpx_users  (materialized view)
+  Lightweight: id, organization, is_test, parent_id. Use for publisher name resolution.
+
+── CRITICAL QUERY RULES ───────────────────────────────────────────────────
+
+JOIN KEYS:
+  session_id (String) links: adpx_sdk_sessions ↔ adpx_impressions_details ↔ adpx_tracked_clicks ↔ adpx_conversionsdetails
+  user_id (UInt64) links: adpx_sdk_sessions / adpx_tracked_clicks / adpx_conversionsdetails → from_airbyte_users
+  pid (String) links: adpx_impressions_details → from_airbyte_users via: pid = toString(user_id)
+  campaign_id: event tables (UInt64) → from_airbyte_campaigns (Int64) via: toInt64(campaign_id) = c.id
+
+PREWHERE (always use for primary sort key + partition):
+  adpx_sdk_sessions:        PREWHERE user_id = X AND toYYYYMM(created_at) >= YYYYMM
+  adpx_tracked_clicks:      PREWHERE user_id = X AND toYYYYMM(created_at) >= YYYYMM
+  adpx_conversionsdetails:  PREWHERE user_id = X AND toYYYYMM(created_at) >= YYYYMM
+  adpx_impressions_details: PREWHERE pid = 'X' AND toYYYYMM(created_at) >= YYYYMM
+
+TYPE CASTING:
+  revenue, payout in conversionsdetails → toFloat64OrNull(revenue)
+  campaign_id joins to airbyte tables → toInt64(campaign_id) = c.id
+  pid (String) → publisher user_id → i.pid = toString(u.id)
+
+DOWNSTREAM LAG: Conversions can arrive 14 days after a session. When joining sessions to conversions, extend the conversion date window by +14 days beyond the session end date.
+
+CAPPING CONFIG: JSON column on from_airbyte_campaigns and from_airbyte_publisher_campaigns.
+  Extract monthly cap: JSONExtractFloat(capping_config, 'month', 'budget')
+  Or: json_parsed['month']['budget'] after parsing in Python.
+
+TIMEZONE: All timestamps stored in UTC. For reporting, use timezone 'America/Chicago'.
+
+── WHAT EACH TABLE ANSWERS ────────────────────────────────────────────────
+
+"How is publisher X performing?"     → adpx_sdk_sessions + adpx_impressions_details + adpx_tracked_clicks + adpx_conversionsdetails
+"Is offer X paused on publisher Y?"  → from_airbyte_publisher_campaigns (is_active)
+"When was offer X paused?"           → adpx_system_activity_logs (old_data/new_data JSON diff)
+"What's the monthly budget cap?"     → from_airbyte_campaigns.capping_config or from_airbyte_publisher_campaigns.capping_config
+"Which carousel slot gets clicked?"  → adpx_tracked_clicks.position
+"Which perks do loyalty members pick?" → from_airbyte_user_selected_perks
+"What network is this offer on?"     → from_airbyte_campaigns.network_id → from_airbyte_networks.name
+"What's the publisher-specific payout?" → from_airbyte_publisher_campaigns.payout (in cents)
+"What placements does publisher X have?" → from_airbyte_placements WHERE user_id = X
+"Is this offer offerwall-only?"      → from_airbyte_campaigns.is_offerwall_only
+"What's the day-of-week schedule?"   → from_airbyte_publisher_campaigns.schedule_days (JSON)
+"Which campaigns are in a serving group?" → from_airbyte_campaign_serving_groups + from_airbyte_grouped_campaign_specs
+"""
 
 
 TOOLS = [
@@ -789,6 +999,37 @@ TOOLS = [
                 "publisher_id": {"type": "integer", "description": "Numeric publisher ID"},
                 "days": {"type": "integer", "description": "Lookback window in days (default 30)"},
             },
+        },
+    },
+    {
+        "name": "run_sql_query",
+        "description": (
+            "Execute an arbitrary ClickHouse SELECT query for questions not covered by other tools. "
+            "Use the DATA DICTIONARY in your context to write correct SQL. "
+            "Use for: any novel analytical question, multi-table joins, custom date ranges, "
+            "cap/schedule config inspection, per-campaign payout lookups, "
+            "serving group analysis, custom report recreation, or any query not covered by existing tools. "
+            "Safety: SELECT-only, 500 row max by default. Always include a description of what you're querying. "
+            "After getting results, present them clearly and add a sourcing callout: "
+            "'> Queried: [description] — live ClickHouse'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "Valid ClickHouse SQL SELECT statement. Use the DATA DICTIONARY for table/column names.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "One-line description of what this query retrieves, e.g. 'TurboTax campaign end dates and cap configs'",
+                },
+                "max_rows": {
+                    "type": "integer",
+                    "description": "Max rows to return (default 500, max 2000)",
+                },
+            },
+            "required": ["sql", "description"],
         },
     },
     {
@@ -2544,6 +2785,64 @@ def get_perkswall_engagement(
         return {"error": str(e), "publisher_name": publisher_name, "publisher_id": publisher_id}
 
 
+def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
+    """
+    Execute an arbitrary SELECT query against ClickHouse.
+    Safety: SELECT-only, 500 row default max, 30s timeout.
+    Returns structured results for Claude to format.
+    """
+    import re as _re
+
+    # Safety guard — SELECT only
+    sql_stripped = sql.strip()
+    first_word = sql_stripped.split()[0].upper() if sql_stripped else ""
+    if first_word not in ("SELECT", "WITH"):
+        return {
+            "error": "Only SELECT queries are allowed. No INSERT, UPDATE, DELETE, DROP, etc.",
+            "sql": sql_stripped,
+        }
+
+    # Inject LIMIT if not present
+    sql_upper = sql_stripped.upper()
+    has_limit = bool(_re.search(r'\bLIMIT\b', sql_upper))
+    if not has_limit:
+        sql_stripped = sql_stripped.rstrip(";") + f"\nLIMIT {max_rows}"
+
+    try:
+        ch = _get_ch_client()
+        result = ch.query(sql_stripped, settings={"max_execution_time": 30})
+        rows = result.result_rows
+        try:
+            col_names = list(result.column_names)
+        except (AttributeError, TypeError):
+            col_names = []
+
+        truncated = len(rows) >= max_rows
+        # Convert rows to list of dicts for readability
+        if col_names:
+            rows_as_dicts = [dict(zip(col_names, row)) for row in rows[:max_rows]]
+        else:
+            rows_as_dicts = [list(row) for row in rows[:max_rows]]
+
+        return {
+            "description": description,
+            "sql_run": sql_stripped,
+            "row_count": len(rows_as_dicts),
+            "truncated": truncated,
+            "truncation_note": f"Results limited to {max_rows} rows. Add LIMIT to your query to control this." if truncated else None,
+            "columns": col_names,
+            "rows": rows_as_dicts,
+        }
+    except Exception as e:
+        err = str(e)
+        return {
+            "error": err,
+            "sql_run": sql_stripped,
+            "description": description,
+            "hint": "Check table/column names against the DATA DICTIONARY. Common issues: wrong join type (pid vs user_id), missing PREWHERE, type mismatch (toFloat64OrNull for revenue).",
+        }
+
+
 def get_scout_status() -> dict:
     """
     System health snapshot: benchmark freshness, offer inventory, queue depth,
@@ -2634,6 +2933,7 @@ TOOL_MAP = {
     "get_publisher_health": get_publisher_health,
     "get_campaign_status": get_campaign_status,
     "get_perkswall_engagement": get_perkswall_engagement,
+    "run_sql_query": run_sql_query,
     "get_scout_status": get_scout_status,
     "get_advertiser_revenue_projection": get_advertiser_revenue_projection,
 }
