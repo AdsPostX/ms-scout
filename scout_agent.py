@@ -141,6 +141,13 @@ def _load_performance_benchmarks() -> dict:
             for cat, v in by_cat.items() if v["count"] > 0
         }
 
+        if not category_benchmarks:
+            log.warning(
+                "Tier 3 benchmarks disabled: 'categories' column appears to be NULL for all "
+                f"{len(rows)} campaigns in from_airbyte_campaigns. "
+                "If category data is populated in the MS platform, re-check the column name."
+            )
+
         result = {
             "by_offer_impact_id":    by_offer,
             "by_adv_name":           by_adv,
@@ -1038,6 +1045,88 @@ def _validate_image_url(url: str) -> bool:
         return False
 
 
+_IMAGE_CACHE_PATH = pathlib.Path(__file__).parent / "data" / "image_cache.json"
+_IMAGE_CACHE_TTL_DAYS = 7
+_image_cache_mem: dict = {}  # in-memory layer to avoid file reads on every brief
+_image_cache_loaded = False
+
+
+def _load_image_cache() -> dict:
+    global _image_cache_mem, _image_cache_loaded
+    if not _image_cache_loaded:
+        try:
+            if _IMAGE_CACHE_PATH.exists():
+                _image_cache_mem = json.loads(_IMAGE_CACHE_PATH.read_text())
+        except Exception:
+            _image_cache_mem = {}
+        _image_cache_loaded = True
+    return _image_cache_mem
+
+
+def _save_image_cache(cache: dict) -> None:
+    try:
+        _IMAGE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _IMAGE_CACHE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache, indent=2))
+        import os; os.replace(tmp, _IMAGE_CACHE_PATH)
+    except Exception as e:
+        log.debug(f"image cache save failed: {e}")
+
+
+def _cached_external_images(advertiser: str) -> dict | None:
+    """Return cached {hero_url, icon_url} if fresh (< 7 days). None if stale or missing."""
+    from datetime import datetime, timezone, timedelta
+    cache = _load_image_cache()
+    key = advertiser.lower().strip()
+    entry = cache.get(key)
+    if not entry:
+        return None
+    cached_at_str = entry.get("cached_at", "")
+    try:
+        cached_at = datetime.fromisoformat(cached_at_str).replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - cached_at).days >= _IMAGE_CACHE_TTL_DAYS:
+            return None  # stale
+    except Exception:
+        return None
+    return entry
+
+
+def _store_image_cache(advertiser: str, hero_url: str, icon_url: str) -> None:
+    from datetime import datetime, timezone
+    cache = _load_image_cache()
+    cache[advertiser.lower().strip()] = {
+        "hero_url": hero_url,
+        "icon_url": icon_url,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_image_cache(cache)
+
+
+def _ms_cdn_image(campaign_id: str) -> str:
+    """Query ClickHouse for the primary CDN creative for an MS campaign. Returns URL or ''."""
+    if not campaign_id:
+        return ""
+    try:
+        ch = _get_ch_client()
+        rows = ch.query(
+            """
+            SELECT url FROM default.from_airbyte_publisher_campaign_images
+            WHERE campaign_id = {cid:Int64}
+              AND is_primary = 1
+              AND deleted_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            parameters={"cid": int(campaign_id)},
+        ).result_rows
+        url = rows[0][0] if rows else ""
+        if url and _validate_image_url(url):
+            return url
+    except Exception as e:
+        log.debug(f"_ms_cdn_image: {e}")
+    return ""
+
+
 def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
     """
     Fetch all offer details needed to generate a campaign brief.
@@ -1091,6 +1180,7 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
     # The MS platform has approved title/CTA/tracking URL already — use them as source of truth.
     platform_title = platform_cta_yes = platform_cta_no = ""
     platform_landing_url = restrictions = platform_image = ""
+    ms_id = None
     try:
         ch = _get_ch_client()
         p_rows = ch.query(
@@ -1127,25 +1217,42 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
         hero_url = icon_url = platform_image
     else:
         advertiser_name = o.get("advertiser", "")
-        app_icon = _app_store_icon(advertiser_name)
-        domain   = _clearbit_domain(advertiser_name)
-        favicon  = _google_favicon(domain) if domain else ""
 
-        # hero: App Store 512px > gstatic 256px > empty
-        if app_icon:
-            hero_url = app_icon
-        elif favicon and _validate_image_url(favicon):
-            hero_url = favicon
+        # hero_url: try MS CDN first (1,032 CDN images already in ClickHouse)
+        cdn_hero = _ms_cdn_image(str(ms_id) if ms_id else "")
+        if cdn_hero:
+            hero_url = cdn_hero
 
-        # icon: App Store > gstatic > empty
-        # App Store preferred over gstatic because it's matched by brand name,
-        # not domain — avoids wrong favicon when Clearbit autocomplete is off
-        # (e.g., "Square" resolves to squarespace.com via Clearbit, but the
-        # App Store correctly returns Square's payments app)
-        if app_icon:
-            icon_url = app_icon
-        elif favicon and _validate_image_url(favicon):
-            icon_url = favicon
+        # Check external image cache before hitting iTunes / Clearbit / gstatic
+        cached = _cached_external_images(advertiser_name)
+        if cached:
+            if not hero_url:
+                hero_url = cached.get("hero_url", "")
+            icon_url = cached.get("icon_url", "")
+        else:
+            app_icon = _app_store_icon(advertiser_name)
+            domain   = _clearbit_domain(advertiser_name)
+            favicon  = _google_favicon(domain) if domain else ""
+
+            # hero: MS CDN (already set above) > App Store 512px > gstatic 256px > empty
+            if not hero_url:
+                if app_icon:
+                    hero_url = app_icon
+                elif favicon and _validate_image_url(favicon):
+                    hero_url = favicon
+
+            # icon: App Store > gstatic > empty
+            # App Store preferred over gstatic because it's matched by brand name,
+            # not domain — avoids wrong favicon when Clearbit autocomplete is off
+            # (e.g., "Square" resolves to squarespace.com via Clearbit, but the
+            # App Store correctly returns Square's payments app)
+            if app_icon:
+                icon_url = app_icon
+            elif favicon and _validate_image_url(favicon):
+                icon_url = favicon
+
+            # Store results so next brief for same advertiser skips API calls
+            _store_image_cache(advertiser_name, hero_url, icon_url)
 
     # Proactive fallback intelligence — surface at brief creation (highest-intent moment)
     fallback = get_fallback_candidates(o.get("advertiser", ""), category=o.get("category"))
