@@ -355,6 +355,12 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
     → Call mark_offer_launched(advertiser=X). Thread-only notification, no channel broadcast.
       "TurboTax confirmed live."
 
+17. SYSTEM STATUS — "@Scout status", "how are you doing?", "is Scout healthy?"
+    Signals: "status", "health", "how fresh", "are you up", "system check", "benchmark freshness"
+    → Call get_scout_status(). Return a compact health card — one line per signal:
+      "Benchmarks: 2m ago  ·  Offers: 1,847  ·  Queue: 2 pending  ·  ClickHouse: OK"
+      Flag anything stale (benchmarks > 2h) or degraded.
+
 DEFAULT RULE: When the intent is unclear, always default to Intent 1 (open prospecting). Call get_top_opportunities() and show results. A confident answer to a slightly wrong interpretation is infinitely more useful than asking "what do you mean?"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -651,6 +657,19 @@ TOOLS = [
                 "advertiser": {"type": "string", "description": "Advertiser name (partial match OK)"},
             },
             "required": ["advertiser"],
+        },
+    },
+    {
+        "name": "get_scout_status",
+        "description": (
+            "Return a system health snapshot: benchmark freshness, offer inventory count, "
+            "queue depth, ClickHouse connectivity, and any data quality warnings. "
+            "Use for: '@Scout status', 'how are you doing?', 'is Scout healthy?', "
+            "'benchmark freshness', 'system check'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
         },
     },
 ]
@@ -1681,6 +1700,7 @@ def get_demand_queue_status() -> dict:
             "payout":     item.get("payout", ""),
             "network":    item.get("network", ""),
             "brief_url":  item.get("thread_url", ""),
+            "notion_url": item.get("notion_url", ""),
             "approved_by": item.get("approved_by", ""),
             "approved_at": item.get("approved_at", ""),
             "status":     "likely_live" if imp > 0 else "pending",
@@ -1723,6 +1743,80 @@ def mark_offer_launched(advertiser: str) -> dict:
     }
 
 
+def get_scout_status() -> dict:
+    """
+    System health snapshot: benchmark freshness, offer inventory, queue depth,
+    ClickHouse connectivity, and data quality warnings.
+    """
+    import time as _time
+    from datetime import datetime, timezone
+
+    status: dict = {}
+
+    # Benchmark freshness
+    age_secs = _time.time() - _BENCHMARKS_LOADED_AT if _BENCHMARKS_LOADED_AT else None
+    if age_secs is None:
+        status["benchmarks"] = "not loaded"
+    elif age_secs < 120:
+        status["benchmarks"] = f"{int(age_secs)}s ago"
+    elif age_secs < 3600:
+        status["benchmarks"] = f"{int(age_secs / 60)}m ago"
+    else:
+        status["benchmarks"] = f"{age_secs / 3600:.1f}h ago (stale — will refresh on next query)"
+
+    # Benchmark coverage
+    bench = _BENCHMARKS or {}
+    status["benchmark_coverage"] = {
+        "by_offer":    len(bench.get("by_offer_impact_id", {})),
+        "by_advertiser": len(bench.get("by_adv_name", {})),
+        "by_category_payout": len(bench.get("by_category_payout", {})),
+        "by_payout_type": len(bench.get("by_payout_type", {})),
+    }
+
+    # Offer inventory
+    offers = _load_offers()
+    status["offer_inventory"] = len(offers)
+    if offers:
+        advertisers = {o.get("advertiser") for o in offers}
+        status["unique_advertisers"] = len(advertisers)
+        networks = {}
+        for o in offers:
+            n = (o.get("network") or "unknown").lower()
+            networks[n] = networks.get(n, 0) + 1
+        status["by_network"] = networks
+
+    # Demand queue
+    state = _load_launched_offers_state()
+    queued    = [k for k, v in state.items() if v.get("status") == "queued"]
+    launched  = [k for k, v in state.items() if v.get("status") == "launched"]
+    status["queue_depth"] = len(queued)
+    status["launched_count"] = len(launched)
+    if queued:
+        status["queue_items"] = queued
+
+    # ClickHouse connectivity
+    try:
+        ch = _get_ch_client()
+        rows = ch.query("SELECT 1").result_rows
+        status["clickhouse"] = "ok" if rows else "degraded"
+    except Exception as e:
+        status["clickhouse"] = f"unavailable: {str(e)[:80]}"
+
+    # Data quality warnings
+    warnings = []
+    if bench and not bench.get("by_offer_impact_id"):
+        warnings.append("No Tier 1 (exact offer) benchmarks — all scoring from Tier 2+")
+    cats_null = sum(1 for o in offers if not o.get("category"))
+    if cats_null > 0:
+        pct = cats_null / max(len(offers), 1) * 100
+        warnings.append(f"{cats_null} offers ({pct:.0f}%) have no category — Tier 3 scoring disabled for these")
+    if warnings:
+        status["warnings"] = warnings
+
+    status["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return status
+
+
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
 TOOL_MAP = {
@@ -1736,6 +1830,7 @@ TOOL_MAP = {
     "get_fallback_candidates": get_fallback_candidates,
     "get_demand_queue_status": get_demand_queue_status,
     "mark_offer_launched": mark_offer_launched,
+    "get_scout_status": get_scout_status,
 }
 
 

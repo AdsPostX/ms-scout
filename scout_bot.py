@@ -13,6 +13,8 @@ import re
 import threading
 import time
 
+import requests
+
 from dotenv import load_dotenv
 from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -302,20 +304,37 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
 
     blocks.append({"type": "divider"})
 
+    # ── Copy QA ───────────────────────────────────────────────────────────────
+    _PROHIBITED_CHARS = ("—", "–", "™", "®")
+
+    def _copy_qa(text: str, max_len: int) -> str:
+        """Return a ✓/⚠ QA badge: char count, and flag if prohibited chars found."""
+        length = len(text)
+        has_prohibited = any(c in text for c in _PROHIBITED_CHARS)
+        if has_prohibited:
+            flagged = [c for c in _PROHIBITED_CHARS if c in text]
+            return f"⚠ prohibited chars: {', '.join(repr(c) for c in flagged)}"
+        if length > max_len:
+            return f"⚠ {length} chars (max {max_len})"
+        return f"✓ {length} chars"
+
     # ── Copy ─────────────────────────────────────────────────────────────────
     if title:
-        title_text = f"*Headline:* {title}"
+        title_qa  = _copy_qa(title, 58)
+        title_text = f"*Headline:* {title}  _{title_qa}_"
         if title_backup:
-            title_text += f"\n_A/B: {title_backup}_"
+            backup_qa = _copy_qa(title_backup, 58)
+            title_text += f"\n_A/B: {title_backup}  {backup_qa}_"
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": title_text},
         })
 
     if description:
+        desc_qa = _copy_qa(description, 170)
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Description:* {description}"},
+            "text": {"type": "mrkdwn", "text": f"*Description:* {description}  _{desc_qa}_"},
         })
 
     if short_desc:
@@ -339,7 +358,17 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
         r = " · ".join(line.strip() for line in restrictions.splitlines() if line.strip())
         detail_parts.append(f":warning: *Restrictions:* {r}")
     if tracking_url and tracking_url != "Not available — pull from network portal":
-        detail_parts.append(f"*Tracking URL:* `{tracking_url}`")
+        # Quick HEAD check — inline ✓/⚠ without blocking the render
+        url_qa = ""
+        try:
+            import urllib.request
+            req = urllib.request.Request(tracking_url, method="HEAD",
+                                         headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=4) as r:
+                url_qa = " _✓ resolves_" if r.status < 400 else f" _⚠ HTTP {r.status}_"
+        except Exception:
+            url_qa = " _⚠ did not resolve_"
+        detail_parts.append(f"*Tracking URL:* `{tracking_url}`{url_qa}")
     if offer_id:
         if portal_url:
             detail_parts.append(f"*Creatives:* <{portal_url}|View on {network}> · Offer ID: `{offer_id}`")
@@ -371,6 +400,7 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     # Packs enough data in value so the handler can write the queue item without
     # re-fetching the brief — keeps the click instant.
     if thread_ts:
+        cta_obj = copy.get("cta") or {}
         btn_val = json.dumps({
             "advertiser":   advertiser,
             "offer_id":     offer_id,
@@ -378,6 +408,15 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
             "network":      network,
             "tracking_url": tracking_url,
             "thread_ts":    thread_ts,
+            # Copy fields for Notion queue write (short keys to stay within 2900-char limit)
+            "t":   (copy.get("title", ""))[:120],
+            "d":   (copy.get("description", ""))[:200],
+            "cy":  (cta_obj.get("yes", ""))[:60],
+            "cn":  (cta_obj.get("no", ""))[:60],
+            "rpm": brief_data.get("scout_score_rpm", 0),
+            "pf":  (brief_data.get("performance_context", ""))[:120],
+            "rf":  (brief_data.get("risk_flag", ""))[:80],
+            "pt":  (brief_data.get("payout_type", "CPA"))[:10],
         }, separators=(",", ":"))[:2900]
         blocks.append({
             "type": "actions",
@@ -671,7 +710,13 @@ def _save_launched_offers(state: dict):
         log.warning(f"Could not persist launched_offers: {e}")
 
 
-def _record_queued_offer(advertiser: str, brief_data: dict, user_id: str, thread_url: str):
+def _record_queued_offer(
+    advertiser: str,
+    brief_data: dict,
+    user_id: str,
+    thread_url: str,
+    notion_url: str = "",
+):
     """Persist approval state so the lifecycle (queue → live → notify) can close the loop.
 
     Stores scout_score_estimated so the 14-day recap can compare prediction vs. actual.
@@ -686,6 +731,7 @@ def _record_queued_offer(advertiser: str, brief_data: dict, user_id: str, thread
         "approved_by":            user_id,
         "approved_at":            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
         "thread_url":             thread_url,
+        "notion_url":             notion_url or "",
         "status":                 "queued",
         # Snapshot the estimate at approval time — compared against actual at 14 days
         "scout_score_estimated":  brief_data.get("scout_score_rpm", 0),
@@ -695,18 +741,214 @@ def _record_queued_offer(advertiser: str, brief_data: dict, user_id: str, thread
     _save_launched_offers(state)
 
 
+def _write_to_notion_queue(
+    brief_data: dict,
+    copy_data: dict,
+    user_id: str,
+    thread_url: str,
+) -> str | None:
+    """
+    Create a Notion page in the Scout Demand Queue DB.
+    Properties: machine-readable filtering/sorting/Kanban data.
+    Page body: human-readable MS entry checklist (Ivan Zhao principle).
+    Returns the Notion page URL on success, None on failure.
+    """
+    from datetime import datetime, timezone
+
+    notion_token  = os.environ.get("NOTION_TOKEN", "")
+    queue_db_id   = os.environ.get("NOTION_QUEUE_DB_ID", "")
+    if not notion_token or not queue_db_id:
+        log.warning("Notion queue write skipped — NOTION_TOKEN or NOTION_QUEUE_DB_ID not set")
+        return None
+
+    advertiser   = brief_data.get("advertiser", "Offer")
+    payout_str   = brief_data.get("payout", "")
+    payout_num   = float(brief_data.get("payout_num") or 0)
+    payout_type  = (brief_data.get("payout_type") or "CPA").upper()
+    network      = (brief_data.get("network") or "").title()
+    tracking_url = brief_data.get("tracking_url", "")
+    rpm          = float(copy_data.get("rpm") or 0)
+    perf_ctx     = copy_data.get("pf", "") or brief_data.get("performance_context", "")
+    risk_flag    = copy_data.get("rf", "") or brief_data.get("risk_flag", "")
+
+    title_copy  = copy_data.get("t", "") or copy_data.get("title", "")
+    desc_copy   = copy_data.get("d", "") or copy_data.get("description", "")
+    cta_yes     = copy_data.get("cy", "") or copy_data.get("cta_yes", "")
+    cta_no      = copy_data.get("cn", "") or copy_data.get("cta_no", "")
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # ── Copy QA checks ────────────────────────────────────────────────────────
+    _PROHIBITED = ("—", "–", "™", "®")
+    title_len   = len(title_copy)
+    desc_len    = len(desc_copy)
+    title_ok    = title_len <= 58 and not any(c in title_copy for c in _PROHIBITED)
+    desc_ok     = desc_len  <= 170 and not any(c in desc_copy for c in _PROHIBITED)
+    title_qa    = f"✓ {title_len} chars" if title_ok else f"⚠ {title_len} chars (max 58)" if title_len > 58 else "⚠ prohibited chars"
+    desc_qa     = f"✓ {desc_len} chars" if desc_ok else f"⚠ {desc_len} chars (max 170)" if desc_len > 170 else "⚠ prohibited chars"
+
+    # ── Properties ────────────────────────────────────────────────────────────
+    page_name = f"{advertiser} — {payout_str} · {network}"
+
+    properties = {
+        "Name":           {"title": [{"text": {"content": page_name}}]},
+        "Status":         {"select": {"name": "Awaiting Entry"}},
+        "Network":        {"select": {"name": network}} if network else {},
+        "Payout":         {"number": payout_num} if payout_num else {},
+        "Payout Type":    {"select": {"name": payout_type}},
+        "Scout Score RPM": {"number": rpm} if rpm else {},
+        "Date Approved":  {"date": {"start": now_iso}},
+        "Approved By":    {"rich_text": [{"text": {"content": user_id}}]},
+        "Brief Link":     {"url": thread_url} if thread_url else {},
+    }
+    # Remove empty property blocks (Notion rejects empty select/number/url)
+    properties = {k: v for k, v in properties.items() if v}
+
+    # ── Page body ─────────────────────────────────────────────────────────────
+    def _rt(text: str) -> dict:
+        return {"object": "block", "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+
+    def _heading(text: str, level: int = 2) -> dict:
+        h = f"heading_{level}"
+        return {"object": "block", "type": h,
+                h: {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+
+    def _divider() -> dict:
+        return {"object": "block", "type": "divider", "divider": {}}
+
+    children = [
+        _heading("Copy", 2),
+        _rt(f"Headline    {title_copy}    {title_qa}"),
+        _rt(f"Description    {desc_copy}    {desc_qa}"),
+        _rt(f'CTA    Yes: "{cta_yes}"  /  No: "{cta_no}"'),
+        _divider(),
+        _heading("Offer Details", 2),
+        _rt(f"Payout: {payout_str}  ·  Network: {network}  ·  Payout Type: {payout_type}"),
+        _rt(f"Tracking URL: {tracking_url}" if tracking_url else "Tracking URL: pull from network portal"),
+        _divider(),
+        _heading("Scout Analysis", 2),
+        _rt(f"Est. RPM: ${rpm:,.0f}" if rpm else "Est. RPM: N/A"),
+        _rt(f"Benchmark basis: {perf_ctx}" if perf_ctx else "Benchmark basis: No MS data"),
+        _rt(f"Fit note: {risk_flag}" if risk_flag else "Fit note: None flagged"),
+        _divider(),
+        _heading("Brief Thread", 2),
+        _rt(f"Approved by: {user_id}  ·  {now_iso}"),
+        {"object": "block", "type": "bookmark",
+         "bookmark": {"url": thread_url, "caption": [{"type": "text", "text": {"content": "View brief thread in Slack →"}}]}}
+        if thread_url else _rt("Brief thread: not available"),
+    ]
+
+    payload = {
+        "parent": {"database_id": queue_db_id},
+        "properties": properties,
+        "children": children,
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.notion.com/v1/pages",
+            headers={
+                "Authorization": f"Bearer {notion_token}",
+                "Content-Type":  "application/json",
+                "Notion-Version": "2022-06-28",
+            },
+            json=payload,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            page_id = resp.json().get("id", "").replace("-", "")
+            notion_url = f"https://www.notion.so/{page_id}"
+            log.info(f"Notion queue page created: {notion_url}")
+            return notion_url
+        else:
+            log.warning(f"Notion queue write failed {resp.status_code}: {resp.text[:200]}")
+            return None
+    except Exception as e:
+        log.warning(f"Notion queue write error: {e}")
+        return None
+
+
+def _update_brief_card_queued(
+    web: WebClient,
+    channel: str,
+    message_ts: str,
+    advertiser: str,
+    user_id: str,
+    notion_url: str | None,
+) -> bool:
+    """
+    Update the brief card in-place: replace the 'Add to Queue' button block
+    with a ⏳ Awaiting Entry context block showing who queued it and a Notion link.
+    Returns True on success.
+    """
+    try:
+        hist = web.conversations_history(
+            channel=channel,
+            latest=message_ts,
+            limit=1,
+            inclusive=True,
+        )
+        messages = (hist.get("messages") or [])
+        if not messages:
+            log.warning(f"_update_brief_card_queued: no message found at {message_ts}")
+            return False
+
+        msg = messages[0]
+        blocks = list(msg.get("blocks") or [])
+
+        # Remove the actions block that contains scout_brief_queue button
+        blocks = [
+            b for b in blocks
+            if not (b.get("type") == "actions" and
+                    any(e.get("action_id") == "scout_brief_queue"
+                        for e in (b.get("elements") or [])))
+        ]
+
+        # Append queued status
+        notion_link = f" · <{notion_url}|View in Notion →>" if notion_url else ""
+        status_text = f":hourglass_flowing_sand: *Awaiting Entry* — queued by <@{user_id}>{notion_link}"
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": status_text}],
+        })
+
+        web.chat_update(
+            channel=channel,
+            ts=message_ts,
+            text=f"Campaign Brief — {advertiser} · ⏳ Awaiting Entry",
+            blocks=blocks,
+        )
+        return True
+    except Exception as e:
+        log.warning(f"_update_brief_card_queued failed: {e}")
+        return False
+
+
 def _try_add_to_demand_queue(
     web: WebClient,
     brief_data: dict,
     user_id: str,
     thread_url: str,
+    copy_data: dict | None = None,
+    brief_channel: str = "",
+    brief_ts: str = "",
 ) -> str | None:
     """
-    Record the offer in the demand queue.
+    Write offer to Notion Queue DB and update the brief card in-place.
+    Returns the Notion page URL on success, None otherwise.
     State is persisted to launched_offers.json by the caller (_record_queued_offer).
-    Returns None — in-thread confirmation is the only signal needed.
     """
-    return None
+    notion_url = _write_to_notion_queue(brief_data, copy_data or {}, user_id, thread_url)
+
+    if brief_channel and brief_ts:
+        _update_brief_card_queued(
+            web, brief_channel, brief_ts,
+            brief_data.get("advertiser", "Offer"),
+            user_id, notion_url,
+        )
+
+    return notion_url
 
 
 def _handle_approve(action: dict, payload: dict, web: WebClient):
@@ -744,27 +986,45 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     brief_data = _fetch_brief_for_approve(advertiser, offer)
     copy       = _make_copy_for_brief(brief_data, offer)
 
-    # 3. Post rich brief in thread (same Block Kit as @Scout "build a brief" flow)
-    brief_blocks = _build_brief_blocks(brief_data, copy, thread_ts=message_ts)
-    web.chat_postMessage(
+    # 3. Build thread URL — used in Notion page body as brief reference
+    thread_url = _slack_thread_url(channel, message_ts)
+
+    # 4. Post rich brief in thread — no queue button (auto-queued immediately)
+    brief_blocks = _build_brief_blocks(brief_data, copy, thread_ts="")
+    brief_resp = web.chat_postMessage(
         channel=channel,
         thread_ts=message_ts,
         text=f":clipboard: Campaign brief for {advertiser}",
         blocks=brief_blocks,
         unfurl_links=False,
     )
+    brief_ts = (brief_resp.get("ts") or "")
+    brief_channel = channel
 
-    # 4. Build thread URL — this IS the brief; queue item points to it
-    thread_url = _slack_thread_url(channel, message_ts)
+    # 5. Write to Notion queue + update brief card in-place with ⏳ status
+    copy_data = {
+        "t":   copy.get("title", ""),
+        "d":   copy.get("description", ""),
+        "cy":  (copy.get("cta") or {}).get("yes", ""),
+        "cn":  (copy.get("cta") or {}).get("no", ""),
+        "rpm": brief_data.get("scout_score_rpm", 0),
+        "pf":  brief_data.get("performance_context", ""),
+        "rf":  brief_data.get("risk_flag", ""),
+        "pt":  brief_data.get("payout_type", "CPA"),
+    }
+    notion_url = _try_add_to_demand_queue(
+        web, brief_data, user_id, thread_url,
+        copy_data=copy_data,
+        brief_channel=brief_channel,
+        brief_ts=brief_ts,
+    )
 
-    # 5. Persist approval state (for lifecycle tracking + launch notification)
-    _record_queued_offer(advertiser, brief_data, user_id, thread_url)
-
-    # 6. Record in queue state
-    _try_add_to_demand_queue(web, brief_data, user_id, thread_url)
+    # 6. Persist approval state (for lifecycle tracking + launch notification)
+    _record_queued_offer(advertiser, brief_data, user_id, thread_url, notion_url=notion_url or "")
 
     # 7. Confirm in the digest thread
-    confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>"
+    notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
+    confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
     web.chat_postMessage(channel=channel, thread_ts=message_ts, text=confirm)
     log.info(f"Approved: {advertiser} ({offer_id}) by {user_id}")
 
@@ -810,13 +1070,35 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
         "payout_num":   0,
         "network":      data.get("network", ""),
         "tracking_url": data.get("tracking_url", ""),
+        "payout_type":  data.get("pt", "CPA"),
+        "scout_score_rpm":    data.get("rpm", 0),
+        "performance_context": data.get("pf", ""),
+        "risk_flag":    data.get("rf", ""),
     }
 
-    # Persist in lifecycle tracker
-    _try_add_to_demand_queue(web, brief_data, user_id, thread_url)
-    _record_queued_offer(advertiser, brief_data, user_id, thread_url)
+    # Copy data (packed into button value with short keys)
+    copy_data = {
+        "t":   data.get("t", ""),
+        "d":   data.get("d", ""),
+        "cy":  data.get("cy", ""),
+        "cn":  data.get("cn", ""),
+        "rpm": data.get("rpm", 0),
+        "pf":  data.get("pf", ""),
+        "rf":  data.get("rf", ""),
+        "pt":  data.get("pt", "CPA"),
+    }
 
-    confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>"
+    # Write to Notion + update brief card in-place with ⏳ status
+    notion_url = _try_add_to_demand_queue(
+        web, brief_data, user_id, thread_url,
+        copy_data=copy_data,
+        brief_channel=channel,
+        brief_ts=message_ts,
+    )
+    _record_queued_offer(advertiser, brief_data, user_id, thread_url, notion_url=notion_url or "")
+
+    notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
+    confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
     web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=confirm)
     log.info(f"Brief queued: {advertiser} by {user_id}")
 
