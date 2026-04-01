@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
+from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 from slack_sdk.web import WebClient
 
 from scout_agent import ask
@@ -217,6 +218,35 @@ def _strip_mention(text: str) -> str:
 
 # ── Block Kit brief builder ───────────────────────────────────────────────────
 
+def _check_url_async(web: WebClient, channel: str, thread_ts: str, tracking_url: str) -> None:
+    """
+    Check tracking URL reachability in a background thread and post the result
+    as a follow-up message. Non-blocking — never delays brief card display.
+    Only called for real URLs (not 'Not available...' strings).
+    """
+    def _run():
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                tracking_url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                badge = "✓ resolves" if r.status < 400 else f"⚠ HTTP {r.status}"
+        except Exception:
+            badge = "⚠ did not resolve"
+        try:
+            web.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f"_Tracking URL: {badge}_",
+                unfurl_links=False,
+            )
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:  # noqa: ARG001
     """Build a Slack Block Kit message for a campaign brief."""
     advertiser   = brief_data.get("advertiser", "Offer")
@@ -358,17 +388,7 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
         r = " · ".join(line.strip() for line in restrictions.splitlines() if line.strip())
         detail_parts.append(f":warning: *Restrictions:* {r}")
     if tracking_url and tracking_url != "Not available — pull from network portal":
-        # Quick HEAD check — inline ✓/⚠ without blocking the render
-        url_qa = ""
-        try:
-            import urllib.request
-            req = urllib.request.Request(tracking_url, method="HEAD",
-                                         headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=4) as r:
-                url_qa = " _✓ resolves_" if r.status < 400 else f" _⚠ HTTP {r.status}_"
-        except Exception:
-            url_qa = " _⚠ did not resolve_"
-        detail_parts.append(f"*Tracking URL:* `{tracking_url}`{url_qa}")
+        detail_parts.append(f"*Tracking URL:* `{tracking_url}`")
     if offer_id:
         if portal_url:
             detail_parts.append(f"*Creatives:* <{portal_url}|View on {network}> · Offer ID: `{offer_id}`")
@@ -401,14 +421,13 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     # re-fetching the brief — keeps the click instant.
     if thread_ts:
         cta_obj = copy.get("cta") or {}
-        btn_val = json.dumps({
+        _btn_json = json.dumps({
             "advertiser":   advertiser,
             "offer_id":     offer_id,
             "payout":       payout,
             "network":      network,
             "tracking_url": tracking_url,
             "thread_ts":    thread_ts,
-            # Copy fields for Notion queue write (short keys to stay within 2900-char limit)
             "t":   (copy.get("title", ""))[:120],
             "d":   (copy.get("description", ""))[:200],
             "cy":  (cta_obj.get("yes", ""))[:60],
@@ -417,7 +436,20 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
             "pf":  (brief_data.get("performance_context", ""))[:120],
             "rf":  (brief_data.get("risk_flag", ""))[:80],
             "pt":  (brief_data.get("payout_type", "CPA"))[:10],
-        }, separators=(",", ":"))[:2900]
+        }, separators=(",", ":"))
+        try:
+            json.loads(_btn_json[:2900])
+            btn_val = _btn_json[:2900]
+        except json.JSONDecodeError:
+            # Truncation split a unicode escape — fall back to minimal safe payload
+            btn_val = json.dumps({
+                "advertiser":   advertiser,
+                "offer_id":     offer_id,
+                "payout":       payout,
+                "network":      network,
+                "tracking_url": tracking_url[:200],
+                "thread_ts":    thread_ts,
+            }, separators=(",", ":"))[:2900]
         blocks.append({
             "type": "actions",
             "elements": [{
@@ -594,7 +626,7 @@ def _build_help_blocks() -> list:
 
 # ── SCOUT Sniper: approve / reject handlers ───────────────────────────────────
 
-_SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #scout-hq
+_SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #scout-qa (was #scout-hq)
 
 
 # ── Approve helpers ───────────────────────────────────────────────────────────
@@ -724,6 +756,10 @@ def _record_queued_offer(
     """
     from datetime import datetime, timezone
     state = _load_launched_offers()
+    existing = state.get(advertiser, {})
+    if existing.get("status") == "queued":
+        log.info(f"_record_queued_offer: {advertiser} already queued — skipping overwrite")
+        return
     state[advertiser] = {
         "payout":                 brief_data.get("payout", ""),
         "payout_num":             brief_data.get("payout_num", 0),
@@ -817,11 +853,23 @@ def _write_to_notion_queue(
     def _divider() -> dict:
         return {"object": "block", "type": "divider", "divider": {}}
 
+    def _callout(text: str, emoji: str = "📋") -> dict:
+        return {
+            "object": "block", "type": "callout",
+            "callout": {
+                "rich_text": [{"type": "text", "text": {"content": text}}],
+                "icon": {"emoji": emoji},
+                "color": "blue_background",
+            }
+        }
+
     children = [
         _heading("Copy", 2),
-        _rt(f"Headline    {title_copy}    {title_qa}"),
-        _rt(f"Description    {desc_copy}    {desc_qa}"),
-        _rt(f'CTA    Yes: "{cta_yes}"  /  No: "{cta_no}"'),
+        _callout(title_copy, "✏️"),
+        _rt(title_qa),
+        _callout(desc_copy, "📝"),
+        _rt(desc_qa),
+        _callout(f'Yes: "{cta_yes}"  /  No: "{cta_no}"', "👆"),
         _divider(),
         _heading("Offer Details", 2),
         _rt(f"Payout: {payout_str}  ·  Network: {network}  ·  Payout Type: {payout_type}"),
@@ -867,6 +915,46 @@ def _write_to_notion_queue(
     except Exception as e:
         log.warning(f"Notion queue write error: {e}")
         return None
+
+
+def _update_notion_status(notion_url: str, new_status: str) -> bool:
+    """
+    PATCH a Notion page's Status select property to new_status.
+    Called when an offer is marked live — keeps Notion in sync with launched_offers.json.
+    Returns True on success. Best-effort — failure logged, never raises.
+    """
+    if not notion_url:
+        return False
+    notion_token = os.environ.get("NOTION_TOKEN", "")
+    if not notion_token:
+        return False
+    # Extract page ID from URL: https://www.notion.so/{32-char-id} or with hyphens
+    page_id = notion_url.rstrip("/").split("/")[-1].replace("-", "")
+    if len(page_id) != 32:
+        log.warning(f"_update_notion_status: unexpected page_id format: {page_id!r}")
+        return False
+    # Notion API requires hyphenated UUID: 8-4-4-4-12
+    hyphenated = f"{page_id[:8]}-{page_id[8:12]}-{page_id[12:16]}-{page_id[16:20]}-{page_id[20:]}"
+    try:
+        resp = requests.patch(
+            f"https://api.notion.com/v1/pages/{hyphenated}",
+            headers={
+                "Authorization": f"Bearer {notion_token}",
+                "Content-Type":  "application/json",
+                "Notion-Version": "2022-06-28",
+            },
+            json={"properties": {"Status": {"select": {"name": new_status}}}},
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            log.info(f"Notion status updated to '{new_status}': {notion_url}")
+            return True
+        else:
+            log.warning(f"Notion status update failed {resp.status_code}: {resp.text[:120]}")
+            return False
+    except Exception as e:
+        log.warning(f"_update_notion_status error: {e}")
+        return False
 
 
 def _update_brief_card_queued(
@@ -962,6 +1050,11 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
       4. Try to write item to Slack Demand Queue list (best-effort, requires lists:write scope)
       5. Post confirmation with queue link if auto-write failed
     """
+    # NOTE: Same data path as _handle_brief_queue / scout_brief_queue button.
+    # Full copy comes from _make_copy_for_brief (not a truncated button value).
+    # Both flows write to launched_offers.json + Notion via _try_add_to_demand_queue.
+    # _write_to_notion_queue handles both short-key schema (t/d/cy/cn from button value)
+    # and long-key schema (title/description from _make_copy_for_brief) transparently.
     import scout_digest
 
     channel    = (payload.get("channel") or {}).get("id", "")
@@ -1000,6 +1093,11 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     )
     brief_ts = (brief_resp.get("ts") or "")
     brief_channel = channel
+
+    # Async tracking URL check — posts result as a follow-up, never blocks brief display
+    _real_url = (brief_data.get("tracking_url") or "").strip()
+    if _real_url and not _real_url.startswith("Not available"):
+        _check_url_async(web, channel, brief_ts, _real_url)
 
     # 5. Write to Notion queue + update brief card in-place with ⏳ status
     copy_data = {
@@ -1096,6 +1194,11 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
         brief_ts=message_ts,
     )
     _record_queued_offer(advertiser, brief_data, user_id, thread_url, notion_url=notion_url or "")
+
+    # Async tracking URL check — posts result as a follow-up, never blocks brief display
+    _real_url = (data.get("tracking_url", "") or "").strip()
+    if _real_url and not _real_url.startswith("Not available"):
+        _check_url_async(web, channel, thread_ts, _real_url)
 
     notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
     confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
@@ -1334,32 +1437,93 @@ _HOME_EXAMPLES = [
 ]
 
 
+def _build_home_queue_section() -> list:
+    """Build queue status blocks for the App Home dashboard. Reads from disk — no network calls."""
+    from datetime import datetime, timezone
+
+    state = _load_launched_offers()
+    queued = [
+        (adv, entry) for adv, entry in state.items()
+        if entry.get("status") == "queued"
+    ]
+
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": ":inbox_tray: Offer Queue", "emoji": True}},
+    ]
+
+    if not queued:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":white_check_mark: Queue is clear — nothing pending entry."},
+        })
+        return blocks
+
+    now = datetime.now(timezone.utc)
+    for adv, entry in sorted(queued, key=lambda x: x[1].get("approved_at", ""), reverse=False):
+        payout     = entry.get("payout", "")
+        network    = entry.get("network", "")
+        notion_url = entry.get("notion_url", "")
+        approved_at = entry.get("approved_at", "")
+        days_str   = ""
+        if approved_at:
+            try:
+                approved_dt = datetime.fromisoformat(approved_at).replace(tzinfo=timezone.utc)
+                days = (now - approved_dt).days
+                days_str = f" · {days}d waiting"
+            except Exception:
+                pass
+        notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{adv}* — {payout} · {network}{days_str}{notion_link}"},
+        })
+
+    return blocks
+
+
 def _build_home_view() -> dict:
-    """Build the Slack App Home tab — persistent tutorial + interactive examples."""
-    blocks: list = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": "Scout — MomentScience Offer Intelligence", "emoji": False},
-        },
+    """
+    App Home dashboard — live queue at the top, system health strip, then examples.
+    Refreshed every time the user opens the App Home tab.
+    """
+    # ── Queue section ─────────────────────────────────────────────────────────
+    blocks: list = _build_home_queue_section()
+
+    # ── System health strip ───────────────────────────────────────────────────
+    try:
+        from scout_agent import _BENCHMARKS_LOADED_AT, _load_offers
+        import time as _time
+        age_secs = _time.time() - _BENCHMARKS_LOADED_AT if _BENCHMARKS_LOADED_AT else None
+        bm_str = (f"{int(age_secs / 60)}m ago" if age_secs and age_secs < 3600
+                  else (f"{int(age_secs)}s ago" if age_secs and age_secs < 120
+                        else ("not loaded" if age_secs is None else f"{age_secs/3600:.1f}h ago")))
+        offers_count = len(_load_offers())
+        health_text = f"_Benchmarks: {bm_str}  ·  Offers: {offers_count:,}  ·  Networks: Impact · MaxBounty · FlexOffers_"
+    except Exception:
+        health_text = "_Networks: Impact · MaxBounty · FlexOffers · Data refreshes daily_"
+
+    blocks += [
+        {"type": "divider"},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": health_text}]},
+        {"type": "divider"},
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    "Mention *@Scout* in any channel and ask in plain English. "
-                    "Scout has access to the full offer inventory across Impact, MaxBounty, and FlexOffers "
-                    "— plus live performance data and publisher account details from the MS platform.\n\n"
-                    "*New here? Click any* *→ Try it* *button below to see a real answer in your DMs.*"
+                    "*Ask @Scout anything in plain English*\n"
+                    "Mention @Scout in any channel. Scout remembers context within a thread.\n\n"
+                    "*Quick commands (slash, any channel — ephemeral):*\n"
+                    "• `/scout-queue` — current queue status\n"
+                    "• `/scout-status` — system health\n"
+                    "• `@Scout status` — same as /scout-status, in-thread\n\n"
+                    "*Try an example →*"
                 ),
             },
         },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "*5 things you can do right now*"},
-        },
     ]
 
+    # ── Example "Try it" buttons (unchanged) ─────────────────────────────────
     for ex in _HOME_EXAMPLES:
         blocks.append({
             "type": "section",
@@ -1378,26 +1542,8 @@ def _build_home_view() -> dict:
     blocks += [
         {"type": "divider"},
         {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    "*How Scout works*\n"
-                    "• Ask anything in plain English — no special syntax or commands\n"
-                    "• Scout remembers context *within a thread* — ask follow-ups naturally\n"
-                    "• After any result, Scout surfaces suggested next steps as clickable buttons\n"
-                    "• Type `@Scout help` from any channel for a quick reference card\n"
-                    "• Data: offer inventory refreshes daily · performance data is live from MS"
-                ),
-            },
-        },
-        {"type": "divider"},
-        {
             "type": "context",
-            "elements": [{
-                "type": "mrkdwn",
-                "text": "_Networks: Impact · MaxBounty · FlexOffers · Publisher data from the MS platform_",
-            }],
+            "elements": [{"type": "mrkdwn", "text": "_Networks: Impact · MaxBounty · FlexOffers · Data refreshes daily_"}],
         },
     ]
 
@@ -1468,15 +1614,99 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
 
 # ── Main event handler ────────────────────────────────────────────────────────
 
+def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
+    """
+    Handle Scout slash commands. All responses are ephemeral — only the caller sees them.
+    Commands must be registered at api.slack.com/apps → Scout → Slash Commands.
+
+    /scout-queue  — Show the current demand queue with Notion links
+    /scout-status — System health: benchmark freshness, offer count, ClickHouse status
+    """
+    from scout_agent import get_demand_queue_status, get_scout_status
+
+    payload  = req.payload
+    command  = payload.get("command", "")
+    user_id  = payload.get("user_id", "")
+    channel  = payload.get("channel_id", "")
+
+    try:
+        if command == "/scout-queue":
+            result = get_demand_queue_status()
+            items  = result.get("pending", [])
+            if not items:
+                text = ":white_check_mark: Queue is clear — nothing pending entry."
+            else:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                lines = [f":hourglass_flowing_sand: *{result['count']} offer{'s' if result['count'] != 1 else ''} in queue*"]
+                for item in items:
+                    adv         = item["advertiser"]
+                    payout      = item.get("payout", "")
+                    network     = item.get("network", "")
+                    notion_url  = item.get("notion_url", "")
+                    approved_at = item.get("approved_at", "")
+                    is_live     = item.get("status") == "likely_live"
+                    badge       = ":large_green_circle: likely live" if is_live else ":white_circle: pending"
+                    notion_link = f" · <{notion_url}|Notion>" if notion_url else ""
+                    # Days waiting
+                    days_str = ""
+                    if approved_at:
+                        try:
+                            approved_dt = datetime.fromisoformat(approved_at).replace(tzinfo=timezone.utc)
+                            days = (now - approved_dt).days
+                            days_str = f" · {days}d"
+                        except Exception:
+                            pass
+                    lines.append(f"{badge} *{adv}* — {payout} · {network}{days_str}{notion_link}")
+                text = "\n".join(lines)
+            web.chat_postEphemeral(channel=channel, user=user_id, text=text)
+
+        elif command == "/scout-status":
+            s       = get_scout_status()
+            ch_stat = s.get("clickhouse", "unknown")
+            ch_icon = ":white_check_mark:" if ch_stat == "ok" else ":warning:"
+            bm_age  = s.get("benchmarks", "unknown")
+            offers  = s.get("offer_inventory", 0)
+            queue   = s.get("queue_depth", 0)
+            warns   = s.get("warnings", [])
+            lines   = [
+                ":satellite: *Scout Status*",
+                f"Benchmarks: `{bm_age}`  ·  Offers: `{offers:,}`  ·  Queue: `{queue} pending`  ·  ClickHouse: {ch_icon}",
+            ]
+            for w in warns:
+                lines.append(f":warning: {w}")
+            web.chat_postEphemeral(channel=channel, user=user_id, text="\n".join(lines))
+
+        else:
+            web.chat_postEphemeral(
+                channel=channel, user=user_id,
+                text=f"Unknown command `{command}`. Try `/scout-queue` or `/scout-status`.",
+            )
+    except Exception as e:
+        log.error(f"_handle_slash_command error ({command}): {e}")
+        try:
+            web.chat_postEphemeral(channel=channel, user=user_id,
+                                   text=f":warning: Scout command failed: {e}")
+        except Exception:
+            pass
+
+
 def handle_event(client: SocketModeClient, req: SocketModeRequest):
     # Acknowledge immediately — Slack requires <3s ack
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
 
-    web = WebClient(token=BOT_TOKEN)
+    web = WebClient(token=BOT_TOKEN, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
 
     # ── Button clicks ─────────────────────────────────────────────────────────
     if req.type == "interactive":
         _handle_block_action(req, web)
+        return
+
+    # ── Slash commands ────────────────────────────────────────────────────────
+    # NOTE: /scout-queue and /scout-status must be registered at api.slack.com/apps
+    #       → Scout app → Slash Commands (Socket Mode). One-time manual step.
+    if req.type == "slash_commands":
+        _handle_slash_command(req, web)
         return
 
     if req.type != "events_api":
@@ -1650,6 +1880,15 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             msg += f"\n{tags}"
         web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
+        # Sync Notion Demand Queue page to "Live" status
+        _notion_url = launched_offer.get("notion_url", "")
+        if _notion_url:
+            threading.Thread(
+                target=_update_notion_status,
+                args=(_notion_url, "Live"),
+                daemon=True,
+            ).start()
+
     if isinstance(response, dict) and response.get("type") == "brief":
         brief_data = response["brief_data"]
         copy       = response["copy"]
@@ -1675,6 +1914,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             blocks=blocks,
         )
         log.info(f"Posted Block Kit brief for {brief_data.get('advertiser')} in {channel}")
+
+        # Async tracking URL check — posts result as a follow-up, never blocks brief display
+        _real_url = (brief_data.get("tracking_url", "") or "").strip()
+        if _real_url and not _real_url.startswith("Not available"):
+            _check_url_async(web, channel, thread_ts, _real_url)
 
     else:
         # Plain text response — with optional suggestion buttons
@@ -1850,6 +2094,22 @@ def _performance_recap(web: WebClient) -> None:
                 )
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
+                # Also DM the approver — they won't be watching a 2-week-old thread
+                approved_by = entry.get("approved_by", "")
+                if approved_by:
+                    try:
+                        dm_ch = web.conversations_open(users=[approved_by])["channel"]["id"]
+                        dm_body = (
+                            f":bar_chart: *{advertiser}* — 14-day recap\n"
+                            f"{score_line}\n"
+                            f"_{payout} · {network} · {impressions:,} impressions_"
+                        )
+                        if thread_url:
+                            dm_body += f" · <{thread_url}|view brief>"
+                        web.chat_postMessage(channel=dm_ch, text=dm_body)
+                    except Exception as _dm_err:
+                        log.warning(f"Recap DM failed for {approved_by}: {_dm_err}")
+
                 # Mark sent — won't re-post
                 state[advertiser]["performance_recap_sent"] = True
                 state[advertiser]["actual_rpm_14d"]         = actual_rpm
@@ -1950,7 +2210,7 @@ def main():
     if not BOT_TOKEN or not APP_TOKEN:
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env")
 
-    web_client    = WebClient(token=BOT_TOKEN)
+    web_client    = WebClient(token=BOT_TOKEN, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
     _BOT_USER_ID  = web_client.auth_test()["user_id"]
     socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)

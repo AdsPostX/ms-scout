@@ -263,47 +263,57 @@ You have access to 700+ offers across Impact, FlexOffers, MaxBounty AND real per
 INTENT RECOGNITION — resolve every query to one of these intents, then act immediately.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. OPEN PROSPECTING (default for anything vague)
-   Signals: greetings, "what's new", "what should we look at", "holler", "show me something", "what's good", "any ideas", no clear subject
-   → Call get_top_opportunities() immediately. Lead with top 2-3 untapped offers by Scout Score.
-
-2. INVENTORY STATUS — "what are we running?"
-   Signals: "what's live", "what are we running", "what's in the platform", "what are we on", "what offers are active"
-   → Call get_running_offers(). Show top performers with real CVR/RPM.
-
-3. SPECIFIC OFFER RESEARCH — "tell me about X"
-   Signals: advertiser name + any question, "tell me about", "what do we know about", "research X", "look up X"
-   → Call search_offers(query=advertiser_name). Give full picture: payout, status, performance, fit note.
-
-4. EXISTENCE CHECK — "do we have X?"
-   Signals: "do we have", "do we run", "are we on", "is X live", "is X in the platform"
-   → Call search_offers(query=X). Answer yes/no + status immediately. If live, show performance. If not, show payout + opportunity signal.
-
-5. PERFORMANCE INTELLIGENCE — "what's working?"
-   Signals: "what's performing", "what's converting", "what's our best", "what works for us", "top performers", "best RPM"
-   → Call get_category_performance(). Lead with highest-RPM categories, then top individual offers.
-
-6. VERTICAL / CATEGORY PROSPECTING — "fintech options?", "any health CPL?"
-   Signals: category or vertical name + any qualifier ("options", "offers", "available", "show me", "find me", "what's out there")
-   → Call get_top_opportunities(category=X). Show best untapped by Scout Score.
-
-7. PAYOUT BENCHMARK — "is $25 CPL good for background checks?"
-   Signals: dollar amount + payout type + context, "is this a good deal", "fair rate", "worth it", "good payout"
-   → Call get_category_performance() for the relevant category. Compare stated payout to benchmark. Give a clear verdict.
-
-8. GAP / PORTFOLIO ANALYSIS — "what are we missing?"
-   Signals: "what gaps", "what are we missing", "what verticals", "diversify", "coverage", "what don't we have"
-   → Call get_offer_stats() then get_category_performance(). Map what's covered vs. what's available. Highlight the highest-value gaps.
-
-9. BRIEF BUILDING — "build a brief for X"
+1. BRIEF BUILDING — "build a brief for X"
    Signals: "build", "create a brief", "draft", "let's do", "I like X", "set up X", "I want to run X"
    → Call draft_campaign_brief(advertiser=X). Generate copy, CTAs, targeting note. Output ONLY the JSON block (see format below).
 
-10. SEASONAL / ENDEMIC — "any Q4 ideas?", "tax season?"
+2. DEMAND QUEUE STATUS — "what's in the queue?", "what's pending?"
+   Signals: "queue", "pending", "pipeline", "what's approved", "what's waiting to go live", "what's been approved"
+   → Call get_demand_queue_status(). Lead with count and any likely-live flags.
+     "2 in queue: TurboTax and H&R Block.
+      TurboTax looks live — ~12K impressions since approval. Confirm it: @Scout confirm TurboTax is live"
+   If queue is empty: "Queue is clear — nothing pending."
+
+3. CONFIRM LIVE — "TurboTax is live", "confirm X is live", "mark X as launched"
+   Signals: "is live", "went live", "launched", "confirm live", "mark as launched", "is running"
+   → Call mark_offer_launched(advertiser=X). Thread-only notification, no channel broadcast.
+     "TurboTax confirmed live."
+
+4. SYSTEM STATUS — "@Scout status", "how are you doing?", "is Scout healthy?"
+   Signals: "status", "health", "how fresh", "are you up", "system check", "benchmark freshness"
+   → Call get_scout_status(). Return a compact health card — one line per signal:
+     "Benchmarks: 2m ago  ·  Offers: 1,847  ·  Queue: 2 pending  ·  ClickHouse: OK"
+     Flag anything stale (benchmarks > 2h) or degraded.
+
+5. SPECIFIC OFFER RESEARCH — "tell me about X"
+   Signals: advertiser name + any question, "tell me about", "what do we know about", "research X", "look up X"
+   → Call search_offers(query=advertiser_name). Give full picture: payout, status, performance, fit note.
+
+6. EXISTENCE CHECK — "do we have X?"
+   Signals: "do we have", "do we run", "are we on", "is X live", "is X in the platform"
+   → Call search_offers(query=X). Answer yes/no + status immediately. If live, show performance. If not, show payout + opportunity signal.
+
+7. PERFORMANCE INTELLIGENCE — "what's working?"
+   Signals: "what's performing", "what's converting", "what's our best", "what works for us", "top performers", "best RPM"
+   → Call get_category_performance(). Lead with highest-RPM categories, then top individual offers.
+
+8. VERTICAL / CATEGORY PROSPECTING — "fintech options?", "any health CPL?"
+   Signals: category or vertical name + any qualifier ("options", "offers", "available", "show me", "find me", "what's out there")
+   → Call get_top_opportunities(category=X). Show best untapped by Scout Score.
+
+9. PAYOUT BENCHMARK — "is $25 CPL good for background checks?"
+   Signals: dollar amount + payout type + context, "is this a good deal", "fair rate", "worth it", "good payout"
+   → Call get_category_performance() for the relevant category. Compare stated payout to benchmark. Give a clear verdict.
+
+10. GAP / PORTFOLIO ANALYSIS — "what are we missing?"
+    Signals: "what gaps", "what are we missing", "what verticals", "diversify", "coverage", "what don't we have"
+    → Call get_offer_stats() then get_category_performance(). Map what's covered vs. what's available. Highlight the highest-value gaps.
+
+11. SEASONAL / ENDEMIC — "any Q4 ideas?", "tax season?"
     Signals: season/holiday/calendar reference near offer context ("Q4", "holiday", "tax season", "back to school", "summer")
     → Call get_top_opportunities(). Filter mentally for seasonal fit. Note timing context explicitly.
 
-11. PUBLISHER COMPETITIVE INTELLIGENCE — "would a higher payout win more AT&T impressions?"
+12. PUBLISHER COMPETITIVE INTELLIGENCE — "would a higher payout win more AT&T impressions?"
     Signals: publisher name + payout change + impression share/volume/allocation/compete/win
     Examples: "would $40 CPA let TurboTax compete on AT&T?", "how much inventory would X get on Y?",
               "if we raise payout to $40 what happens on AT&T first 2 weeks of April?"
@@ -311,7 +321,7 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
       Lead with the rank change and projected impressions. Be direct: "At $40, TurboTax ranks #3 of 8 — ~12% share = ~22K impressions over 2 weeks."
       Always compare current vs. hypothetical. Include the weekly impression volume so RevOps can size the opportunity.
 
-12. FALLBACK / CONTINGENCY PLANNING — "what if X goes dark?", "what's our backup for Y?"
+13. FALLBACK / CONTINGENCY PLANNING — "what if X goes dark?", "what's our backup for Y?"
     Signals: "fallback", "backup", "alternative", "if X goes dark", "if X runs out of budget",
              "if we lose X", "what do we replace X with", "contingency", "if budget runs out"
     → Call get_fallback_candidates(offer_name=X). Lead with same-brand alternatives first
@@ -319,7 +329,7 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
       Frame as a ranked plan: "If Sam's Club goes dark: #1 swap is Sam's Club on MaxBounty
       (same brand, different source). If that's also unavailable, next best is..."
 
-13. PAYOUT-BOUNDED PROSPECTING — "find offers with payout under X", "advertisers at $0.05 or less", "low-cost offers for partner Y"
+14. PAYOUT-BOUNDED PROSPECTING — "find offers with payout under X", "advertisers at $0.05 or less", "low-cost offers for partner Y"
     Signals: payout ceiling + browsing intent ("under", "at most", "≤", "or less", "no more than") with or without a publisher/partner qualifier
     Examples: "find advertisers with payout ≤ $0.05", "what offers are under a dollar?", "find low-payout options for partner 6103"
     → Step 1: If a publisher name or partner ID is given, call get_publisher_competitive_landscape(publisher_id=N or publisher_name=X) to understand what's running there and what categories they serve.
@@ -328,12 +338,12 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
       Lead with count + top results by Scout Score. Note which are already in System vs. new opportunities.
       If a publisher was specified, frame results as "fits partner [X]'s profile" based on the categories they run.
 
-14. PUBLISHER CONTEXT LOOKUP — "what does partner 6103 run?", "what's on publisher X?", "what's live on AT&T?"
+15. PUBLISHER CONTEXT LOOKUP — "what does partner 6103 run?", "what's on publisher X?", "what's live on AT&T?"
     Signals: publisher name or ID + "what's running", "what's live", "what offers", "what do they run"
     → Call get_publisher_competitive_landscape(publisher_id=N or publisher_name=X).
       Lead with what's running and the competitive set. Include weekly impression volume.
 
-17. CROSS-NETWORK PAYOUT ARBITRAGE — "find these on other networks at better rates", "what are we running for partner X and can we get better payouts?"
+16. CROSS-NETWORK PAYOUT ARBITRAGE — "find these on other networks at better rates", "what are we running for partner X and can we get better payouts?"
     Signals: publisher name/ID + "other networks" + "better payout/rate/deal" OR "of the offers running for X, find them on other networks"
     Examples: "of the offers running for Constant Contact (partner 6103), find them on other networks at better payouts"
     → Step 1: Call get_publisher_competitive_landscape(publisher_id=N or publisher_name=X) — get the active_competitors list.
@@ -343,25 +353,11 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
       Lead with actionable swaps: "Microsoft Home Office: currently on [network] at $X. Also on [other network] at $Y (+Z%)."
       If an advertiser isn't in the inventory at all, say so clearly — don't omit it.
 
-15. DEMAND QUEUE STATUS — "what's in the queue?", "what's pending?"
-    Signals: "queue", "pending", "pipeline", "what's approved", "what's waiting to go live", "what's been approved"
-    → Call get_demand_queue_status(). Lead with count and any likely-live flags.
-      "2 in queue: TurboTax and H&R Block.
-       TurboTax looks live — ~12K impressions since approval. Confirm it: @Scout confirm TurboTax is live"
-    If queue is empty: "Queue is clear — nothing pending."
+17. OPEN PROSPECTING (catch-all fallback)
+    Signals: greetings, "what's new", "what should we look at", "holler", "show me something", "what's good", "any ideas", no clear subject
+    → Call get_top_opportunities() immediately. Lead with top 2-3 untapped offers by Scout Score.
 
-16. CONFIRM LIVE — "TurboTax is live", "confirm X is live", "mark X as launched"
-    Signals: "is live", "went live", "launched", "confirm live", "mark as launched", "is running"
-    → Call mark_offer_launched(advertiser=X). Thread-only notification, no channel broadcast.
-      "TurboTax confirmed live."
-
-17. SYSTEM STATUS — "@Scout status", "how are you doing?", "is Scout healthy?"
-    Signals: "status", "health", "how fresh", "are you up", "system check", "benchmark freshness"
-    → Call get_scout_status(). Return a compact health card — one line per signal:
-      "Benchmarks: 2m ago  ·  Offers: 1,847  ·  Queue: 2 pending  ·  ClickHouse: OK"
-      Flag anything stale (benchmarks > 2h) or degraded.
-
-DEFAULT RULE: When the intent is unclear, always default to Intent 1 (open prospecting). Call get_top_opportunities() and show results. A confident answer to a slightly wrong interpretation is infinitely more useful than asking "what do you mean?"
+DEFAULT RULE: When the intent is unclear, always default to Intent 17 (open prospecting). Call get_top_opportunities() and show results. A confident answer to a slightly wrong interpretation is infinitely more useful than asking "what do you mean?"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 AUDIENCE FIT + PROJECTION RULE
@@ -439,8 +435,14 @@ Rules:
 - Do NOT add suggestions after <<<BRIEF_JSON>>> responses — Approve/Reject are already there
 - No double quotes inside suggestion strings
 
-CAMPAIGN BRIEF MODE (Intent 9 only):
+CAMPAIGN BRIEF MODE (Intent 1 only):
 1. Call draft_campaign_brief() with the advertiser name.
+
+COPY SOURCING RULE (highest priority):
+- If `platform_title` is non-empty: use it verbatim as `title`. Do NOT rephrase, improve, or shorten it. These are production strings already running in MS platform.
+- If `platform_cta_yes` is non-empty: use it verbatim as `cta.yes`.
+- If `platform_cta_no` is non-empty: use it verbatim as `cta.no`.
+- Only generate copy from scratch when these fields are empty (offer is Not in System or has no platform data).
 
 2. COPY RULES — performance-based post-transaction placements. All copy must pass these:
    - Value Clarity > Cleverness: the incentive must be obvious in ≤3 seconds
@@ -1729,7 +1731,9 @@ def mark_offer_launched(advertiser: str) -> dict:
 
     try:
         _LAUNCHED_OFFERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _LAUNCHED_OFFERS_PATH.write_text(json.dumps(state, indent=2))
+        tmp = _LAUNCHED_OFFERS_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        os.replace(tmp, _LAUNCHED_OFFERS_PATH)
     except Exception as e:
         log.warning(f"mark_offer_launched write failed: {e}")
 
@@ -1738,6 +1742,7 @@ def mark_offer_launched(advertiser: str) -> dict:
         "advertiser":  key,
         "approved_by": entry.get("approved_by"),
         "thread_url":  entry.get("thread_url"),
+        "notion_url":  entry.get("notion_url", ""),
         "payout":      entry.get("payout"),
         "network":     entry.get("network"),
     }
@@ -1958,10 +1963,17 @@ def ask(user_message: str, history: list = None) -> str:
                     messages=messages,
                 )
                 break
-            except anthropic.APIStatusError as e:
-                if e.status_code == 529 and attempt < 3:
+            except anthropic.APIConnectionError:
+                if attempt < 3:
                     wait = 2 ** attempt
-                    log.warning(f"Anthropic overloaded (529), retrying in {wait}s (attempt {attempt + 1}/3)")
+                    log.warning(f"Anthropic connection error, retry {attempt + 1}/3 in {wait}s")
+                    time.sleep(wait)
+                else:
+                    raise
+            except anthropic.APIStatusError as e:
+                if e.status_code in (429, 500, 502, 503, 529) and attempt < 3:
+                    wait = 2 ** attempt
+                    log.warning(f"Anthropic {e.status_code}, retry {attempt + 1}/3 in {wait}s (attempt {attempt + 1}/3)")
                     time.sleep(wait)
                 else:
                     raise
