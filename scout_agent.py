@@ -1841,7 +1841,7 @@ def get_advertiser_revenue_projection(
             JOIN from_airbyte_campaigns c
                 ON i.campaign_id = cast(c.id AS UInt64)
             LEFT JOIN from_airbyte_users u
-                ON cast(i.pid AS UInt64) = u.id
+                ON i.pid = toString(u.id)
             LEFT JOIN adpx_conversionsdetails cd
                 ON i.session_id = cd.session_id
                 AND cd.campaign_id = i.campaign_id
