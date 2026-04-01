@@ -50,3 +50,5 @@ services:
         sync: false
       - key: GIPHY_API_KEY
         sync: false
+      - key: PULSE_CHANNEL
+        sync: false
