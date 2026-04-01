@@ -317,10 +317,13 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
 12. PUBLISHER COMPETITIVE INTELLIGENCE — "would a higher payout win more AT&T impressions?"
     Signals: publisher name + payout change + impression share/volume/allocation/compete/win
     Also triggers on: "let's do the projection/analysis/breakdown for [publisher]", "look at historic traffic for [publisher]", "performance of [offer] on [publisher]"
+    Payout scenario signals: "[offer] on [publisher] if CPA/payout changes from $X to $Y", "what RPM will X get if payout is $Y", "what payout do we need to reach top [N] on [publisher]", "how much do we need to beat [competitor] on [publisher]"
     Examples: "would $40 CPA let TurboTax compete on AT&T?", "how much inventory would X get on Y?",
+              "what will the RPM be for TurboTax 20% off on AT&T if CPA increases from $35 to $45?",
               "if we raise payout to $40 what happens on AT&T first 2 weeks of April?",
               "let's do the projection for AT&T — look at historic traffic trends and performance of Disney+"
     → Call get_publisher_competitive_landscape(publisher_name=Y, offer_name=X, hypothetical_payout=N).
+      IMPORTANT: For "from $X to $Y" — pass Y (the NEW value), not X.
       Lead with the rank change and projected impressions. Be direct: "At $40, TurboTax ranks #3 of 8 — ~12% share = ~22K impressions over 2 weeks."
       Always compare current vs. hypothetical. Include the weekly impression volume so RevOps can size the opportunity.
 
@@ -363,11 +366,24 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
 18. REVENUE / GROSS PROJECTION — "what is the projected revenue for Disney+ in April?"
     Signals: "projected revenue", "gross revenue", "how much will X make", "revenue for [offer] in [month]",
              "revenue forecast", "monthly revenue for X", "how much does X generate", "revenue projection for X across all partners"
+    Cap scenario signals: "what if cap is lifted", "uncapped revenue for X", "potential without cap",
+             "how much could X make without the cap", "what if we remove the budget cap"
+    Payout impact signals: "revenue if payout goes to $X", "revenue impact of raising CPA",
+             "what happens to revenue if we change payout to $Y"
     → Call get_advertiser_revenue_projection(advertiser_name=X, month="April 2026").
-      Lead with the total projected gross revenue, then break it down by publisher.
-      Always flag cap warnings and campaigns ending before month-end.
-      Format: "$52K projected gross revenue for Disney+ in April across 22 publishers.
-               AT&T Payment Confirmation drives 68% (~$35K). ⚠️ Campaign 3752 ends Mar 31 — excluded."
+      RESPONSE FORMAT — mandatory:
+      If cap_applied=True (cap_applied field in result):
+        Lead: ":red_circle: *Budget cap is the story.* Campaign [ID] caps [Advertiser] at *$[cap]*/mo — run rate is *$[avg_daily]/day* (~$[uncapped_projected_revenue] uncapped for [Month])."
+        Then: publisher breakdown (top 5, with share %).
+        End: ":zap: *Action:* Lift cap on Campaign [ID] or spin a new uncapped campaign to unlock ~$[delta] in [Month]."
+      If no cap:
+        Lead: "[Advertiser] projects to *$[projected_revenue]* gross for [Month] at *$[avg_daily]/day* run rate."
+        Then: publisher breakdown (top 5).
+        End: ":zap: *Action:* [most relevant next step]."
+      For payout impact queries — after calling projection tool, compute inline:
+        new_rpm = new_payout × (avg_cvr/100) × 1000. Present as: "At $Y CPA, RPM would be ~$Z."
+        Note: rank-change effects not modeled here — flag it once.
+      Always flag campaigns ending before month-end.
 
 DEFAULT RULE: When the intent is unclear, always default to Intent 17 (open prospecting). Call get_top_opportunities() and show results. A confident answer to a slightly wrong interpretation is infinitely more useful than asking "what do you mean?"
 
@@ -415,13 +431,17 @@ What you found. 2 lines max per item.
 *Bottom line:* One sentence. Bold it.
 
 Rules:
-- Use --- on its own line between items (it renders as a visual divider, not literal dashes)
+- SECTION BREAKS: Use \n---\n (exactly one newline before, one after — no blank lines, no spaces around dashes). This renders as a real Slack divider. Any other format (blank lines, spaces) breaks the renderer.
 - Use > at the start of a line for caveats, footnotes, Scout Scores, secondary context (renders smaller + gray)
-- *bold* for offer names, verdicts, key numbers
+- *bold* for offer names, verdicts, key numbers — especially the LEAD NUMBER
+- LEAD NUMBER: The first sentence of every non-trivial response MUST contain the single most important number, bolded. If it's a cap situation: "*$100* cap on Campaign [ID] is the whole story." If it's revenue: "*$62K* gross over 30 days." If it's a rank: "Disney+ ranks *#8 of 13*."
+- STATUS EMOJI: :large_green_circle: serving/live · :yellow_circle: marginal/near-cap · :red_circle: capped/ended/dead
+- ACTION LINE: End every response with :zap: *Action:* [one specific step]. Never skip this.
 - Lead with a one-line summary before the first ---
 - Keep each section to 2-3 lines max — design for skimming
 - For simple answers (yes/no, single offer, queue status): plain text, no --- needed
-- Never: | tables | **double asterisks** | ## headers | emojis in body text
+- Max 5 publishers or offers in any breakdown
+- Never: | tables | **double asterisks** | ## headers | methodology unless asked
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FOLLOW-UP SUGGESTIONS
@@ -1908,14 +1928,15 @@ def get_advertiser_revenue_projection(
     total_revenue_30d     = sum(r[4] for r in baseline_rows)
     total_payout_30d      = sum(r[5] for r in baseline_rows)
     total_impressions_30d = sum(r[2] for r in baseline_rows)
+    total_sessions_30d    = sum(r[3] for r in baseline_rows)
     total_conversions_30d = sum(r[6] for r in baseline_rows)
 
-    projected_revenue = (total_revenue_30d / 30) * days_in_month
-    projected_payout  = (total_payout_30d  / 30) * days_in_month
-    cap_applied = False
-    if monthly_cap_total and projected_revenue > monthly_cap_total:
-        projected_revenue = monthly_cap_total
-        cap_applied = True
+    uncapped_projected_revenue = round((total_revenue_30d / 30) * days_in_month, 2)
+    uncapped_projected_payout  = round((total_payout_30d  / 30) * days_in_month, 2)
+
+    cap_applied = bool(monthly_cap_total and uncapped_projected_revenue > monthly_cap_total)
+    projected_revenue = monthly_cap_total if cap_applied else uncapped_projected_revenue
+    projected_payout  = uncapped_projected_payout  # payout cap not modeled separately
 
     by_publisher = []
     for row in baseline_rows[:10]:
@@ -1931,25 +1952,31 @@ def get_advertiser_revenue_projection(
         })
 
     return {
-        "advertiser":             advertiser_name,
-        "month":                  month_label,
-        "days_in_month":          days_in_month,
-        "publisher_count":        len(baseline_rows),
+        "advertiser":                advertiser_name,
+        "month":                     month_label,
+        "days_in_month":             days_in_month,
+        "publisher_count":           len(baseline_rows),
         # Actuals (30-day)
-        "revenue_30d":            round(total_revenue_30d, 2),
-        "payout_30d":             round(total_payout_30d, 2),
-        "impressions_30d":        total_impressions_30d,
-        "conversions_30d":        total_conversions_30d,
+        "revenue_30d":               round(total_revenue_30d, 2),
+        "payout_30d":                round(total_payout_30d, 2),
+        "impressions_30d":           total_impressions_30d,
+        "conversions_30d":           total_conversions_30d,
         # Projections
-        "projected_revenue":      round(projected_revenue, 2),
-        "projected_payout":       round(projected_payout, 2),
-        "projected_impressions":  int((total_impressions_30d / 30) * days_in_month),
-        "cap_applied":            cap_applied,
+        "projected_revenue":         round(projected_revenue, 2),
+        "uncapped_projected_revenue": uncapped_projected_revenue,
+        "projected_payout":          round(projected_payout, 2),
+        "projected_impressions":     int((total_impressions_30d / 30) * days_in_month),
+        "cap_applied":               cap_applied,
+        "monthly_cap_total":         monthly_cap_total,
+        # Performance metrics (used for payout impact math)
+        "avg_daily_revenue":         round(total_revenue_30d / 30, 2),
+        "avg_rpm":                   round(total_revenue_30d / max(total_impressions_30d, 1) * 1000, 4),
+        "avg_cvr":                   round(total_conversions_30d / max(total_sessions_30d, 1) * 100, 4),
         # Breakdown + warnings
-        "by_publisher":           by_publisher,
-        "cap_warnings":           cap_warnings,
-        "end_date_warnings":      end_date_warnings,
-        "methodology":            "30-day avg daily revenue × days in month. Campaigns ending before month excluded.",
+        "by_publisher":              by_publisher,
+        "cap_warnings":              cap_warnings,
+        "end_date_warnings":         end_date_warnings,
+        "methodology":               "30-day avg daily revenue × days in month. Cap applied where monthly_cap_total < uncapped projection.",
     }
 
 

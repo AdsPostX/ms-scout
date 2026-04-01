@@ -220,11 +220,10 @@ _GIPHY_CACHE_TTL = 600  # 10 minutes — keeps well under 100 calls/hr free limi
 
 
 def _fetch_giphy_url(tag: str) -> str | None:
-    """Fetch a random animated GIF URL for the given tag. Returns None on any failure."""
+    """Fetch a GIF URL via Giphy search. Returns None on any failure."""
     api_key = os.getenv("GIPHY_API_KEY", "")
     if not api_key:
         return None
-    # Serve from cache if fresh
     cached_url, cached_at = _GIPHY_CACHE.get(tag, ("", 0.0))
     if cached_url and (time.time() - cached_at) < _GIPHY_CACHE_TTL:
         return cached_url
@@ -232,13 +231,17 @@ def _fetch_giphy_url(tag: str) -> str | None:
         import urllib.request as _ur
         import urllib.parse as _up
         import json as _json
+        offset = random.randint(0, 8)  # variety without staleness
         url = (
-            f"https://api.giphy.com/v1/gifs/random"
-            f"?api_key={api_key}&tag={_up.quote(tag)}&rating=g"
+            f"https://api.giphy.com/v1/gifs/search"
+            f"?api_key={api_key}&q={_up.quote(tag)}&rating=pg-13&limit=10&offset={offset}"
         )
         with _ur.urlopen(url, timeout=3) as r:
             data = _json.loads(r.read())
-        gif_url = data["data"]["images"]["fixed_height"]["url"]
+        results = data.get("data", [])
+        if not results:
+            return None
+        gif_url = results[0]["images"]["fixed_height"]["url"]
         _GIPHY_CACHE[tag] = (gif_url, time.time())
         return gif_url
     except Exception:
@@ -263,16 +266,20 @@ def _pick_loading_message(query: str = "") -> tuple[str, str]:
 
     q = (query or "").lower()
 
-    if any(w in q for w in ("brief", "campaign", "build a brief", "draft")):
-        pool_key, giphy_tag = "pool_brief", "working hard"
+    if any(w in q for w in ("brief", "campaign", "build a brief", "draft", "write")):
+        pool_key, giphy_tag = "pool_brief", "wolf of wall street working"
     elif any(w in q for w in ("queue", "status", "pending", "live", "launch", "enter")):
-        pool_key, giphy_tag = "pool_ops", "waiting"
-    elif any(w in q for w in ("performance", "rpm", "cvr", "revenue", "data", "benchmark", "report")):
-        pool_key, giphy_tag = "pool_data", "math"
-    elif any(w in q for w in ("publisher", "partner", "integration", "maxbounty", "impact", "flexoffers", "network")):
-        pool_key, giphy_tag = "pool_publisher", "thinking"
+        pool_key, giphy_tag = "pool_ops", "mission impossible"
+    elif any(w in q for w in ("revenue", "projection", "gross", "cap", "budget", "forecast")):
+        pool_key, giphy_tag = "pool_data", "breaking bad i am the one who knocks"
+    elif any(w in q for w in ("performance", "rpm", "cvr", "data", "benchmark", "report", "rank")):
+        pool_key, giphy_tag = "pool_data", "moneyball"
+    elif any(w in q for w in ("publisher", "partner", "at&t", "pch", "offerup", "integration", "network")):
+        pool_key, giphy_tag = "pool_publisher", "succession"
+    elif any(w in q for w in ("find", "opportunity", "untapped", "gap", "search", "what are")):
+        pool_key, giphy_tag = "pool_generic", "indiana jones searching"
     else:
-        pool_key, giphy_tag = "pool_generic", "loading"
+        pool_key, giphy_tag = "pool_generic", "sherlock holmes thinking"
 
     pool = _MESSAGE_POOLS[pool_key]
     tone = "late" if is_late else "grind"
@@ -287,21 +294,21 @@ def _clean_error(err: Exception) -> tuple[str, str]:
     """
     s = str(err)
     if "429" in s or "rate_limit" in s:
-        msg  = "Scout hit the rate limit — give it 60 seconds and try again."
-        tags = ["too much", "overwhelmed", "slow down", "traffic"]
+        msg = "Scout hit the rate limit — give it 60 seconds and try again."
+        tag = "office michael scott too much"
     elif "529" in s or "overloaded" in s:
-        msg  = "Anthropic is slammed right now — try again in a minute."
-        tags = ["overloaded", "busy", "crowded", "too many people"]
+        msg = "Anthropic is slammed right now — try again in a minute."
+        tag = "it crowd have you tried turning it off"
     elif "timeout" in s.lower() or "timed out" in s.lower():
-        msg  = "Scout timed out — try a narrower question."
-        tags = ["waiting", "slow", "timeout"]
+        msg = "Scout timed out — try a narrower question."
+        tag = "arrested development im on it"
     elif "connection" in s.lower() or "network" in s.lower():
-        msg  = "Network hiccup — try again."
-        tags = ["disconnected", "no signal", "network"]
+        msg = "Network hiccup — try again."
+        tag = "it crowd internet"
     else:
-        msg  = "Something broke — try again, or rephrase the question."
-        tags = ["fail", "oops", "broken", "nope", "whoops"]
-    return msg, random.choice(tags)
+        msg = "Something broke — try again, or rephrase the question."
+        tag = "arrested development but why"
+    return msg, tag
 
 
 def _post_error_update(web: WebClient, channel: str, ts: str, err: Exception) -> None:
@@ -322,28 +329,33 @@ def _rotating_status(
     web: WebClient,
     channel: str,
     ts: str,
+    gif_block: list | None = None,
     interval: float = 4.0,
 ):
     """
     Rotates the loading placeholder message every `interval` seconds.
     Returns a stop() callable — call it when the real response is ready.
-    Each update appends elapsed time so the user knows Scout isn't frozen.
+    gif_block: shared list reference — populated async by _inject_loading_gif.
+               Each rotation update re-reads it so the GIF persists once it arrives.
     """
     stop_event = threading.Event()
     start = time.monotonic()
     msgs = _LOADING_MESSAGES[:]
     random.shuffle(msgs)
     idx = [0]
+    _gif = gif_block if gif_block is not None else []
 
     def _run():
         while not stop_event.wait(interval):
             elapsed = int(time.monotonic() - start)
             msg = msgs[idx[0] % len(msgs)]
-            # Strip italic markers, append elapsed, re-wrap
             core = msg.strip("_")
             update_text = f"_{core}_ · {elapsed}s"
             try:
-                web.chat_update(channel=channel, ts=ts, text=update_text)
+                web.chat_update(
+                    channel=channel, ts=ts, text=update_text,
+                    blocks=[*_gif, {"type": "section", "text": {"type": "mrkdwn", "text": update_text}}],
+                )
             except Exception:
                 pass
             idx[0] += 1
@@ -670,7 +682,7 @@ def _text_to_blocks(text: str) -> list:
     - Everything else → section block
     Falls back to a single section block if no --- separators found.
     """
-    parts = re.split(r'\n\s*---\s*\n', text.strip())
+    parts = re.split(r'\n+\s*---\s*\n+', text.strip())
     if len(parts) == 1:
         # No separators — single section block
         return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
@@ -1439,11 +1451,27 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
 
     _msg_text, _giphy_tag = _pick_loading_message(query)
     placeholder = web.chat_postMessage(
-        channel=channel,
-        thread_ts=thread_ts,
-        text=_msg_text,
+        channel=channel, thread_ts=thread_ts, text=_msg_text,
+        blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
-    stop_rotating = _rotating_status(web, channel, placeholder["ts"])
+    _placeholder_ts_sg = placeholder["ts"]
+    _gif_block_sg: list = []
+
+    def _inject_gif_sg():
+        gif_url = _fetch_giphy_url(_giphy_tag)
+        if not gif_url:
+            return
+        _gif_block_sg.append({"type": "image", "image_url": gif_url, "alt_text": "Scout"})
+        try:
+            web.chat_update(
+                channel=channel, ts=_placeholder_ts_sg, text=_msg_text,
+                blocks=[{"type": "image", "image_url": gif_url, "alt_text": "Scout"},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
+            )
+        except Exception:
+            pass
+    threading.Thread(target=_inject_gif_sg, daemon=True).start()
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, gif_block=_gif_block_sg)
 
     # Build thread history (mirrors handle_event)
     history = []
@@ -1540,14 +1568,10 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
             msg += f"\n{tags}"
         web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
-    _reveal_gif = _fetch_giphy_url(_giphy_tag)
-    _gif_block = [{"type": "image", "image_url": _reveal_gif, "alt_text": "Scout"}] if _reveal_gif else []
-
     suggestion_blocks = _build_suggestion_buttons(sugg)
     web.chat_update(
-        channel=channel, ts=placeholder["ts"], text=response_text,
+        channel=channel, ts=_placeholder_ts_sg, text=response_text,
         blocks=[
-            *_gif_block,
             {"type": "section", "text": {"type": "mrkdwn", "text": response_text}},
             *suggestion_blocks,
         ],
@@ -1768,11 +1792,27 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
 
         _msg_text, _giphy_tag = _pick_loading_message(query)
         placeholder = web.chat_postMessage(
-            channel=dm_channel,
-            thread_ts=thread_ts,
-            text=_msg_text,
+            channel=dm_channel, thread_ts=thread_ts, text=_msg_text,
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
         )
-        stop_rotating = _rotating_status(web, dm_channel, placeholder["ts"])
+        _placeholder_ts_ah = placeholder["ts"]
+        _gif_block_ah: list = []
+
+        def _inject_gif_ah():
+            gif_url = _fetch_giphy_url(_giphy_tag)
+            if not gif_url:
+                return
+            _gif_block_ah.append({"type": "image", "image_url": gif_url, "alt_text": "Scout"})
+            try:
+                web.chat_update(
+                    channel=dm_channel, ts=_placeholder_ts_ah, text=_msg_text,
+                    blocks=[{"type": "image", "image_url": gif_url, "alt_text": "Scout"},
+                            {"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_inject_gif_ah, daemon=True).start()
+        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, gif_block=_gif_block_ah)
 
         try:
             response = ask(query)
@@ -1795,13 +1835,11 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
             else:
                 response_text     = response if isinstance(response, str) else str(response)
                 suggestion_blocks = []
-            _reveal_gif = _fetch_giphy_url(_giphy_tag)
-            _gif_block  = [{"type": "image", "image_url": _reveal_gif, "alt_text": "Scout"}] if _reveal_gif else []
             content_blocks = _text_to_blocks(response_text)
             web.chat_update(
-                channel=dm_channel, ts=placeholder["ts"],
+                channel=dm_channel, ts=_placeholder_ts_ah,
                 text=response_text,
-                blocks=[*_gif_block, *content_blocks, *suggestion_blocks],
+                blocks=[*content_blocks, *suggestion_blocks],
             )
         log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
     except Exception as e:
@@ -2178,14 +2216,30 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             ] + history
             log.info(f"Injected thread context for {thread_ts}: {ctx_line}")
 
-    # Post placeholder — text only while ask() runs; GIF appears at reveal
+    # Post placeholder immediately — GIF injected async so there's no Giphy latency on first render
     _msg_text, _giphy_tag = _pick_loading_message(query)
     placeholder = web.chat_postMessage(
-        channel=channel,
-        thread_ts=thread_ts,
-        text=_msg_text,
+        channel=channel, thread_ts=thread_ts, text=_msg_text,
+        blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
-    stop_rotating = _rotating_status(web, channel, placeholder["ts"])
+    _placeholder_ts = placeholder["ts"]
+    _gif_block_he: list = []
+
+    def _inject_gif_he():
+        gif_url = _fetch_giphy_url(_giphy_tag)
+        if not gif_url:
+            return
+        _gif_block_he.append({"type": "image", "image_url": gif_url, "alt_text": "Scout"})
+        try:
+            web.chat_update(
+                channel=channel, ts=_placeholder_ts, text=_msg_text,
+                blocks=[{"type": "image", "image_url": gif_url, "alt_text": "Scout"},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
+            )
+        except Exception:
+            pass
+    threading.Thread(target=_inject_gif_he, daemon=True).start()
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts, gif_block=_gif_block_he)
 
     try:
         response = ask(query, history=history)
@@ -2274,17 +2328,15 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             _run_preflight_qa(web, channel, thread_ts, brief_data)
 
     else:
-        # Plain text response — GIF reveal first, then content, then suggestion buttons
+        # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
         response_text = response if isinstance(response, str) else str(response)
         content_blocks = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
-        _reveal_gif = _fetch_giphy_url(_giphy_tag)
-        _gif_block  = [{"type": "image", "image_url": _reveal_gif, "alt_text": "Scout"}] if _reveal_gif else []
         web.chat_update(
             channel=channel,
-            ts=placeholder["ts"],
+            ts=_placeholder_ts,
             text=response_text,  # fallback for notifications
-            blocks=[*_gif_block, *content_blocks, *suggestion_blocks],
+            blocks=[*content_blocks, *suggestion_blocks],
         )
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 
