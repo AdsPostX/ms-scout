@@ -913,7 +913,11 @@ def _slack_thread_url(channel: str, thread_ts: str) -> str:
     return f"https://momentscience.slack.com/archives/{channel}/p{ts_nodot}"
 
 
-_LAUNCHED_OFFERS_FILE = pathlib.Path(__file__).parent / "data" / "launched_offers.json"
+_LAUNCHED_OFFERS_FILE        = pathlib.Path(__file__).parent / "data" / "launched_offers.json"
+_PULSE_STATE_FILE            = pathlib.Path(__file__).parent / "data" / "pulse_state.json"
+_LEARNINGS_FILE              = pathlib.Path(__file__).parent / "data" / "learnings.json"
+_LEARNED_BENCHMARKS_FILE     = pathlib.Path(__file__).parent / "data" / "learned_benchmarks.json"
+_PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # falls back to _SCOUT_HQ_CHANNEL if unset
 
 
 def _load_launched_offers() -> dict:
@@ -931,6 +935,398 @@ def _save_launched_offers(state: dict):
         _atomic_write(_LAUNCHED_OFFERS_FILE, state)
     except Exception as e:
         log.warning(f"Could not persist launched_offers: {e}")
+
+
+# ── Pulse state ───────────────────────────────────────────────────────────────
+
+def _load_pulse_state() -> dict:
+    try:
+        if _PULSE_STATE_FILE.exists():
+            return json.loads(_PULSE_STATE_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_pulse_state(state: dict):
+    try:
+        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(_PULSE_STATE_FILE, state)
+    except Exception as e:
+        log.warning(f"Could not persist pulse_state: {e}")
+
+
+# ── Learnings store ───────────────────────────────────────────────────────────
+
+def _load_learnings() -> dict:
+    try:
+        if _LEARNINGS_FILE.exists():
+            return json.loads(_LEARNINGS_FILE.read_text())
+    except Exception:
+        pass
+    return {"corrections": [], "positive_signals": []}
+
+
+def _save_learnings(data: dict):
+    try:
+        _LEARNINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(_LEARNINGS_FILE, data)
+    except Exception as e:
+        log.warning(f"Could not persist learnings: {e}")
+
+
+# ── Benchmark recalibration from 14-day actuals ───────────────────────────────
+
+def _update_benchmark_from_actuals(advertiser: str, actual_rpm: float, payout_type: str = "") -> None:
+    """
+    After a 14-day recap, fold the actual RPM into learned_benchmarks.json.
+    Stored as a rolling average per (advertiser, payout_type).
+    Scout loads this on startup to improve future estimates.
+    """
+    try:
+        key = f"{advertiser.lower()}:{payout_type.lower()}" if payout_type else advertiser.lower()
+        data: dict = {}
+        if _LEARNED_BENCHMARKS_FILE.exists():
+            try:
+                data = json.loads(_LEARNED_BENCHMARKS_FILE.read_text())
+            except Exception:
+                data = {}
+
+        entry = data.get(key, {"rpm_actual_avg": 0.0, "sample_count": 0})
+        n     = entry["sample_count"]
+        avg   = entry["rpm_actual_avg"]
+        # Rolling average (max 20 samples — recent data is more relevant)
+        n_new = min(n + 1, 20)
+        w     = 1 / n_new  # weight for new sample
+        new_avg = avg * (1 - w) + actual_rpm * w
+        data[key] = {"rpm_actual_avg": round(new_avg, 2), "sample_count": n_new}
+
+        _LEARNED_BENCHMARKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(_LEARNED_BENCHMARKS_FILE, data)
+        log.info(f"Learned benchmark updated: {key} → avg RPM ${new_avg:.2f} (n={n_new})")
+    except Exception as e:
+        log.warning(f"_update_benchmark_from_actuals failed for {advertiser}: {e}")
+
+
+# ── Feedback buttons ──────────────────────────────────────────────────────────
+
+def _build_feedback_buttons(query_hash: str) -> list:
+    """
+    Adds 👍 / 👎 / ✏️ feedback buttons to Scout text responses.
+    query_hash: short identifier for the query (for learnings tracking).
+    """
+    return [
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "👍 Accurate", "emoji": True},
+                    "action_id": "scout_feedback_good",
+                    "value": query_hash,
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
+                    "action_id": "scout_feedback_bad",
+                    "value": query_hash,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✏️ Correct this", "emoji": True},
+                    "action_id": "scout_feedback_correct",
+                    "value": query_hash,
+                },
+            ],
+        }
+    ]
+
+
+# ── Pulse signal runners ──────────────────────────────────────────────────────
+
+def _run_pulse_signals() -> dict:
+    """
+    Run the three proactive pulse signals against ClickHouse.
+    Returns a dict with cap_alerts, velocity_shifts, overnight_events.
+    Each is a list (may be empty if no signal or query failed).
+    """
+    from scout_agent import _get_ch_client
+    import json as _json
+    ch = _get_ch_client()
+
+    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": []}
+
+    # ── Signal 1: Cap proximity (campaigns ≥70% of monthly cap) ──────────────
+    try:
+        cap_rows = ch.query(
+            """
+            SELECT
+                c.id          AS campaign_id,
+                c.adv_name,
+                c.capping_config,
+                coalesce(sum(toFloat64OrNull(cv.revenue)), 0) AS revenue_this_month
+            FROM from_airbyte_campaigns c
+            LEFT JOIN adpx_conversionsdetails cv
+                ON toInt64(cv.campaign_id) = c.id
+                AND toYYYYMM(cv.created_at) = toYYYYMM(today())
+            WHERE c.deleted_at IS NULL
+              AND c.capping_config IS NOT NULL
+              AND c.capping_config != ''
+              AND c.capping_config != 'null'
+            GROUP BY c.id, c.adv_name, c.capping_config
+            """
+        ).result_rows
+        from datetime import date as _date
+        import calendar as _cal
+        today_d = _date.today()
+        days_in_month = _cal.monthrange(today_d.year, today_d.month)[1]
+        days_remaining = days_in_month - today_d.day + 1
+        for camp_id, adv_name, cap_cfg, revenue_mtd in cap_rows:
+            try:
+                cfg = _json.loads(cap_cfg) if isinstance(cap_cfg, str) else (cap_cfg or {})
+                mb  = float((cfg.get("month") or {}).get("budget") or 0)
+            except Exception:
+                mb = 0.0
+            if mb <= 0:
+                continue
+            cap_pct = revenue_mtd / mb
+            if cap_pct < 0.70:
+                continue
+            daily_run_rate = revenue_mtd / max(today_d.day, 1)
+            days_to_cap    = (mb - revenue_mtd) / daily_run_rate if daily_run_rate > 0 else 999
+            signals["cap_alerts"].append({
+                "adv_name":       adv_name,
+                "campaign_id":    int(camp_id) if camp_id else None,
+                "monthly_cap":    mb,
+                "revenue_mtd":    round(revenue_mtd, 2),
+                "cap_pct":        round(cap_pct * 100, 1),
+                "days_remaining": days_remaining,
+                "days_to_cap":    round(days_to_cap, 1),
+            })
+        signals["cap_alerts"].sort(key=lambda x: x["cap_pct"], reverse=True)
+    except Exception as e:
+        log.warning(f"Pulse cap signal failed: {e}")
+
+    # ── Signal 2: Revenue velocity (7d vs 30d run rate, ≥40% delta, >$1K/mo) ─
+    try:
+        vel_rows = ch.query(
+            """
+            SELECT
+                user_id,
+                sum(toFloat64OrNull(revenue))                                           AS revenue_30d,
+                sumIf(toFloat64OrNull(revenue), created_at >= today() - 7)              AS revenue_7d
+            FROM adpx_conversionsdetails
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+            WHERE created_at >= today() - 30
+            GROUP BY user_id
+            HAVING revenue_30d > 5000  -- exclude ramp-ups from near-zero baseline
+            ORDER BY revenue_30d DESC
+            LIMIT 200
+            """
+        ).result_rows
+        # Resolve publisher names in one batch query
+        uid_list = [str(r[0]) for r in vel_rows if r[0]]
+        org_map: dict = {}
+        if uid_list:
+            try:
+                id_csv = ",".join(uid_list[:200])
+                name_rows = ch.query(
+                    f"SELECT id, organization FROM from_airbyte_users WHERE id IN ({id_csv}) LIMIT 200"
+                ).result_rows
+                org_map = {str(r[0]): r[1] for r in name_rows}
+            except Exception:
+                pass
+        for user_id, rev_30d, rev_7d in vel_rows:
+            rev_7d_ann = (rev_7d / 7) * 30 if rev_7d else 0
+            if rev_30d <= 0:
+                continue
+            pct_delta = (rev_7d_ann - rev_30d) / rev_30d * 100
+            if abs(pct_delta) < 40:
+                continue
+            signals["velocity_shifts"].append({
+                "publisher_name": org_map.get(str(user_id), f"Partner {user_id}"),
+                "publisher_id":   int(user_id) if user_id else None,
+                "revenue_30d":    round(rev_30d, 2),
+                "revenue_7d_ann": round(rev_7d_ann, 2),
+                "pct_delta":      round(pct_delta, 1),
+                "direction":      "up" if pct_delta > 0 else "down",
+            })
+        signals["velocity_shifts"].sort(key=lambda x: abs(x["pct_delta"]), reverse=True)
+        signals["velocity_shifts"] = signals["velocity_shifts"][:5]
+    except Exception as e:
+        log.warning(f"Pulse velocity signal failed: {e}")
+
+    # ── Signal 3: Overnight campaign events (last 24h pauses/resumes) ─────────
+    try:
+        event_rows = ch.query(
+            """
+            SELECT type, old_data, created_at
+            FROM adpx_system_activity_logs
+            WHERE created_at >= now() - INTERVAL 24 HOUR
+              AND type IN ('pause', 'resume')
+              AND entity = 'campaigns'
+            ORDER BY created_at DESC
+            LIMIT 15
+            """
+        ).result_rows
+        for ev_type, old_data_str, created_at in event_rows:
+            adv_name = ""
+            try:
+                od = _json.loads(old_data_str) if old_data_str else {}
+                adv_name = od.get("adv_name") or od.get("name") or ""
+            except Exception:
+                pass
+            signals["overnight_events"].append({
+                "type":      ev_type,
+                "adv_name":  adv_name,
+                "timestamp": str(created_at) if created_at else "",
+            })
+    except Exception as e:
+        log.warning(f"Pulse events signal failed: {e}")
+
+    return signals
+
+
+def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
+    """
+    Format pulse signals into a Slack Block Kit message.
+    Returns (fallback_text, blocks).
+    """
+    from datetime import date as _date
+    today_label = _date.today().strftime("%B %-d, %Y")
+    blocks: list = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"Scout Pulse — {today_label}"}},
+    ]
+    sections: list = []
+
+    cap_alerts    = signals.get("cap_alerts", [])
+    vel_shifts    = signals.get("velocity_shifts", [])
+    night_events  = signals.get("overnight_events", [])
+
+    # ── Cap alerts ────────────────────────────────────────────────────────────
+    if cap_alerts:
+        lines = []
+        for a in cap_alerts[:5]:
+            hit_note = (
+                f"hits in ~{a['days_to_cap']:.0f}d"
+                if a["days_to_cap"] < a["days_remaining"]
+                else f"{a['days_remaining']}d left"
+            )
+            emoji = ":red_circle:" if a["cap_pct"] >= 90 else ":yellow_circle:"
+            lines.append(
+                f"{emoji} *{a['adv_name']}* — "
+                f"*${a['revenue_mtd']:,.0f}* of *${a['monthly_cap']:,.0f}* cap "
+                f"(*{a['cap_pct']}% used*, {hit_note})"
+            )
+        sections.append(":rotating_light: *CAP ALERTS*\n" + "\n".join(lines))
+    else:
+        sections.append(":large_green_circle: No campaigns near monthly cap.")
+
+    # ── Velocity shifts ───────────────────────────────────────────────────────
+    if vel_shifts:
+        ups   = [v for v in vel_shifts if v["direction"] == "up"]
+        downs = [v for v in vel_shifts if v["direction"] == "down"]
+        vel_lines = []
+        for v in ups[:3]:
+            vel_lines.append(
+                f":chart_with_upwards_trend: *{v['publisher_name']}* trending *+{v['pct_delta']:.0f}%* "
+                f"(7d: ${v['revenue_7d_ann']:,.0f}/mo vs 30d: ${v['revenue_30d']:,.0f}/mo)"
+            )
+        for v in downs[:3]:
+            vel_lines.append(
+                f":chart_with_downwards_trend: *{v['publisher_name']}* trending *{v['pct_delta']:.0f}%* "
+                f"(7d: ${v['revenue_7d_ann']:,.0f}/mo vs 30d: ${v['revenue_30d']:,.0f}/mo)"
+            )
+        sections.append(":bar_chart: *VELOCITY*\n" + "\n".join(vel_lines))
+
+    # ── Overnight events ──────────────────────────────────────────────────────
+    if night_events:
+        ev_lines = []
+        for e in night_events[:8]:
+            ts = e["timestamp"][:16] if e["timestamp"] else ""
+            name = f" ({e['adv_name']})" if e["adv_name"] else ""
+            ev_lines.append(
+                f":pause_button: {e['type'].capitalize()}{name} at {ts}"
+                if e["type"] == "pause"
+                else f":arrow_forward: {e['type'].capitalize()}{name} at {ts}"
+            )
+        sections.append(":clock2: *OVERNIGHT CHANGES*\n" + "\n".join(ev_lines))
+
+    # Build blocks — each section separated by a divider
+    for i, section_text in enumerate(sections):
+        if i > 0:
+            blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": section_text}})
+
+    blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": ":speech_balloon: Ask Scout anything: `@Scout what happened to [advertiser]?`"}],
+    })
+
+    fallback = f"Scout Pulse — {today_label}: {len(cap_alerts)} cap alerts, {len(vel_shifts)} velocity shifts, {len(night_events)} overnight events."
+    return fallback, blocks
+
+
+def _proactive_pulse(web: WebClient) -> None:
+    """
+    Daily proactive intelligence briefing daemon.
+
+    Posts once per day at 8:00 AM Chicago time to the pulse channel.
+    Idempotent — uses pulse_state.json to avoid double-posting.
+    Surfaces: cap proximity alerts, revenue velocity shifts, overnight events.
+    """
+    import pytz
+    from datetime import datetime as _dt, timezone as _tz
+
+    while True:
+        try:
+            chicago = pytz.timezone("America/Chicago")
+            now_chi = _dt.now(chicago)
+            # Sleep until next 8:00 AM Chicago
+            target  = now_chi.replace(hour=8, minute=0, second=0, microsecond=0)
+            if now_chi >= target:
+                # Already past 8am today — target tomorrow
+                from datetime import timedelta
+                target += timedelta(days=1)
+            sleep_secs = (target - now_chi).total_seconds()
+            log.info(f"[pulse] sleeping {sleep_secs / 3600:.1f}h until next pulse at {target}")
+            time.sleep(sleep_secs)
+
+            # Idempotency — skip if already posted today
+            today_str = _dt.now(chicago).strftime("%Y-%m-%d")
+            state = _load_pulse_state()
+            if state.get("last_pulse_date") == today_str:
+                log.info(f"[pulse] already posted today ({today_str}), skipping")
+                time.sleep(3600)  # retry check in 1h
+                continue
+
+            # Run signals
+            signals = _run_pulse_signals()
+
+            # Only post if there's something to say
+            has_content = (
+                signals.get("cap_alerts")
+                or signals.get("velocity_shifts")
+                or signals.get("overnight_events")
+            )
+            channel = _PULSE_CHANNEL or _SCOUT_HQ_CHANNEL
+            if has_content:
+                fallback, blocks = _format_pulse_blocks(signals)
+                web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
+                log.info(f"[pulse] posted to {channel}: {len(signals['cap_alerts'])} caps, "
+                         f"{len(signals['velocity_shifts'])} velocity, {len(signals['overnight_events'])} events")
+            else:
+                log.info("[pulse] no signals today — skipping post")
+
+            # Record posted
+            state["last_pulse_date"] = today_str
+            _save_pulse_state(state)
+
+        except Exception as e:
+            log.error(f"[pulse] cycle failed: {e}", exc_info=True)
+            time.sleep(3600)  # back off 1h on error
 
 
 def _record_queued_offer(
@@ -1569,11 +1965,15 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
     suggestion_blocks = _build_suggestion_buttons(sugg)
+    import hashlib as _hl
+    _qhash_sg = _hl.md5(f"{thread_ts}:{query[:40]}".encode()).hexdigest()[:8]
+    feedback_blocks_sg = _build_feedback_buttons(_qhash_sg)
     web.chat_update(
         channel=channel, ts=_placeholder_ts_sg, text=response_text,
         blocks=[
             {"type": "section", "text": {"type": "mrkdwn", "text": response_text}},
             *suggestion_blocks,
+            *feedback_blocks_sg,
         ],
     )
     log.info(f"Suggestion answered in {channel} (thread {thread_ts}): {query!r}")
@@ -1621,6 +2021,89 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         if user_id and query:
             _handle_home_try_query(web, user_id, query)
         return
+
+    # ── Feedback buttons (👍 / 👎 / ✏️) ──────────────────────────────────────
+    if action_id in ("scout_feedback_good", "scout_feedback_bad", "scout_feedback_correct"):
+        _handle_feedback(action, payload, web)
+        return
+
+
+# ── Feedback handler ─────────────────────────────────────────────────────────
+
+def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
+    """
+    Handle 👍 / 👎 / ✏️ feedback buttons on Scout responses.
+    Stores to data/learnings.json for future prompt injection.
+    """
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+
+    action_id   = action.get("action_id", "")
+    query_hash  = action.get("value", "")
+    user_id     = (payload.get("user") or {}).get("id", "")
+    channel     = (payload.get("channel") or {}).get("id", "")
+    message     = payload.get("message", {})
+    thread_ts   = message.get("thread_ts") or message.get("ts", "")
+    msg_ts      = message.get("ts", "")
+
+    learnings = _load_learnings()
+    now_str   = _dt.now(_tz.utc).isoformat()
+
+    if action_id == "scout_feedback_good":
+        learnings.setdefault("positive_signals", []).append({
+            "id":         str(_uuid.uuid4())[:8],
+            "created_at": now_str,
+            "query_hash": query_hash,
+            "user":       user_id,
+        })
+        _save_learnings(learnings)
+        # Acknowledge with an ephemeral message (visible only to the clicker)
+        try:
+            web.chat_postEphemeral(
+                channel=channel, user=user_id, thread_ts=thread_ts,
+                text=":white_check_mark: Got it — noted as accurate.",
+            )
+        except Exception:
+            pass
+
+    elif action_id == "scout_feedback_bad":
+        learnings.setdefault("negative_signals", []).append({
+            "id":         str(_uuid.uuid4())[:8],
+            "created_at": now_str,
+            "query_hash": query_hash,
+            "user":       user_id,
+        })
+        _save_learnings(learnings)
+        try:
+            web.chat_postEphemeral(
+                channel=channel, user=user_id, thread_ts=thread_ts,
+                text=":pencil: Got it — marked as off. Use :pencil2: *Correct this* to add the right answer so Scout remembers.",
+            )
+        except Exception:
+            pass
+
+    elif action_id == "scout_feedback_correct":
+        # Store a pending correction keyed by msg_ts — _handle_event will capture the follow-up reply
+        corr_id = str(_uuid.uuid4())[:8]
+        learnings.setdefault("pending_corrections", {})[msg_ts] = {
+            "id":          corr_id,
+            "created_at":  now_str,
+            "query_hash":  query_hash,
+            "correction_by": user_id,
+            "channel":     channel,
+            "thread_ts":   thread_ts,
+            "msg_ts":      msg_ts,
+        }
+        _save_learnings(learnings)
+        try:
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=f"<@{user_id}> What's the correct answer? Reply here and I'll remember it. :memo:",
+            )
+        except Exception:
+            pass
+
+    log.info(f"Feedback recorded: {action_id} query={query_hash} user={user_id}")
 
 
 # ── App Home tutorial ─────────────────────────────────────────────────────────
@@ -1836,10 +2319,13 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
                 response_text     = response if isinstance(response, str) else str(response)
                 suggestion_blocks = []
             content_blocks = _text_to_blocks(response_text)
+            import hashlib as _hl
+            _qhash_ah = _hl.md5(f"{dm_channel}:{query[:40]}".encode()).hexdigest()[:8]
+            feedback_blocks_ah = _build_feedback_buttons(_qhash_ah)
             web.chat_update(
                 channel=dm_channel, ts=_placeholder_ts_ah,
                 text=response_text,
-                blocks=[*content_blocks, *suggestion_blocks],
+                blocks=[*content_blocks, *suggestion_blocks, *feedback_blocks_ah],
             )
         log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
     except Exception as e:
@@ -2129,6 +2615,37 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         return
 
     log.info(f"Query from {event.get('user')}: {query!r}")
+    user_id_event = event.get("user", "")
+
+    # ── Correction capture — if this thread has a pending correction, store it ─
+    learnings_state = _load_learnings()
+    pending_corrs   = learnings_state.get("pending_corrections", {})
+    if pending_corrs:
+        # Check if any pending correction belongs to this thread
+        matched_key = None
+        for key, corr in pending_corrs.items():
+            if corr.get("thread_ts") == thread_ts:
+                matched_key = key
+                break
+        if matched_key:
+            corr = pending_corrs.pop(matched_key)
+            import uuid as _uuid
+            learnings_state.setdefault("corrections", []).append({
+                "id":            corr.get("id", str(_uuid.uuid4())[:8]),
+                "created_at":    corr.get("created_at", ""),
+                "query_hash":    corr.get("query_hash", ""),
+                "correction":    query,
+                "corrected_by":  user_id_event,
+                "confidence":    "high",
+            })
+            learnings_state["pending_corrections"] = pending_corrs
+            _save_learnings(learnings_state)
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=":white_check_mark: Got it — I'll remember that.",
+            )
+            log.info(f"Correction captured for query_hash={corr.get('query_hash')}: {query[:80]!r}")
+            return  # don't process this as a normal query
 
     lower = query.lower()
 
@@ -2329,14 +2846,17 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
-        response_text = response if isinstance(response, str) else str(response)
-        content_blocks = _text_to_blocks(response_text)
+        response_text     = response if isinstance(response, str) else str(response)
+        content_blocks    = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
+        import hashlib as _hl
+        _qhash = _hl.md5(f"{thread_ts}:{query[:40]}".encode()).hexdigest()[:8]
+        feedback_blocks   = _build_feedback_buttons(_qhash)
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
-            text=response_text,  # fallback for notifications
-            blocks=[*content_blocks, *suggestion_blocks],
+            text=response_text,
+            blocks=[*content_blocks, *suggestion_blocks, *feedback_blocks],
         )
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 
@@ -2524,6 +3044,13 @@ def _performance_recap(web: WebClient) -> None:
                 updated = True
                 log.info(f"14-day recap sent for {advertiser}: est=${estimated} actual=${actual_rpm}")
 
+                # Feed actuals back into learned benchmarks
+                if actual_rpm > 0:
+                    _update_benchmark_from_actuals(
+                        advertiser, actual_rpm,
+                        payout_type=entry.get("payout_type", ""),
+                    )
+
             if updated:
                 _save_launched_offers(state)
 
@@ -2628,6 +3155,8 @@ def main():
     threading.Thread(target=_performance_recap, args=(web_client,), daemon=True).start()
     # Background: nightly cleanup of state files to prevent unbounded growth
     threading.Thread(target=_cleanup_state, daemon=True).start()
+    # Background: daily proactive pulse — cap alerts, velocity shifts, overnight events
+    threading.Thread(target=_proactive_pulse, args=(web_client,), daemon=True).start()
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()

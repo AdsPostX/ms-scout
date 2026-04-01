@@ -44,6 +44,82 @@ _BENCHMARKS: dict = {}
 _BENCHMARKS_LOADED_AT: float = 0.0
 _BENCHMARKS_TTL = 3600  # 1 hour
 
+# ── Data quality tier helper ──────────────────────────────────────────────────
+
+def _data_quality_tier(days_of_data: int, sessions: int = 0) -> dict:
+    """
+    Compute confidence tier for a data window.
+    Used by tools to populate data_quality in return values.
+    Claude uses this to emit the CONFIDENCE LINE rule in responses.
+    """
+    if days_of_data >= 14 and sessions >= 1000:
+        tier, emoji = "strong", ":large_green_circle:"
+    elif days_of_data >= 7 and sessions >= 100:
+        tier, emoji = "directional", ":yellow_circle:"
+    else:
+        tier, emoji = "thin", ":red_circle:"
+    if sessions > 0:
+        note = f"{days_of_data} days · {sessions:,} sessions"
+    else:
+        note = f"{days_of_data} days"
+    return {"tier": tier, "emoji": emoji, "days_of_data": days_of_data, "sessions": sessions, "note": note}
+
+
+# ── Learnings injection ───────────────────────────────────────────────────────
+
+_LEARNINGS_PATH = pathlib.Path(__file__).parent / "data" / "learnings.json"
+_LEARNED_BENCHMARKS_PATH = pathlib.Path(__file__).parent / "data" / "learned_benchmarks.json"
+
+
+def _get_corrections_context() -> str:
+    """
+    Load high-confidence corrections from learnings.json and return as a
+    context string to prepend to user queries in ask().
+    Returns empty string if no corrections or file missing.
+    """
+    try:
+        if not _LEARNINGS_PATH.exists():
+            return ""
+        data = json.loads(_LEARNINGS_PATH.read_text())
+        corrections = [c for c in data.get("corrections", []) if c.get("confidence") == "high"]
+        if not corrections:
+            return ""
+        lines = []
+        for c in corrections[-10:]:  # last 10 high-confidence corrections
+            lines.append(f"- {c['correction']}")
+        return (
+            "TEAM CORRECTIONS (from prior feedback — treat these as ground truth):\n"
+            + "\n".join(lines)
+            + "\n\n"
+        )
+    except Exception:
+        return ""
+
+
+def _merge_learned_benchmarks() -> None:
+    """
+    Merge data/learned_benchmarks.json into _BENCHMARKS at startup.
+    Learned benchmarks have lower weight than ClickHouse actuals
+    but override category defaults. Called once after _load_performance_benchmarks().
+    """
+    global _BENCHMARKS
+    try:
+        if not _LEARNED_BENCHMARKS_PATH.exists():
+            return
+        lb = json.loads(_LEARNED_BENCHMARKS_PATH.read_text())
+        if not lb:
+            return
+        learned = _BENCHMARKS.setdefault("by_learned_actuals", {})
+        for key, entry in lb.items():
+            learned[key] = {
+                "avg_cvr_pct": 0.0,  # CVR not tracked in simple recap
+                "avg_rpm": entry.get("rpm_actual_avg", 0.0),
+                "sample_campaigns": entry.get("sample_count", 0),
+            }
+        log.info(f"Merged {len(lb)} learned benchmark entries into _BENCHMARKS")
+    except Exception as e:
+        log.warning(f"_merge_learned_benchmarks failed: {e}")
+
 def _load_performance_benchmarks() -> dict:
     """
     Query ClickHouse for real CVR + RPM benchmarks grounded in actual MS conversion data.
@@ -171,6 +247,7 @@ def _get_benchmarks() -> dict:
     global _BENCHMARKS, _BENCHMARKS_LOADED_AT
     if not _BENCHMARKS or (time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL:
         _BENCHMARKS = _load_performance_benchmarks()
+        _merge_learned_benchmarks()  # overlay actuals from 14-day recaps
         _BENCHMARKS_LOADED_AT = time.time()
     return _BENCHMARKS
 
@@ -472,7 +549,14 @@ Rules:
 - Use > at the start of a line for caveats, footnotes, Scout Scores, secondary context (renders smaller + gray)
 - *bold* for offer names, verdicts, key numbers — especially the LEAD NUMBER
 - LEAD NUMBER: The first sentence of every non-trivial response MUST contain the single most important number, bolded. If it's a cap situation: "*$100* cap on Campaign [ID] is the whole story." If it's revenue: "*$62K* gross over 30 days." If it's a rank: "Disney+ ranks *#8 of 13*."
+- LEAD NUMBER CONSISTENCY: The lead number MUST match the breakdown that follows. If you say "*14 campaigns*" you must list 14. If you show fewer (capped at 5, filtered to active-only), adjust the lead to match: "*14 campaigns total — 1 active production cap*" or "*3 active campaigns*". Never open with a count that contradicts the list below it.
 - STATUS EMOJI: :large_green_circle: serving/live · :yellow_circle: marginal/near-cap · :red_circle: capped/ended/dead
+- CONFIDENCE LINE: Every response with data must include a confidence line immediately before the :zap: Action line. Use > prefix. Three tiers:
+    :large_green_circle: Strong (≥14 days, ≥1K sessions): `> _Based on [N] days · [X] sessions_`
+    :yellow_circle: Directional (7–13 days or 100–999 sessions): `> _Directional — [N] days · [X] sessions_`
+    :red_circle: Thin (<7 days or <100 sessions): `> _Thin data — [N] days, [X] sessions. Treat as estimate only._`
+    For run_sql_query results: `> _Free-form query — [N] rows. Verify column semantics before acting._`
+    Omit only for pure status/operational responses (campaign status, queue status, scout status, yes/no answers).
 - ACTION LINE: End every response with :zap: *Action:* [one specific step]. Never skip this.
 - Lead with a one-line summary before the first ---
 - Keep each section to 2-3 lines max — design for skimming
@@ -2297,6 +2381,7 @@ def get_advertiser_revenue_projection(
         "cap_warnings":              cap_warnings,
         "end_date_warnings":         end_date_warnings,
         "methodology":               "30-day avg daily revenue × days in month. Cap applied where monthly_cap_total < uncapped projection.",
+        "data_quality":              _data_quality_tier(30, total_sessions_30d),
     }
 
 
@@ -2373,6 +2458,9 @@ def get_publisher_health(
         q1_rows = ch.query(q1, parameters=params1).result_rows
 
         # ── Query 2: ad metrics by placement ─────────────────────────────────
+        # Scan impressions LEFT (filtered by pid+date), sessions RIGHT (hash table).
+        # Putting impressions on the right OOMs on large publishers (FillingRightJoinSide).
+        state_clause_inner = f"AND state ILIKE {{geo_state: String}}" if geo_state else ""
         q2 = f"""
         SELECT
             s.placement,
@@ -2380,40 +2468,57 @@ def get_publisher_health(
             count(DISTINCT cd.id)                                   AS conversions,
             coalesce(sum(toFloat64OrNull(cd.revenue)), 0)           AS revenue,
             coalesce(sum(toFloat64OrNull(cd.payout)), 0)            AS payout
-        FROM adpx_sdk_sessions s
-        JOIN adpx_impressions_details i
-            ON i.session_id = s.session_id
-            AND toYYYYMM(i.created_at) >= {{partition: UInt32}}
-        LEFT JOIN adpx_conversionsdetails cd
-            ON cd.session_id = s.session_id
-            AND cd.campaign_id = i.campaign_id
-            AND toYYYYMM(cd.created_at) >= {{extended_partition: UInt32}}
-        WHERE s.user_id = {{pid: UInt64}}
-            AND toYYYYMM(s.created_at) >= {{partition: UInt32}}
-            AND s.created_at >= today() - {{days: UInt32}}
-          {state_clause}
+        FROM (
+            SELECT session_id, id, campaign_id
+            FROM adpx_impressions_details
+            PREWHERE pid = {{pid_str: String}}
+                AND toYYYYMM(created_at) >= {{partition: UInt32}}
+            WHERE created_at >= today() - {{days: UInt32}}
+        ) i
+        JOIN (
+            SELECT session_id, placement
+            FROM adpx_sdk_sessions
+            PREWHERE user_id = {{pid: UInt64}}
+                AND toYYYYMM(created_at) >= {{partition: UInt32}}
+            WHERE created_at >= today() - {{days: UInt32}}
+              {state_clause_inner}
+        ) s ON s.session_id = i.session_id
+        LEFT JOIN (
+            SELECT session_id, id, campaign_id, revenue, payout
+            FROM adpx_conversionsdetails
+            PREWHERE user_id = {{pid: UInt64}}
+                AND toYYYYMM(created_at) >= {{extended_partition: UInt32}}
+        ) cd ON cd.session_id = i.session_id AND cd.campaign_id = i.campaign_id
         GROUP BY s.placement
         """
-        params2 = {"pid": int(pid), "partition": partition, "extended_partition": extended_partition, "days": days}
+        params2 = {"pid": int(pid), "pid_str": str(pid), "partition": partition, "extended_partition": extended_partition, "days": days}
         if geo_state:
             params2["geo_state"] = f"%{geo_state}%"
         q2_rows = ch.query(q2, parameters=params2).result_rows
 
         # ── Query 3: click metrics by placement ───────────────────────────────
+        # Scan clicks LEFT (filtered by user_id+date), sessions RIGHT (hash table).
         q3 = f"""
         SELECT
             s.placement,
             count(tc.id)                            AS clicks,
             countIf(tc.is_converted)               AS converted_clicks,
             round(avg(tc.position), 1)             AS avg_position
-        FROM adpx_sdk_sessions s
-        JOIN adpx_tracked_clicks tc
-            ON tc.session_id = s.session_id
-            AND toYYYYMM(tc.created_at) >= {{partition: UInt32}}
-        WHERE s.user_id = {{pid: UInt64}}
-            AND toYYYYMM(s.created_at) >= {{partition: UInt32}}
-            AND s.created_at >= today() - {{days: UInt32}}
-          {state_clause}
+        FROM (
+            SELECT session_id, id, is_converted, position
+            FROM adpx_tracked_clicks
+            PREWHERE user_id = {{pid: UInt64}}
+                AND toYYYYMM(created_at) >= {{partition: UInt32}}
+            WHERE created_at >= today() - {{days: UInt32}}
+        ) tc
+        JOIN (
+            SELECT session_id, placement
+            FROM adpx_sdk_sessions
+            PREWHERE user_id = {{pid: UInt64}}
+                AND toYYYYMM(created_at) >= {{partition: UInt32}}
+            WHERE created_at >= today() - {{days: UInt32}}
+              {state_clause_inner}
+        ) s ON s.session_id = tc.session_id
         GROUP BY s.placement
         """
         params3 = {"pid": int(pid), "partition": partition, "days": days}
@@ -2544,6 +2649,7 @@ def get_publisher_health(
             "by_placement":          by_placement,
             "os_split":              os_split,
             "top_placements_note":   top_placement_note,
+            "data_quality":          _data_quality_tier(days, total_sessions),
         }
     except Exception as e:
         log.exception("get_publisher_health failed")
@@ -2832,6 +2938,10 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
             "truncation_note": f"Results limited to {max_rows} rows. Add LIMIT to your query to control this." if truncated else None,
             "columns": col_names,
             "rows": rows_as_dicts,
+            "data_quality": {
+                "tier": "free_form",
+                "note": f"Free-form query — {len(rows_as_dicts)} rows. Verify column semantics before acting.",
+            },
         }
     except Exception as e:
         err = str(e)
@@ -3044,7 +3154,10 @@ def ask(user_message: str, history: list = None) -> str:
         return "ANTHROPIC_API_KEY not set — Scout can't respond."
 
     client = anthropic.Anthropic(api_key=api_key)
-    messages = list(history or []) + [{"role": "user", "content": user_message}]
+    # Prepend team corrections as grounding context for this query
+    corrections_ctx = _get_corrections_context()
+    effective_message = (corrections_ctx + user_message) if corrections_ctx else user_message
+    messages = list(history or []) + [{"role": "user", "content": effective_message}]
     # List of brief results — append each draft_campaign_brief call result.
     # We use the FIRST successful result as the primary (handles multi-brief
     # requests where Claude calls the tool multiple times in one turn).
