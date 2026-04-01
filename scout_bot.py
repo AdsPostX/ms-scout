@@ -555,8 +555,8 @@ def _build_help_blocks() -> list:
 
 # ── SCOUT Sniper: approve / reject handlers ───────────────────────────────────
 
-QUEUE_LIST_URL = "https://momentscience.slack.com/lists/T03Q93Q96UD/F07QCKFP0RM"
-_DEMAND_QUEUE_LIST_ID = "F07QCKFP0RM"
+_SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #scout-hq
+_ROJ_USER_ID       = "U03QQM9SCBB"   # Roj Niyogi — AdOps, reviews demand queue
 
 
 # ── Approve helpers ───────────────────────────────────────────────────────────
@@ -701,33 +701,56 @@ def _try_add_to_demand_queue(
     brief_data: dict,
     user_id: str,
     thread_url: str,
-) -> bool:
+) -> str | None:
     """
-    Write an approved offer to the Demand Queue Slack List.
-    Queue item name includes the direct thread link so AdOps has the full brief
-    without hunting Slack — no canvas, no copy-paste required.
-    Returns True if successful, False on any error (graceful fallback).
+    Post a demand queue card to #scout-hq and tag Roj.
+
+    The Slack Lists API (lists.items.add) has no public write endpoint —
+    #scout-hq posts are the canonical, searchable queue record.
+
+    Returns the permalink of the posted queue card on success, None on failure.
     """
     advertiser = brief_data.get("advertiser", "Unknown")
     payout     = brief_data.get("payout", "")
     network    = (brief_data.get("network") or "").title()
+    score      = brief_data.get("scout_score") or brief_data.get("rpm_estimate") or ""
 
-    item_name = f"{advertiser} — {payout} · {network} | Brief: {thread_url}"
-    try:
-        resp = web.api_call(
-            "lists.items.add",
-            json={
-                "list_id": _DEMAND_QUEUE_LIST_ID,
-                "item": {"name": item_name},
+    score_text = f"  ·  Scout Score: *{score}*" if score else ""
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f":clipboard: *Demand Queue* — *{advertiser}*\n"
+                    f"{payout}  ·  {network}{score_text}\n"
+                    f"<{thread_url}|View brief thread>  ·  Added by <@{user_id}>"
+                ),
             },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"<@{_ROJ_USER_ID}> — new offer to review"},
+            ],
+        },
+    ]
+    try:
+        resp = web.chat_postMessage(
+            channel=_SCOUT_HQ_CHANNEL,
+            text=f"📋 Demand Queue: {advertiser} — {payout} · {network}",
+            blocks=blocks,
         )
         if resp.get("ok"):
-            log.info(f"Demand Queue: added '{advertiser}'")
-            return True
-        log.warning(f"lists.items.add not-ok: {resp.get('error', 'unknown')}")
+            ts         = resp.get("ts", "")
+            channel_id = resp.get("channel", _SCOUT_HQ_CHANNEL)
+            permalink  = _slack_thread_url(channel_id, ts)
+            log.info(f"Demand Queue: posted '{advertiser}' to #scout-hq at {ts}")
+            return permalink
+        log.warning(f"Demand Queue post failed: {resp.get('error', 'unknown')}")
     except Exception as e:
-        log.warning(f"lists.items.add failed (scope missing?): {e}")
-    return False
+        log.warning(f"Demand Queue post failed: {e}")
+    return None
 
 
 def _handle_approve(action: dict, payload: dict, web: WebClient):
@@ -781,22 +804,21 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     # 5. Persist approval state (for lifecycle tracking + launch notification)
     _record_queued_offer(advertiser, brief_data, user_id, thread_url)
 
-    # 6. Try to write directly to the Slack Demand Queue list
-    added_to_list = _try_add_to_demand_queue(web, brief_data, user_id, thread_url)
+    # 6. Post queue card to #scout-hq, tag Roj
+    queue_permalink = _try_add_to_demand_queue(web, brief_data, user_id, thread_url)
 
-    # 7. Confirm — include thread link so the approval message is self-contained
-    if added_to_list:
+    # 7. Confirm in the digest thread
+    if queue_permalink:
         confirm = (
-            f":white_check_mark: *{advertiser}* added to queue by <@{user_id}> — "
-            f"<{thread_url}|brief is in this thread>"
+            f":white_check_mark: *{advertiser}* queued by <@{user_id}> — "
+            f"<{queue_permalink}|see in #scout-hq>"
         )
     else:
         confirm = (
-            f":white_check_mark: *{advertiser}* approved by <@{user_id}> · "
-            f"<{QUEUE_LIST_URL}|Add to Demand Queue →>"
+            f":white_check_mark: *{advertiser}* approved by <@{user_id}>"
         )
     web.chat_postMessage(channel=channel, thread_ts=message_ts, text=confirm)
-    log.info(f"Approved: {advertiser} ({offer_id}) by {user_id}, list_write={added_to_list}")
+    log.info(f"Approved: {advertiser} ({offer_id}) by {user_id}, queue_post={'ok' if queue_permalink else 'failed'}")
 
 
 def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
@@ -842,22 +864,21 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
         "tracking_url": data.get("tracking_url", ""),
     }
 
-    # Write to Slack List + lifecycle tracker
-    added = _try_add_to_demand_queue(web, brief_data, user_id, thread_url)
+    # Post queue card to #scout-hq, tag Roj + persist in lifecycle tracker
+    queue_permalink = _try_add_to_demand_queue(web, brief_data, user_id, thread_url)
     _record_queued_offer(advertiser, brief_data, user_id, thread_url)
 
-    if added:
+    if queue_permalink:
         confirm = (
-            f":white_check_mark: *{advertiser}* added to queue by <@{user_id}> — "
-            f"<{thread_url}|brief is in this thread>"
+            f":white_check_mark: *{advertiser}* queued by <@{user_id}> — "
+            f"<{queue_permalink}|see in #scout-hq>"
         )
     else:
         confirm = (
-            f":white_check_mark: *{advertiser}* approved by <@{user_id}> · "
-            f"<{QUEUE_LIST_URL}|Add to Demand Queue →>"
+            f":white_check_mark: *{advertiser}* queued by <@{user_id}>"
         )
     web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=confirm)
-    log.info(f"Brief queued: {advertiser} by {user_id}, list_write={added}")
+    log.info(f"Brief queued: {advertiser} by {user_id}, queue_post={'ok' if queue_permalink else 'failed'}")
 
 
 def _handle_reject(action: dict, payload: dict, web: WebClient):
