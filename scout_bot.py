@@ -661,16 +661,25 @@ def _save_launched_offers(state: dict):
 
 
 def _record_queued_offer(advertiser: str, brief_data: dict, user_id: str, thread_url: str):
-    """Persist approval state so the lifecycle (queue → live → notify) can close the loop."""
+    """Persist approval state so the lifecycle (queue → live → notify) can close the loop.
+
+    Stores scout_score_estimated so the 14-day recap can compare prediction vs. actual.
+    This is the training signal: every validated offer becomes a calibration data point.
+    """
     from datetime import datetime, timezone
     state = _load_launched_offers()
     state[advertiser] = {
-        "payout":      brief_data.get("payout", ""),
-        "network":     (brief_data.get("network") or "").title(),
-        "approved_by": user_id,
-        "approved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-        "thread_url":  thread_url,
-        "status":      "queued",
+        "payout":                 brief_data.get("payout", ""),
+        "payout_num":             brief_data.get("payout_num", 0),
+        "network":                (brief_data.get("network") or "").title(),
+        "approved_by":            user_id,
+        "approved_at":            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "thread_url":             thread_url,
+        "status":                 "queued",
+        # Snapshot the estimate at approval time — compared against actual at 14 days
+        "scout_score_estimated":  brief_data.get("scout_score_rpm", 0),
+        "performance_context":    brief_data.get("performance_context", ""),
+        "performance_recap_sent": False,
     }
     _save_launched_offers(state)
 
@@ -1478,6 +1487,118 @@ def _check_stale_queue(web: WebClient) -> None:
             log.warning(f"Stale queue check failed: {e}")
 
 
+def _performance_recap(web: WebClient) -> None:
+    """
+    14-day post-launch performance recap daemon.
+
+    Runs daily. For every queued/live offer where:
+      - approved_at is 14+ days ago
+      - performance_recap_sent is False
+
+    Pulls actual RPM from ClickHouse, compares to Scout's estimate at approval time,
+    posts a 3-line recap in the original approval thread, marks recap as sent.
+
+    This is the feedback loop that makes the model legible:
+      Scout estimated $X → actual came in at $Y (+/-Z%)
+    The ClickHouse benchmarks already self-improve as offers accumulate data.
+    This thread post makes that improvement visible and builds team trust.
+    """
+    RECAP_DAYS = 14
+
+    while True:
+        time.sleep(86_400)
+        try:
+            from scout_agent import _get_ch_client
+            state   = _load_launched_offers()
+            now     = datetime.now(timezone.utc)
+            updated = False
+
+            for advertiser, entry in list(state.items()):
+                if entry.get("performance_recap_sent"):
+                    continue
+                approved_at_str = entry.get("approved_at", "")
+                if not approved_at_str:
+                    continue
+                try:
+                    approved_at = datetime.fromisoformat(approved_at_str).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                if (now - approved_at).days < RECAP_DAYS:
+                    continue
+
+                thread_url = entry.get("thread_url", "")
+                import re as _re
+                m = _re.search(r'/archives/([A-Z0-9]+)/p(\d+)', thread_url)
+                if not m:
+                    continue
+                channel   = m.group(1)
+                ts_raw    = m.group(2)
+                thread_ts = f"{ts_raw[:10]}.{ts_raw[10:]}"
+
+                # Pull actual impressions + revenue since approval date
+                try:
+                    ch = _get_ch_client()
+                    q  = f"""
+                    SELECT
+                        count()                          AS impressions,
+                        sum(toFloat64OrNull(revenue))    AS total_revenue
+                    FROM default.adpx_conversionsdetails conv
+                    JOIN default.mv_adpx_campaigns c
+                      ON toInt64(conv.campaign_id) = toInt64(c.id)
+                    WHERE c.adv_name ILIKE '%{advertiser.replace("'", "''")}%'
+                      AND conv.created_at >= toDateTime('{approved_at_str}')
+                      AND toYYYYMM(conv.created_at) >= toYYYYMM(toDate('{approved_at_str[:10]}'))
+                    """
+                    rows = ch.query(q).result_rows
+                    impressions   = int((rows[0][0] if rows else 0) or 0)
+                    total_revenue = float((rows[0][1] if rows else 0) or 0)
+                except Exception as ch_err:
+                    log.warning(f"Recap ClickHouse query failed for {advertiser}: {ch_err}")
+                    continue
+
+                # Build the recap message
+                estimated = entry.get("scout_score_estimated", 0)
+                payout    = entry.get("payout", "")
+                network   = entry.get("network", "")
+
+                if impressions < 100:
+                    # Not enough data yet — skip, will catch next cycle
+                    log.info(f"Recap skipped for {advertiser}: only {impressions} impressions at 14d")
+                    continue
+
+                actual_rpm = round(total_revenue / impressions * 1000, 0) if impressions else 0
+
+                if estimated and actual_rpm:
+                    delta_pct = round((actual_rpm - estimated) / estimated * 100)
+                    direction = f"+{delta_pct}%" if delta_pct >= 0 else f"{delta_pct}%"
+                    accuracy  = "on the money" if abs(delta_pct) <= 15 else ("above estimate" if delta_pct > 0 else "below estimate")
+                    score_line = f"Scout estimated *${estimated:,.0f} RPM* → actual *${actual_rpm:,.0f} RPM* ({direction}, {accuracy})"
+                elif actual_rpm:
+                    score_line = f"Actual RPM at 14 days: *${actual_rpm:,.0f}* ({impressions:,} impressions)"
+                else:
+                    score_line = f"No conversions detected at 14 days ({impressions:,} impressions)"
+
+                msg = (
+                    f":bar_chart: *{advertiser}* — 14-day performance recap\n"
+                    f"{score_line}\n"
+                    f"_{payout} · {network} · {impressions:,} impressions_"
+                )
+                web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+
+                # Mark sent — won't re-post
+                state[advertiser]["performance_recap_sent"] = True
+                state[advertiser]["actual_rpm_14d"]         = actual_rpm
+                state[advertiser]["impressions_14d"]        = impressions
+                updated = True
+                log.info(f"14-day recap sent for {advertiser}: est=${estimated} actual=${actual_rpm}")
+
+            if updated:
+                _save_launched_offers(state)
+
+        except Exception as e:
+            log.warning(f"Performance recap check failed: {e}")
+
+
 def main():
     global _BOT_USER_ID
     if not BOT_TOKEN or not APP_TOKEN:
@@ -1490,6 +1611,8 @@ def main():
 
     # Background: daily stale queue alerts (daemon thread dies cleanly on exit)
     threading.Thread(target=_check_stale_queue, args=(web_client,), daemon=True).start()
+    # Background: 14-day performance recap — compares Scout estimates to actual ClickHouse RPM
+    threading.Thread(target=_performance_recap, args=(web_client,), daemon=True).start()
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
