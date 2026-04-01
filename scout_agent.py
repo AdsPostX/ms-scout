@@ -385,6 +385,31 @@ INTENT RECOGNITION — resolve every query to one of these intents, then act imm
         Note: rank-change effects not modeled here — flag it once.
       Always flag campaigns ending before month-end.
 
+19. PUBLISHER HEALTH ANALYSIS — "how is 7-Eleven doing?", "performance for AT&T by placement"
+    Signals: publisher name + "performance", "how is [publisher] doing", "full funnel", "breakdown by placement",
+             "what placement", "placement performance", "sessions", "CTR", "click rate"
+    → Call get_publisher_health(publisher_name=X or publisher_id=N, days=14).
+      RESPONSE FORMAT — information hierarchy (mandatory):
+      Level 1 (lead): Overall RPM, revenue, sessions. One-line verdict.
+        ":large_green_circle: *[Publisher]* — *$[RPM]* RPM across [N] sessions in [days] days."
+      ---
+      Level 2 (placement breakdown): Top placements by RPM, flagging anomalies.
+        Format each: "[Placement]: *$[RPM]* RPM · [sessions] sessions · [CTR]% CTR · avg slot [position]"
+        If anomaly: "> :warning: [Placement] generates [Nx] higher RPM than [other placement] — investigate offer mix"
+      ---
+      Level 3 (OS split): "iOS: [N] sessions ([pct]%) · Android: [N] sessions ([pct]%)"
+      ---
+      End: ":zap: *Action:* [one specific step — e.g. 'Fix offer mix on FuelHub — it has 5x more sessions but 0.03x the RPM']"
+      NEVER jump to offer-level detail without first showing placement-level breakdown.
+
+20. CAMPAIGN STATUS CHECK — "is TurboTax Free Edition paused?", "confirm Hulu is still paused"
+    Signals: offer name + "paused", "active", "live", "killed", "confirm", "still running", "status of [offer]",
+             "is [offer] paused", "are all [offer] campaigns off", "what happened to [offer]"
+    → Call get_campaign_status(advertiser_name=X).
+      Lead with the count and status: ":large_green_circle: TurboTax — *3 active*, 1 paused." or ":red_circle: All [N] TurboTax Free Edition campaigns are paused."
+      Then show recent changes from the audit log: "Paused 2 days ago by admin. Previously active for 14 days."
+      End: ":zap: *Action:* [relevant next step]"
+
 DEFAULT RULE: When the intent is unclear, always default to Intent 17 (open prospecting). Call get_top_opportunities() and show results. A confident answer to a slightly wrong interpretation is infinitely more useful than asking "what do you mean?"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -710,6 +735,60 @@ TOOLS = [
                 "month": {"type": "string", "description": "Target month e.g. 'April 2026' or '2026-04'. Defaults to next calendar month."},
             },
             "required": ["advertiser_name"],
+        },
+    },
+    {
+        "name": "get_publisher_health",
+        "description": (
+            "Full publisher health analysis: sessions, impressions, clicks, conversions, revenue, RPM, CTR, and CVR. "
+            "Breaks down by placement (e.g. FuelHub vs TransactionReceipt) and OS (iOS/Android). "
+            "Includes click position data (which carousel slot gets clicked). "
+            "Use for: 'how is [publisher] doing', 'performance for [publisher]', "
+            "'breakdown by placement', 'full funnel for [publisher]', "
+            "'[publisher] placement performance', 'what placement drives most revenue on [publisher]'. "
+            "This is the default tool for any publisher performance query — always call this before offer-level analysis."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "publisher_name": {"type": "string", "description": "Publisher name (partial match OK) e.g. '7-Eleven', 'AT&T'. Omit if using publisher_id."},
+                "publisher_id": {"type": "integer", "description": "Numeric publisher ID. Use when user provides a partner number."},
+                "days": {"type": "integer", "description": "Lookback window in days (default 14)"},
+                "geo_state": {"type": "string", "description": "Optional: filter to a US state e.g. 'California', 'TX'"},
+            },
+        },
+    },
+    {
+        "name": "get_campaign_status",
+        "description": (
+            "Check if an advertiser's campaigns are active or paused, and see recent changes from the audit log. "
+            "Use for: 'is [offer] paused?', 'confirm [offer] is paused', 'is [offer] still live?', "
+            "'what happened to [offer]?', 'when was [offer] paused?', 'confirm all [offer] campaigns are killed'. "
+            "Returns current is_active status for each publisher campaign + last 30 days of change history."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "advertiser_name": {"type": "string", "description": "Advertiser/offer name (partial match OK) e.g. 'TurboTax', 'Hulu'"},
+            },
+            "required": ["advertiser_name"],
+        },
+    },
+    {
+        "name": "get_perkswall_engagement",
+        "description": (
+            "Perkswall offer selection analytics — which offers do loyalty members actually pick? "
+            "Queries user_selected_perks to show offer selections, unique members engaged, and selection rates. "
+            "Use for: 'which perks are [publisher] users picking?', 'Perkswall engagement for [publisher]', "
+            "'what do loyalty members select on [publisher]?', 'top selected perks on [publisher]'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "publisher_name": {"type": "string", "description": "Publisher name (partial match OK)"},
+                "publisher_id": {"type": "integer", "description": "Numeric publisher ID"},
+                "days": {"type": "integer", "description": "Lookback window in days (default 30)"},
+            },
         },
     },
     {
@@ -1980,6 +2059,491 @@ def get_advertiser_revenue_projection(
     }
 
 
+def get_publisher_health(
+    publisher_name: str = None,
+    publisher_id: int = None,
+    days: int = 14,
+    geo_state: str = None,
+) -> dict:
+    """
+    Full publisher health analysis: sessions, impressions, clicks, conversions, revenue, RPM, CTR, CVR.
+    Breaks down by placement and OS. Includes click position data.
+    """
+    try:
+        ch = _get_ch_client()
+
+        # ── Resolve publisher name → ID ───────────────────────────────────────
+        pid = publisher_id
+        pub_name = None
+        if pid is None and publisher_name:
+            rows = ch.query(
+                "SELECT id, organization FROM from_airbyte_users WHERE organization ILIKE {name: String} LIMIT 5",
+                parameters={"name": f"%{publisher_name}%"},
+            ).result_rows
+            if not rows:
+                return {"error": f"No publisher found matching '{publisher_name}'"}
+            pid = int(rows[0][0])
+            pub_name = rows[0][1]
+        elif pid is not None:
+            rows = ch.query(
+                "SELECT id, organization FROM from_airbyte_users WHERE id = {pid: UInt64} LIMIT 1",
+                parameters={"pid": int(pid)},
+            ).result_rows
+            pub_name = rows[0][1] if rows else f"Partner {pid}"
+
+        if pid is None:
+            return {"error": "Must provide publisher_name or publisher_id"}
+
+        # ── Fetch placement display names ─────────────────────────────────────
+        placement_names = {}
+        try:
+            pn_rows = ch.query(
+                "SELECT slug, display_name FROM from_airbyte_placements WHERE user_id = {pid: Int64}",
+                parameters={"pid": int(pid)},
+            ).result_rows
+            for slug, display_name in pn_rows:
+                if display_name:
+                    placement_names[slug] = display_name
+        except Exception:
+            pass  # non-fatal — use slugs as-is if table unavailable
+
+        # ── Partition filter ──────────────────────────────────────────────────
+        from datetime import date
+        today = date.today()
+        # partition for sessions (go back days + a little buffer)
+        partition = int(today.strftime("%Y%m")) - (1 if today.day <= days else 0)
+        extended_partition = partition - 1  # extra month for downstream lag
+
+        # ── Query 1: session volume by placement + OS ─────────────────────────
+        state_clause = "AND state ILIKE {geo_state: String}" if geo_state else ""
+        q1 = f"""
+        SELECT placement, os, count() AS sessions
+        FROM adpx_sdk_sessions
+        PREWHERE user_id = {{pid: UInt64}}
+            AND toYYYYMM(created_at) >= {{partition: UInt32}}
+        WHERE created_at >= today() - {{days: UInt32}}
+          {state_clause}
+        GROUP BY placement, os
+        ORDER BY sessions DESC
+        """
+        params1 = {"pid": int(pid), "partition": partition, "days": days}
+        if geo_state:
+            params1["geo_state"] = f"%{geo_state}%"
+        q1_rows = ch.query(q1, parameters=params1).result_rows
+
+        # ── Query 2: ad metrics by placement ─────────────────────────────────
+        q2 = f"""
+        SELECT
+            s.placement,
+            count(DISTINCT i.id)                                    AS impressions,
+            count(DISTINCT cd.id)                                   AS conversions,
+            coalesce(sum(toFloat64OrNull(cd.revenue)), 0)           AS revenue,
+            coalesce(sum(toFloat64OrNull(cd.payout)), 0)            AS payout
+        FROM adpx_sdk_sessions s
+        JOIN adpx_impressions_details i
+            ON i.session_id = s.session_id
+            AND toYYYYMM(i.created_at) >= {{partition: UInt32}}
+        LEFT JOIN adpx_conversionsdetails cd
+            ON cd.session_id = s.session_id
+            AND cd.campaign_id = i.campaign_id
+            AND toYYYYMM(cd.created_at) >= {{extended_partition: UInt32}}
+        WHERE s.user_id = {{pid: UInt64}}
+            AND toYYYYMM(s.created_at) >= {{partition: UInt32}}
+            AND s.created_at >= today() - {{days: UInt32}}
+          {state_clause}
+        GROUP BY s.placement
+        """
+        params2 = {"pid": int(pid), "partition": partition, "extended_partition": extended_partition, "days": days}
+        if geo_state:
+            params2["geo_state"] = f"%{geo_state}%"
+        q2_rows = ch.query(q2, parameters=params2).result_rows
+
+        # ── Query 3: click metrics by placement ───────────────────────────────
+        q3 = f"""
+        SELECT
+            s.placement,
+            count(tc.id)                            AS clicks,
+            countIf(tc.is_converted)               AS converted_clicks,
+            round(avg(tc.position), 1)             AS avg_position
+        FROM adpx_sdk_sessions s
+        JOIN adpx_tracked_clicks tc
+            ON tc.session_id = s.session_id
+            AND toYYYYMM(tc.created_at) >= {{partition: UInt32}}
+        WHERE s.user_id = {{pid: UInt64}}
+            AND toYYYYMM(s.created_at) >= {{partition: UInt32}}
+            AND s.created_at >= today() - {{days: UInt32}}
+          {state_clause}
+        GROUP BY s.placement
+        """
+        params3 = {"pid": int(pid), "partition": partition, "days": days}
+        if geo_state:
+            params3["geo_state"] = f"%{geo_state}%"
+        q3_rows = ch.query(q3, parameters=params3).result_rows
+
+        # ── Combine results ───────────────────────────────────────────────────
+        # Build placement-keyed dicts
+        sess_by_placement: dict = {}
+        os_by_placement: dict = {}
+        for placement, os_val, sess in q1_rows:
+            p = placement or "unknown"
+            sess_by_placement[p] = sess_by_placement.get(p, 0) + sess
+            os_by_placement.setdefault(p, {})
+            os_by_placement[p][os_val or "unknown"] = os_by_placement[p].get(os_val or "unknown", 0) + sess
+
+        ad_metrics: dict = {}
+        for placement, impressions, conversions, revenue, payout in q2_rows:
+            p = placement or "unknown"
+            ad_metrics[p] = {
+                "impressions": int(impressions),
+                "conversions": int(conversions),
+                "revenue": float(revenue),
+                "payout": float(payout),
+            }
+
+        click_metrics: dict = {}
+        for placement, clicks, converted_clicks, avg_position in q3_rows:
+            p = placement or "unknown"
+            click_metrics[p] = {
+                "clicks": int(clicks),
+                "converted_clicks": int(converted_clicks),
+                "avg_position": float(avg_position) if avg_position else 0.0,
+            }
+
+        # Aggregate OS split across all placements
+        os_totals: dict = {}
+        for p_os in os_by_placement.values():
+            for os_val, cnt in p_os.items():
+                os_totals[os_val] = os_totals.get(os_val, 0) + cnt
+        total_sess_all = sum(os_totals.values()) or 1
+        os_split = sorted(
+            [{"os": k, "sessions": v, "share_pct": round(v / total_sess_all * 100, 1)} for k, v in os_totals.items()],
+            key=lambda x: -x["sessions"],
+        )
+
+        # Build per-placement breakdown
+        all_placements = set(sess_by_placement.keys()) | set(ad_metrics.keys()) | set(click_metrics.keys())
+        total_revenue = sum(ad_metrics.get(p, {}).get("revenue", 0) for p in all_placements)
+        total_impressions = sum(ad_metrics.get(p, {}).get("impressions", 0) for p in all_placements)
+        publisher_avg_rpm = (total_revenue / total_impressions * 1000) if total_impressions else 0
+
+        by_placement = []
+        for p in all_placements:
+            sess = sess_by_placement.get(p, 0)
+            ad = ad_metrics.get(p, {"impressions": 0, "conversions": 0, "revenue": 0.0, "payout": 0.0})
+            cl = click_metrics.get(p, {"clicks": 0, "converted_clicks": 0, "avg_position": 0.0})
+            impr = ad["impressions"]
+            rev = ad["revenue"]
+            rpm = round(rev / impr * 1000, 2) if impr else 0.0
+            ctr = round(cl["clicks"] / impr * 100, 2) if impr else 0.0
+            cvr = round(ad["conversions"] / sess * 100, 2) if sess else 0.0
+
+            anomaly = None
+            if publisher_avg_rpm > 0 and rpm > 0 and rpm > publisher_avg_rpm * 5:
+                ratio = round(rpm / publisher_avg_rpm, 1)
+                anomaly = f"{ratio}x higher RPM than publisher avg"
+
+            display_name = placement_names.get(p, p)
+            by_placement.append({
+                "placement":       display_name,
+                "placement_slug":  p,
+                "sessions":        sess,
+                "impressions":     impr,
+                "clicks":          cl["clicks"],
+                "conversions":     ad["conversions"],
+                "revenue":         round(rev, 2),
+                "rpm":             rpm,
+                "ctr_pct":         ctr,
+                "cvr_pct":         cvr,
+                "avg_position":    cl["avg_position"],
+                "anomaly":         anomaly,
+            })
+
+        by_placement.sort(key=lambda x: -x["revenue"])
+
+        # Overall rollup
+        total_sessions = sum(sess_by_placement.values())
+        total_clicks = sum(cl["clicks"] for cl in click_metrics.values())
+        total_conversions = sum(ad_metrics.get(p, {}).get("conversions", 0) for p in all_placements)
+        total_payout = sum(ad_metrics.get(p, {}).get("payout", 0) for p in all_placements)
+        all_positions = [cl["avg_position"] for cl in click_metrics.values() if cl["avg_position"] > 0]
+        avg_click_position = round(sum(all_positions) / len(all_positions), 1) if all_positions else 0.0
+
+        overall_rpm = round(total_revenue / total_impressions * 1000, 2) if total_impressions else 0.0
+        overall_ctr = round(total_clicks / total_impressions * 100, 2) if total_impressions else 0.0
+        overall_cvr = round(total_conversions / total_sessions * 100, 2) if total_sessions else 0.0
+
+        # Top placement note
+        top_placement_note = ""
+        if len(by_placement) >= 2:
+            top = by_placement[0]
+            bottom = by_placement[-1]
+            if bottom["rpm"] > 0 and top["rpm"] > 0:
+                ratio = round(top["rpm"] / bottom["rpm"], 1)
+                top_placement_note = (
+                    f"{top['placement']} generates {ratio}x RPM of {bottom['placement']}"
+                )
+
+        return {
+            "publisher":     pub_name or f"Partner {pid}",
+            "publisher_id":  int(pid),
+            "days":          days,
+            "geo_state":     geo_state or None,
+            "overall": {
+                "sessions":           total_sessions,
+                "impressions":        total_impressions,
+                "clicks":             total_clicks,
+                "conversions":        total_conversions,
+                "revenue":            round(total_revenue, 2),
+                "payout":             round(total_payout, 2),
+                "rpm":                overall_rpm,
+                "ctr_pct":            overall_ctr,
+                "cvr_pct":            overall_cvr,
+                "avg_click_position": avg_click_position,
+            },
+            "by_placement":          by_placement,
+            "os_split":              os_split,
+            "top_placements_note":   top_placement_note,
+        }
+    except Exception as e:
+        log.exception("get_publisher_health failed")
+        return {"error": str(e), "publisher_name": publisher_name, "publisher_id": publisher_id}
+
+
+def get_campaign_status(advertiser_name: str) -> dict:
+    """
+    Check if an advertiser's campaigns are active/paused and show recent changes from audit log.
+    """
+    try:
+        import json as _json
+        ch = _get_ch_client()
+
+        # ── Query 1: current status from publisher_campaigns ──────────────────
+        q1_rows = []
+        try:
+            q1_rows = ch.query(
+                """
+                SELECT
+                    pc.id, pc.campaign_id, pc.is_active,
+                    c.adv_name,
+                    pc.updated_at, pc.deleted_at
+                FROM from_airbyte_publisher_campaigns pc
+                JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
+                WHERE c.adv_name ILIKE {adv: String}
+                  AND c.deleted_at IS NULL
+                ORDER BY pc.updated_at DESC
+                LIMIT 50
+                """,
+                parameters={"adv": f"%{advertiser_name}%"},
+            ).result_rows
+        except Exception as e:
+            log.warning(f"get_campaign_status q1 failed: {e}")
+
+        # ── Query 2: recent audit log entries ─────────────────────────────────
+        q2_rows = []
+        try:
+            q2_rows = ch.query(
+                """
+                SELECT
+                    entity, type, old_data, new_data, created_at, user_type, user_role
+                FROM adpx_system_activity_logs
+                WHERE (lower(new_data) LIKE lower({adv_pat: String}) OR lower(old_data) LIKE lower({adv_pat: String}))
+                  AND created_at >= today() - 30
+                ORDER BY created_at DESC
+                LIMIT 20
+                """,
+                parameters={"adv_pat": f"%{advertiser_name}%"},
+            ).result_rows
+        except Exception as e:
+            log.warning(f"get_campaign_status q2 failed: {e}")
+
+        # ── Build campaigns list ──────────────────────────────────────────────
+        campaigns = []
+        for row in q1_rows:
+            pc_id, camp_id, is_active, adv_name, updated_at, deleted_at = row
+            campaigns.append({
+                "publisher_campaign_id": int(pc_id) if pc_id else None,
+                "campaign_id":           int(camp_id) if camp_id else None,
+                "adv_name":              adv_name or advertiser_name,
+                "is_active":             bool(is_active),
+                "last_updated":          str(updated_at) if updated_at else None,
+                "is_deleted":            deleted_at is not None,
+            })
+
+        active_count = sum(1 for c in campaigns if c["is_active"] and not c["is_deleted"])
+        paused_count = sum(1 for c in campaigns if not c["is_active"] and not c["is_deleted"])
+
+        # ── Parse audit log ───────────────────────────────────────────────────
+        recent_changes = []
+        for row in q2_rows:
+            entity, change_type_raw, old_data_str, new_data_str, created_at, user_type, user_role = row
+            try:
+                old_data = _json.loads(old_data_str) if old_data_str else {}
+            except Exception:
+                old_data = {}
+            try:
+                new_data = _json.loads(new_data_str) if new_data_str else {}
+            except Exception:
+                new_data = {}
+
+            # Determine change type
+            old_active = old_data.get("is_active")
+            new_active = new_data.get("is_active")
+            if old_active is True and new_active is False:
+                c_type = "paused"
+                summary = f"Campaign paused by {user_role or user_type or 'system'}"
+            elif old_active is False and new_active is True:
+                c_type = "resumed"
+                summary = f"Campaign resumed by {user_role or user_type or 'system'}"
+            elif "capping_config" in new_data or "capping_config" in old_data:
+                c_type = "budget_changed"
+                summary = "Budget/cap configuration changed"
+            else:
+                c_type = "other"
+                summary = f"{change_type_raw or 'Change'} by {user_role or user_type or 'system'}"
+
+            recent_changes.append({
+                "entity":      entity or "",
+                "change_type": c_type,
+                "timestamp":   str(created_at) if created_at else None,
+                "summary":     summary,
+            })
+
+        # ── Status summary ────────────────────────────────────────────────────
+        last_change_str = ""
+        if recent_changes:
+            last = recent_changes[0]
+            last_change_str = f" Last change: {last['change_type']} ({last['timestamp'][:10] if last['timestamp'] else 'unknown'})."
+        status_summary = f"{active_count} active, {paused_count} paused.{last_change_str}"
+
+        return {
+            "advertiser":     advertiser_name,
+            "campaign_count": len(campaigns),
+            "active_count":   active_count,
+            "paused_count":   paused_count,
+            "campaigns":      campaigns,
+            "recent_changes": recent_changes,
+            "status_summary": status_summary,
+        }
+    except Exception as e:
+        log.exception("get_campaign_status failed")
+        return {"error": str(e), "advertiser": advertiser_name}
+
+
+def get_perkswall_engagement(
+    publisher_name: str = None,
+    publisher_id: int = None,
+    days: int = 30,
+) -> dict:
+    """
+    Perkswall offer selection analytics — which offers do loyalty members actually pick?
+    """
+    try:
+        ch = _get_ch_client()
+
+        # ── Resolve publisher name → ID ───────────────────────────────────────
+        pid = publisher_id
+        pub_name = None
+        if pid is None and publisher_name:
+            rows = ch.query(
+                "SELECT id, organization FROM from_airbyte_users WHERE organization ILIKE {name: String} LIMIT 5",
+                parameters={"name": f"%{publisher_name}%"},
+            ).result_rows
+            if not rows:
+                return {"error": f"No publisher found matching '{publisher_name}'"}
+            pid = int(rows[0][0])
+            pub_name = rows[0][1]
+        elif pid is not None:
+            rows = ch.query(
+                "SELECT id, organization FROM from_airbyte_users WHERE id = {pid: UInt64} LIMIT 1",
+                parameters={"pid": int(pid)},
+            ).result_rows
+            pub_name = rows[0][1] if rows else f"Partner {pid}"
+
+        if pid is None:
+            return {"error": "Must provide publisher_name or publisher_id"}
+
+        # ── Partition filter ──────────────────────────────────────────────────
+        from datetime import date
+        today = date.today()
+        partition = int(today.strftime("%Y%m")) - (1 if today.day <= days else 0)
+
+        # ── Query: perk selections by offer ───────────────────────────────────
+        sel_rows = ch.query(
+            """
+            SELECT
+                sp.campaign_id,
+                any(c.adv_name)                        AS offer_name,
+                count()                                AS selections,
+                count(DISTINCT sp.pub_user_id)         AS unique_members,
+                count(DISTINCT sp.session_id)          AS sessions_with_selection
+            FROM from_airbyte_user_selected_perks sp
+            JOIN from_airbyte_campaigns c ON toInt64(sp.campaign_id) = c.id
+            WHERE sp.user_id = {pid: UInt64}
+              AND sp.created_at >= today() - {days: UInt32}
+            GROUP BY sp.campaign_id
+            ORDER BY selections DESC
+            LIMIT 20
+            """,
+            parameters={"pid": int(pid), "days": days},
+        ).result_rows
+
+        # ── Total sessions for selection rate ─────────────────────────────────
+        sess_row = ch.query(
+            """
+            SELECT count() AS total_sessions, count(DISTINCT session_id) AS unique_sessions
+            FROM adpx_sdk_sessions
+            PREWHERE user_id = {pid: UInt64}
+                AND toYYYYMM(created_at) >= {partition: UInt32}
+            WHERE created_at >= today() - {days: UInt32}
+            """,
+            parameters={"pid": int(pid), "partition": partition, "days": days},
+        ).result_rows
+        total_sessions = int(sess_row[0][0]) if sess_row else 0
+        total_sessions_safe = total_sessions or 1
+
+        # ── Build offer breakdown ─────────────────────────────────────────────
+        by_offer = []
+        total_selections = 0
+        all_unique_members = set()
+        for campaign_id, offer_name, selections, unique_members, sessions_with_selection in sel_rows:
+            total_selections += int(selections)
+            by_offer.append({
+                "offer":                    offer_name or f"Campaign {campaign_id}",
+                "campaign_id":              int(campaign_id) if campaign_id else None,
+                "selections":               int(selections),
+                "unique_members":           int(unique_members),
+                "sessions_with_selection":  int(sessions_with_selection),
+                "selection_rate_pct":       round(int(selections) / total_sessions_safe * 100, 2),
+            })
+
+        total_unique_members = sum(o["unique_members"] for o in by_offer)
+        selection_rate_pct = round(total_selections / total_sessions_safe * 100, 2)
+
+        # ── Insight ───────────────────────────────────────────────────────────
+        insight = ""
+        if by_offer:
+            top = by_offer[0]
+            insight = (
+                f"{top['offer']} selected by {top['unique_members']:,} unique members "
+                f"({top['selection_rate_pct']}% of sessions)"
+            )
+
+        return {
+            "publisher":               pub_name or f"Partner {pid}",
+            "publisher_id":            int(pid),
+            "days":                    days,
+            "total_sessions":          total_sessions,
+            "total_selections":        total_selections,
+            "selection_rate_pct":      selection_rate_pct,
+            "unique_members_engaged":  total_unique_members,
+            "by_offer":                by_offer,
+            "insight":                 insight,
+        }
+    except Exception as e:
+        log.exception("get_perkswall_engagement failed")
+        return {"error": str(e), "publisher_name": publisher_name, "publisher_id": publisher_id}
+
+
 def get_scout_status() -> dict:
     """
     System health snapshot: benchmark freshness, offer inventory, queue depth,
@@ -2067,6 +2631,9 @@ TOOL_MAP = {
     "get_fallback_candidates": get_fallback_candidates,
     "get_demand_queue_status": get_demand_queue_status,
     "mark_offer_launched": mark_offer_launched,
+    "get_publisher_health": get_publisher_health,
+    "get_campaign_status": get_campaign_status,
+    "get_perkswall_engagement": get_perkswall_engagement,
     "get_scout_status": get_scout_status,
     "get_advertiser_revenue_projection": get_advertiser_revenue_projection,
 }
