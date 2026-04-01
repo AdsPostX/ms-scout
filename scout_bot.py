@@ -38,7 +38,19 @@ APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 # never cause "No brief found" on the Launch button click.
 _STATE_FILE = pathlib.Path(__file__).parent / "data" / "pending_briefs.json"
 _LAST_THREAD_PER_CHANNEL: dict = {}  # channel → thread_ts
+_LAST_THREAD_LOCK = threading.Lock()
 _BOT_USER_ID: str = ""  # cached at startup — never changes
+
+
+def _atomic_write(path: pathlib.Path, data: dict) -> None:
+    """Write JSON atomically — temp file + os.replace prevents partial writes on crash."""
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _load_briefs() -> dict:
@@ -53,7 +65,7 @@ def _load_briefs() -> dict:
 def _save_briefs(briefs: dict):
     try:
         _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _STATE_FILE.write_text(json.dumps(briefs, indent=2))
+        _atomic_write(_STATE_FILE, briefs)
     except Exception as e:
         log.warning(f"Could not persist brief state: {e}")
 
@@ -95,7 +107,7 @@ def _load_thread_contexts() -> dict:
 def _save_thread_contexts(contexts: dict):
     try:
         _THREAD_CTX_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _THREAD_CTX_FILE.write_text(json.dumps(contexts, indent=2))
+        _atomic_write(_THREAD_CTX_FILE, contexts)
     except Exception as e:
         log.warning(f"Could not persist thread context: {e}")
 
@@ -655,7 +667,7 @@ def _load_launched_offers() -> dict:
 def _save_launched_offers(state: dict):
     try:
         _LAUNCHED_OFFERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _LAUNCHED_OFFERS_FILE.write_text(json.dumps(state, indent=2))
+        _atomic_write(_LAUNCHED_OFFERS_FILE, state)
     except Exception as e:
         log.warning(f"Could not persist launched_offers: {e}")
 
@@ -942,7 +954,8 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     finally:
         stop_rotating()
 
-    _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
+    with _LAST_THREAD_LOCK:
+        _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
 
     if isinstance(response, dict) and response.get("type") == "brief":
         brief_data = response["brief_data"]
@@ -1285,7 +1298,9 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     is_thread_reply = event.get("thread_ts") and event.get("thread_ts") != msg_ts
     # For top-level messages (no thread), check if there's a recent active thread
     # in this channel so "yes" / "do that" follow-ups retain context.
-    effective_thread_ts = thread_ts if is_thread_reply else _LAST_THREAD_PER_CHANNEL.get(channel)
+    with _LAST_THREAD_LOCK:
+        _last_thread = _LAST_THREAD_PER_CHANNEL.get(channel)
+    effective_thread_ts = thread_ts if is_thread_reply else _last_thread
 
     if effective_thread_ts:
         try:
@@ -1358,7 +1373,8 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     # ── Route response: brief (Block Kit) vs text_with_context vs plain text ────
     # Track the active thread per channel so top-level follow-ups retain context
-    _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
+    with _LAST_THREAD_LOCK:
+        _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
 
     # Block B: extract entities + suggestions from text_with_context responses
     suggestions: list = []
@@ -1441,8 +1457,9 @@ def _check_stale_queue(web: WebClient) -> None:
     """
     STALE_DAYS = 7
     while True:
-        time.sleep(86_400)  # 24 hours
         try:
+            time.sleep(86_400)  # 24 hours
+            from datetime import datetime, timezone
             state = _load_launched_offers()
             now = datetime.now(timezone.utc)
             for advertiser, entry in state.items():
@@ -1484,7 +1501,7 @@ def _check_stale_queue(web: WebClient) -> None:
                 log.info(f"Stale queue nudge sent for {advertiser} ({age_days} days)")
 
         except Exception as e:
-            log.warning(f"Stale queue check failed: {e}")
+            log.error(f"[stale_queue] cycle failed, will retry in 24h: {e}", exc_info=True)
 
 
 def _performance_recap(web: WebClient) -> None:
@@ -1506,8 +1523,9 @@ def _performance_recap(web: WebClient) -> None:
     RECAP_DAYS = 14
 
     while True:
-        time.sleep(86_400)
         try:
+            time.sleep(86_400)
+            from datetime import datetime, timezone
             from scout_agent import _get_ch_client
             state   = _load_launched_offers()
             now     = datetime.now(timezone.utc)
@@ -1538,18 +1556,22 @@ def _performance_recap(web: WebClient) -> None:
                 # Pull actual impressions + revenue since approval date
                 try:
                     ch = _get_ch_client()
-                    q  = f"""
+                    q  = """
                     SELECT
                         count()                          AS impressions,
                         sum(toFloat64OrNull(revenue))    AS total_revenue
                     FROM default.adpx_conversionsdetails conv
                     JOIN default.mv_adpx_campaigns c
                       ON toInt64(conv.campaign_id) = toInt64(c.id)
-                    WHERE c.adv_name ILIKE '%{advertiser.replace("'", "''")}%'
-                      AND conv.created_at >= toDateTime('{approved_at_str}')
-                      AND toYYYYMM(conv.created_at) >= toYYYYMM(toDate('{approved_at_str[:10]}'))
+                    WHERE c.adv_name ILIKE {adv_pattern:String}
+                      AND conv.created_at >= toDateTime({approved_at_str:String})
+                      AND toYYYYMM(conv.created_at) >= toYYYYMM(toDate({approved_at_date:String}))
                     """
-                    rows = ch.query(q).result_rows
+                    rows = ch.query(q, parameters={
+                        "adv_pattern":      f"%{advertiser}%",
+                        "approved_at_str":  approved_at_str,
+                        "approved_at_date": approved_at_str[:10],
+                    }).result_rows
                     impressions   = int((rows[0][0] if rows else 0) or 0)
                     total_revenue = float((rows[0][1] if rows else 0) or 0)
                 except Exception as ch_err:
@@ -1596,7 +1618,88 @@ def _performance_recap(web: WebClient) -> None:
                 _save_launched_offers(state)
 
         except Exception as e:
-            log.warning(f"Performance recap check failed: {e}")
+            log.error(f"[performance_recap] cycle failed, will retry in 24h: {e}", exc_info=True)
+
+
+def _cleanup_state() -> None:
+    """
+    Nightly cleanup of state files to prevent unbounded growth.
+    - pending_briefs.json: drop entries > 30 days old
+    - thread_context.json: keep last 500 by last_updated
+    - launched_offers.json: keep all (lifecycle data, small)
+    - digest_state.json: keep approved forever, drop rejected > 90 days
+    Also called once at startup to recover from accumulated debt.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    def _parse_ts_age(ts_str: str, now: datetime) -> int:
+        """Return age in days of a Slack thread timestamp (epoch.microseconds format)."""
+        try:
+            epoch = float(ts_str.replace(".", "")[:10])
+            created = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            return (now - created).days
+        except Exception:
+            return 0  # unknown age → keep
+
+    def _run_cleanup():
+        now = datetime.now(timezone.utc)
+
+        # 1. pending_briefs.json — drop entries older than 30 days
+        try:
+            briefs = _load_briefs()
+            pruned_briefs = {
+                ts: data for ts, data in briefs.items()
+                if _parse_ts_age(ts, now) < 30
+            }
+            if len(pruned_briefs) < len(briefs):
+                _atomic_write(_STATE_FILE, pruned_briefs)
+                log.info(f"Cleanup: pruned {len(briefs) - len(pruned_briefs)} old brief entries")
+        except Exception as e:
+            log.warning(f"Cleanup: briefs prune failed: {e}")
+
+        # 2. thread_context.json — LRU eviction, keep last 500
+        try:
+            ctx = _load_thread_contexts()
+            if len(ctx) > 500:
+                sorted_keys = sorted(
+                    ctx.keys(),
+                    key=lambda k: ctx[k].get("last_updated", ""),
+                    reverse=True,
+                )
+                pruned_ctx = {k: ctx[k] for k in sorted_keys[:500]}
+                _atomic_write(_THREAD_CTX_FILE, pruned_ctx)
+                log.info(f"Cleanup: evicted {len(ctx) - 500} old thread contexts")
+        except Exception as e:
+            log.warning(f"Cleanup: thread context eviction failed: {e}")
+
+        # 3. digest_state.json — keep approved forever, drop rejected > 90 days
+        try:
+            digest_state_path = pathlib.Path(__file__).parent / "data" / "digest_state.json"
+            if digest_state_path.exists():
+                state = json.loads(digest_state_path.read_text())
+                rejected = state.get("rejected", {})
+                cutoff_90 = (now - timedelta(days=90)).strftime("%Y-%m-%d")
+                pruned_rejected = {
+                    k: v for k, v in rejected.items()
+                    if v.get("actioned_at", "9999") > cutoff_90
+                }
+                if len(pruned_rejected) < len(rejected):
+                    state["rejected"] = pruned_rejected
+                    _atomic_write(digest_state_path, state)
+                    log.info(f"Cleanup: pruned {len(rejected) - len(pruned_rejected)} old rejections")
+        except Exception as e:
+            log.warning(f"Cleanup: digest state prune failed: {e}")
+
+    # Run once at startup
+    _run_cleanup()
+
+    # Then nightly
+    while True:
+        try:
+            time.sleep(86_400)
+            _run_cleanup()
+        except Exception as e:
+            log.error(f"[cleanup_state] cycle failed: {e}", exc_info=True)
 
 
 def main():
@@ -1613,6 +1716,8 @@ def main():
     threading.Thread(target=_check_stale_queue, args=(web_client,), daemon=True).start()
     # Background: 14-day performance recap — compares Scout estimates to actual ClickHouse RPM
     threading.Thread(target=_performance_recap, args=(web_client,), daemon=True).start()
+    # Background: nightly cleanup of state files to prevent unbounded growth
+    threading.Thread(target=_cleanup_state, daemon=True).start()
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
