@@ -918,6 +918,7 @@ _PULSE_STATE_FILE            = pathlib.Path(__file__).parent / "data" / "pulse_s
 _LEARNINGS_FILE              = pathlib.Path(__file__).parent / "data" / "learnings.json"
 _LEARNED_BENCHMARKS_FILE     = pathlib.Path(__file__).parent / "data" / "learned_benchmarks.json"
 _PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # falls back to _SCOUT_HQ_CHANNEL if unset
+_PULSE_ENABLED               = os.getenv("PULSE_ENABLED", "true").lower() == "true"
 
 
 def _load_launched_offers() -> dict:
@@ -3285,7 +3286,11 @@ def main():
     # Background: nightly cleanup of state files to prevent unbounded growth
     threading.Thread(target=_cleanup_state, daemon=True).start()
     # Background: daily proactive pulse — cap alerts, velocity shifts, overnight events
-    threading.Thread(target=_proactive_pulse, args=(web_client,), daemon=True).start()
+    # PULSE_ENABLED=false on local (LaunchAgent) to avoid double-posting when Render is also live
+    if _PULSE_ENABLED:
+        threading.Thread(target=_proactive_pulse, args=(web_client,), daemon=True).start()
+    else:
+        log.info("[pulse] disabled via PULSE_ENABLED=false — skipping pulse thread")
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
