@@ -26,13 +26,37 @@ log = logging.getLogger("scout_agent")
 def _get_ch_client():
     """Create a ClickHouse client from env vars. Import is local so startup never fails."""
     import clickhouse_connect
-    return clickhouse_connect.get_client(
+    client = clickhouse_connect.get_client(
         host=os.getenv("CH_HOST", ""),
         user=os.getenv("CH_USER", "analytics"),
         password=os.getenv("CH_PASSWORD", ""),
         database=os.getenv("CH_DATABASE", "default"),
         secure=True,
     )
+    return _LoggingCHClient(client)
+
+
+class _LoggingCHClient:
+    """Thin wrapper that logs every SQL query to the terminal before execution.
+
+    Vamsee's ask: "when running locally, we should be printing all queries to
+    the terminal — that's where you'll verify." This satisfies that without
+    touching every call site. Logs at INFO so it appears in both local terminal
+    and Railway log stream. Truncates to 400 chars to keep it readable.
+    """
+
+    def __init__(self, client):
+        self._client = client
+
+    def query(self, query: str, parameters=None, **kwargs):
+        preview = query.strip().replace("\n", " ")
+        preview = " ".join(preview.split())  # collapse whitespace
+        log.info(f"[CH] {preview[:400]}{'…' if len(preview) > 400 else ''}")
+        return self._client.query(query, parameters=parameters, **kwargs)
+
+    def __getattr__(self, name):
+        # Proxy everything else (command, insert, etc.) directly to real client
+        return getattr(self._client, name)
 
 
 SNAPSHOT_PATH = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
