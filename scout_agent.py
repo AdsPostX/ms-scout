@@ -2403,13 +2403,35 @@ def get_publisher_health(
         pub_name = None
         if pid is None and publisher_name:
             rows = ch.query(
-                "SELECT id, organization FROM from_airbyte_users WHERE organization ILIKE {name: String} LIMIT 5",
+                "SELECT id, organization FROM from_airbyte_users WHERE organization ILIKE {name: String} LIMIT 10",
                 parameters={"name": f"%{publisher_name}%"},
             ).result_rows
             if not rows:
                 return {"error": f"No publisher found matching '{publisher_name}'"}
-            pid = int(rows[0][0])
-            pub_name = rows[0][1]
+            # Disambiguate: pick the candidate with the most recent sessions.
+            # Without this, accounts with the same name return in arbitrary order and
+            # the wrong (inactive) account gets picked — e.g. TextNow 2527 vs 1952.
+            if len(rows) > 1:
+                candidate_ids = [str(int(r[0])) for r in rows]
+                id_csv = ", ".join(candidate_ids)
+                vol_rows = ch.query(
+                    f"""
+                    SELECT user_id, count() AS sessions
+                    FROM adpx_sdk_sessions
+                    PREWHERE user_id IN ({id_csv})
+                        AND toYYYYMM(created_at) >= toYYYYMM(today() - 7)
+                    WHERE created_at >= today() - 7
+                    GROUP BY user_id
+                    ORDER BY sessions DESC
+                    LIMIT 1
+                    """
+                ).result_rows
+                best_id = int(vol_rows[0][0]) if vol_rows else int(rows[0][0])
+                best_row = next((r for r in rows if int(r[0]) == best_id), rows[0])
+            else:
+                best_row = rows[0]
+            pid = int(best_row[0])
+            pub_name = best_row[1]
         elif pid is not None:
             rows = ch.query(
                 "SELECT id, organization FROM from_airbyte_users WHERE id = {pid: UInt64} LIMIT 1",
@@ -2792,13 +2814,33 @@ def get_perkswall_engagement(
         pub_name = None
         if pid is None and publisher_name:
             rows = ch.query(
-                "SELECT id, organization FROM from_airbyte_users WHERE organization ILIKE {name: String} LIMIT 5",
+                "SELECT id, organization FROM from_airbyte_users WHERE organization ILIKE {name: String} LIMIT 10",
                 parameters={"name": f"%{publisher_name}%"},
             ).result_rows
             if not rows:
                 return {"error": f"No publisher found matching '{publisher_name}'"}
-            pid = int(rows[0][0])
-            pub_name = rows[0][1]
+            # Disambiguate: pick the candidate with the most recent sessions.
+            if len(rows) > 1:
+                candidate_ids = [str(int(r[0])) for r in rows]
+                id_csv = ", ".join(candidate_ids)
+                vol_rows = ch.query(
+                    f"""
+                    SELECT user_id, count() AS sessions
+                    FROM adpx_sdk_sessions
+                    PREWHERE user_id IN ({id_csv})
+                        AND toYYYYMM(created_at) >= toYYYYMM(today() - 7)
+                    WHERE created_at >= today() - 7
+                    GROUP BY user_id
+                    ORDER BY sessions DESC
+                    LIMIT 1
+                    """
+                ).result_rows
+                best_id = int(vol_rows[0][0]) if vol_rows else int(rows[0][0])
+                best_row = next((r for r in rows if int(r[0]) == best_id), rows[0])
+            else:
+                best_row = rows[0]
+            pid = int(best_row[0])
+            pub_name = best_row[1]
         elif pid is not None:
             rows = ch.query(
                 "SELECT id, organization FROM from_airbyte_users WHERE id = {pid: UInt64} LIMIT 1",
