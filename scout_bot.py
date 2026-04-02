@@ -45,6 +45,27 @@ _LAST_THREAD_LOCK = threading.Lock()
 _BOT_USER_ID: str = ""  # cached at startup — never changes
 
 
+def _smart_history(history: list, max_full: int = 4) -> list:
+    """Keep last max_full messages verbatim; summarize older ones as a single context line."""
+    if len(history) <= max_full:
+        return history
+    older, recent = history[:-max_full], history[-max_full:]
+    entities: set = set()
+    for msg in older:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            entities.update(re.findall(r'\b[A-Z][a-zA-Z+]{2,}\b', content))
+    summary = (
+        f"[Earlier context: {', '.join(list(entities)[:8])}]"
+        if entities
+        else "[Earlier messages truncated]"
+    )
+    return [
+        {"role": "user", "content": summary},
+        {"role": "assistant", "content": "Understood."},
+    ] + recent
+
+
 def _atomic_write(path: pathlib.Path, data: dict) -> None:
     """Write JSON atomically — temp file + os.replace prevents partial writes on crash."""
     tmp = path.with_suffix(".tmp")
@@ -2026,9 +2047,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     except Exception as e:
         log.warning(f"suggestion handler: could not fetch history: {e}")
 
-    _MAX_HISTORY = 10  # 20x800 chars exceeded 10K TPM org limit
-    if len(history) > _MAX_HISTORY:
-        history = history[:2] + history[-(_MAX_HISTORY - 2):]
+    history = _smart_history(history)
 
     thread_ctx = _get_thread_context(thread_ts)
     if thread_ctx:
@@ -2835,12 +2854,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         except Exception as e:
             log.warning(f"Could not fetch thread history: {e}")
 
-    # Smart trim: keep first 2 + last 18 messages — drops verbose middle content
-    # (Scout's own long responses) without losing the opening context or recent turns.
+    # Smart trim: keep last 4 messages verbatim; summarize older ones into a single
+    # entity-extraction line so context is preserved without ballooning token count.
     # Context block is injected AFTER this trim so it always lands at position 0.
-    _MAX_HISTORY = 10  # 20x800 chars exceeded 10K TPM org limit
-    if len(history) > _MAX_HISTORY:
-        history = history[:2] + history[-(_MAX_HISTORY - 2):]
+    history = _smart_history(history)
 
     # Inject persisted thread entities at position 0 — immune to trimming.
     # Resolves follow-ups like "@Scout yes, $50 CPA" without restating publisher/offer.
