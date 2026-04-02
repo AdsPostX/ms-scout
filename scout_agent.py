@@ -13,7 +13,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 import anthropic
@@ -3211,9 +3211,36 @@ def ask(user_message: str, history: list = None) -> str:
             return text or "(no response)"
 
         # Process tool calls
+        tool_blocks = [(i, block) for i, block in enumerate(response.content)
+                       if block.type == "tool_use"]
         tool_results = []
-        for block in response.content:
-            if block.type == "tool_use":
+
+        if len(tool_blocks) > 1:
+            # Multiple tool calls — run in parallel, then reassemble in original order
+            with ThreadPoolExecutor(max_workers=len(tool_blocks)) as executor:
+                futures = {
+                    executor.submit(_run_tool, block.name, block.input): (i, block)
+                    for i, block in tool_blocks
+                }
+                results_map = {}
+                for future in as_completed(futures):
+                    i, block = futures[future]
+                    result = future.result()
+                    results_map[i] = (block, result)
+
+            for i, _ in sorted(tool_blocks, key=lambda x: x[0]):
+                block, result = results_map[i]
+                if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
+                    _brief_results.append(result)  # collect all, use first for primary
+                _all_tool_results.append(result)  # accumulate all for entity extraction
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(result),
+                })
+        else:
+            # Single tool call — keep sequential path unchanged
+            for i, block in tool_blocks:
                 result = _run_tool(block.name, block.input)
                 if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                     _brief_results.append(result)  # collect all, use first for primary
