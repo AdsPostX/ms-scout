@@ -3219,7 +3219,10 @@ def ask(user_message: str, history: list = None) -> str:
     if not api_key:
         return "ANTHROPIC_API_KEY not set — Scout can't respond."
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+    )
     # Prepend team corrections as grounding context for this query
     corrections_ctx = _get_corrections_context()
     effective_message = (corrections_ctx + user_message) if corrections_ctx else user_message
@@ -3237,7 +3240,7 @@ def ask(user_message: str, history: list = None) -> str:
                 response = client.messages.create(
                     model="claude-sonnet-4-6",
                     max_tokens=2048,
-                    system=SYSTEM_PROMPT,
+                    system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                     tools=TOOLS,
                     messages=messages,
                 )
