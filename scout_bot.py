@@ -1108,7 +1108,7 @@ def _run_pulse_signals() -> dict:
     except Exception as e:
         log.warning(f"Pulse cap signal failed: {e}")
 
-    # ── Signal 2: Revenue velocity (7d vs 30d run rate, ≥40% delta, >$1K/mo) ─
+    # ── Signal 2: Revenue velocity (7d vs 30d run rate, ≥40% delta, >$5K/mo) ─
     try:
         vel_rows = ch.query(
             """
@@ -1125,6 +1125,7 @@ def _run_pulse_signals() -> dict:
             LIMIT 200
             """
         ).result_rows
+
         # Resolve publisher names in one batch query
         uid_list = [str(r[0]) for r in vel_rows if r[0]]
         org_map: dict = {}
@@ -1137,6 +1138,8 @@ def _run_pulse_signals() -> dict:
                 org_map = {str(r[0]): r[1] for r in name_rows}
             except Exception:
                 pass
+
+        # Build velocity shifts list (filter to ≥40% delta)
         for user_id, rev_30d, rev_7d in vel_rows:
             rev_7d_ann = (rev_7d / 7) * 30 if rev_7d else 0
             if rev_30d <= 0:
@@ -1145,15 +1148,63 @@ def _run_pulse_signals() -> dict:
             if abs(pct_delta) < 40:
                 continue
             signals["velocity_shifts"].append({
-                "publisher_name": org_map.get(str(user_id), f"Partner {user_id}"),
-                "publisher_id":   int(user_id) if user_id else None,
-                "revenue_30d":    round(rev_30d, 2),
-                "revenue_7d_ann": round(rev_7d_ann, 2),
-                "pct_delta":      round(pct_delta, 1),
-                "direction":      "up" if pct_delta > 0 else "down",
+                "publisher_name":  org_map.get(str(user_id), f"Partner {user_id}"),
+                "publisher_id":    int(user_id) if user_id else None,
+                "revenue_30d":     round(rev_30d, 2),
+                "revenue_7d_ann":  round(rev_7d_ann, 2),
+                "pct_delta":       round(pct_delta, 1),
+                "direction":       "up" if pct_delta > 0 else "down",
+                "top_advertisers": [],
             })
         signals["velocity_shifts"].sort(key=lambda x: abs(x["pct_delta"]), reverse=True)
         signals["velocity_shifts"] = signals["velocity_shifts"][:5]
+
+        # ── Advertiser attribution: top-2 per publisher by revenue delta ──────
+        vel_pub_ids = [v["publisher_id"] for v in signals["velocity_shifts"] if v["publisher_id"]]
+        if vel_pub_ids:
+            try:
+                pub_id_csv = ",".join(str(p) for p in vel_pub_ids)
+                attr_rows = ch.query(
+                    f"""
+                    SELECT
+                        cv.user_id,
+                        c.adv_name,
+                        sum(toFloat64OrNull(cv.revenue))                                       AS rev_30d,
+                        sumIf(toFloat64OrNull(cv.revenue), cv.created_at >= today() - 7)       AS rev_7d,
+                        (sumIf(toFloat64OrNull(cv.revenue), cv.created_at >= today() - 7)
+                            / 7 * 30) - sum(toFloat64OrNull(cv.revenue))                      AS delta_ann
+                    FROM adpx_conversionsdetails cv
+                    JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
+                    PREWHERE cv.user_id IN ({pub_id_csv})
+                        AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
+                    WHERE cv.created_at >= today() - 30
+                      AND c.deleted_at IS NULL
+                    GROUP BY cv.user_id, c.adv_name
+                    ORDER BY cv.user_id, abs(delta_ann) DESC
+                    """
+                ).result_rows
+                # Group by publisher_id → top 2 advertisers by |delta_ann|
+                attr_map: dict = {}
+                for uid, adv_name, rev_30d_a, rev_7d_a, delta_a in attr_rows:
+                    key = int(uid) if uid else None
+                    if key not in attr_map:
+                        attr_map[key] = []
+                    delta_rounded = round(delta_a or 0, 0)
+                    # Skip flat advertisers — no meaningful signal
+                    if abs(delta_rounded) < 100:
+                        continue
+                    if len(attr_map[key]) < 2:
+                        attr_map[key].append({
+                            "adv_name": adv_name,
+                            "delta_ann": delta_rounded,
+                            "rev_7d":    round(rev_7d_a or 0, 0),
+                        })
+                # Attach to velocity shifts
+                for v in signals["velocity_shifts"]:
+                    v["top_advertisers"] = attr_map.get(v["publisher_id"], [])
+            except Exception as e:
+                log.warning(f"Pulse advertiser attribution failed: {e}")
+
     except Exception as e:
         log.warning(f"Pulse velocity signal failed: {e}")
 
@@ -1192,80 +1243,167 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
     """
     Format pulse signals into a Slack Block Kit message.
     Returns (fallback_text, blocks).
+
+    Design principles:
+    - Urgency-first: NEEDS ATTENTION (downs) before MOMENTUM (ups)
+    - One line per publisher — name, %, current rate, attribution all inline
+    - No context blocks for velocity items — attribution is part of the signal,
+      not subordinate to it
+    - Standing checks (caps, overnight) compact at bottom
+    - Non-events are context blocks (gray, small) — don't compete with real signals
     """
     from datetime import date as _date
-    today_label = _date.today().strftime("%B %-d, %Y")
-    blocks: list = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"Scout Pulse — {today_label}"}},
-    ]
-    sections: list = []
 
-    cap_alerts    = signals.get("cap_alerts", [])
-    vel_shifts    = signals.get("velocity_shifts", [])
-    night_events  = signals.get("overnight_events", [])
+    def _fmt_k(n: float) -> str:
+        if abs(n) >= 1000:
+            k = n / 1000
+            return f"${k:.0f}K" if k == int(k) else f"${k:.1f}K"
+        return f"${n:.0f}"
 
-    # ── Cap alerts ────────────────────────────────────────────────────────────
-    if cap_alerts:
-        lines = []
-        for a in cap_alerts[:5]:
+    def _inline_attr(v: dict) -> str:
+        """One-line attribution label — fits inline on the publisher signal line."""
+        advs      = v.get("top_advertisers", [])
+        direction = v.get("direction", "up")
+        parts = []
+        for a in advs:
+            delta = a["delta_ann"]
+            if direction == "up" and delta < 0:
+                continue
+            if direction == "down" and delta > 0:
+                continue
+            if a["rev_7d"] == 0 and delta < 0:
+                parts.append(f"{a['adv_name']} inactive")
+            else:
+                sign = "+" if delta >= 0 else "-"
+                parts.append(f"{a['adv_name']} {sign}{_fmt_k(abs(delta))}")
+        return "  ·  ".join(parts)
+
+    today_label  = _date.today().strftime("%B %-d, %Y")
+    cap_alerts   = signals.get("cap_alerts", [])
+    vel_shifts   = signals.get("velocity_shifts", [])
+    night_events = signals.get("overnight_events", [])
+    downs        = [v for v in vel_shifts if v["direction"] == "down"]
+    ups          = [v for v in vel_shifts if v["direction"] == "up"]
+
+    blocks: list = []
+
+    # ── Title ─────────────────────────────────────────────────────────────────
+    blocks.append({
+        "type": "header",
+        "text": {"type": "plain_text", "text": f"Scout Pulse  ·  {today_label}"},
+    })
+
+    # ── NEEDS ATTENTION (downs) ───────────────────────────────────────────────
+    if downs:
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":rotating_light:  *NEEDS ATTENTION*"},
+        })
+        for v in downs[:3]:
+            attr = _inline_attr(v)
+            attr_part = f"   ·   {attr}" if attr else ""
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"\u00a0\u00a0\u00a0\u00a0•   *{v['publisher_name']}*   "
+                        f"*{v['pct_delta']:.0f}%*   "
+                        f"{_fmt_k(v['revenue_7d_ann'])}/mo"
+                        f"{attr_part}"
+                    ),
+                },
+            })
+
+    # ── MOMENTUM (ups) ────────────────────────────────────────────────────────
+    if ups:
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":chart_with_upwards_trend:  *MOMENTUM*"},
+        })
+        for v in ups[:3]:
+            attr = _inline_attr(v)
+            attr_part = f"   ·   {attr}" if attr else ""
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"\u00a0\u00a0\u00a0\u00a0•   *{v['publisher_name']}*   "
+                        f"*+{v['pct_delta']:.0f}%*   "
+                        f"{_fmt_k(v['revenue_7d_ann'])}/mo"
+                        f"{attr_part}"
+                    ),
+                },
+            })
+
+    # ── Cap alerts — urgent caps join NEEDS ATTENTION, the rest go to standing ──
+    # ≥90% with days_to_cap < days_remaining = hits cap before month end → urgent
+    urgent_caps  = [a for a in cap_alerts if a["cap_pct"] >= 90 and a["days_to_cap"] < a["days_remaining"]]
+    routine_caps = [a for a in cap_alerts if a not in urgent_caps]
+
+    if urgent_caps:
+        # Inject into NEEDS ATTENTION section if it exists, else open a new one
+        if not downs:
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": ":rotating_light:  *NEEDS ATTENTION*"},
+            })
+        for a in urgent_caps[:3]:
+            hit_note = f"~{a['days_to_cap']:.0f}d to cap"
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"\u00a0\u00a0\u00a0\u00a0•   *{a['adv_name']}*   *{a['cap_pct']}% of cap*   {hit_note}",
+                },
+            })
+
+    # ── Standing checks: routine caps + overnight (compact, bottom) ───────────
+    standing: list = []
+
+    if routine_caps:
+        for a in routine_caps[:3]:
             hit_note = (
-                f"hits in ~{a['days_to_cap']:.0f}d"
+                f"~{a['days_to_cap']:.0f}d to cap"
                 if a["days_to_cap"] < a["days_remaining"]
                 else f"{a['days_remaining']}d left"
             )
-            emoji = ":red_circle:" if a["cap_pct"] >= 90 else ":yellow_circle:"
-            lines.append(
-                f"{emoji} *{a['adv_name']}* — "
-                f"*${a['revenue_mtd']:,.0f}* of *${a['monthly_cap']:,.0f}* cap "
-                f"(*{a['cap_pct']}% used*, {hit_note})"
-            )
-        sections.append(":rotating_light: *CAP ALERTS*\n" + "\n".join(lines))
-    else:
-        sections.append(":large_green_circle: No campaigns near monthly cap.")
+            # 🟡 and 🔴 render reliably; :yellow_circle: is not a valid Slack shortcode
+            status_emoji = "🔴" if a["cap_pct"] >= 90 else "🟡"
+            standing.append(f"{status_emoji}  *{a['adv_name']}* {a['cap_pct']}% of cap   {hit_note}")
+    elif not urgent_caps:
+        standing.append("🟢  No caps at risk")
 
-    # ── Velocity shifts ───────────────────────────────────────────────────────
-    if vel_shifts:
-        ups   = [v for v in vel_shifts if v["direction"] == "up"]
-        downs = [v for v in vel_shifts if v["direction"] == "down"]
-        vel_lines = []
-        for v in ups[:3]:
-            vel_lines.append(
-                f":chart_with_upwards_trend: *{v['publisher_name']}* trending *+{v['pct_delta']:.0f}%* "
-                f"(7d: ${v['revenue_7d_ann']:,.0f}/mo vs 30d: ${v['revenue_30d']:,.0f}/mo)"
-            )
-        for v in downs[:3]:
-            vel_lines.append(
-                f":chart_with_downwards_trend: *{v['publisher_name']}* trending *{v['pct_delta']:.0f}%* "
-                f"(7d: ${v['revenue_7d_ann']:,.0f}/mo vs 30d: ${v['revenue_30d']:,.0f}/mo)"
-            )
-        sections.append(":bar_chart: *VELOCITY*\n" + "\n".join(vel_lines))
+    for e in night_events[:4]:
+        ts     = e["timestamp"][11:16] if len(e.get("timestamp", "")) >= 16 else ""
+        name   = e["adv_name"] or "Unknown"
+        icon   = "⏸" if e["type"] == "pause" else "▶"
+        action = "paused" if e["type"] == "pause" else "resumed"
+        standing.append(f"{icon}  *{name}* {action} {ts} UTC")
 
-    # ── Overnight events ──────────────────────────────────────────────────────
-    if night_events:
-        ev_lines = []
-        for e in night_events[:8]:
-            ts = e["timestamp"][:16] if e["timestamp"] else ""
-            name = f" ({e['adv_name']})" if e["adv_name"] else ""
-            ev_lines.append(
-                f":pause_button: {e['type'].capitalize()}{name} at {ts}"
-                if e["type"] == "pause"
-                else f":arrow_forward: {e['type'].capitalize()}{name} at {ts}"
-            )
-        sections.append(":clock2: *OVERNIGHT CHANGES*\n" + "\n".join(ev_lines))
+    if standing:
+        blocks.append({"type": "divider"})
+        for line in standing:
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": line}],
+            })
 
-    # Build blocks — each section separated by a divider
-    for i, section_text in enumerate(sections):
-        if i > 0:
-            blocks.append({"type": "divider"})
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": section_text}})
-
+    # ── Footer ────────────────────────────────────────────────────────────────
     blocks.append({"type": "divider"})
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": ":speech_balloon: Ask Scout anything: `@Scout what happened to [advertiser]?`"}],
+        "elements": [{
+            "type": "mrkdwn",
+            "text": ":speech_balloon:  `@Scout what happened to [partner]?`   ·   :lock: Only you see slash command responses",
+        }],
     })
 
-    fallback = f"Scout Pulse — {today_label}: {len(cap_alerts)} cap alerts, {len(vel_shifts)} velocity shifts, {len(night_events)} overnight events."
+    fallback = f"Scout Pulse — {today_label}: {len(downs)} need attention, {len(ups)} in momentum, {len(night_events)} overnight."
     return fallback, blocks
 
 
@@ -1965,15 +2103,11 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
     suggestion_blocks = _build_suggestion_buttons(sugg)
-    import hashlib as _hl
-    _qhash_sg = _hl.md5(f"{thread_ts}:{query[:40]}".encode()).hexdigest()[:8]
-    feedback_blocks_sg = _build_feedback_buttons(_qhash_sg)
     web.chat_update(
         channel=channel, ts=_placeholder_ts_sg, text=response_text,
         blocks=[
             {"type": "section", "text": {"type": "mrkdwn", "text": response_text}},
             *suggestion_blocks,
-            *feedback_blocks_sg,
         ],
     )
     log.info(f"Suggestion answered in {channel} (thread {thread_ts}): {query!r}")
@@ -2112,14 +2246,19 @@ def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
 # Values are real advertisers/partners confirmed in the MS platform.
 _HOME_EXAMPLES = [
     {
-        "jtbd":        "Prep for a publisher call",
-        "description": "Get the full account picture: every provisioned offer, which are serving, what to pitch.",
-        "query":       "What's provisioned and running for Constant Contact (partner 6103)?",
+        "jtbd":        "Morning triage — what needs my attention?",
+        "description": "Get a plain-English summary of what moved overnight and who needs a call.",
+        "query":       "What happened today?",
     },
     {
-        "jtbd":        "Find better payouts for an advertiser we're already running",
-        "description": "Check if Capital One Shopping exists on MaxBounty or FlexOffers at a higher rate.",
-        "query":       "Find Capital One Shopping on other networks — is there a better payout?",
+        "jtbd":        "Prep for a publisher call",
+        "description": "Full account picture: provisioned offers, what's serving, revenue health, what to pitch.",
+        "query":       "Give me a health check on TuitionHero",
+    },
+    {
+        "jtbd":        "Understand a revenue drop",
+        "description": "Diagnose why a publisher's revenue fell — which advertiser pulled back and when.",
+        "query":       "What happened to Pinger this week?",
     },
     {
         "jtbd":        "Build a campaign brief",
@@ -2127,14 +2266,9 @@ _HOME_EXAMPLES = [
         "query":       "Build a brief for Square",
     },
     {
-        "jtbd":        "Browse top offers in a vertical",
-        "description": "Find the highest Scout Score Finance offers available right now.",
-        "query":       "What are the top Finance offers by Scout Score?",
-    },
-    {
-        "jtbd":        "Check the demand pipeline",
-        "description": "See what's pending approval or waiting to go live.",
-        "query":       "What's in the demand queue?",
+        "jtbd":        "Find better payouts",
+        "description": "Check if an advertiser exists on other networks at a higher payout rate.",
+        "query":       "Find Capital One Shopping on other networks — is there a better payout?",
     },
 ]
 
@@ -2213,14 +2347,15 @@ def _build_home_view() -> dict:
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    "*Ask @Scout anything in plain English*\n"
-                    "Mention @Scout in any channel. Scout remembers context within a thread.\n\n"
-                    "*Quick commands (slash, any channel — ephemeral):*\n"
-                    "• `/scout-pub [publisher]` — publisher performance card\n"
-                    "• `/scout-queue` — current queue status\n"
-                    "• `/scout-enter [advertiser or URL]` — MS Platform entry card\n"
-                    "• `/scout-status` — system health\n\n"
-                    "*Try an example →*"
+                    "*Ask @Scout anything in plain English.*\n"
+                    "Mention @Scout in any channel or thread. Scout remembers context within a thread.\n\n"
+                    "*Slash commands — responses are only visible to you:*\n"
+                    "• `/scout-pub [publisher name]` — revenue health, active offers, what to pitch\n"
+                    "• `/scout-enter [advertiser or URL]` — campaign entry card for the MS platform\n"
+                    "• `/scout-queue` — what's pending in the demand queue\n"
+                    "• `/scout-status` — system health + data freshness\n\n"
+                    ":lock: _Slash command responses are private — only you can see them. Great for quick lookups mid-call._\n\n"
+                    "*Try one →*"
                 ),
             },
         },
@@ -2319,13 +2454,10 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
                 response_text     = response if isinstance(response, str) else str(response)
                 suggestion_blocks = []
             content_blocks = _text_to_blocks(response_text)
-            import hashlib as _hl
-            _qhash_ah = _hl.md5(f"{dm_channel}:{query[:40]}".encode()).hexdigest()[:8]
-            feedback_blocks_ah = _build_feedback_buttons(_qhash_ah)
             web.chat_update(
                 channel=dm_channel, ts=_placeholder_ts_ah,
                 text=response_text,
-                blocks=[*content_blocks, *suggestion_blocks, *feedback_blocks_ah],
+                blocks=[*content_blocks, *suggestion_blocks],
             )
         log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
     except Exception as e:
@@ -2849,14 +2981,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         response_text     = response if isinstance(response, str) else str(response)
         content_blocks    = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
-        import hashlib as _hl
-        _qhash = _hl.md5(f"{thread_ts}:{query[:40]}".encode()).hexdigest()[:8]
-        feedback_blocks   = _build_feedback_buttons(_qhash)
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
             text=response_text,
-            blocks=[*content_blocks, *suggestion_blocks, *feedback_blocks],
+            blocks=[*content_blocks, *suggestion_blocks],
         )
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 
