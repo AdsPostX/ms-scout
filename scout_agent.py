@@ -3209,6 +3209,19 @@ def _extract_thread_entities(tool_results: list) -> dict:
     return {k: v for k, v in ctx.items() if v is not None}
 
 
+def _select_model(user_message: str) -> str:
+    """Route simple queries to Haiku, complex analytical queries to Sonnet."""
+    msg = user_message.lower()
+    simple = ["status", "queue", "is scout", "help", "paused", "active",
+              "how many", "count", "list all", "what is the cap"]
+    complex_ = ["health", "competitive", "projection", "revenue", "rpm",
+                "trend", "brief", "compare", "analyze", "performance",
+                "velocity", "benchmark", "opportunity", "why"]
+    if sum(1 for p in simple if p in msg) > sum(1 for p in complex_ if p in msg):
+        return "claude-haiku-3-5-20251001"
+    return "claude-sonnet-4-6"
+
+
 def ask(user_message: str, history: list = None) -> str:
     """
     Send a message to Scout and get a response.
@@ -3238,7 +3251,7 @@ def ask(user_message: str, history: list = None) -> str:
         for attempt in range(4):
             try:
                 response = client.messages.create(
-                    model="claude-sonnet-4-6",
+                    model=_select_model(user_message),
                     max_tokens=2048,
                     system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                     tools=TOOLS,
