@@ -296,6 +296,9 @@ def _clean_error(err: Exception) -> tuple[str, str]:
     if "429" in s or "rate_limit" in s:
         msg = "Scout hit the rate limit — give it 60 seconds and try again."
         tag = "office michael scott too much"
+    elif "credit balance" in s.lower() or ("400" in s and "credit" in s.lower()):
+        msg = "Scout is out of Anthropic credits — ping Sidd to top up at console.anthropic.com."
+        tag = "office michael scott money"
     elif "529" in s or "overloaded" in s:
         msg = "Anthropic is slammed right now — try again in a minute."
         tag = "it crowd have you tried turning it off"
@@ -2023,7 +2026,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     except Exception as e:
         log.warning(f"suggestion handler: could not fetch history: {e}")
 
-    _MAX_HISTORY = 20
+    _MAX_HISTORY = 10  # 20x800 chars exceeded 10K TPM org limit
     if len(history) > _MAX_HISTORY:
         history = history[:2] + history[-(_MAX_HISTORY - 2):]
 
@@ -2835,7 +2838,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     # Smart trim: keep first 2 + last 18 messages — drops verbose middle content
     # (Scout's own long responses) without losing the opening context or recent turns.
     # Context block is injected AFTER this trim so it always lands at position 0.
-    _MAX_HISTORY = 20
+    _MAX_HISTORY = 10  # 20x800 chars exceeded 10K TPM org limit
     if len(history) > _MAX_HISTORY:
         history = history[:2] + history[-(_MAX_HISTORY - 2):]
 
