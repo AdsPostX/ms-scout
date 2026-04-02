@@ -13,6 +13,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 import anthropic
@@ -1877,37 +1878,40 @@ def get_publisher_competitive_landscape(
         # pid in impressions table = numeric user id as string
         pub_pid = str(pub_id_int)
 
+        # Step 2 + Step 3 run in parallel — both depend only on pub_pid/pub_id_int
         # Step 2: weekly impression volume on this publisher (last 4 weeks avg)
-        vol_rows = ch.query(f"""
-            SELECT
-                toStartOfWeek(i.created_at) AS week,
-                count() AS impressions
-            FROM default.adpx_impressions_details i
-            PREWHERE i.pid = '{pub_pid}'
-            WHERE i.created_at >= today() - 28
-            GROUP BY week
-            ORDER BY week DESC
-        """).result_rows
-
-        weekly_impressions = int(sum(r[1] for r in vol_rows) / max(len(vol_rows), 1)) if vol_rows else 0
-
         # Step 3: provisioned offers — what's assigned to this publisher account.
         # from_airbyte_publisher_campaigns is the source of truth for "what's set up."
         # Impressions tell us which of those are actively serving right now.
-        prov_rows = ch.query(f"""
-            SELECT
-                pc.campaign_id,
-                c.adv_name,
-                pc.payout
-            FROM default.from_airbyte_publisher_campaigns pc
-            JOIN default.from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
-            WHERE pc.user_id = {pub_id_int}
-              AND pc.deleted_at IS NULL
-              AND pc.is_active = true
-              AND c.deleted_at IS NULL
-            ORDER BY pc.created_at DESC
-            LIMIT 50
-        """).result_rows
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            f_vol = executor.submit(ch.query, f"""
+                SELECT
+                    toStartOfWeek(i.created_at) AS week,
+                    count() AS impressions
+                FROM default.adpx_impressions_details i
+                PREWHERE i.pid = '{pub_pid}'
+                WHERE i.created_at >= today() - 28
+                GROUP BY week
+                ORDER BY week DESC
+            """)
+            f_prov = executor.submit(ch.query, f"""
+                SELECT
+                    pc.campaign_id,
+                    c.adv_name,
+                    pc.payout
+                FROM default.from_airbyte_publisher_campaigns pc
+                JOIN default.from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
+                WHERE pc.user_id = {pub_id_int}
+                  AND pc.deleted_at IS NULL
+                  AND pc.is_active = true
+                  AND c.deleted_at IS NULL
+                ORDER BY pc.created_at DESC
+                LIMIT 50
+            """)
+            vol_rows = f_vol.result().result_rows
+            prov_rows = f_prov.result().result_rows
+
+        weekly_impressions = int(sum(r[1] for r in vol_rows) / max(len(vol_rows), 1)) if vol_rows else 0
 
         # Step 4: determine which provisioned campaigns have recent impressions (serving now).
         serving_map: dict = {}  # campaign_id → impression count
@@ -2272,10 +2276,11 @@ def get_advertiser_revenue_projection(
     month_end     = date(target_year, target_month_num, days_in_month)
     month_label   = f"{_cal.month_name[target_month_num]} {target_year}"
 
-    # ── Step 1: 30-day baseline — impressions + revenue per publisher ─────────
-    baseline_rows = []
-    try:
-        result = ch.query(
+    # ── Steps 1 + 2 run in parallel — both depend only on advertiser_name ───────
+    # Step 1: 30-day baseline — impressions + revenue per publisher
+    # Step 2: Campaign end dates + monthly caps
+    def _fetch_baseline():
+        return ch.query(
             """
             SELECT
                 cast(i.pid AS String)          AS publisher_pid,
@@ -2303,26 +2308,10 @@ def get_advertiser_revenue_projection(
             LIMIT 30
             """,
             parameters={"adv": f"%{advertiser_name}%"},
-        )
-        baseline_rows = result.result_rows
-    except Exception as e:
-        log.warning(f"get_advertiser_revenue_projection baseline failed: {e}")
-        return {"error": str(e), "advertiser": advertiser_name, "month": month_label}
+        ).result_rows
 
-    if not baseline_rows:
-        return {
-            "advertiser": advertiser_name,
-            "month": month_label,
-            "error": f"No impression data for '{advertiser_name}' in the last 30 days. Check spelling or try a partial name.",
-        }
-
-    # ── Step 2: Campaign end dates + monthly caps ─────────────────────────────
-    cap_warnings       = []
-    end_date_warnings  = []
-    monthly_cap_total  = None
-
-    try:
-        cap_result = ch.query(
+    def _fetch_cap_data():
+        return ch.query(
             """
             SELECT id, adv_name, end_date, capping_config
             FROM from_airbyte_campaigns
@@ -2331,26 +2320,52 @@ def get_advertiser_revenue_projection(
               AND (end_date IS NULL OR end_date >= %(month_start)s)
             """,
             parameters={"adv": f"%{advertiser_name}%", "month_start": str(month_start)},
-        )
-        for row in cap_result.result_rows:
-            cid, adv, end_dt, cap_cfg = row
-            if end_dt and end_dt < month_end:
-                end_date_warnings.append(
-                    f"Campaign {cid} ends {end_dt} — won't run full month"
-                )
-            if cap_cfg:
-                try:
-                    cfg = _json.loads(cap_cfg) if isinstance(cap_cfg, str) else cap_cfg
-                    mb = (cfg.get("month") or {}).get("budget")
-                    if mb and float(mb) > 0:
-                        cap_warnings.append(
-                            f"Campaign {cid}: ${float(mb):,.0f} monthly budget cap"
-                        )
-                        monthly_cap_total = (monthly_cap_total or 0) + float(mb)
-                except Exception:
-                    pass
-    except Exception as e:
-        log.warning(f"get_advertiser_revenue_projection cap query failed: {e}")
+        ).result_rows
+
+    baseline_rows = []
+    cap_rows = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f_baseline = executor.submit(_fetch_baseline)
+        f_cap = executor.submit(_fetch_cap_data)
+        try:
+            baseline_rows = f_baseline.result()
+        except Exception as e:
+            log.warning(f"get_advertiser_revenue_projection baseline failed: {e}")
+            return {"error": str(e), "advertiser": advertiser_name, "month": month_label}
+        try:
+            cap_rows = f_cap.result()
+        except Exception as e:
+            log.warning(f"get_advertiser_revenue_projection cap query failed: {e}")
+
+    if not baseline_rows:
+        return {
+            "advertiser": advertiser_name,
+            "month": month_label,
+            "error": f"No impression data for '{advertiser_name}' in the last 30 days. Check spelling or try a partial name.",
+        }
+
+    # ── Process cap/end-date results ──────────────────────────────────────────
+    cap_warnings       = []
+    end_date_warnings  = []
+    monthly_cap_total  = None
+
+    for row in cap_rows:
+        cid, adv, end_dt, cap_cfg = row
+        if end_dt and end_dt < month_end:
+            end_date_warnings.append(
+                f"Campaign {cid} ends {end_dt} — won't run full month"
+            )
+        if cap_cfg:
+            try:
+                cfg = _json.loads(cap_cfg) if isinstance(cap_cfg, str) else cap_cfg
+                mb = (cfg.get("month") or {}).get("budget")
+                if mb and float(mb) > 0:
+                    cap_warnings.append(
+                        f"Campaign {cid}: ${float(mb):,.0f} monthly budget cap"
+                    )
+                    monthly_cap_total = (monthly_cap_total or 0) + float(mb)
+            except Exception:
+                pass
 
     # ── Step 3: Projection ────────────────────────────────────────────────────
     total_revenue_30d     = sum(r[4] for r in baseline_rows)
@@ -2466,19 +2481,6 @@ def get_publisher_health(
         if pid is None:
             return {"error": "Must provide publisher_name or publisher_id"}
 
-        # ── Fetch placement display names ─────────────────────────────────────
-        placement_names = {}
-        try:
-            pn_rows = ch.query(
-                "SELECT slug, display_name FROM from_airbyte_placements WHERE user_id = {pid: Int64}",
-                parameters={"pid": int(pid)},
-            ).result_rows
-            for slug, display_name in pn_rows:
-                if display_name:
-                    placement_names[slug] = display_name
-        except Exception:
-            pass  # non-fatal — use slugs as-is if table unavailable
-
         # ── Partition filter ──────────────────────────────────────────────────
         from datetime import date
         today = date.today()
@@ -2486,8 +2488,10 @@ def get_publisher_health(
         partition = int(today.strftime("%Y%m")) - (1 if today.day <= days else 0)
         extended_partition = partition - 1  # extra month for downstream lag
 
-        # ── Query 1: session volume by placement + OS ─────────────────────────
+        # ── Queries 1–3 + placement names run in parallel (all depend only on pid/partition) ──
         state_clause = "AND state ILIKE {geo_state: String}" if geo_state else ""
+        state_clause_inner = f"AND state ILIKE {{geo_state: String}}" if geo_state else ""
+
         q1 = f"""
         SELECT placement, os, count() AS sessions
         FROM adpx_sdk_sessions
@@ -2501,12 +2505,10 @@ def get_publisher_health(
         params1 = {"pid": int(pid), "partition": partition, "days": days}
         if geo_state:
             params1["geo_state"] = f"%{geo_state}%"
-        q1_rows = ch.query(q1, parameters=params1).result_rows
 
         # ── Query 2: ad metrics by placement ─────────────────────────────────
         # Scan impressions LEFT (filtered by pid+date), sessions RIGHT (hash table).
         # Putting impressions on the right OOMs on large publishers (FillingRightJoinSide).
-        state_clause_inner = f"AND state ILIKE {{geo_state: String}}" if geo_state else ""
         q2 = f"""
         SELECT
             s.placement,
@@ -2540,7 +2542,6 @@ def get_publisher_health(
         params2 = {"pid": int(pid), "pid_str": str(pid), "partition": partition, "extended_partition": extended_partition, "days": days}
         if geo_state:
             params2["geo_state"] = f"%{geo_state}%"
-        q2_rows = ch.query(q2, parameters=params2).result_rows
 
         # ── Query 3: click metrics by placement ───────────────────────────────
         # Scan clicks LEFT (filtered by user_id+date), sessions RIGHT (hash table).
@@ -2570,7 +2571,27 @@ def get_publisher_health(
         params3 = {"pid": int(pid), "partition": partition, "days": days}
         if geo_state:
             params3["geo_state"] = f"%{geo_state}%"
-        q3_rows = ch.query(q3, parameters=params3).result_rows
+
+        def _fetch_placement_names():
+            try:
+                rows = ch.query(
+                    "SELECT slug, display_name FROM from_airbyte_placements WHERE user_id = {pid: Int64}",
+                    parameters={"pid": int(pid)},
+                ).result_rows
+                return {slug: dn for slug, dn in rows if dn}
+            except Exception:
+                return {}  # non-fatal — use slugs as-is if table unavailable
+
+        # ── Fetch placement display names ─────────────────────────────────────
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            f_pn = executor.submit(_fetch_placement_names)
+            f_q1 = executor.submit(lambda: ch.query(q1, parameters=params1).result_rows)
+            f_q2 = executor.submit(lambda: ch.query(q2, parameters=params2).result_rows)
+            f_q3 = executor.submit(lambda: ch.query(q3, parameters=params3).result_rows)
+            placement_names = f_pn.result()
+            q1_rows = f_q1.result()
+            q2_rows = f_q2.result()
+            q3_rows = f_q3.result()
 
         # ── Combine results ───────────────────────────────────────────────────
         # Build placement-keyed dicts
@@ -2710,10 +2731,11 @@ def get_campaign_status(advertiser_name: str) -> dict:
         import json as _json
         ch = _get_ch_client()
 
-        # ── Query 1: current status from publisher_campaigns ──────────────────
-        q1_rows = []
-        try:
-            q1_rows = ch.query(
+        # ── Queries 1 + 2 run in parallel — both depend only on advertiser_name ─
+        # Query 1: current status from publisher_campaigns
+        # Query 2: recent audit log entries
+        def _fetch_q1():
+            return ch.query(
                 """
                 SELECT
                     pc.id, pc.campaign_id, pc.is_active,
@@ -2728,13 +2750,9 @@ def get_campaign_status(advertiser_name: str) -> dict:
                 """,
                 parameters={"adv": f"%{advertiser_name}%"},
             ).result_rows
-        except Exception as e:
-            log.warning(f"get_campaign_status q1 failed: {e}")
 
-        # ── Query 2: recent audit log entries ─────────────────────────────────
-        q2_rows = []
-        try:
-            q2_rows = ch.query(
+        def _fetch_q2():
+            return ch.query(
                 """
                 SELECT
                     entity, type, old_data, new_data, created_at, user_type, user_role
@@ -2746,8 +2764,20 @@ def get_campaign_status(advertiser_name: str) -> dict:
                 """,
                 parameters={"adv_pat": f"%{advertiser_name}%"},
             ).result_rows
-        except Exception as e:
-            log.warning(f"get_campaign_status q2 failed: {e}")
+
+        q1_rows = []
+        q2_rows = []
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            f_q1 = executor.submit(_fetch_q1)
+            f_q2 = executor.submit(_fetch_q2)
+            try:
+                q1_rows = f_q1.result()
+            except Exception as e:
+                log.warning(f"get_campaign_status q1 failed: {e}")
+            try:
+                q2_rows = f_q2.result()
+            except Exception as e:
+                log.warning(f"get_campaign_status q2 failed: {e}")
 
         # ── Build campaigns list ──────────────────────────────────────────────
         campaigns = []
