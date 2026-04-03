@@ -730,7 +730,7 @@ def get_supply_demand_gaps(
         # Step 1: Resolve publisher
         pub_rows = ch.query(
             "SELECT id, organization FROM from_airbyte_users "
-            "WHERE organization ILIKE %(pub)s AND deleted_at IS NULL LIMIT 5",
+            "WHERE organization ILIKE %(pub)s LIMIT 5",
             parameters={"pub": f"%{publisher_name}%"}
         ).result_rows
         if not pub_rows:
@@ -3446,27 +3446,41 @@ def ask(user_message: str, history: list = None) -> str:
 
         if len(tool_blocks) > 1:
             # Multiple tool calls — run in parallel, then reassemble in original order
-            with ThreadPoolExecutor(max_workers=len(tool_blocks)) as executor:
-                futures = {
-                    executor.submit(_run_tool, block.name, block.input): (i, block)
-                    for i, block in tool_blocks
-                }
-                results_map = {}
-                for future in as_completed(futures):
-                    i, block = futures[future]
-                    result = future.result()
-                    results_map[i] = (block, result)
+            # Falls back to sequential if executor is unavailable (e.g. during shutdown)
+            try:
+                with ThreadPoolExecutor(max_workers=len(tool_blocks)) as executor:
+                    futures = {
+                        executor.submit(_run_tool, block.name, block.input): (i, block)
+                        for i, block in tool_blocks
+                    }
+                    results_map = {}
+                    for future in as_completed(futures):
+                        i, block = futures[future]
+                        result = future.result()
+                        results_map[i] = (block, result)
 
-            for i, _ in sorted(tool_blocks, key=lambda x: x[0]):
-                block, result = results_map[i]
-                if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
-                    _brief_results.append(result)  # collect all, use first for primary
-                _all_tool_results.append(result)  # accumulate all for entity extraction
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result),
-                })
+                for i, _ in sorted(tool_blocks, key=lambda x: x[0]):
+                    block, result = results_map[i]
+                    if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
+                        _brief_results.append(result)
+                    _all_tool_results.append(result)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result),
+                    })
+            except RuntimeError:
+                # Interpreter shutting down — fall back to sequential
+                for i, block in tool_blocks:
+                    result = _run_tool(block.name, block.input)
+                    if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
+                        _brief_results.append(result)
+                    _all_tool_results.append(result)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result),
+                    })
         else:
             # Single tool call — keep sequential path unchanged
             for i, block in tool_blocks:
