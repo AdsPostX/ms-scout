@@ -3327,7 +3327,7 @@ def ask(user_message: str, history: list = None) -> str:
 
     client = anthropic.Anthropic(
         api_key=api_key,
-        extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+        default_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
     )
     # Prepend team corrections as grounding context for this query
     corrections_ctx = _get_corrections_context()
