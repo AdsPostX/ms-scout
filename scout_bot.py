@@ -1251,6 +1251,109 @@ def _run_pulse_signals() -> dict:
     except Exception as e:
         log.warning(f"Pulse velocity signal failed: {e}")
 
+    # ── Causal hypothesis + gap opportunities for each down publisher ──────────
+    # Runs after velocity + attribution so top_advertisers is already populated.
+    for v in signals["velocity_shifts"]:
+        v["hypothesis"] = ""
+        v["gaps"] = []
+        if v["direction"] != "down":
+            continue
+        pub_id   = v.get("publisher_id")
+        pub_name = v.get("publisher_name", "")
+        top_advs = v.get("top_advertisers", [])
+
+        # ── Causal hypothesis: is the top-drop advertiser also down elsewhere? ─
+        top_adv = next((a for a in top_advs if a.get("delta_ann", 0) < 0), None)
+        if top_adv and pub_id:
+            try:
+                hyp_rows = ch.query(
+                    """
+                    SELECT
+                        u.organization,
+                        sum(toFloat64OrNull(cv.revenue))                                    AS rev_30d,
+                        sumIf(toFloat64OrNull(cv.revenue), cv.created_at >= today() - 7)   AS rev_7d
+                    FROM adpx_conversionsdetails cv
+                    JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
+                    JOIN from_airbyte_users u ON cv.user_id = u.id
+                    PREWHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
+                    WHERE cv.created_at >= today() - 30
+                      AND c.adv_name ILIKE %(adv)s
+                      AND cv.user_id != %(pub_id)s
+                    GROUP BY u.organization
+                    HAVING rev_30d > 500
+                    ORDER BY rev_30d DESC
+                    LIMIT 5
+                    """,
+                    parameters={"adv": f"%{top_adv['adv_name']}%", "pub_id": pub_id},
+                ).result_rows
+                # A publisher "also down" = 7d annualized < 80% of 30d run rate
+                also_down = [r[0] for r in hyp_rows
+                             if r[2] > 0 and (r[2] / 7 * 30) < r[1] * 0.80][:2]
+                adv_abs   = abs(top_adv["delta_ann"])
+                delta_fmt = f"${adv_abs/1000:.0f}K" if adv_abs >= 1000 else f"${adv_abs:.0f}"
+                if also_down:
+                    also_str = " & ".join(also_down)
+                    v["hypothesis"] = (
+                        f"_{top_adv['adv_name']} dropped {delta_fmt} — "
+                        f"also down at {also_str}. Likely advertiser-side cap, not a {pub_name} issue._"
+                    )
+                else:
+                    v["hypothesis"] = (
+                        f"_{top_adv['adv_name']} dropped {delta_fmt} here but holding elsewhere — "
+                        f"check {pub_name} provisioning or targeting config._"
+                    )
+            except Exception as e:
+                log.warning(f"Pulse hypothesis failed for {pub_name}: {e}")
+
+        # ── Quick gap check: top earners on 2+ publishers not yet in this one ──
+        if pub_id:
+            try:
+                existing_rows = ch.query(
+                    f"SELECT DISTINCT c.adv_name "
+                    f"FROM from_airbyte_publisher_campaigns pc "
+                    f"JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id) "
+                    f"WHERE pc.user_id = {pub_id} AND pc.is_active = true AND pc.deleted_at IS NULL"
+                ).result_rows
+                existing = {r[0] for r in existing_rows}
+
+                gap_rows = ch.query(f"""
+                    WITH imp_agg AS (
+                        SELECT campaign_id, count() AS imp_30d
+                        FROM adpx_impressions_details
+                        PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+                        WHERE created_at >= today() - 30
+                        GROUP BY campaign_id
+                    ),
+                    conv_agg AS (
+                        SELECT campaign_id, sum(toFloat64OrNull(revenue)) AS rev_30d
+                        FROM adpx_conversionsdetails
+                        PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+                        WHERE created_at >= today() - 30
+                        GROUP BY campaign_id
+                    )
+                    SELECT
+                        c.adv_name,
+                        count(DISTINCT pc.user_id) AS pub_count,
+                        sum(ca.rev_30d)             AS revenue_30d,
+                        round(sum(ca.rev_30d) / nullIf(sum(ia.imp_30d), 0) * 1000, 2) AS rpm
+                    FROM from_airbyte_publisher_campaigns pc
+                    JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
+                    LEFT JOIN imp_agg ia ON ia.campaign_id = pc.campaign_id
+                    LEFT JOIN conv_agg ca ON ca.campaign_id = pc.campaign_id
+                    WHERE pc.is_active = true AND pc.deleted_at IS NULL
+                      AND pc.user_id != {pub_id}
+                    GROUP BY c.adv_name
+                    HAVING pub_count >= 2 AND sum(ca.rev_30d) > 0
+                    ORDER BY sum(ca.rev_30d) DESC
+                    LIMIT 20
+                """).result_rows
+                v["gaps"] = [
+                    (adv, rpm) for adv, _cnt, _rev, rpm in gap_rows
+                    if adv not in existing and rpm and rpm > 0
+                ][:3]
+            except Exception as e:
+                log.warning(f"Pulse gap check failed for {pub_name}: {e}")
+
     # ── Signal 3: Overnight campaign events (last 24h pauses/resumes) ─────────
     try:
         event_rows = ch.query(
@@ -1325,8 +1428,18 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
     cap_alerts   = signals.get("cap_alerts", [])
     vel_shifts   = signals.get("velocity_shifts", [])
     night_events = signals.get("overnight_events", [])
-    downs        = [v for v in vel_shifts if v["direction"] == "down"]
-    ups          = [v for v in vel_shifts if v["direction"] == "up"]
+    # Sort by absolute dollar impact (not % change) — a -48% drop on $29K/mo
+    # outranks a -98% drop on $129/mo. Magnitude matters more than ratio.
+    downs = sorted(
+        [v for v in vel_shifts if v["direction"] == "down"],
+        key=lambda x: abs(x["revenue_7d_ann"] - x["revenue_30d"]),
+        reverse=True,
+    )
+    ups = sorted(
+        [v for v in vel_shifts if v["direction"] == "up"],
+        key=lambda x: abs(x["revenue_7d_ann"] - x["revenue_30d"]),
+        reverse=True,
+    )
 
     blocks: list = []
 
@@ -1358,6 +1471,19 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
                     ),
                 },
             })
+            # Causal hypothesis: why this is happening
+            if v.get("hypothesis"):
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0{v['hypothesis']}"}],
+                })
+            # Gap opportunities: top earners not yet provisioned here
+            if v.get("gaps"):
+                gap_parts = [f"{adv} (${rpm:.2f} RPM)" for adv, rpm in v["gaps"]]
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0↳ *Missing:* {',  '.join(gap_parts)}"}],
+                })
 
     # ── MOMENTUM (ups) ────────────────────────────────────────────────────────
     if ups:
