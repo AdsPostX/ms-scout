@@ -449,6 +449,13 @@ INTENTS — resolve every query to one, then act immediately.
     → Write SQL using the DATA DICTIONARY. run_sql_query(sql=..., description=...).
     Lead with the most important number, bolded. Add sourcing callout before Action: "> Queried: [description] — live ClickHouse". On failure, show error + corrected approach.
 
+22. SUPPLY/DEMAND GAP ANALYSIS — "what advertisers aren't in [publisher]", "gap analysis for [publisher]", "which publishers is [advertiser] not in", "uncaptured revenue", "dead weight on [publisher]", "what should we add to [publisher]", "where should [advertiser] run", "what are we missing on [publisher]", "[publisher] opportunities", "supply gaps", "demand gaps"
+    → get_supply_demand_gaps(publisher_name=X) OR get_supply_demand_gaps(advertiser_name=X).
+    Use publisher_name when question is publisher-first (what to add to a publisher).
+    Use advertiser_name when question is advertiser-first (where should this advertiser expand).
+    Never pass both parameters simultaneously.
+    Lead with total revenue estimate, then the ranked gap list. End with dead weight if present.
+
 DEFAULT: Unclear intent → Intent 17. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -702,6 +709,205 @@ Campaigns in serving group   → from_airbyte_campaign_serving_groups + from_air
 """
 
 
+def get_supply_demand_gaps(
+    publisher_name: str = "",
+    advertiser_name: str = ""
+) -> str:
+    """
+    Identify supply-demand gaps:
+    - Publisher-first: which advertisers are performing elsewhere but NOT in this publisher?
+    - Advertiser-first: which publishers is this advertiser NOT running in?
+    Also surfaces dead weight: provisioned but zero impressions in 30 days.
+    Provide either publisher_name OR advertiser_name, not both.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    ch = _get_ch_client()
+
+    if publisher_name and not advertiser_name:
+        # --- PUBLISHER-FIRST MODE ---
+
+        # Step 1: Resolve publisher
+        pub_rows = ch.query(
+            "SELECT id, organization FROM from_airbyte_users "
+            "WHERE organization ILIKE %(pub)s AND deleted_at IS NULL LIMIT 5",
+            parameters={"pub": f"%{publisher_name}%"}
+        ).result_rows
+        if not pub_rows:
+            return f"No publisher found matching '{publisher_name}'."
+        pub_id, pub_org = pub_rows[0][0], pub_rows[0][1]
+        pub_pid = str(pub_id)
+
+        # Step 2: Advertisers already active in this publisher
+        existing_rows = ch.query(
+            "SELECT DISTINCT c.adv_name "
+            "FROM from_airbyte_publisher_campaigns pc "
+            "JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id "
+            "WHERE pc.user_id = %(pub_id)s "
+            "  AND pc.is_active = true AND pc.deleted_at IS NULL AND c.deleted_at IS NULL",
+            parameters={"pub_id": pub_id}
+        ).result_rows
+        existing = {r[0] for r in existing_rows}
+
+        def q_gaps():
+            # Pre-aggregate to avoid 582M row scan
+            return ch.query("""
+                WITH imp_agg AS (
+                    SELECT campaign_id, count() AS impressions_30d
+                    FROM adpx_impressions_details
+                    WHERE created_at >= today() - 30
+                      AND toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+                    GROUP BY campaign_id
+                ),
+                conv_agg AS (
+                    SELECT campaign_id, sum(toFloat64OrNull(revenue)) AS revenue_30d
+                    FROM adpx_conversionsdetails
+                    WHERE created_at >= today() - 30
+                      AND toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+                    GROUP BY campaign_id
+                )
+                SELECT
+                    c.adv_name,
+                    count(DISTINCT pc.user_id) AS pub_count,
+                    sum(ia.impressions_30d) AS impressions_30d,
+                    coalesce(sum(ca.revenue_30d), 0) AS revenue_30d,
+                    round(coalesce(sum(ca.revenue_30d), 0) /
+                          nullIf(sum(ia.impressions_30d), 0) * 1000, 2) AS rpm
+                FROM from_airbyte_publisher_campaigns pc
+                JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
+                LEFT JOIN imp_agg ia ON ia.campaign_id = toUInt64(pc.campaign_id)
+                LEFT JOIN conv_agg ca ON ca.campaign_id = toUInt64(pc.campaign_id)
+                WHERE pc.is_active = true
+                  AND pc.deleted_at IS NULL AND c.deleted_at IS NULL
+                  AND pc.user_id != %(pub_id)s
+                GROUP BY c.adv_name
+                HAVING revenue_30d > 0 AND pub_count >= 2
+                ORDER BY revenue_30d DESC
+                LIMIT 20
+            """, parameters={"pub_id": pub_id}).result_rows
+
+        def q_dead_weight():
+            return ch.query("""
+                SELECT c.adv_name, min(pc.created_at) AS provisioned_since
+                FROM from_airbyte_publisher_campaigns pc
+                JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
+                LEFT JOIN adpx_impressions_details i
+                    ON i.campaign_id = toUInt64(pc.campaign_id)
+                    AND i.pid = %(pub_pid)s
+                    AND i.created_at >= today() - 30
+                WHERE pc.user_id = %(pub_id)s
+                  AND pc.is_active = true
+                  AND pc.deleted_at IS NULL AND c.deleted_at IS NULL
+                  AND i.campaign_id IS NULL
+                GROUP BY c.adv_name
+                LIMIT 10
+            """, parameters={"pub_id": pub_id, "pub_pid": pub_pid}).result_rows
+
+        def q_pub_sessions():
+            rows = ch.query(
+                "SELECT count() AS sessions FROM adpx_sdk_sessions "
+                "WHERE user_id = %(pub_id)s AND created_at >= today() - 30 "
+                "  AND toYYYYMM(created_at) >= toYYYYMM(today() - 30)",
+                parameters={"pub_id": pub_id}
+            ).result_rows
+            return rows[0][0] if rows else 0
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            f_gaps = ex.submit(q_gaps)
+            f_dead = ex.submit(q_dead_weight)
+            f_sess = ex.submit(q_pub_sessions)
+            gap_rows = f_gaps.result()
+            dead_rows = f_dead.result()
+            sessions_30d = f_sess.result()
+
+        # Filter gaps to advertisers not already in this publisher
+        gaps = [(adv, pub_count, imp, rev, rpm)
+                for (adv, pub_count, imp, rev, rpm) in gap_rows
+                if adv not in existing]
+
+        daily_sessions = sessions_30d / 30 if sessions_30d else 0
+
+        lines = [f"*{pub_org} — Supply Gap Analysis* (30-day data)\n"]
+
+        if gaps:
+            lines.append(":large_green_circle: *GAP OPPORTUNITIES* (performing on 2+ other publishers, not here)")
+            total_est = 0
+            for adv, pub_count, imp, rev, rpm in gaps[:10]:
+                est_daily = round(daily_sessions * (rpm / 1000), 0) if rpm else 0
+                total_est += est_daily
+                lines.append(
+                    f"• *{adv}* — ${rev:,.0f}/mo elsewhere · RPM ${rpm:.2f} across {pub_count} publishers"
+                    + (f" → *est. ${est_daily:,.0f}/day at {pub_org} volume*" if est_daily > 0 else "")
+                )
+            if total_est > 0:
+                lines.append(f"\n:zap: Top gaps combined: est. *${total_est:,.0f}/day* incremental revenue potential.")
+        else:
+            lines.append(":white_check_mark: No major gap opportunities found — coverage looks solid.")
+
+        if dead_rows:
+            lines.append("\n:yellow_circle: *DEAD WEIGHT* (provisioned here, zero impressions in 30 days)")
+            for adv, since in dead_rows:
+                since_str = since.strftime("%b %d") if hasattr(since, "strftime") else str(since)
+                lines.append(f"• *{adv}* — active since {since_str}, 0 impressions. Remove or investigate.")
+
+        return "\n".join(lines)
+
+    elif advertiser_name and not publisher_name:
+        # --- ADVERTISER-FIRST MODE ---
+
+        # Publishers where advertiser IS running (active)
+        active_rows = ch.query(
+            "SELECT DISTINCT pc.user_id, u.organization "
+            "FROM from_airbyte_publisher_campaigns pc "
+            "JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id "
+            "JOIN from_airbyte_users u ON pc.user_id = u.id "
+            "WHERE c.adv_name ILIKE %(adv)s "
+            "  AND pc.is_active = true AND pc.deleted_at IS NULL AND c.deleted_at IS NULL",
+            parameters={"adv": f"%{advertiser_name}%"}
+        ).result_rows
+        active_pub_ids = {r[0] for r in active_rows}
+        active_pub_names = [r[1] for r in active_rows]
+
+        if not active_pub_ids:
+            return f"No active publisher campaigns found for '{advertiser_name}'."
+
+        # Publishers with significant traffic NOT running this advertiser
+        missing_rows = ch.query("""
+            SELECT u.id, u.organization,
+                   count() AS sessions_30d
+            FROM adpx_sdk_sessions s
+            JOIN from_airbyte_users u ON s.user_id = u.id
+            WHERE s.created_at >= today() - 30
+              AND toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
+              AND s.user_id NOT IN %(active_ids)s
+            GROUP BY u.id, u.organization
+            HAVING sessions_30d > 1000
+            ORDER BY sessions_30d DESC
+            LIMIT 20
+        """, parameters={"active_ids": list(active_pub_ids)}).result_rows
+
+        lines = [f"*{advertiser_name} — Publisher Gap Analysis* (30-day data)\n",
+                 f":white_check_mark: Currently running in: {', '.join(active_pub_names[:8])}\n"]
+
+        if missing_rows:
+            lines.append(":large_green_circle: *NOT RUNNING IN* (publishers with >1K sessions/mo)")
+            for pub_id, pub_org, sessions in missing_rows[:10]:
+                lines.append(f"• *{pub_org}* — {sessions:,} sessions/mo")
+            lines.append(
+                f"\n:zap: {len(missing_rows)} publishers with meaningful traffic not running {advertiser_name}."
+            )
+        else:
+            lines.append(":white_check_mark: Running in all major publishers — no significant gaps found.")
+
+        return "\n".join(lines)
+
+    else:
+        return (
+            "Please provide either a publisher_name (e.g. 'TextNow') or an advertiser_name (e.g. 'Scrambly'), "
+            "not both and not neither."
+        )
+
+
 TOOLS = [
     {
         "name": "search_offers",
@@ -942,6 +1148,28 @@ TOOLS = [
                 "publisher_id": {"type": "integer", "description": "Numeric publisher ID"},
                 "days": {"type": "integer", "description": "Lookback window in days (default 30)"},
             },
+        },
+    },
+    {
+        "name": "get_supply_demand_gaps",
+        "description": (
+            "Identify supply-demand gaps: which advertisers are performing on other publishers but missing from a given publisher, "
+            "or which publishers an advertiser is not running in. Also surfaces dead weight (provisioned but zero impressions in 30 days). "
+            "Provide publisher_name OR advertiser_name, not both."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "publisher_name": {
+                    "type": "string",
+                    "description": "Publisher to analyze (e.g. 'TextNow', 'Pinger'). Leave blank if using advertiser_name."
+                },
+                "advertiser_name": {
+                    "type": "string",
+                    "description": "Advertiser to analyze (e.g. 'Scrambly', 'BLD'). Leave blank if using publisher_name."
+                }
+            },
+            "required": []
         },
     },
     {
@@ -2973,6 +3201,7 @@ TOOL_MAP = {
     "get_publisher_health": get_publisher_health,
     "get_campaign_status": get_campaign_status,
     "get_perkswall_engagement": get_perkswall_engagement,
+    "get_supply_demand_gaps": get_supply_demand_gaps,
     "run_sql_query": run_sql_query,
     "get_scout_status": get_scout_status,
     "get_advertiser_revenue_projection": get_advertiser_revenue_projection,
