@@ -24,6 +24,19 @@ load_dotenv(override=True)
 log = logging.getLogger("scout_agent")
 
 
+def _run_parallel(fns: list):
+    """Run a list of zero-argument callables in parallel.
+    Falls back to sequential if ThreadPoolExecutor is unavailable (e.g. during shutdown).
+    Returns a list of results in the same order as fns.
+    """
+    try:
+        with ThreadPoolExecutor(max_workers=len(fns)) as ex:
+            futures = [ex.submit(fn) for fn in fns]
+            return [f.result() for f in futures]
+    except RuntimeError:
+        return [fn() for fn in fns]
+
+
 def _get_ch_client():
     """Create a ClickHouse client from env vars. Import is local so startup never fails."""
     import clickhouse_connect
@@ -812,13 +825,7 @@ def get_supply_demand_gaps(
             ).result_rows
             return rows[0][0] if rows else 0
 
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            f_gaps = ex.submit(q_gaps)
-            f_dead = ex.submit(q_dead_weight)
-            f_sess = ex.submit(q_pub_sessions)
-            gap_rows = f_gaps.result()
-            dead_rows = f_dead.result()
-            sessions_30d = f_sess.result()
+        gap_rows, dead_rows, sessions_30d = _run_parallel([q_gaps, q_dead_weight, q_pub_sessions])
 
         # Filter gaps to advertisers not already in this publisher
         gaps = [(adv, pub_count, imp, rev, rpm)
@@ -1945,8 +1952,7 @@ def get_publisher_competitive_landscape(
         # Step 3: provisioned offers — what's assigned to this publisher account.
         # from_airbyte_publisher_campaigns is the source of truth for "what's set up."
         # Impressions tell us which of those are actively serving right now.
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            f_vol = executor.submit(ch.query, f"""
+        _vol_sql = f"""
                 SELECT
                     toStartOfWeek(i.created_at) AS week,
                     count() AS impressions
@@ -1955,8 +1961,8 @@ def get_publisher_competitive_landscape(
                 WHERE i.created_at >= today() - 28
                 GROUP BY week
                 ORDER BY week DESC
-            """)
-            f_prov = executor.submit(ch.query, f"""
+            """
+        _prov_sql = f"""
                 SELECT
                     pc.campaign_id,
                     c.adv_name,
@@ -1969,9 +1975,11 @@ def get_publisher_competitive_landscape(
                   AND c.deleted_at IS NULL
                 ORDER BY pc.created_at DESC
                 LIMIT 50
-            """)
-            vol_rows = f_vol.result().result_rows
-            prov_rows = f_prov.result().result_rows
+            """
+        vol_rows, prov_rows = [r.result_rows for r in _run_parallel([
+            lambda: ch.query(_vol_sql),
+            lambda: ch.query(_prov_sql),
+        ])]
 
         weekly_impressions = int(sum(r[1] for r in vol_rows) / max(len(vol_rows), 1)) if vol_rows else 0
 
@@ -2386,18 +2394,19 @@ def get_advertiser_revenue_projection(
 
     baseline_rows = []
     cap_rows = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        f_baseline = executor.submit(_fetch_baseline)
-        f_cap = executor.submit(_fetch_cap_data)
+    try:
+        baseline_rows, cap_rows = _run_parallel([_fetch_baseline, _fetch_cap_data])
+    except Exception as e:
+        log.warning(f"get_advertiser_revenue_projection parallel fetch failed: {e}")
         try:
-            baseline_rows = f_baseline.result()
-        except Exception as e:
-            log.warning(f"get_advertiser_revenue_projection baseline failed: {e}")
-            return {"error": str(e), "advertiser": advertiser_name, "month": month_label}
+            baseline_rows = _fetch_baseline()
+        except Exception as e2:
+            log.warning(f"get_advertiser_revenue_projection baseline failed: {e2}")
+            return {"error": str(e2), "advertiser": advertiser_name, "month": month_label}
         try:
-            cap_rows = f_cap.result()
-        except Exception as e:
-            log.warning(f"get_advertiser_revenue_projection cap query failed: {e}")
+            cap_rows = _fetch_cap_data()
+        except Exception as e2:
+            log.warning(f"get_advertiser_revenue_projection cap query failed: {e2}")
 
     if not baseline_rows:
         return {
@@ -2645,15 +2654,14 @@ def get_publisher_health(
                 return {}  # non-fatal — use slugs as-is if table unavailable
 
         # ── Fetch placement display names ─────────────────────────────────────
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            f_pn = executor.submit(_fetch_placement_names)
-            f_q1 = executor.submit(lambda: ch.query(q1, parameters=params1).result_rows)
-            f_q2 = executor.submit(lambda: ch.query(q2, parameters=params2).result_rows)
-            f_q3 = executor.submit(lambda: ch.query(q3, parameters=params3).result_rows)
-            placement_names = f_pn.result()
-            q1_rows = f_q1.result()
-            q2_rows = f_q2.result()
-            q3_rows = f_q3.result()
+        _p1, _p2, _p3 = params1, params2, params3
+        _q1, _q2, _q3 = q1, q2, q3
+        placement_names, q1_rows, q2_rows, q3_rows = _run_parallel([
+            _fetch_placement_names,
+            lambda: ch.query(_q1, parameters=_p1).result_rows,
+            lambda: ch.query(_q2, parameters=_p2).result_rows,
+            lambda: ch.query(_q3, parameters=_p3).result_rows,
+        ])
 
         # ── Combine results ───────────────────────────────────────────────────
         # Build placement-keyed dicts
@@ -2829,17 +2837,18 @@ def get_campaign_status(advertiser_name: str) -> dict:
 
         q1_rows = []
         q2_rows = []
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            f_q1 = executor.submit(_fetch_q1)
-            f_q2 = executor.submit(_fetch_q2)
+        try:
+            q1_rows, q2_rows = _run_parallel([_fetch_q1, _fetch_q2])
+        except Exception as e:
+            log.warning(f"get_campaign_status parallel fetch failed: {e}")
             try:
-                q1_rows = f_q1.result()
-            except Exception as e:
-                log.warning(f"get_campaign_status q1 failed: {e}")
+                q1_rows = _fetch_q1()
+            except Exception as e2:
+                log.warning(f"get_campaign_status q1 failed: {e2}")
             try:
-                q2_rows = f_q2.result()
-            except Exception as e:
-                log.warning(f"get_campaign_status q2 failed: {e}")
+                q2_rows = _fetch_q2()
+            except Exception as e2:
+                log.warning(f"get_campaign_status q2 failed: {e2}")
 
         # ── Build campaigns list ──────────────────────────────────────────────
         campaigns = []
