@@ -981,6 +981,24 @@ def _save_pulse_state(state: dict):
         log.warning(f"Could not persist pulse_state: {e}")
 
 
+# ── Watchdog state ────────────────────────────────────────────────────────────
+
+_WATCHDOG_STATE_PATH = pathlib.Path(__file__).parent / "data" / "watchdog_state.json"
+
+
+def _load_watchdog_state() -> dict:
+    try:
+        if _WATCHDOG_STATE_PATH.exists():
+            return json.loads(_WATCHDOG_STATE_PATH.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_watchdog_state(state: dict) -> None:
+    _WATCHDOG_STATE_PATH.write_text(json.dumps(state, indent=2))
+
+
 # ── Learnings store ───────────────────────────────────────────────────────────
 
 def _load_learnings() -> dict:
@@ -1430,6 +1448,226 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
 
     fallback = f"Scout Pulse — {today_label}: {len(downs)} need attention, {len(ups)} in momentum, {len(night_events)} overnight."
     return fallback, blocks
+
+
+def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
+    """Query impressions, clicks, revenue since launch. Returns alert dict or None."""
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime as _dt, timezone as _utc
+
+    try:
+        from scout_agent import _get_ch_client
+        ch = _get_ch_client()
+        launched_str = launched_at.strftime("%Y-%m-%d %H:%M:%S")
+        partition = launched_at.strftime("%Y%m")
+
+        def q_impressions():
+            rows = ch.query("""
+                SELECT count() AS impressions
+                FROM adpx_impressions_details i
+                JOIN from_airbyte_campaigns c ON i.campaign_id = c.id
+                WHERE c.adv_name ILIKE %(adv)s
+                  AND i.created_at >= %(launched_at)s
+                  AND toYYYYMM(i.created_at) >= %(partition)s
+            """, parameters={"adv": adv_name, "launched_at": launched_str, "partition": int(partition)}).result_rows
+            return rows[0][0] if rows else 0
+
+        def q_clicks():
+            rows = ch.query("""
+                SELECT count() AS clicks
+                FROM adpx_tracked_clicks tc
+                JOIN from_airbyte_campaigns c ON tc.campaign_id = c.id
+                WHERE c.adv_name ILIKE %(adv)s
+                  AND tc.created_at >= %(launched_at)s
+                  AND toYYYYMM(tc.created_at) >= %(partition)s
+            """, parameters={"adv": adv_name, "launched_at": launched_str, "partition": int(partition)}).result_rows
+            return rows[0][0] if rows else 0
+
+        def q_revenue():
+            rows = ch.query("""
+                SELECT sum(toFloat64OrNull(revenue)) AS revenue
+                FROM adpx_conversionsdetails cd
+                JOIN from_airbyte_campaigns c ON cd.campaign_id = c.id
+                WHERE c.adv_name ILIKE %(adv)s
+                  AND cd.created_at >= %(launched_at)s
+                  AND toYYYYMM(cd.created_at) >= %(partition)s
+            """, parameters={"adv": adv_name, "launched_at": launched_str, "partition": int(partition)}).result_rows
+            return (rows[0][0] or 0) if rows else 0
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            f_imp = ex.submit(q_impressions)
+            f_clk = ex.submit(q_clicks)
+            f_rev = ex.submit(q_revenue)
+            impressions = f_imp.result()
+            clicks = f_clk.result()
+            revenue = f_rev.result()
+
+        # Alert conditions
+        hours_since = (_dt.now(_utc.utc) - launched_at).total_seconds() / 3600
+        alert = None
+
+        if impressions > 1000 and clicks == 0 and hours_since >= 3:
+            alert = {
+                "impressions": impressions, "clicks": clicks, "revenue": revenue,
+                "hypothesis": "CTA not rendering or link broken — no clicks despite high impression volume."
+            }
+        elif impressions > 5000 and revenue == 0 and clicks > 0 and hours_since >= 6:
+            alert = {
+                "impressions": impressions, "clicks": clicks, "revenue": revenue,
+                "hypothesis": "Tracking pixel not firing or landing page failure — clicks present but no conversions."
+            }
+        elif impressions == 0 and hours_since >= 3:
+            alert = {
+                "impressions": 0, "clicks": 0, "revenue": 0,
+                "hypothesis": "Not serving at all — check geo/OS restrictions or provisioning config."
+            }
+
+        return alert
+
+    except Exception as e:
+        log.error(f"[watchdog] health check failed for {adv_name}: {e}")
+        return None
+
+
+def _post_watchdog_alert(web: WebClient, adv_name: str, result: dict, hours_since: float) -> None:
+    """Post launch health alert to #revenue-operations."""
+    channel = _PULSE_CHANNEL or _SCOUT_HQ_CHANNEL
+    hours_str = f"{int(hours_since)}h" if hours_since < 24 else f"{hours_since / 24:.1f}d"
+    imp = f"{result['impressions']:,}"
+    clk = f"{result['clicks']:,}"
+    rev = f"${result['revenue']:,.2f}"
+
+    text = (
+        f":rotating_light: *Launch Health Alert — {adv_name}*\n"
+        f"Launched {hours_str} ago · {imp} impressions · "
+        f"*{clk} clicks · {rev} revenue*\n\n"
+        f"Likely cause: {result['hypothesis']}\n\n"
+        f":zap: Reply `@Scout health brief on {adv_name}` for a full breakdown."
+    )
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    try:
+        web.chat_postMessage(channel=channel, text=text, blocks=blocks)
+        log.info(f"[watchdog] alert posted for {adv_name}")
+    except Exception as e:
+        log.error(f"[watchdog] failed to post alert: {e}")
+
+
+def _run_watchdog_checks(web: WebClient, state: dict) -> None:
+    """Check recently launched campaigns for zero-engagement patterns."""
+    from datetime import datetime as _dt, timezone as _utc, timedelta
+    import pytz
+
+    alerted = set(state.get("alerted", []))
+    new_alerts = []
+
+    # --- Source A: Scout-tracked launches from launched_offers.json ---
+    offers = _load_launched_offers()
+    now_utc = _dt.now(_utc.utc)
+
+    for adv_name, offer in offers.items():
+        if offer.get("status") != "launched":
+            continue
+        launched_at_str = offer.get("launched_at")
+        if not launched_at_str:
+            continue
+        try:
+            launched_at = _dt.fromisoformat(launched_at_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        hours_since = (now_utc - launched_at).total_seconds() / 3600
+        if hours_since < 3 or hours_since > 48:
+            continue  # too early or too old
+        if adv_name in alerted:
+            continue
+
+        result = _check_campaign_health(adv_name, launched_at)
+        if result:
+            _post_watchdog_alert(web, adv_name, result, hours_since)
+            new_alerts.append(adv_name)
+
+    # --- Source B: Platform-launched campaigns (not in Scout queue) ---
+    # Query from_airbyte_publisher_campaigns for new entries in last 48h
+    try:
+        from scout_agent import _get_ch_client
+        ch = _get_ch_client()
+        rows = ch.query("""
+            SELECT DISTINCT c.adv_name, min(pc.created_at) AS first_seen
+            FROM from_airbyte_publisher_campaigns pc
+            JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
+            WHERE pc.created_at >= now() - INTERVAL 48 HOUR
+              AND pc.is_active = true
+              AND pc.deleted_at IS NULL
+              AND c.deleted_at IS NULL
+            GROUP BY c.adv_name
+        """).result_rows
+    except Exception as e:
+        log.error(f"[watchdog] platform launch query failed: {e}")
+        rows = []
+
+    for (adv_name, first_seen) in rows:
+        if adv_name in offers:
+            continue  # already handled by Source A
+        if adv_name in alerted:
+            continue
+        now_utc = _dt.now(_utc.utc)
+        if hasattr(first_seen, 'tzinfo') and first_seen.tzinfo is None:
+            import pytz as _pytz
+            first_seen = _pytz.utc.localize(first_seen)
+        hours_since = (now_utc - first_seen).total_seconds() / 3600
+        if hours_since < 3 or hours_since > 48:
+            continue
+
+        result = _check_campaign_health(adv_name, first_seen)
+        if result:
+            _post_watchdog_alert(web, adv_name, result, hours_since)
+            new_alerts.append(adv_name)
+
+    if new_alerts:
+        state.setdefault("alerted", [])
+        state["alerted"].extend(new_alerts)
+        _save_watchdog_state(state)
+
+    log.info(f"[watchdog] checked launches, fired {len(new_alerts)} alert(s)")
+
+
+def _launch_watchdog(web: WebClient) -> None:
+    """
+    Launch health watchdog daemon.
+
+    Runs daily at 10:00 AM Chicago time. Check-first pattern — fires immediately
+    on startup if today's run was missed (e.g. Mac was off at 10am).
+    Catches broken campaign launches within hours, not days.
+    Posts alerts to #revenue-operations (no @mentions).
+    """
+    import pytz
+    from datetime import datetime as _dt, timedelta
+
+    while True:
+        try:
+            chicago = pytz.timezone("America/Chicago")
+            now_chi = _dt.now(chicago)
+            today_str = now_chi.strftime("%Y-%m-%d")
+
+            # Load state
+            state = _load_watchdog_state()
+
+            # CHECK FIRST: if past 10am and haven't run today, fire immediately
+            if state.get("last_run_date") != today_str and now_chi.hour >= 10:
+                _run_watchdog_checks(web, state)
+                state["last_run_date"] = today_str
+                _save_watchdog_state(state)
+
+            # Sleep until next 10am
+            target = now_chi.replace(hour=10, minute=0, second=0, microsecond=0)
+            if now_chi >= target:
+                target += timedelta(days=1)
+            sleep_secs = (target - now_chi).total_seconds()
+            log.info(f"[watchdog] sleeping {sleep_secs / 3600:.1f}h until next run at {target}")
+            time.sleep(sleep_secs)
+
+        except Exception as e:
+            log.error(f"[watchdog] cycle failed: {e}", exc_info=True)
+            time.sleep(3600)
 
 
 def _proactive_pulse(web: WebClient) -> None:
@@ -3319,6 +3557,8 @@ def main():
         threading.Thread(target=_proactive_pulse, args=(web_client,), daemon=True).start()
     else:
         log.info("[pulse] disabled via PULSE_ENABLED=false — skipping pulse thread")
+    # Background: daily launch health watchdog — catches broken campaigns within hours
+    threading.Thread(target=_launch_watchdog, args=(web_client,), daemon=True, name="launch-watchdog").start()
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
