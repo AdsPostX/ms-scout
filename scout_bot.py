@@ -1441,51 +1441,47 @@ def _proactive_pulse(web: WebClient) -> None:
     Surfaces: cap proximity alerts, revenue velocity shifts, overnight events.
     """
     import pytz
-    from datetime import datetime as _dt, timezone as _tz
+    from datetime import datetime as _dt, timedelta
 
     while True:
         try:
             chicago = pytz.timezone("America/Chicago")
             now_chi = _dt.now(chicago)
-            # Sleep until next 8:00 AM Chicago
-            target  = now_chi.replace(hour=8, minute=0, second=0, microsecond=0)
+            today_str = now_chi.strftime("%Y-%m-%d")
+
+            # CHECK FIRST: fire immediately if past 8am and haven't run today.
+            # This handles: Mac was off at 8am, just resumed.
+            state = _load_pulse_state()
+            if state.get("last_pulse_date") != today_str and now_chi.hour >= 8:
+                # Run signals
+                signals = _run_pulse_signals()
+
+                # Only post if there's something to say
+                has_content = (
+                    signals.get("cap_alerts")
+                    or signals.get("velocity_shifts")
+                    or signals.get("overnight_events")
+                )
+                channel = _PULSE_CHANNEL or _SCOUT_HQ_CHANNEL
+                if has_content:
+                    fallback, blocks = _format_pulse_blocks(signals)
+                    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
+                    log.info(f"[pulse] posted to {channel}: {len(signals['cap_alerts'])} caps, "
+                             f"{len(signals['velocity_shifts'])} velocity, {len(signals['overnight_events'])} events")
+                else:
+                    log.info("[pulse] no signals today — skipping post")
+
+                # Record posted
+                state["last_pulse_date"] = today_str
+                _save_pulse_state(state)
+
+            # SLEEP until next 8am
+            target = now_chi.replace(hour=8, minute=0, second=0, microsecond=0)
             if now_chi >= target:
-                # Already past 8am today — target tomorrow
-                from datetime import timedelta
                 target += timedelta(days=1)
             sleep_secs = (target - now_chi).total_seconds()
             log.info(f"[pulse] sleeping {sleep_secs / 3600:.1f}h until next pulse at {target}")
             time.sleep(sleep_secs)
-
-            # Idempotency — skip if already posted today
-            today_str = _dt.now(chicago).strftime("%Y-%m-%d")
-            state = _load_pulse_state()
-            if state.get("last_pulse_date") == today_str:
-                log.info(f"[pulse] already posted today ({today_str}), skipping")
-                time.sleep(3600)  # retry check in 1h
-                continue
-
-            # Run signals
-            signals = _run_pulse_signals()
-
-            # Only post if there's something to say
-            has_content = (
-                signals.get("cap_alerts")
-                or signals.get("velocity_shifts")
-                or signals.get("overnight_events")
-            )
-            channel = _PULSE_CHANNEL or _SCOUT_HQ_CHANNEL
-            if has_content:
-                fallback, blocks = _format_pulse_blocks(signals)
-                web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
-                log.info(f"[pulse] posted to {channel}: {len(signals['cap_alerts'])} caps, "
-                         f"{len(signals['velocity_shifts'])} velocity, {len(signals['overnight_events'])} events")
-            else:
-                log.info("[pulse] no signals today — skipping post")
-
-            # Record posted
-            state["last_pulse_date"] = today_str
-            _save_pulse_state(state)
 
         except Exception as e:
             log.error(f"[pulse] cycle failed: {e}", exc_info=True)
@@ -2070,7 +2066,10 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
             ] + history
 
     try:
+        _t0 = time.monotonic()
         response = ask(query, history=history)
+        _elapsed = int(time.monotonic() - _t0)
+        _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
     except Exception as e:
         log.error(f"suggestion ask failed: {e}")
         stop_rotating()
@@ -2131,6 +2130,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         blocks=[
             {"type": "section", "text": {"type": "mrkdwn", "text": response_text}},
             *suggestion_blocks,
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]},
         ],
     )
     log.info(f"Suggestion answered in {channel} (thread {thread_ts}): {query!r}")
@@ -2456,7 +2456,10 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
         stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, gif_block=_gif_block_ah)
 
         try:
+            _t0 = time.monotonic()
             response = ask(query)
+            _elapsed = int(time.monotonic() - _t0)
+            _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         finally:
             stop_rotating()
 
@@ -2480,7 +2483,8 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
             web.chat_update(
                 channel=dm_channel, ts=_placeholder_ts_ah,
                 text=response_text,
-                blocks=[*content_blocks, *suggestion_blocks],
+                blocks=[*content_blocks, *suggestion_blocks,
+                        {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
             )
         log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
     except Exception as e:
@@ -2912,7 +2916,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     stop_rotating = _rotating_status(web, channel, _placeholder_ts, gif_block=_gif_block_he)
 
     try:
+        _t0 = time.monotonic()
         response = ask(query, history=history)
+        _elapsed = int(time.monotonic() - _t0)
+        _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
     except Exception as e:
         log.error(f"Agent error: {e}")
         stop_rotating()
@@ -3006,7 +3013,8 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             channel=channel,
             ts=_placeholder_ts,
             text=response_text,
-            blocks=[*content_blocks, *suggestion_blocks],
+            blocks=[*content_blocks, *suggestion_blocks,
+                    {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
         )
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 
