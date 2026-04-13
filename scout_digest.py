@@ -22,19 +22,31 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv()  # plist env vars (SCOUT_ENV, SCOUT_DIGEST_CHANNEL, etc.) take precedence over .env
 
 log = logging.getLogger("scout_digest")
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _DIR         = pathlib.Path(__file__).parent
 DATA_DIR     = _DIR / "data"
-OFFERS_FILE  = DATA_DIR / "offers_latest.json"
+OFFERS_FILE          = DATA_DIR / "offers_latest.json"
+OFFERS_PREVIOUS_FILE = DATA_DIR / "offers_previous.json"
 PAYOUT_CACHE = _DIR / "payout_cache.json"
 STATE_FILE   = DATA_DIR / "digest_state.json"
 
 # ── Slack ──────────────────────────────────────────────────────────────────────
-SCOUT_DIGEST_CHANNEL = "C0AQEECF800"  # #scout-hq — digest always posts here, not configurable
+_SCOUT_QA_CHANNEL    = "C0AQEECF800"  # #scout-qa — always used in dev/force
+_SCOUT_ENV           = os.getenv("SCOUT_ENV", "development")
+_PROD_OFFERS_CHANNEL = os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_QA_CHANNEL)  # #scout-offers
+
+def _digest_channel(force: bool = False) -> str:
+    """Return the correct Slack channel for the offer digest.
+    Force=True OR non-production environment → always #scout-qa.
+    """
+    if force or _SCOUT_ENV != "production":
+        return _SCOUT_QA_CHANNEL
+    return _PROD_OFFERS_CHANNEL
+
 QUEUE_LIST_URL = "https://momentscience.slack.com/lists/T03Q93Q96UD/F07QCKFP0RM"
 
 # Stop-words for fuzzy name matching
@@ -812,24 +824,17 @@ def select_offers(
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-def post_digest(dry_run: bool = False):
-    """Select top offers and post the weekly Slack digest.
+def post_digest(dry_run: bool = False, is_force: bool = False):
+    """Select top offers and post the offer digest to Slack.
 
-    Idempotent within the same ISO week — won't post twice even if called
-    multiple times (e.g. cron retry or manual trigger on the same day).
+    Event-driven: posts when new offers are detected OR on Mondays (weekly review).
+    Force=True bypasses all gates and always posts to #scout-qa.
+    Channel: #scout-offers in production, #scout-qa in dev/force.
     """
     from slack_sdk.web import WebClient
 
-    # ── Idempotency: one post per ISO week ────────────────────────────────────
-    now       = datetime.now()
-    this_week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
-
-    if not dry_run:
-        state = load_state()
-        last_posted = state.get("last_posted_week", "")
-        if last_posted == this_week:
-            log.info(f"Digest already posted this week ({this_week}) — skipping.")
-            return
+    now      = datetime.now()
+    is_monday = now.weekday() == 0  # Monday = 0
 
     # ── Load all external data once — no redundant calls ─────────────────────
     from scout_agent import _get_benchmarks
@@ -841,8 +846,29 @@ def post_digest(dry_run: bool = False):
 
     total_selected = sum(len(v) for v in offers_by_network.values())
     if total_selected == 0:
-        log.info("No new offers to surface this week — skipping digest.")
+        log.info("No offers to surface — skipping digest.")
         return
+
+    # ── Diff detection: new offers since last scraper run ────────────────────
+    new_offer_keys: set = set()
+    try:
+        prev_data = json.loads(OFFERS_PREVIOUS_FILE.read_text())
+        prev_keys = {o["_unique_key"] for o in prev_data if o.get("_unique_key")}
+        curr_keys = {o["_unique_key"] for item in offers_by_network.values() for o in item if o.get("_unique_key")}
+        new_offer_keys = curr_keys - prev_keys
+    except FileNotFoundError:
+        log.warning("[digest] offers_previous.json missing — treating all offers as new")
+        new_offer_keys = {o["_unique_key"] for item in offers_by_network.values() for o in item if o.get("_unique_key")}
+    except json.JSONDecodeError:
+        log.warning("[digest] offers_previous.json corrupt — treating all offers as new")
+        new_offer_keys = {o["_unique_key"] for item in offers_by_network.values() for o in item if o.get("_unique_key")}
+
+    # ── Event-driven gate: post only when meaningful ──────────────────────────
+    # Skip if: no new offers AND not Monday (weekly review) AND not forced
+    if not dry_run and not is_force:
+        if not new_offer_keys and not is_monday:
+            log.info("[digest] no new offers and not Monday — skipping post")
+            return
 
     # Flatten for image prefetch
     all_scored = [item for v in offers_by_network.values() for item in v]
@@ -853,31 +879,51 @@ def post_digest(dry_run: bool = False):
 
     run_date = now.strftime("%b %-d")
     blocks   = build_digest_blocks(offers_by_network, payout_cache, ms_campaigns, benchmarks, run_date, offer_images=offer_images)
+
+    # Prepend NEW THIS WEEK section
+    new_block: list = []
+    if new_offer_keys:
+        new_offers_flat = [
+            o for item in offers_by_network.values() for o in item
+            if o.get("_unique_key") in new_offer_keys
+        ]
+        new_names = ", ".join(o.get("offer_name") or o.get("adv_name", "Unknown") for o in new_offers_flat[:8])
+        if len(new_offers_flat) > 8:
+            new_names += f" +{len(new_offers_flat) - 8} more"
+        new_block = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": f":new:  *NEW THIS WEEK*  ({len(new_offer_keys)} offers)"}},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": new_names}]},
+            {"type": "divider"},
+        ]
+    else:
+        new_block = [
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": "No new offers this week — all offers already in your pipeline."}]},
+            {"type": "divider"},
+        ]
+    blocks = new_block + blocks
+
     fallback = f"🎯 SCOUT Sniper — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
 
     if dry_run:
         print(json.dumps(blocks, indent=2))
         return
 
+    channel = _digest_channel(force=is_force)
     web  = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
     resp = web.chat_postMessage(
-        channel=SCOUT_DIGEST_CHANNEL,
+        channel=channel,
         text=fallback,
         blocks=blocks,
         unfurl_links=False,
         unfurl_media=False,
     )
-    log.info(f"Digest posted → {SCOUT_DIGEST_CHANNEL} ts={resp['ts']}")
-
-    # Record the week so we don't post again until next Monday
-    state = load_state()
-    state["last_posted_week"] = this_week
-    save_state(state)
+    log.info(f"Digest posted → {channel} ts={resp['ts']}")
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    parser = argparse.ArgumentParser(description="SCOUT Sniper — post weekly offer digest")
+    parser = argparse.ArgumentParser(description="SCOUT Sniper — offer digest")
     parser.add_argument("--dry-run", action="store_true", help="Print blocks without posting")
+    parser.add_argument("--force", action="store_true", help="Bypass new-offer gate, always post to #scout-qa")
     args = parser.parse_args()
-    post_digest(dry_run=args.dry_run)
+    post_digest(dry_run=args.dry_run, is_force=args.force)

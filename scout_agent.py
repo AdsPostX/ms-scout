@@ -13,13 +13,14 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import datetime as _dt_mod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 import anthropic
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 
 log = logging.getLogger("scout_agent")
 
@@ -128,6 +129,51 @@ def _get_corrections_context() -> str:
         return (
             "TEAM CORRECTIONS (from prior feedback — treat these as ground truth):\n"
             + "\n".join(lines)
+            + "\n\n"
+        )
+    except Exception:
+        return ""
+
+
+_CHANNEL_CONTEXT_PATH = pathlib.Path(__file__).parent / "data" / "channel_context.json"
+
+
+def _get_channel_context(query: str) -> str:
+    """
+    Load compressed channel notes from nightly harvest.
+    Inject global notes always + all publisher entries (short-form).
+    Returns empty string if file missing, expired, or empty.
+    """
+    try:
+        if not _CHANNEL_CONTEXT_PATH.exists():
+            return ""
+        data = json.loads(_CHANNEL_CONTEXT_PATH.read_text())
+
+        # Check expiry
+        expires = data.get("expires_at", "")
+        if expires and expires < datetime.now().strftime("%Y-%m-%d"):
+            return ""  # stale context is worse than no context
+
+        parts = []
+        harvested = data.get("harvested_at", "unknown")
+
+        # Global notes — always injected
+        global_ctx = data.get("global", "").strip()
+        if global_ctx:
+            parts.append(global_ctx)
+
+        # All publisher notes — short-form, all of them (no alias matching needed)
+        publishers = data.get("publishers", {})
+        for pub_name, notes in publishers.items():
+            if notes and notes.strip():
+                parts.append(f"Publisher: {pub_name} — {notes.strip()}")
+
+        if not parts:
+            return ""
+
+        return (
+            f"TEAM CONTEXT (from Slack as of {harvested} — treat as current ground truth):\n"
+            + "\n".join(parts)
             + "\n\n"
         )
     except Exception:
@@ -375,6 +421,25 @@ MomentScience runs affiliate offers at post-transaction moments (right after a p
 You have 700+ offers across Impact, FlexOffers, MaxBounty plus real CVR and RPM from ClickHouse. Help the team make confident offer decisions fast. No clarifying questions. Ever.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CAPABILITY BOUNDARY — read this first
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SCOUT CAN: Query ClickHouse (read-only), search offer inventory, build campaign briefs, analyze publisher performance, project revenue, identify gaps, surface ghost campaigns.
+
+SCOUT CANNOT:
+- Write to any database or dashboard (ClickHouse is read-only)
+- Pause, launch, activate, or modify campaigns
+- Adjust budget caps, payouts, or campaign settings
+- Send emails or external communications
+- Access contact directories, CRM, or HR systems
+- Create publisher categories or modify account structures
+- Execute any action that changes system state
+
+When a request requires something above, respond:
+"I can't make that change from here — that needs to happen in the dashboard directly. Here's what I can show you to help: [offer the most relevant read-only data]."
+Never attempt the action. Never error silently. Redirect to what you CAN do.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INTENTS — resolve every query to one, then act immediately.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -457,10 +522,16 @@ INTENTS — resolve every query to one, then act immediately.
     → get_campaign_status(advertiser_name=X).
     Lead with count + status. Show recent audit log changes. End with :zap: Action.
 
-21. FREE-FORM DATA QUERY — any analytical question requiring custom SQL not covered by 1-20
-    Signals: "show me", "give me a breakdown", "list all", "how many", "run-rate", "daily average", "which campaigns end", "what's the cap for", "payout for X on Y"
+21. FREE-FORM DATA QUERY — any analytical question requiring custom SQL not covered by other intents
+    Signals: "show me", "give me a breakdown", "list all", "how many", "run-rate", "daily average", "which campaigns end", "what's the cap for", "payout for X on Y", "breakdown by placement", "full funnel metrics", "today's revenue", "performance by [dimension]"
     → Write SQL using the DATA DICTIONARY. run_sql_query(sql=..., description=...).
+    Common patterns from real usage:
+    - "breakdown [publisher] by placement over last N days" → GROUP BY placement, full funnel (sessions → impressions → clicks → conversions)
+    - "which campaigns have budget caps / what are the caps" → from_airbyte_publisher_campaigns.monthly_budget_cap
+    - "today's revenue" / "revenue for today" → conversions table, created_at >= today(), sum revenue
+    - Publisher ID disambiguation (e.g., "did you look at 1952 or 2527") → always confirm which publisher_id you're querying and name the organization
     Lead with the most important number, bolded. Add sourcing callout before Action: "> Queried: [description] — live ClickHouse". On failure, show error + corrected approach.
+    NEVER add "Verify column semantics before acting" — own your output. If the data is there, present it confidently.
 
 22. SUPPLY/DEMAND GAP ANALYSIS — "what advertisers aren't in [publisher]", "gap analysis for [publisher]", "which publishers is [advertiser] not in", "uncaptured revenue", "dead weight on [publisher]", "what should we add to [publisher]", "where should [advertiser] run", "what are we missing on [publisher]", "[publisher] opportunities", "supply gaps", "demand gaps"
     → get_supply_demand_gaps(publisher_name=X) OR get_supply_demand_gaps(advertiser_name=X).
@@ -469,7 +540,26 @@ INTENTS — resolve every query to one, then act immediately.
     Never pass both parameters simultaneously.
     Lead with total revenue estimate, then the ranked gap list. End with dead weight if present.
 
+23. GHOST CAMPAIGN BRIEF — "ghost brief", "ghost campaigns", "what campaigns are earning nothing", "campaigns with no revenue", "show me the ghosts", "zero revenue campaigns", "which campaigns have impressions but no revenue"
+    → get_ghost_campaigns().
+    Returns full list with per-campaign pixel/postback diagnosis. No parameters needed.
+    Lead with count, then ranked list by impressions. End with :zap: action prompt.
+    NEVER suggest action buttons (pause, check, fallback) — Scout cannot execute campaign operations from Slack.
+    Each row includes campaign_id and publisher name + ID — surface both so the reader can open the exact right account.
+
+24. FILL RATE — "fill rate", "low fill rate", "publishers not serving offers", "which publishers have low fill", "offer fill", "session fill", "checkout page fill rate", "confirmation page fill", "sessions not getting offers", "what publishers are underserving"
+    → get_low_fill_publishers().
+    Returns publishers on post-transaction placements (checkout confirmation, receipt, order confirmation, etc.) with fill rate below 15%.
+    Fill rate = % of sessions that received at least one offer impression.
+    Lead with total missed sessions and estimated revenue at risk. Then ranked publisher list. End with :zap: action note.
+
+25. REVENUE OPPORTUNITIES — "revenue opportunities", "what are we missing", "what should we add", "net-new revenue", "supply gaps", "where should we add advertisers", "largest gaps", "uncaptured revenue", "what advertisers should we add to which publishers"
+    → get_top_revenue_opportunities().
+    Returns top cross-publisher advertiser gaps: high-performing advertisers (2+ publishers, >$10K/30d) not yet active in high-volume publishers (>100K sessions/30d).
+    Lead with total estimated monthly revenue at risk. Then ranked list by est. revenue. End with :zap: action note.
+
 DEFAULT: Unclear intent → Intent 17. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
+EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 AUDIENCE FIT + PROJECTION RULE
@@ -1208,6 +1298,48 @@ TOOLS = [
                 },
             },
             "required": ["sql", "description"],
+        },
+    },
+    {
+        "name": "get_ghost_campaigns",
+        "description": (
+            "Return the full list of ghost campaigns: active campaigns with high impressions + clicks "
+            "but near-zero revenue (< $5 in last 7 days), older than 7 days. Includes per-campaign "
+            "pixel/postback diagnosis. "
+            "Use for: 'ghost brief', 'ghost campaigns', 'what campaigns are earning nothing', "
+            "'campaigns with no revenue', 'show me the ghosts', 'zero revenue campaigns'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_low_fill_publishers",
+        "description": (
+            "Return publishers on post-transaction placements (checkout confirmation, order receipt, "
+            "thank you pages, etc.) where fill rate is below 15% — meaning more than 85% of "
+            "checkout sessions are receiving no offer. Includes missed session count and revenue-at-risk estimate. "
+            "Use for: 'fill rate', 'low fill rate', 'which publishers have low fill', 'sessions not getting offers', "
+            "'offer fill', 'checkout fill', 'confirmation page fill', 'publishers underserving'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_top_revenue_opportunities",
+        "description": (
+            "Return top cross-publisher revenue gap opportunities: high-performing advertisers "
+            "(active on 2+ publishers, >$10K/30d revenue) that are NOT yet active in high-volume publishers "
+            "(>100K sessions/30d). Ranked by estimated monthly revenue. Shows total revenue at risk. "
+            "Use for: 'revenue opportunities', 'what are we missing', 'what should we add', 'net-new revenue', "
+            "'supply gaps', 'where should we add advertisers', 'uncaptured revenue', 'largest gaps'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
         },
     },
     {
@@ -3091,11 +3223,23 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
             col_names = []
 
         truncated = len(rows) >= max_rows
+
+        # Sanitize values — ClickHouse returns date/datetime as Python objects
+        def _sanitize(v):
+            if isinstance(v, (_dt_mod.date, _dt_mod.datetime)):
+                return str(v)
+            if isinstance(v, (list, tuple)):
+                return [_sanitize(x) for x in v]
+            return v
+
         # Convert rows to list of dicts for readability
         if col_names:
-            rows_as_dicts = [dict(zip(col_names, row)) for row in rows[:max_rows]]
+            rows_as_dicts = [
+                {k: _sanitize(v) for k, v in zip(col_names, row)}
+                for row in rows[:max_rows]
+            ]
         else:
-            rows_as_dicts = [list(row) for row in rows[:max_rows]]
+            rows_as_dicts = [[_sanitize(v) for v in row] for row in rows[:max_rows]]
 
         return {
             "description": description,
@@ -3118,6 +3262,344 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
             "description": description,
             "hint": "Check table/column names against the DATA DICTIONARY. Common issues: wrong join type (pid vs user_id), missing PREWHERE, type mismatch (toFloat64OrNull for revenue).",
         }
+
+
+def get_ghost_campaigns() -> str:
+    """
+    Return full ghost campaign list with per-campaign diagnosis.
+    Ghost = actively serving impressions + clicks but generating near-zero revenue
+    (< $5 in last 7 days), older than 7 days (not a new launch).
+    """
+    ch = _get_ch_client()
+    sql = """
+WITH imp_agg AS (
+    SELECT campaign_id, count() AS impressions_7d, min(created_at)::Date AS first_impression_date
+    FROM adpx_impressions_details
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
+    WHERE created_at >= today() - 7
+    GROUP BY campaign_id
+    HAVING impressions_7d > 5000
+),
+click_agg AS (
+    SELECT campaign_id, count() AS clicks_7d
+    FROM adpx_tracked_clicks
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
+    WHERE created_at >= today() - 7
+    GROUP BY campaign_id
+    HAVING clicks_7d > 100
+),
+rev_agg AS (
+    SELECT campaign_id,
+           coalesce(sum(toFloat64OrNull(revenue)), 0) AS revenue_7d,
+           count()                                    AS conversion_count_7d
+    FROM adpx_conversionsdetails
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
+    WHERE created_at >= today() - 7
+    GROUP BY campaign_id
+)
+SELECT
+    c.id                                          AS campaign_id,
+    c.adv_name,
+    c.title                                       AS campaign_title,
+    ia.impressions_7d,
+    ca.clicks_7d,
+    coalesce(ra.revenue_7d, 0)                    AS revenue_7d,
+    toString(ia.first_impression_date)            AS first_impression_date,
+    groupArray(toInt64(pc.user_id))               AS publisher_ids,
+    groupArray(u.organization)                    AS publisher_names
+FROM imp_agg ia
+JOIN click_agg ca ON toString(ca.campaign_id) = toString(ia.campaign_id)
+JOIN from_airbyte_campaigns c ON toInt64(ia.campaign_id) = c.id
+    AND JSONLength(c.conversion_events) > 0
+    AND (c.is_test = false OR c.is_test IS NULL)
+LEFT JOIN rev_agg ra ON toString(ra.campaign_id) = toString(ia.campaign_id)
+LEFT JOIN from_airbyte_publisher_campaigns pc
+    ON toString(pc.campaign_id) = toString(ia.campaign_id) AND pc.is_active = 1
+LEFT JOIN from_airbyte_users u ON pc.user_id = u.id
+WHERE coalesce(ra.conversion_count_7d, 0) = 0
+  AND ia.first_impression_date <= today() - 7
+  AND c.deleted_at IS NULL
+GROUP BY c.id, c.adv_name, c.title, ia.impressions_7d, ca.clicks_7d, revenue_7d, ia.first_impression_date
+HAVING impressions_7d > 5000 AND clicks_7d > 200
+ORDER BY impressions_7d DESC
+LIMIT 25
+"""
+    try:
+        rows = ch.query(sql).result_rows
+    except Exception as e:
+        return f"Ghost campaign query failed: {e}"
+
+    if not rows:
+        return (
+            "*Ghost Campaign Report*\n\n"
+            ":white_check_mark: No ghost campaigns detected — all active campaigns with "
+            "high engagement are generating revenue."
+        )
+
+    lines = [f"*Ghost Campaign Report — Full List* ({len(rows)} campaigns)\n"]
+    for campaign_id, adv_name, campaign_title, imps, clicks, rev, first_date_str, pub_ids, pub_names in rows:
+        imp_str = f"{imps / 1000:.0f}K" if imps >= 1000 else str(imps)
+        rev_str = f"${rev:.2f}" if rev > 0 else "$0"
+        first_date_str = str(first_date_str)[:10] if first_date_str else "unknown"
+
+        # Publisher context — deduplicate and format as "Name (#ID)"
+        seen, pub_parts = set(), []
+        for pid, pname in zip(pub_ids, pub_names):
+            if pid not in seen and pname:
+                seen.add(pid)
+                pub_parts.append(f"{pname} (#{pid})")
+        pub_str = ", ".join(pub_parts[:3]) if pub_parts else "unknown publisher"
+
+        if clicks > 0 and rev == 0:
+            hypothesis = "Zero conversions in 7 days — postback not firing post-click. Check postback URL config."
+        else:
+            hypothesis = "Clicks converting but revenue not flowing — check campaign payout config."
+
+        lines.append(
+            f"• *{adv_name}* · Campaign #{campaign_id} · {pub_str}\n"
+            f"  {imp_str} impressions · {clicks:,} clicks · {rev_str} · since {first_date_str}\n"
+            f"  ↳ _{hypothesis}_"
+        )
+
+    lines.append(
+        "\n:zap: Start with the highest-impression campaigns — they're burning the most inventory. "
+        "Pull the postback URL for each campaign from the network dashboard and confirm pixel fires."
+    )
+    return "\n".join(lines)
+
+
+_POST_TX_PLACEMENTS = (
+    "'checkout_confirmation_page'", "'order_confirmation'", "'order-confirmation'",
+    "'buy_flow_thank_you'", "'buyflowthankyou'", "'acctmgmt_payment_confirmation'",
+    "'acctmgmtpaymentconfirmation'", "'receipt'", "'visit-receipt'", "'visit_receipt'",
+    "'parking_pass_receipt'", "'order-receipt'", "'receipt-parkingdotcom'",
+    "'post_checkout_receipt'", "'post_transaction'", "'post_transaction_page'",
+    "'metropolis_transaction_details'", "'7eleven-fuel-transactionreceipt-bottom'",
+    "'7Eleven_Fuel_TransactionReceipt_Bottom'", "'conv-orderconfirmation'",
+    "'thank_you'", "'message_confirmation'", "'registration_complete'",
+    "'order_status_offers'",
+)
+
+
+def get_low_fill_publishers() -> str:
+    """
+    Return publishers on post-transaction placements with fill rate < 15% over last 30 days.
+    Fill rate = % of sessions that received at least one offer impression.
+    Low fill on a checkout/receipt page = burned traffic with no monetization attempt.
+    """
+    ch = _get_ch_client()
+    placements_sql = ", ".join(_POST_TX_PLACEMENTS)
+    sql = f"""
+WITH sessions_agg AS (
+    SELECT
+        toInt64(user_id) AS publisher_id,
+        placement,
+        count() AS sessions_30d
+    FROM adpx_sdk_sessions
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+    WHERE created_at >= today() - 30
+      AND placement IN ({placements_sql})
+    GROUP BY user_id, placement
+    HAVING sessions_30d > 10000
+),
+imps_agg AS (
+    SELECT
+        toInt64(pid) AS publisher_id,
+        count(DISTINCT session_id) AS sessions_with_imps
+    FROM adpx_impressions_details
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+    WHERE created_at >= today() - 30
+    GROUP BY pid
+),
+rev_agg AS (
+    SELECT
+        toInt64(user_id) AS publisher_id,
+        coalesce(sum(toFloat64OrNull(revenue)), 0) AS revenue_30d,
+        count(DISTINCT session_id) AS converting_sessions
+    FROM adpx_conversionsdetails
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+    WHERE created_at >= today() - 30
+    GROUP BY user_id
+)
+SELECT
+    s.publisher_id,
+    u.organization AS publisher_name,
+    s.placement,
+    s.sessions_30d,
+    coalesce(i.sessions_with_imps, 0) AS sessions_with_imps,
+    round(100.0 * coalesce(i.sessions_with_imps, 0) / s.sessions_30d, 2) AS fill_rate_pct,
+    s.sessions_30d - coalesce(i.sessions_with_imps, 0)                    AS missed_sessions,
+    coalesce(r.revenue_30d, 0)                                             AS revenue_30d
+FROM sessions_agg s
+LEFT JOIN imps_agg i ON i.publisher_id = s.publisher_id
+LEFT JOIN rev_agg r  ON r.publisher_id = s.publisher_id
+LEFT JOIN from_airbyte_users u ON s.publisher_id = u.id
+WHERE coalesce(i.sessions_with_imps, 0) * 100.0 / s.sessions_30d < 15
+ORDER BY missed_sessions DESC
+LIMIT 15
+"""
+    try:
+        rows = ch.query(sql).result_rows
+    except Exception as e:
+        return f"Fill rate query failed: {e}"
+
+    if not rows:
+        return (
+            "*Publisher Fill Rate Report*\n\n"
+            ":white_check_mark: All post-transaction publishers are filling at ≥15% — "
+            "no low-fill anomalies detected."
+        )
+
+    total_missed = sum(int(r[6]) for r in rows)
+    # Rough RPM from revenue / sessions_with_imps across all low-fill pubs
+    total_imps = sum(int(r[4]) for r in rows)
+    total_rev  = sum(float(r[7]) for r in rows)
+    avg_rpm    = (total_rev / total_imps * 1000) if total_imps > 0 else 0
+    est_at_risk = total_missed / 30 * avg_rpm / 1000  # daily revenue at risk
+
+    lines = [
+        f"*Publisher Fill Rate Report — Low Fill on Post-Transaction Pages*\n",
+        f"{len(rows)} publisher{'s' if len(rows) != 1 else ''} below 15% fill · "
+        f"{total_missed / 1_000_000:.1f}M missed sessions/30d",
+    ]
+    if avg_rpm > 0:
+        lines.append(
+            f"Est. revenue at risk: *${est_at_risk:,.0f}/day* "
+            f"(based on ${avg_rpm:.2f} RPM on served sessions)\n"
+        )
+    else:
+        lines.append("")
+
+    for pub_id, pub_name, placement, sessions, with_imps, fill_pct, missed, rev in rows:
+        sessions_str = f"{int(sessions) / 1_000_000:.1f}M" if sessions >= 1_000_000 else f"{int(sessions) / 1000:.0f}K"
+        missed_str   = f"{int(missed) / 1_000_000:.1f}M" if missed >= 1_000_000 else f"{int(missed) / 1000:.0f}K"
+        rev_str      = f"${float(rev) / 1000:.1f}K" if float(rev) >= 1000 else f"${float(rev):.0f}"
+
+        if fill_pct < 2:
+            hypothesis = "Near-zero fill — SDK likely not showing offers at all. Check SDK integration, geo/OS targeting config, or advertiser supply for this placement."
+        elif fill_pct < 10:
+            hypothesis = "Very low fill — most sessions get no offer. Check advertiser targeting restrictions (geo/OS/device), cap exhaustion, or SDK render failure."
+        else:
+            hypothesis = "Below-normal fill — some sessions served, but majority missed. May be geo/device targeting mismatch or insufficient advertiser supply."
+
+        lines.append(
+            f"• *{pub_name or f'Pub #{pub_id}'}* · `{placement}` · Pub #{pub_id}\n"
+            f"  {sessions_str} sessions · {fill_pct:.1f}% fill · {missed_str} sessions missed · {rev_str} revenue/30d\n"
+            f"  ↳ _{hypothesis}_"
+        )
+
+    lines.append(
+        "\n:zap: Start with the highest missed-session publishers — they represent the largest "
+        "uncaptured monetization surface. Check SDK integration logs and advertiser targeting config."
+    )
+    return "\n".join(lines)
+
+
+def get_top_revenue_opportunities() -> str:
+    """
+    Return the top cross-publisher revenue gap opportunities.
+    Finds high-performing advertisers (2+ publishers, >$10K/30d) not active
+    in high-volume publishers (>100K sessions/30d). Ranked by estimated monthly revenue.
+    """
+    ch = _get_ch_client()
+    sql = """
+WITH adv_perf AS (
+    SELECT
+        c.adv_name,
+        count(DISTINCT cv.user_id)                               AS publisher_count,
+        round(sum(toFloat64OrNull(cv.revenue)), 2)               AS rev_30d,
+        round(sum(toFloat64OrNull(cv.revenue))
+              / nullIf(count(DISTINCT cv.user_id), 0), 2)        AS avg_rev_per_pub
+    FROM adpx_conversionsdetails cv
+    JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
+    WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
+      AND cv.created_at >= today() - 30
+    GROUP BY c.adv_name
+    HAVING publisher_count >= 2 AND rev_30d >= 10000
+),
+pub_volume AS (
+    SELECT
+        toInt64(user_id) AS publisher_id,
+        u.organization   AS publisher_name,
+        count()          AS sessions_30d
+    FROM adpx_sdk_sessions s
+    JOIN from_airbyte_users u ON toInt64(s.user_id) = u.id
+    WHERE toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
+      AND s.created_at >= today() - 30
+    GROUP BY publisher_id, publisher_name
+    HAVING sessions_30d > 100000
+),
+active_pairs AS (
+    SELECT DISTINCT
+        toInt64(pc.user_id) AS publisher_id,
+        c.adv_name
+    FROM from_airbyte_publisher_campaigns pc
+    JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
+    WHERE pc.is_active = 1 AND pc.deleted_at IS NULL
+),
+candidates AS (
+    SELECT
+        pv.publisher_name,
+        pv.publisher_id,
+        adv.adv_name,
+        adv.rev_30d       AS adv_total_rev_30d,
+        adv.avg_rev_per_pub AS est_monthly_rev,
+        adv.publisher_count AS adv_pub_count,
+        pv.sessions_30d
+    FROM pub_volume pv
+    CROSS JOIN adv_perf adv
+)
+SELECT
+    c.publisher_name,
+    c.publisher_id,
+    c.adv_name,
+    c.adv_total_rev_30d,
+    c.est_monthly_rev,
+    c.adv_pub_count,
+    c.sessions_30d
+FROM candidates c
+LEFT JOIN active_pairs ap
+    ON ap.publisher_id = c.publisher_id
+   AND ap.adv_name = c.adv_name
+WHERE ap.publisher_id IS NULL
+ORDER BY c.est_monthly_rev DESC, c.sessions_30d DESC
+LIMIT 20
+"""
+    try:
+        rows = ch.query(sql).result_rows
+    except Exception as e:
+        return f"Revenue opportunities query failed: {e}"
+
+    if not rows:
+        return (
+            "*Revenue Opportunity Report*\n\n"
+            ":white_check_mark: No obvious cross-publisher gaps detected — "
+            "all high-performing advertisers appear active in major publishers."
+        )
+
+    total_est = sum(float(r[4]) for r in rows)
+    lines = [
+        f"*Revenue Opportunity Report — Cross-Publisher Gaps* ({len(rows)} opportunities)\n",
+        f"Total estimated monthly revenue at risk: *${total_est / 1000:.0f}K/mo*\n",
+        "_Advertisers already earning on 2+ publishers — the revenue pattern is proven, "
+        "the distribution gap is the opportunity._\n",
+    ]
+
+    for pub_name, pub_id, adv_name, adv_rev, est_rev, pub_count, sessions in rows:
+        sessions_str = f"{int(sessions) / 1_000_000:.1f}M" if sessions >= 1_000_000 else f"{int(sessions) / 1000:.0f}K"
+        adv_rev_str  = f"${float(adv_rev) / 1000:.0f}K" if float(adv_rev) >= 1000 else f"${float(adv_rev):.0f}"
+        est_rev_str  = f"${float(est_rev) / 1000:.0f}K" if float(est_rev) >= 1000 else f"${float(est_rev):.0f}"
+        lines.append(
+            f"• Add *{adv_name}* → *{pub_name or f'Pub #{pub_id}'}*\n"
+            f"  {adv_name} earns {adv_rev_str}/30d across {pub_count} publishers · est. *{est_rev_str}/mo* if added\n"
+            f"  {pub_name}: {sessions_str} sessions/30d · not currently running this advertiser"
+        )
+
+    lines.append(
+        "\n:zap: Prioritize by session volume × avg revenue. "
+        "Confirm no geo/OS exclusions exist before requesting provisioning."
+    )
+    return "\n".join(lines)
 
 
 def get_scout_status() -> dict:
@@ -3214,6 +3696,9 @@ TOOL_MAP = {
     "run_sql_query": run_sql_query,
     "get_scout_status": get_scout_status,
     "get_advertiser_revenue_projection": get_advertiser_revenue_projection,
+    "get_ghost_campaigns": get_ghost_campaigns,
+    "get_low_fill_publishers": get_low_fill_publishers,
+    "get_top_revenue_opportunities": get_top_revenue_opportunities,
 }
 
 
@@ -3338,9 +3823,11 @@ def ask(user_message: str, history: list = None) -> str:
         api_key=api_key,
         default_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
     )
-    # Prepend team corrections as grounding context for this query
+    # Prepend team context (from Slack channels) + corrections as grounding context
+    channel_ctx     = _get_channel_context(user_message)
     corrections_ctx = _get_corrections_context()
-    effective_message = (corrections_ctx + user_message) if corrections_ctx else user_message
+    prefix = channel_ctx + corrections_ctx
+    effective_message = (prefix + user_message) if prefix else user_message
     messages = list(history or []) + [{"role": "user", "content": effective_message}]
     # List of brief results — append each draft_campaign_brief call result.
     # We use the FIRST successful result as the primary (handles multi-brief

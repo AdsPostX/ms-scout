@@ -1011,10 +1011,21 @@ def main():
         log.info("NOTION_TOKEN not set — skipping Notion. Set it to enable Notion output.")
 
     # Write JSON snapshot for Scout (offer intelligence bot)
-    snapshot_path = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
-    snapshot_path.parent.mkdir(exist_ok=True)
-    with open(snapshot_path, "w") as f:
-        json.dump(cleaned, f, default=str)
+    # P9-1: atomic rotation — copy latest → previous, then replace latest via tmp
+    _data_dir = pathlib.Path(__file__).parent / "data"
+    _data_dir.mkdir(exist_ok=True)
+    snapshot_path  = _data_dir / "offers_latest.json"
+    previous_path  = _data_dir / "offers_previous.json"
+    tmp_path       = _data_dir / "offers_latest.tmp"
+
+    # Rotate: current latest → previous (only if latest exists)
+    if snapshot_path.exists():
+        import shutil
+        shutil.copy(snapshot_path, previous_path)
+
+    # Write new latest atomically
+    tmp_path.write_text(json.dumps(cleaned, default=str))
+    os.replace(tmp_path, snapshot_path)
     log.info(f"Scout snapshot written: {len(cleaned)} offers → {snapshot_path}")
 
     # Post SCOUT Sniper weekly digest to Slack

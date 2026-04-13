@@ -24,7 +24,7 @@ from slack_sdk.web import WebClient
 
 from scout_agent import ask
 
-load_dotenv(override=True)
+load_dotenv()  # plist env vars (SCOUT_ENV, PULSE_CHANNEL, etc.) take precedence over .env
 
 logging.basicConfig(
     level=logging.INFO,
@@ -941,8 +941,29 @@ _LAUNCHED_OFFERS_FILE        = pathlib.Path(__file__).parent / "data" / "launche
 _PULSE_STATE_FILE            = pathlib.Path(__file__).parent / "data" / "pulse_state.json"
 _LEARNINGS_FILE              = pathlib.Path(__file__).parent / "data" / "learnings.json"
 _LEARNED_BENCHMARKS_FILE     = pathlib.Path(__file__).parent / "data" / "learned_benchmarks.json"
-_PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # falls back to _SCOUT_HQ_CHANNEL if unset
+_PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # kept for backwards compat
 _PULSE_ENABLED               = os.getenv("PULSE_ENABLED", "true").lower() == "true"
+
+# ── Environment-aware channel routing ─────────────────────────────────────────
+# SCOUT_ENV=production → messages go to production channels (set in launchd plist)
+# Anything else (unset, "development") → everything goes to #scout-qa
+# force=True → always #scout-qa regardless of environment
+_SCOUT_ENV = os.getenv("SCOUT_ENV", "development")
+_PRODUCTION_CHANNELS = {
+    "pulse":    os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
+    "watchdog": os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
+    "offers":   os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL),   # #scout-offers
+}
+
+def _route_channel(purpose: str, force: bool = False) -> str:
+    """
+    Return the correct Slack channel for a given message purpose.
+    Foolproof: force=True OR non-production env always routes to #scout-qa.
+    Production channels require SCOUT_ENV=production (set in launchd plist only).
+    """
+    if force or _SCOUT_ENV != "production":
+        return _SCOUT_HQ_CHANNEL
+    return _PRODUCTION_CHANNELS.get(purpose, _SCOUT_HQ_CHANNEL)
 
 
 def _load_launched_offers() -> dict:
@@ -1098,7 +1119,7 @@ def _run_pulse_signals() -> dict:
     import json as _json
     ch = _get_ch_client()
 
-    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": []}
+    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": [], "ghost_campaigns": [], "fill_rate": [], "opportunities": []}
 
     # ── Signal 1: Cap proximity (campaigns ≥70% of monthly cap) ──────────────
     try:
@@ -1274,7 +1295,7 @@ def _run_pulse_signals() -> dict:
                         sumIf(toFloat64OrNull(cv.revenue), cv.created_at >= today() - 7)   AS rev_7d
                     FROM adpx_conversionsdetails cv
                     JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
-                    JOIN from_airbyte_users u ON cv.user_id = u.id
+                    JOIN from_airbyte_users u ON toInt64(cv.user_id) = u.id
                     PREWHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
                     WHERE cv.created_at >= today() - 30
                       AND c.adv_name ILIKE %(adv)s
@@ -1338,8 +1359,8 @@ def _run_pulse_signals() -> dict:
                         round(sum(ca.rev_30d) / nullIf(sum(ia.imp_30d), 0) * 1000, 2) AS rpm
                     FROM from_airbyte_publisher_campaigns pc
                     JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
-                    LEFT JOIN imp_agg ia ON ia.campaign_id = pc.campaign_id
-                    LEFT JOIN conv_agg ca ON ca.campaign_id = pc.campaign_id
+                    LEFT JOIN imp_agg ia ON toString(ia.campaign_id) = toString(pc.campaign_id)
+                    LEFT JOIN conv_agg ca ON toString(ca.campaign_id) = toString(pc.campaign_id)
                     WHERE pc.is_active = true AND pc.deleted_at IS NULL
                       AND pc.user_id != {pub_id}
                     GROUP BY c.adv_name
@@ -1382,23 +1403,271 @@ def _run_pulse_signals() -> dict:
     except Exception as e:
         log.warning(f"Pulse events signal failed: {e}")
 
+    # ── Signal 4: Ghost campaigns (serving + clicking but near-zero revenue) ────
+    # Detects campaigns with broken tracking/pixels that all other signals miss.
+    # All other signals assume revenue exists — ghost campaigns earn $0 and are
+    # invisible to velocity shifts, cap alerts, and the watchdog.
+    try:
+        ghost_rows = ch.query(
+            """
+            WITH imp_agg AS (
+                SELECT
+                    i.campaign_id,
+                    count()                           AS impressions_7d,
+                    min(i.created_at)::Date           AS first_impression_date
+                FROM adpx_impressions_details i
+                PREWHERE toYYYYMM(i.created_at) >= toYYYYMM(today() - 7)
+                WHERE i.created_at >= today() - 7
+                GROUP BY i.campaign_id
+            ),
+            click_agg AS (
+                SELECT campaign_id, count() AS clicks_7d
+                FROM adpx_tracked_clicks
+                PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
+                WHERE created_at >= today() - 7
+                GROUP BY campaign_id
+            ),
+            rev_agg AS (
+                SELECT
+                    campaign_id,
+                    coalesce(sum(toFloat64OrNull(revenue)), 0) AS revenue_7d,
+                    count()                                    AS conversion_count_7d
+                FROM adpx_conversionsdetails
+                PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
+                WHERE created_at >= today() - 7
+                GROUP BY campaign_id
+            ),
+            joined AS (
+                SELECT
+                    c.adv_name,
+                    ia.impressions_7d,
+                    coalesce(ca.clicks_7d, 0)              AS clicks_7d,
+                    coalesce(ra.revenue_7d, 0)             AS revenue_7d,
+                    coalesce(ra.conversion_count_7d, 0)    AS conversion_count_7d,
+                    ia.first_impression_date
+                FROM imp_agg ia
+                JOIN from_airbyte_campaigns c ON toInt64(ia.campaign_id) = c.id
+                    AND JSONLength(c.conversion_events) > 0
+                    AND (c.is_test = false OR c.is_test IS NULL)
+                    AND c.deleted_at IS NULL
+                LEFT JOIN click_agg ca ON ca.campaign_id = ia.campaign_id
+                LEFT JOIN rev_agg ra  ON ra.campaign_id  = ia.campaign_id
+                WHERE coalesce(ra.conversion_count_7d, 0) = 0
+                  AND ia.first_impression_date <= today() - 7
+            )
+            SELECT
+                adv_name,
+                sum(impressions_7d)       AS total_impressions,
+                sum(clicks_7d)            AS total_clicks,
+                sum(revenue_7d)           AS total_revenue
+            FROM joined
+            GROUP BY adv_name
+            HAVING total_impressions > 5000 AND total_clicks > 200
+            ORDER BY total_impressions DESC
+            LIMIT 10
+            """
+        ).result_rows
+        for adv_name, impressions, clicks, revenue in ghost_rows:
+            if revenue == 0:
+                hypothesis = "Zero conversions in 7 days — postback not firing post-click. Check pixel/postback URL config."
+            else:
+                hypothesis = "Near-zero RPM — may be a test campaign or fundamentally non-converting offer. Review or pause."
+            signals["ghost_campaigns"].append({
+                "adv_name":       adv_name,
+                "impressions_7d": int(impressions),
+                "clicks_7d":      int(clicks),
+                "revenue_7d":     round(float(revenue), 2),
+                "hypothesis":     hypothesis,
+            })
+    except Exception as e:
+        log.warning(f"Pulse ghost campaign signal failed: {e}")
+
+    # ── Signal 5: Low fill rate on post-transaction placements ───────────────────
+    # Detects publishers on checkout/receipt/order-confirmation pages where
+    # fewer than 15% of sessions receive an offer. These are the highest-value
+    # real estate in MomentScience's inventory — burned sessions = burned revenue.
+    try:
+        from scout_agent import _POST_TX_PLACEMENTS
+        placements_sql = ", ".join(_POST_TX_PLACEMENTS)
+        fill_rows = ch.query(
+            f"""
+            WITH sessions_agg AS (
+                SELECT
+                    toInt64(user_id) AS publisher_id,
+                    count()          AS sessions_7d
+                FROM adpx_sdk_sessions
+                PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
+                WHERE created_at >= today() - 7
+                  AND placement IN ({placements_sql})
+                GROUP BY user_id
+                HAVING sessions_7d > 5000
+            ),
+            imps_agg AS (
+                SELECT
+                    toInt64(pid) AS publisher_id,
+                    count(DISTINCT session_id) AS sessions_with_imps
+                FROM adpx_impressions_details
+                PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
+                WHERE created_at >= today() - 7
+                GROUP BY pid
+            )
+            SELECT
+                s.publisher_id,
+                u.organization AS publisher_name,
+                s.sessions_7d,
+                coalesce(i.sessions_with_imps, 0) AS sessions_with_imps,
+                round(100.0 * coalesce(i.sessions_with_imps, 0) / s.sessions_7d, 2) AS fill_rate_pct,
+                s.sessions_7d - coalesce(i.sessions_with_imps, 0) AS missed_sessions
+            FROM sessions_agg s
+            LEFT JOIN imps_agg i ON i.publisher_id = s.publisher_id
+            LEFT JOIN from_airbyte_users u ON s.publisher_id = u.id
+            WHERE coalesce(i.sessions_with_imps, 0) * 100.0 / s.sessions_7d < 15
+            ORDER BY missed_sessions DESC
+            LIMIT 5
+            """
+        ).result_rows
+        for pub_id, pub_name, sessions_7d, with_imps, fill_pct, missed in fill_rows:
+            signals["fill_rate"].append({
+                "publisher_id":   int(pub_id),
+                "publisher_name": pub_name or f"Pub #{pub_id}",
+                "sessions_7d":    int(sessions_7d),
+                "fill_rate_pct":  round(float(fill_pct), 1),
+                "missed_sessions": int(missed),
+            })
+    except Exception as e:
+        log.warning(f"Pulse fill rate signal failed: {e}")
+
+    # ── Signal 6: Revenue opportunities (cross-publisher gaps) ───────────────
+    # Finds high-performing advertisers not active in high-volume publishers.
+    # Shown weekly (Mondays) to surface proactive expansion opportunities —
+    # separate from the reactive gaps embedded in velocity-shift downs.
+    try:
+        opp_rows = ch.query(
+            """
+            WITH adv_perf AS (
+                SELECT
+                    c.adv_name,
+                    count(DISTINCT cv.user_id)                   AS publisher_count,
+                    round(sum(toFloat64OrNull(cv.revenue)), 2)   AS rev_30d,
+                    round(sum(toFloat64OrNull(cv.revenue))
+                          / nullIf(count(DISTINCT cv.user_id), 0), 2) AS avg_rev_per_pub
+                FROM adpx_conversionsdetails cv
+                JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
+                WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
+                  AND cv.created_at >= today() - 30
+                GROUP BY c.adv_name
+                HAVING publisher_count >= 2 AND rev_30d >= 10000
+            ),
+            pub_volume AS (
+                SELECT
+                    toInt64(user_id) AS publisher_id,
+                    u.organization   AS publisher_name,
+                    count()          AS sessions_30d
+                FROM adpx_sdk_sessions s
+                JOIN from_airbyte_users u ON toInt64(s.user_id) = u.id
+                WHERE toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
+                  AND s.created_at >= today() - 30
+                GROUP BY publisher_id, publisher_name
+                HAVING sessions_30d > 100000
+            ),
+            active_pairs AS (
+                SELECT DISTINCT
+                    toInt64(pc.user_id) AS publisher_id,
+                    c.adv_name
+                FROM from_airbyte_publisher_campaigns pc
+                JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
+                WHERE pc.is_active = 1 AND pc.deleted_at IS NULL
+            ),
+            candidates AS (
+                SELECT
+                    pv.publisher_name,
+                    pv.publisher_id,
+                    ap.adv_name,
+                    ap.avg_rev_per_pub AS est_monthly_rev,
+                    pv.sessions_30d
+                FROM pub_volume pv
+                CROSS JOIN adv_perf ap
+            )
+            SELECT
+                c.publisher_name,
+                c.adv_name,
+                c.est_monthly_rev,
+                c.sessions_30d
+            FROM candidates c
+            LEFT JOIN active_pairs ap
+                ON ap.publisher_id = c.publisher_id
+               AND ap.adv_name = c.adv_name
+            WHERE ap.publisher_id IS NULL
+            ORDER BY c.est_monthly_rev DESC, c.sessions_30d DESC
+            LIMIT 5
+            """
+        ).result_rows
+        for pub_name, adv_name, est_rev, sessions in opp_rows:
+            signals["opportunities"].append({
+                "publisher_name": pub_name or "Unknown Publisher",
+                "adv_name":       adv_name,
+                "est_monthly_rev": round(float(est_rev), 0),
+                "sessions_30d":   int(sessions),
+            })
+    except Exception as e:
+        log.warning(f"Pulse opportunities signal failed: {e}")
+
     return signals
 
 
-def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
+def _format_pulse_blocks(
+    signals: dict,
+    is_weekend: bool = False,
+    flagged_history: dict | None = None,
+    chronic: list | None = None,
+) -> tuple[str, list]:
     """
     Format pulse signals into a Slack Block Kit message.
     Returns (fallback_text, blocks).
 
     Design principles:
+    - Ghost campaigns first — P0, burning inventory, team needs to act immediately
     - Urgency-first: NEEDS ATTENTION (downs) before MOMENTUM (ups)
     - One line per publisher — name, %, current rate, attribution all inline
-    - No context blocks for velocity items — attribution is part of the signal,
-      not subordinate to it
     - Standing checks (caps, overnight) compact at bottom
     - Non-events are context blocks (gray, small) — don't compete with real signals
+    - Weekend mode: higher thresholds (noise suppression), different title
+    - Signal fatigue: annotate persistent issues, demote 7d+ to standing checks
     """
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
+
+    # Rotating NEEDS ATTENTION section hints — actionable nudge at the bottom of the
+    # NEEDS ATTENTION block. Separate from the footer. Different day offset so they
+    # don't cycle in sync and feel independent.
+    _NA_HINTS = [
+        "`@Scout dig into [partner]` → detailed breakdown + action plan",
+        "Reply with a partner name for deeper analysis",
+        "`@Scout why is [partner] down?` → root cause + fix",
+        "`@Scout gaps for [partner]` → what advertisers are missing",
+        "`@Scout what should I fix first?` → prioritized action list",
+    ]
+    _na_hint_idx  = (_date.today().timetuple().tm_yday + 3) % len(_NA_HINTS)
+    na_section_hint = _NA_HINTS[_na_hint_idx]
+
+    # Rotating footer hints — picks a different prompt each day so the pulse
+    # never looks stale. Weekday and weekend lists are separate.
+    _WEEKDAY_HINTS = [
+        "`@Scout what happened to [partner]?`",
+        "`@Scout gaps for [partner]`",
+        "`@Scout health brief on [campaign]`",
+        "`@Scout why is [partner] down?`",
+        "`@Scout top performers this week`",
+        "`@Scout what's missing from [partner]?`",
+        "`@Scout any ghost campaigns today?`",
+    ]
+    _WEEKEND_HINTS = [
+        "`@Scout check this over the weekend`",
+        "`@Scout any ghost campaigns this weekend?`",
+        "`@Scout what needs attention before Monday?`",
+    ]
+    _hint_pool = _WEEKEND_HINTS if is_weekend else _WEEKDAY_HINTS
+    _hint_idx  = _date.today().timetuple().tm_yday % len(_hint_pool)
+    footer_hint = _hint_pool[_hint_idx]
 
     def _fmt_k(n: float) -> str:
         if abs(n) >= 1000:
@@ -1424,10 +1693,15 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
                 parts.append(f"{a['adv_name']} {sign}{_fmt_k(abs(delta))}")
         return "  ·  ".join(parts)
 
-    today_label  = _date.today().strftime("%B %-d, %Y")
+    today_d      = _date.today()
+    today_label  = today_d.strftime("%B %-d, %Y")
     cap_alerts   = signals.get("cap_alerts", [])
     vel_shifts   = signals.get("velocity_shifts", [])
     night_events = signals.get("overnight_events", [])
+    ghost_camps  = signals.get("ghost_campaigns", [])
+    fill_rate    = signals.get("fill_rate", [])
+    opportunities = signals.get("opportunities", [])
+
     # Sort by absolute dollar impact (not % change) — a -48% drop on $29K/mo
     # outranks a -98% drop on $129/mo. Magnitude matters more than ratio.
     downs = sorted(
@@ -1441,24 +1715,138 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
         reverse=True,
     )
 
+    # Weekend mode: raise thresholds to suppress noise — only high-magnitude moves
+    # Team response is slower on weekends; false urgency trains people to ignore it.
+    if is_weekend:
+        downs = [d for d in downs if abs(d["revenue_7d_ann"] - d["revenue_30d"]) >= 15000]
+        ups   = [u for u in ups   if abs(u["revenue_7d_ann"] - u["revenue_30d"]) >= 15000]
+
+    # Cap alerts — urgent vs routine
+    urgent_caps  = [a for a in cap_alerts if a["cap_pct"] >= 90 and a["days_to_cap"] < a["days_remaining"]]
+    # Weekend: skip routine caps entirely — not actionable until Monday
+    routine_caps = [] if is_weekend else [a for a in cap_alerts if a not in urgent_caps]
+
+    # Signal fatigue: separate persistent (7d+) downs from regular downs
+    # P9-2: chronic partners are excluded from NEEDS ATTENTION entirely
+    fh = flagged_history or {}
+    chronic_set = set(chronic or [])
+    persistent_downs: list[tuple] = []  # (v, flag_count) — demoted to standing
+    regular_downs:    list[tuple] = []  # (v, flag_count) — rendered normally
+    for v in downs[:3]:
+        pname = v["publisher_name"]
+        if pname in chronic_set:
+            continue  # chronic — shown in CHRONIC ISSUES footer instead
+        flag_count = fh.get(pname, {}).get("count", 0)
+        if flag_count >= 7:
+            persistent_downs.append((v, flag_count))
+        else:
+            regular_downs.append((v, flag_count))
+
     blocks: list = []
 
     # ── Title ─────────────────────────────────────────────────────────────────
+    if is_weekend:
+        sat = today_d if today_d.weekday() == 5 else today_d - _td(days=1)
+        sun = sat + _td(days=1)
+        header_text = f"Weekend Watchdog  ·  Sat–Sun, {sat.strftime('%b %-d')}–{sun.strftime('%-d')}"
+    else:
+        header_text = f"Pulse  ·  {today_d.strftime('%A, %b %-d')}"
     blocks.append({
         "type": "header",
-        "text": {"type": "plain_text", "text": f"Scout Pulse  ·  {today_label}"},
+        "text": {"type": "plain_text", "text": header_text},
     })
 
+    # ── Ghost campaigns (P0 — compact inline, all same cause, details on demand) ─
+    if ghost_camps:
+        blocks.append({"type": "divider"})
+        # Inline compact list: names + impression scale only — hypothesis is uniform
+        # so it's noise inline; available via @Scout ghost brief on demand.
+        top_g    = ghost_camps[:5]
+        remainder = len(ghost_camps) - len(top_g)
+        g_parts  = []
+        for g in top_g:
+            imp_str = f"{g['impressions_7d'] / 1000:.0f}K" if g["impressions_7d"] >= 1000 else str(g["impressions_7d"])
+            g_parts.append(f"*{g['adv_name']}* {imp_str}")
+        ghost_inline = "  ·  ".join(g_parts)
+        if remainder > 0:
+            ghost_inline += f"  +{remainder} more"
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f":ghost:  *GHOST CAMPAIGNS*  ({len(ghost_camps)} active · high impressions · $0 revenue)"},
+        })
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0{ghost_inline}"}],
+        })
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "\u00a0\u00a0\u00a0\u00a0`@Scout ghost brief` \u2192 full list + pixel/postback diagnosis per campaign"}],
+        })
+
+    # ── Low fill rate (P0 — burned post-transaction traffic) ─────────────────
+    if fill_rate:
+        blocks.append({"type": "divider"})
+        total_missed = sum(f["missed_sessions"] for f in fill_rate)
+        missed_str   = f"{total_missed / 1_000_000:.1f}M" if total_missed >= 1_000_000 else f"{total_missed / 1000:.0f}K"
+        fill_parts   = []
+        for f in fill_rate[:4]:
+            sess_str = f"{f['sessions_7d'] / 1_000_000:.1f}M" if f["sessions_7d"] >= 1_000_000 else f"{f['sessions_7d'] / 1000:.0f}K"
+            fill_parts.append(f"*{f['publisher_name']}* {f['fill_rate_pct']:.0f}% ({sess_str} sessions)")
+        fill_inline = "  ·  ".join(fill_parts)
+        if len(fill_rate) > 4:
+            fill_inline += f"  +{len(fill_rate) - 4} more"
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f":bar_chart:  *LOW FILL RATE*  ({len(fill_rate)} publisher{'s' if len(fill_rate) != 1 else ''} · {missed_str} sessions/7d with no offer shown)"},
+        })
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0{fill_inline}"}],
+        })
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "\u00a0\u00a0\u00a0\u00a0`@Scout fill rate brief` \u2192 breakdown by publisher + root cause diagnosis"}],
+        })
+
+    # ── Revenue opportunities (weekly, Mondays only) ──────────────────────────
+    # Proactive cross-publisher gap intelligence — not tied to any publisher being down.
+    # Reactive gaps (per down-publisher) are already embedded in velocity shifts.
+    if opportunities and today_d.weekday() == 0:  # Monday only
+        blocks.append({"type": "divider"})
+        total_est = sum(o["est_monthly_rev"] for o in opportunities)
+        total_str = f"${total_est / 1000:.0f}K" if total_est >= 1000 else f"${total_est:.0f}"
+        opp_parts = []
+        for o in opportunities[:4]:
+            sess_str = f"{o['sessions_30d'] / 1_000_000:.1f}M" if o["sessions_30d"] >= 1_000_000 else f"{o['sessions_30d'] / 1000:.0f}K"
+            est_str  = f"${o['est_monthly_rev'] / 1000:.0f}K" if o["est_monthly_rev"] >= 1000 else f"${o['est_monthly_rev']:.0f}"
+            opp_parts.append(f"*{o['adv_name']}* → {o['publisher_name']} · {sess_str} sessions · est. {est_str}/mo")
+        if len(opportunities) > 4:
+            opp_parts.append(f"+{len(opportunities) - 4} more")
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f":chart_with_upwards_trend:  *REVENUE OPPORTUNITIES*  ({len(opportunities)} gaps · est. {total_str}/mo combined)"},
+        })
+        for part in opp_parts:
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0{part}"}],
+            })
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "\u00a0\u00a0\u00a0\u00a0`@Scout revenue opportunities` \u2192 full ranked list + estimated impact"}],
+        })
+
     # ── NEEDS ATTENTION (downs) ───────────────────────────────────────────────
-    if downs:
+    if regular_downs or urgent_caps:
         blocks.append({"type": "divider"})
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": ":rotating_light:  *NEEDS ATTENTION*"},
         })
-        for v in downs[:3]:
-            attr = _inline_attr(v)
+        for v, flag_count in regular_downs:
+            attr      = _inline_attr(v)
             attr_part = f"   ·   {attr}" if attr else ""
+            flag_note = f"   ·   _(flagged {flag_count}d)_" if flag_count >= 4 else ""
             blocks.append({
                 "type": "section",
                 "text": {
@@ -1467,7 +1855,7 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
                         f"\u00a0\u00a0\u00a0\u00a0•   *{v['publisher_name']}*   "
                         f"*{v['pct_delta']:.0f}%*   "
                         f"{_fmt_k(v['revenue_7d_ann'])}/mo"
-                        f"{attr_part}"
+                        f"{attr_part}{flag_note}"
                     ),
                 },
             })
@@ -1484,6 +1872,22 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
                     "type": "context",
                     "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0↳ *Missing:* {',  '.join(gap_parts)}"}],
                 })
+
+        for a in urgent_caps[:3]:
+            hit_note = f"~{a['days_to_cap']:.0f}d to cap"
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"\u00a0\u00a0\u00a0\u00a0•   *{a['adv_name']}*   *{a['cap_pct']}% of cap*   {hit_note}",
+                },
+            })
+
+        # Rotating action nudge — bottom of NEEDS ATTENTION section
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0:speech_balloon:  {na_section_hint}"}],
+        })
 
     # ── MOMENTUM (ups) ────────────────────────────────────────────────────────
     if ups:
@@ -1508,31 +1912,15 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
                 },
             })
 
-    # ── Cap alerts — urgent caps join NEEDS ATTENTION, the rest go to standing ──
-    # ≥90% with days_to_cap < days_remaining = hits cap before month end → urgent
-    urgent_caps  = [a for a in cap_alerts if a["cap_pct"] >= 90 and a["days_to_cap"] < a["days_remaining"]]
-    routine_caps = [a for a in cap_alerts if a not in urgent_caps]
-
-    if urgent_caps:
-        # Inject into NEEDS ATTENTION section if it exists, else open a new one
-        if not downs:
-            blocks.append({"type": "divider"})
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": ":rotating_light:  *NEEDS ATTENTION*"},
-            })
-        for a in urgent_caps[:3]:
-            hit_note = f"~{a['days_to_cap']:.0f}d to cap"
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"\u00a0\u00a0\u00a0\u00a0•   *{a['adv_name']}*   *{a['cap_pct']}% of cap*   {hit_note}",
-                },
-            })
-
-    # ── Standing checks: routine caps + overnight (compact, bottom) ───────────
+    # ── Standing checks: routine caps + overnight + persistent down partners ───
     standing: list = []
+
+    # Persistent down partners (7+ days flagged) — demoted here with escalation note
+    for v, flag_count in persistent_downs:
+        standing.append(
+            f"⚠️  *{v['publisher_name']}* {v['pct_delta']:.0f}%   {_fmt_k(v['revenue_7d_ann'])}/mo"
+            f"   _(flagged {flag_count}d — persistent, escalate or investigate)_"
+        )
 
     if routine_caps:
         for a in routine_caps[:3]:
@@ -1541,10 +1929,9 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
                 if a["days_to_cap"] < a["days_remaining"]
                 else f"{a['days_remaining']}d left"
             )
-            # 🟡 and 🔴 render reliably; :yellow_circle: is not a valid Slack shortcode
             status_emoji = "🔴" if a["cap_pct"] >= 90 else "🟡"
             standing.append(f"{status_emoji}  *{a['adv_name']}* {a['cap_pct']}% of cap   {hit_note}")
-    elif not urgent_caps:
+    elif not urgent_caps and not is_weekend:
         standing.append("🟢  No caps at risk")
 
     for e in night_events[:4]:
@@ -1562,17 +1949,26 @@ def _format_pulse_blocks(signals: dict) -> tuple[str, list]:
                 "elements": [{"type": "mrkdwn", "text": line}],
             })
 
+    # ── Chronic issues (P9-2) ────────────────────────────────────────────────
+    if chronic_set:
+        chronic_names = ", ".join(sorted(chronic_set))
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f":rotating_light:  *Chronic Issues*   {chronic_names} — ongoing structural issues, tracked."}],
+        })
+
     # ── Footer ────────────────────────────────────────────────────────────────
     blocks.append({"type": "divider"})
     blocks.append({
         "type": "context",
         "elements": [{
             "type": "mrkdwn",
-            "text": ":speech_balloon:  `@Scout what happened to [partner]?`   ·   :lock: Only you see slash command responses",
+            "text": f":speech_balloon:  {footer_hint}   ·   :lock: Only you see slash command responses",
         }],
     })
 
-    fallback = f"Scout Pulse — {today_label}: {len(downs)} need attention, {len(ups)} in momentum, {len(night_events)} overnight."
+    fallback = f"{'Weekend Watchdog' if is_weekend else 'Pulse'} — {today_label}: {len(ghost_camps)} ghost, {len(downs)} need attention, {len(ups)} in momentum."
     return fallback, blocks
 
 
@@ -1591,7 +1987,7 @@ def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
             rows = ch.query("""
                 SELECT count() AS impressions
                 FROM adpx_impressions_details i
-                JOIN from_airbyte_campaigns c ON i.campaign_id = c.id
+                JOIN from_airbyte_campaigns c ON i.campaign_id = toUInt64(c.id)
                 WHERE c.adv_name ILIKE %(adv)s
                   AND i.created_at >= %(launched_at)s
                   AND toYYYYMM(i.created_at) >= %(partition)s
@@ -1602,7 +1998,7 @@ def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
             rows = ch.query("""
                 SELECT count() AS clicks
                 FROM adpx_tracked_clicks tc
-                JOIN from_airbyte_campaigns c ON tc.campaign_id = c.id
+                JOIN from_airbyte_campaigns c ON tc.campaign_id = toUInt64(c.id)
                 WHERE c.adv_name ILIKE %(adv)s
                   AND tc.created_at >= %(launched_at)s
                   AND toYYYYMM(tc.created_at) >= %(partition)s
@@ -1613,7 +2009,7 @@ def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
             rows = ch.query("""
                 SELECT sum(toFloat64OrNull(revenue)) AS revenue
                 FROM adpx_conversionsdetails cd
-                JOIN from_airbyte_campaigns c ON cd.campaign_id = c.id
+                JOIN from_airbyte_campaigns c ON cd.campaign_id = toUInt64(c.id)
                 WHERE c.adv_name ILIKE %(adv)s
                   AND cd.created_at >= %(launched_at)s
                   AND toYYYYMM(cd.created_at) >= %(partition)s
@@ -1656,8 +2052,8 @@ def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
 
 
 def _post_watchdog_alert(web: WebClient, adv_name: str, result: dict, hours_since: float) -> None:
-    """Post launch health alert to #revenue-operations."""
-    channel = _PULSE_CHANNEL or _SCOUT_HQ_CHANNEL
+    """Post launch health alert to #revenue-operations (production) or #scout-qa (dev/force)."""
+    channel = _route_channel("watchdog")
     hours_str = f"{int(hours_since)}h" if hours_since < 24 else f"{hours_since / 24:.1f}d"
     imp = f"{result['impressions']:,}"
     clk = f"{result['clicks']:,}"
@@ -1698,6 +2094,8 @@ def _run_watchdog_checks(web: WebClient, state: dict) -> None:
             continue
         try:
             launched_at = _dt.fromisoformat(launched_at_str.replace("Z", "+00:00"))
+            if launched_at.tzinfo is None:
+                launched_at = launched_at.replace(tzinfo=_utc.utc)
         except Exception:
             continue
         hours_since = (now_utc - launched_at).total_seconds() / 3600
@@ -1817,21 +2215,92 @@ def _proactive_pulse(web: WebClient) -> None:
             # This handles: Mac was off at 8am, just resumed.
             state = _load_pulse_state()
             if state.get("last_pulse_date") != today_str and now_chi.hour >= 8:
+                is_weekend = now_chi.weekday() >= 5  # Saturday=5, Sunday=6
+
                 # Run signals
                 signals = _run_pulse_signals()
+
+                # ── Update signal fatigue tracking ────────────────────────────
+                # flagged_history: publisher_name → {count, first_flagged, last_flagged}
+                # Uses "last_flagged within 48h" window — resilient to Scout being
+                # offline for a day (strict consecutive counter would reset on gap).
+                flagged_history: dict = state.get("flagged_history", {})
+                today_s = today_str
+                from datetime import datetime as _fdt
+                for v in signals.get("velocity_shifts", []):
+                    if v.get("direction") != "down":
+                        continue
+                    pname = v["publisher_name"]
+                    rec   = flagged_history.get(pname, {})
+                    last  = rec.get("last_flagged", "")
+                    # Within 48h = either yesterday or today (handles one offline day)
+                    if last and (_fdt.strptime(today_s, "%Y-%m-%d") - _fdt.strptime(last, "%Y-%m-%d")).days <= 2:
+                        rec["count"] = rec.get("count", 1) + 1
+                    else:
+                        rec = {"count": 1, "first_flagged": today_s}
+                    rec["last_flagged"] = today_s
+                    flagged_history[pname] = rec
+                state["flagged_history"] = flagged_history
+
+                # ── Chronic classification (P9-2) ─────────────────────────────────
+                # Threshold: count >= 3 AND (last_flagged - first_flagged) <= 14 days
+                # Eviction: today - last_flagged > 14 days → remove from chronic list
+                chronic: list = state.get("chronic", [])
+                today_dt = _fdt.strptime(today_s, "%Y-%m-%d")
+
+                # Evict stale chronic partners
+                evicted = [
+                    pname for pname in chronic
+                    if (today_dt - _fdt.strptime(
+                        flagged_history.get(pname, {}).get("last_flagged") or "2000-01-01",
+                        "%Y-%m-%d",
+                    )).days > 14
+                ]
+                for pname in evicted:
+                    chronic.remove(pname)
+                    log.info(f"[pulse] {pname} evicted from chronic list (no flag in 14d)")
+
+                # Promote new chronic partners
+                for pname, rec in flagged_history.items():
+                    if pname in chronic:
+                        continue
+                    count = rec.get("count", 0)
+                    first = rec.get("first_flagged", "")
+                    last  = rec.get("last_flagged", "")
+                    if not first or not last:
+                        continue
+                    span_days = (_fdt.strptime(last, "%Y-%m-%d") - _fdt.strptime(first, "%Y-%m-%d")).days
+                    if count >= 3 and span_days <= 14:
+                        chronic.append(pname)
+                        log.info(f"[pulse] {pname} classified as chronic ({count} flags in {span_days}d)")
+
+                state["chronic"] = chronic
 
                 # Only post if there's something to say
                 has_content = (
                     signals.get("cap_alerts")
                     or signals.get("velocity_shifts")
                     or signals.get("overnight_events")
+                    or signals.get("ghost_campaigns")
+                    or signals.get("fill_rate")
+                    or signals.get("opportunities")
                 )
-                channel = _PULSE_CHANNEL or _SCOUT_HQ_CHANNEL
+                channel = _route_channel("pulse")
                 if has_content:
-                    fallback, blocks = _format_pulse_blocks(signals)
+                    fallback, blocks = _format_pulse_blocks(
+                        signals,
+                        is_weekend=is_weekend,
+                        flagged_history=flagged_history,
+                        chronic=chronic,
+                    )
                     web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
                     log.info(f"[pulse] posted to {channel}: {len(signals['cap_alerts'])} caps, "
-                             f"{len(signals['velocity_shifts'])} velocity, {len(signals['overnight_events'])} events")
+                             f"{len(signals['velocity_shifts'])} velocity, "
+                             f"{len(signals['overnight_events'])} events, "
+                             f"{len(signals['ghost_campaigns'])} ghosts, "
+                             f"{len(signals['fill_rate'])} low-fill, "
+                             f"{len(signals['opportunities'])} opportunities"
+                             f"{' [weekend]' if is_weekend else ''}")
                 else:
                     log.info("[pulse] no signals today — skipping post")
 
@@ -3661,8 +4130,62 @@ def _cleanup_state() -> None:
             log.error(f"[cleanup_state] cycle failed: {e}", exc_info=True)
 
 
+def _nightly_harvest():
+    """Background daemon: harvest Slack channel context once per day at midnight CT."""
+    import zoneinfo
+    from context_harvester import harvest, is_stale
+
+    ct = zoneinfo.ZoneInfo("America/Chicago")
+    while True:
+        try:
+            from datetime import datetime as _dt
+            now = _dt.now(ct)
+            # Run at midnight CT — calculate seconds until next midnight
+            from datetime import timedelta as _td
+            tomorrow_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + _td(days=1)
+            sleep_secs = (tomorrow_midnight - now).total_seconds()
+
+            # On startup, if context is stale, harvest immediately
+            if is_stale():
+                log.info("[harvest] context stale or missing — running immediate harvest")
+                harvest()
+            else:
+                log.info(f"[harvest] context is fresh — sleeping {sleep_secs / 3600:.1f}h until midnight CT")
+
+            time.sleep(sleep_secs)
+            # After sleep, harvest
+            log.info("[harvest] midnight CT — running nightly harvest")
+            harvest()
+        except Exception as e:
+            log.error(f"[harvest] cycle failed: {e}", exc_info=True)
+            time.sleep(3600)  # retry in 1 hour on failure
+
+
+_PID_FILE = pathlib.Path(__file__).parent / "data" / "scout.pid"
+
+
+def _check_singleton() -> None:
+    """Prevent two Scout processes from running simultaneously and double-posting."""
+    import atexit, sys
+    if _PID_FILE.exists():
+        try:
+            existing_pid = int(_PID_FILE.read_text().strip())
+            os.kill(existing_pid, 0)   # raises ProcessLookupError if dead
+            log.error(
+                "[main] Scout already running (PID %s). "
+                "Kill it first or delete data/scout.pid. Exiting.",
+                existing_pid,
+            )
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass   # stale PID file — safe to overwrite
+    _PID_FILE.write_text(str(os.getpid()))
+    atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
+
+
 def main():
     global _BOT_USER_ID
+    _check_singleton()
     if not BOT_TOKEN or not APP_TOKEN:
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env")
 
@@ -3685,6 +4208,8 @@ def main():
         log.info("[pulse] disabled via PULSE_ENABLED=false — skipping pulse thread")
     # Background: daily launch health watchdog — catches broken campaigns within hours
     threading.Thread(target=_launch_watchdog, args=(web_client,), daemon=True, name="launch-watchdog").start()
+    # Background: nightly channel context harvest — reads Slack channels, compresses to notes
+    threading.Thread(target=_nightly_harvest, daemon=True, name="context-harvest").start()
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
