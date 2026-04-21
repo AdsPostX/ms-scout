@@ -31,7 +31,7 @@ _DIR         = pathlib.Path(__file__).parent
 DATA_DIR     = _DIR / "data"
 OFFERS_FILE          = DATA_DIR / "offers_latest.json"
 OFFERS_PREVIOUS_FILE = DATA_DIR / "offers_previous.json"
-PAYOUT_CACHE = _DIR / "payout_cache.json"
+PAYOUT_CACHE = DATA_DIR / "payout_cache.json"
 STATE_FILE   = DATA_DIR / "digest_state.json"
 
 # ── Slack ──────────────────────────────────────────────────────────────────────

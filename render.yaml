@@ -56,5 +56,3 @@ services:
         sync: false
       - key: GIPHY_API_KEY
         sync: false
-      - key: GSHEET_ID
-        sync: false

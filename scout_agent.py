@@ -574,6 +574,11 @@ INTENTS — resolve every query to one, then act immediately.
     Triggers an immediate affiliate network fetch (~2 min). Returns count of offers loaded.
     Use when Scout reports "offer inventory at 0" or benchmarks are stale.
 
+28. PERKSWALL ENGAGEMENT — "perkswall engagement for [partner]", "perkswall stats for [partner]", "how is [partner]'s perkswall doing", "perkswall performance for [partner]", "perkswall clicks for [partner]", "what's the engagement on [partner]'s perkswall", "perkswall metrics"
+    → get_perkswall_engagement(publisher_name=<partner>).
+    Returns click-through rate, session engagement, and offer interaction breakdown for the partner's Perkswall placement.
+    Lead with publisher name + total sessions. Highlight CTR and top-performing offer slots. Flag low-engagement placements.
+
 DEFAULT: Unclear intent → Intent 17. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
 

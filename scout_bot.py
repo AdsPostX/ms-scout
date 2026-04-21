@@ -335,7 +335,7 @@ def _clean_error(err: Exception) -> tuple[str, str]:
         msg = "Scout timed out — try a narrower question."
         tag = "arrested development im on it"
     elif "connection" in s.lower() or "network" in s.lower():
-        msg = "Network hiccup — try again."
+        msg = "Scout just restarted (deploy or crash) — please resend your message."
         tag = "it crowd internet"
     else:
         msg = "Something broke — try again, or rephrase the question."
@@ -2965,11 +2965,12 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
             msg += f"\n{tags}"
         web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
+    content_blocks_sg = _text_to_blocks(response_text)
     suggestion_blocks = _build_suggestion_buttons(sugg)
     web.chat_update(
         channel=channel, ts=_placeholder_ts_sg, text=response_text,
         blocks=[
-            {"type": "section", "text": {"type": "mrkdwn", "text": response_text}},
+            *content_blocks_sg,
             *suggestion_blocks,
             {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]},
         ],

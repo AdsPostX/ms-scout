@@ -252,11 +252,11 @@ def is_stale() -> bool:
             lock_data = json.loads(_LOCK_PATH.read_text())
             started = datetime.fromisoformat(lock_data["started"])
             age_hours = (datetime.now(timezone.utc) - started).total_seconds() / 3600
-            if age_hours < 6:
+            if age_hours < 0.5:  # 30 minutes — harvests complete in minutes, not hours
                 log.info("[harvest] lock file present and fresh — harvest in progress, skipping")
                 return False  # harvest in progress
             else:
-                log.warning("[harvest] stale lock file (>6h) — crash detected, cleaning up")
+                log.warning("[harvest] stale lock file (>30min) — crash detected, cleaning up")
                 _LOCK_PATH.unlink(missing_ok=True)
         except Exception:
             _LOCK_PATH.unlink(missing_ok=True)  # corrupt lock — clean up and proceed
