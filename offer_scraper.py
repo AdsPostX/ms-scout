@@ -17,6 +17,7 @@ Usage:
 """
 
 import os
+import pathlib
 import re
 import json
 import logging
@@ -55,8 +56,8 @@ CH_DATABASE         = os.environ.get("CH_DATABASE", "default")
 
 DEBUG = False  # set to True via --debug flag at runtime
 
-# Payout cache file (in script directory)
-PAYOUT_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payout_cache.json")
+# Payout cache — lives in data/ for persistence across Render deploys
+PAYOUT_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "payout_cache.json")
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -113,8 +114,9 @@ def _load_payout_cache() -> dict:
 
 
 def _save_payout_cache(cache: dict):
-    """Save payout cache to payout_cache.json"""
+    """Save payout cache to data/payout_cache.json"""
     try:
+        pathlib.Path(PAYOUT_CACHE_FILE).parent.mkdir(parents=True, exist_ok=True)
         with open(PAYOUT_CACHE_FILE, "w") as f:
             json.dump(cache, f, indent=2)
         log.info(f"Payout cache saved: {len(cache)} campaigns")
@@ -951,6 +953,59 @@ NETWORK_MAP = {
     "flexoffers":  fetch_flexoffers,
     "maxbounty":   fetch_maxbounty,
 }
+
+def run_headless() -> None:
+    """
+    Run the full scraper pipeline programmatically (no CLI args, no --dry-run).
+
+    Called from scout_bot.py daemon thread — avoids argparse / sys.argv interaction.
+    Fetches all networks, normalises offers, writes data/offers_latest.json,
+    rotates data/offers_previous.json, and posts the Scout Sniper digest.
+    """
+    global DEBUG
+    DEBUG = False
+
+    all_offers = []
+    for name, fn in NETWORK_MAP.items():
+        try:
+            all_offers.extend(fn())
+        except Exception as e:
+            log.error(f"[scraper] {name}: failed — {e}")
+
+    log.info(f"[scraper] Total offers collected: {len(all_offers)}")
+    ms_index = fetch_ms_campaign_index()
+    cleaned  = clean_offers(all_offers, ms_index)
+    log.info(f"[scraper] After cleaning (active only, normalised): {len(cleaned)} offers")
+
+    if not cleaned:
+        log.warning("[scraper] No active offers — skipping writes")
+        return
+
+    if NOTION_TOKEN:
+        write_notion(cleaned)
+
+    # Atomic rotation: latest → previous, then write new latest
+    _data_dir    = pathlib.Path(__file__).parent / "data"
+    _data_dir.mkdir(exist_ok=True)
+    snapshot_path = _data_dir / "offers_latest.json"
+    previous_path = _data_dir / "offers_previous.json"
+    tmp_path      = _data_dir / "offers_latest.tmp"
+
+    if snapshot_path.exists():
+        import shutil
+        shutil.copy(snapshot_path, previous_path)
+
+    tmp_path.write_text(json.dumps(cleaned, default=str))
+    os.replace(tmp_path, snapshot_path)
+    log.info(f"[scraper] snapshot written: {len(cleaned)} offers → {snapshot_path}")
+
+    try:
+        import scout_digest
+        log.info("[scraper] posting Scout Sniper digest...")
+        scout_digest.post_digest()
+    except Exception as e:
+        log.warning(f"[scraper] digest post failed (non-fatal): {e}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Affiliate offer scraper")

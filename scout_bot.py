@@ -4165,6 +4165,70 @@ def _nightly_harvest():
             time.sleep(3600)  # retry in 1 hour on failure
 
 
+def _run_scraper_daemon() -> None:
+    """
+    Offer scraper daemon — fetches affiliate inventory (Impact/FlexOffers/MaxBounty)
+    once per day at 6:00 AM CT, then posts the Scout Sniper digest.
+
+    First-boot behaviour: if scraper_state.json doesn't exist, run immediately
+    regardless of time of day. This ensures Render deployments (which can happen
+    any time) don't leave offer inventory empty for hours.
+
+    Check-first on subsequent starts: if past 6am and haven't run today, fire now.
+    State: data/scraper_state.json
+    """
+    import pytz
+    from datetime import datetime as _dt, timedelta
+    from offer_scraper import run_headless as _run_scraper
+
+    _SCRAPER_STATE = _DATA_DIR / "scraper_state.json"
+
+    def _load_state():
+        try:
+            return json.loads(_SCRAPER_STATE.read_text())
+        except Exception:
+            return {}
+
+    def _save_state(s):
+        _atomic_write(_SCRAPER_STATE, s)
+
+    while True:
+        try:
+            chicago = pytz.timezone("America/Chicago")
+            now_chi = _dt.now(chicago)
+            today_str = now_chi.strftime("%Y-%m-%d")
+            state = _load_state()
+
+            # FIRST BOOT: no state file → run immediately regardless of hour.
+            # Prevents "offer inventory at 0" immediately after a Render deploy.
+            is_first_boot = not _SCRAPER_STATE.exists() or not state
+
+            # CHECK FIRST: past 6am and haven't run today → fire immediately.
+            should_run = is_first_boot or (
+                state.get("last_run_date") != today_str and now_chi.hour >= 6
+            )
+
+            if should_run:
+                reason = "first boot" if is_first_boot else "daily run"
+                log.info(f"[scraper] running offer fetch ({reason})")
+                _run_scraper()
+                state["last_run_date"] = today_str
+                _save_state(state)
+                log.info("[scraper] done — offers_latest.json updated")
+
+            # Sleep until next 6am CT
+            target = now_chi.replace(hour=6, minute=0, second=0, microsecond=0)
+            if now_chi >= target:
+                target += timedelta(days=1)
+            sleep_secs = (target - now_chi).total_seconds()
+            log.info(f"[scraper] sleeping {sleep_secs / 3600:.1f}h until next run at {target}")
+            time.sleep(sleep_secs)
+
+        except Exception as e:
+            log.error(f"[scraper] cycle failed: {e}", exc_info=True)
+            time.sleep(3600)  # retry in 1 hour on failure
+
+
 _PID_FILE = _DATA_DIR / "scout.pid"
 
 
@@ -4214,6 +4278,8 @@ def main():
     threading.Thread(target=_launch_watchdog, args=(web_client,), daemon=True, name="launch-watchdog").start()
     # Background: nightly channel context harvest — reads Slack channels, compresses to notes
     threading.Thread(target=_nightly_harvest, daemon=True, name="context-harvest").start()
+    # Background: daily offer scraper — keeps offers_latest.json fresh (6am CT, or immediately on first boot)
+    threading.Thread(target=_run_scraper_daemon, daemon=True, name="scraper").start()
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()

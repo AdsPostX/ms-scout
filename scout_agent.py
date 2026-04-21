@@ -455,6 +455,11 @@ INTENTS — resolve every query to one, then act immediately.
 
 4. SYSTEM STATUS — "status", "health", "are you up", "benchmark freshness"
    → get_scout_status(). Compact health card, one line per signal. Flag stale (benchmarks > 2h) or degraded.
+   IMPORTANT: Benchmarks (ClickHouse CVR/RPM) and Offer Inventory (offers_latest.json) are TWO SEPARATE THINGS.
+   Benchmarks = real CVR/RPM from MS's own ClickHouse data — always available when CH is up, scraper NOT required.
+   Offer Inventory = affiliate offers from Impact/FlexOffers/MaxBounty — populated by scraper (runs 6am CT daily).
+   When inventory is 0: say ":red_circle: Offer Inventory — 0 offers. Run `@Scout refresh offers` to fetch now (~2 min)."
+   Never imply benchmarks depend on the scraper. They come from ClickHouse.
 
 5. SPECIFIC OFFER RESEARCH — advertiser name + any question, "tell me about X", "look up X"
    → search_offers(query=advertiser_name). Full picture: payout, status, performance, fit note.
@@ -557,6 +562,17 @@ INTENTS — resolve every query to one, then act immediately.
     → get_top_revenue_opportunities().
     Returns top cross-publisher advertiser gaps: high-performing advertisers (2+ publishers, >$10K/30d) not yet active in high-volume publishers (>100K sessions/30d).
     Lead with total estimated monthly revenue at risk. Then ranked list by est. revenue. End with :zap: action note.
+
+26. PARTNER OFFER RECOMMENDATIONS — "offers for [partner]", "what should we add to [partner]", "recommend offers for [partner]", "what can we run on [partner]", "what's a good fit for [partner]", "pitch ideas for [partner]", "affiliate offers for [partner]", "new offers for [partner]"
+    → get_offers_for_publisher(publisher_name=<partner>).
+    Returns top affiliate network offers (not yet provisioned) scored by estimated RPM using real MS conversion benchmarks.
+    DIFFERENT from get_supply_demand_gaps (which shows MS advertisers already on the platform) — this surfaces net-new affiliate inventory.
+    Lead with partner name and candidate count. Ranked list. End with :zap: demand queue CTA.
+
+27. RUN SCRAPER / REFRESH OFFERS — "refresh offers", "run scraper", "update offer inventory", "load benchmarks", "inventory is empty", "reload offers", "fetch latest offers", "scraper"
+    → run_offer_scraper().
+    Triggers an immediate affiliate network fetch (~2 min). Returns count of offers loaded.
+    Use when Scout reports "offer inventory at 0" or benchmarks are stale.
 
 DEFAULT: Unclear intent → Intent 17. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
@@ -1353,6 +1369,44 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {},
+        },
+    },
+    {
+        "name": "run_offer_scraper",
+        "description": (
+            "Trigger an immediate offer inventory refresh from affiliate networks "
+            "(Impact, FlexOffers, MaxBounty). Takes ~2 minutes. Run when offer inventory "
+            "is empty or stale. Updates offers_latest.json and posts the Scout Sniper digest. "
+            "Use for: 'refresh offers', 'run scraper', 'update offer inventory', "
+            "'load benchmarks', 'inventory is empty', 'reload offers', 'fetch latest offers'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_offers_for_publisher",
+        "description": (
+            "Return top affiliate offers (from Impact, FlexOffers, MaxBounty inventory) that are "
+            "a good fit for a specific publisher but not yet provisioned in their campaign set. "
+            "Scored by estimated RPM using real MS conversion benchmarks. "
+            "DIFFERENT from get_supply_demand_gaps — this surfaces net-new affiliate inventory, "
+            "not advertisers already on the MS platform. "
+            "Use for: 'offers for [partner]', 'what should we add to [partner]', "
+            "'recommend offers for [partner]', 'what can we run on [partner]', "
+            "'what's a good fit for [partner]', 'pitch ideas for [partner]', "
+            "'affiliate offers for [partner]', 'new offers for [partner]'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "publisher_name": {
+                    "type": "string",
+                    "description": "The publisher/partner name (e.g., 'TextNow', 'PCH', 'Metropolis').",
+                }
+            },
+            "required": ["publisher_name"],
         },
     },
 ]
@@ -3676,6 +3730,133 @@ def get_scout_status() -> dict:
     return status
 
 
+def run_offer_scraper() -> str:
+    """
+    Trigger an immediate offer inventory refresh from affiliate networks
+    (Impact, FlexOffers, MaxBounty). Run when offer inventory is empty or stale.
+    Takes ~2 minutes. Writes data/offers_latest.json and posts digest.
+    """
+    try:
+        from offer_scraper import run_headless
+        log.info("[scraper] on-demand refresh triggered via @Scout")
+        run_headless()
+        # Report results
+        offers_path = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
+        if offers_path.exists():
+            import json as _json
+            offers = _json.loads(offers_path.read_text())
+            active = sum(1 for o in offers if o.get("status") == "Active")
+            return (
+                f":white_check_mark: Offer inventory refreshed — {len(offers)} total offers, "
+                f"{active} active. Scout Score rankings and prospecting are now fully operational."
+            )
+        return (
+            ":white_check_mark: Scraper ran. No offers_latest.json found — "
+            "check Render logs for network errors."
+        )
+    except Exception as e:
+        log.error(f"[scraper] on-demand run failed: {e}", exc_info=True)
+        return f":x: Scraper failed: {e}. Check Render logs for details."
+
+
+def get_offers_for_publisher(publisher_name: str) -> str:
+    """
+    Return top affiliate offers (Impact/FlexOffers/MaxBounty inventory) that are
+    a good fit for this publisher but not yet provisioned in their campaign set.
+    Scored by estimated RPM using real MS conversion benchmarks (_scout_score).
+    Different from get_supply_demand_gaps — surfaces NET-NEW affiliate inventory,
+    not advertisers already on the MS platform.
+    """
+    import json as _json
+
+    offers_path = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
+    if not offers_path.exists():
+        return (
+            f"Offer inventory is empty — the scraper hasn't run yet on Render. "
+            f"Run `@Scout refresh offers` to fetch now (~2 min), "
+            f"or wait for the 6am CT daily auto-refresh."
+        )
+
+    try:
+        all_offers = _json.loads(offers_path.read_text())
+    except Exception as e:
+        return f"Offer inventory file is corrupt: {e}. Try `@Scout refresh offers`."
+
+    active = [o for o in all_offers if o.get("status") == "Active"]
+    if not active:
+        return "Offer inventory has 0 active offers. Try `@Scout refresh offers` to fetch latest."
+
+    ch = _get_ch_client()
+
+    # Resolve publisher
+    pub_rows = ch.query(
+        "SELECT id, organization FROM from_airbyte_users "
+        "WHERE organization ILIKE %(pub)s LIMIT 5",
+        parameters={"pub": f"%{publisher_name}%"}
+    ).result_rows
+    if not pub_rows:
+        return f"Publisher '{publisher_name}' not found in MomentScience."
+    pub_id, pub_org = pub_rows[0]
+
+    # Existing advertiser set for this publisher (active campaigns only)
+    existing_rows = ch.query(
+        "SELECT DISTINCT c.adv_name "
+        "FROM from_airbyte_publisher_campaigns pc "
+        "JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id "
+        "WHERE toInt64(pc.user_id) = %(uid)s AND pc.is_active = 1 AND pc.deleted_at IS NULL",
+        parameters={"uid": int(pub_id)}
+    ).result_rows
+    existing_adv = {row[0].lower() for row in existing_rows}
+
+    # Filter to net-new advertisers (not already provisioned for this publisher)
+    def _is_new(offer: dict) -> bool:
+        adv = (offer.get("advertiser") or "").lower()
+        return not any(adv in ex or ex in adv for ex in existing_adv)
+
+    candidates = [o for o in active if _is_new(o)]
+
+    if not candidates:
+        return (
+            f"All active affiliate offers in the inventory are already provisioned in {pub_org}. "
+            f"Use `@Scout revenue opportunities` for cross-publisher advertiser gaps, "
+            f"or `@Scout what advertisers aren't in {pub_org}` for the provisioning view."
+        )
+
+    # Score using existing benchmark infrastructure
+    benchmarks = _load_performance_benchmarks()
+    scored = [(o, _scout_score(o, benchmarks)) for o in candidates]
+    scored = [(o, s) for o, s in scored if s > 0]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top = scored[:10]
+
+    if not top:
+        return (
+            f"{len(candidates)} net-new affiliate offers found for {pub_org}, "
+            f"but none have MS benchmark data yet (no prior run history). "
+            f"Try `@Scout revenue opportunities` for cross-publisher revenue gaps with proven estimates."
+        )
+
+    lines = [
+        f"*{pub_org} — Recommended Offers* "
+        f"({len(candidates)} net-new candidates · showing top {len(top)} by est. RPM)\n"
+    ]
+    for i, (o, score) in enumerate(top, 1):
+        raw_payout = o.get("_raw_payout") or o.get("payout") or "?"
+        lines.append(
+            f"{i}. *{o['advertiser']}* · {raw_payout} · {o.get('category','?')} · "
+            f"est. *${score:.2f} RPM* · {o['network'].title()}"
+        )
+
+    lines.append(
+        f"\nThese are affiliate offers not yet provisioned in {pub_org}, "
+        f"ranked by estimated RPM using real MS conversion benchmarks."
+    )
+    lines.append(
+        ":zap: Add the top 2-3 to the demand queue: `@Scout brief [offer name]`"
+    )
+    return "\n".join(lines)
+
+
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
 TOOL_MAP = {
@@ -3699,6 +3880,8 @@ TOOL_MAP = {
     "get_ghost_campaigns": get_ghost_campaigns,
     "get_low_fill_publishers": get_low_fill_publishers,
     "get_top_revenue_opportunities": get_top_revenue_opportunities,
+    "run_offer_scraper": run_offer_scraper,
+    "get_offers_for_publisher": get_offers_for_publisher,
 }
 
 
