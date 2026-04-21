@@ -854,14 +854,14 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
     try:
         prev_data = json.loads(OFFERS_PREVIOUS_FILE.read_text())
         prev_keys = {o["_unique_key"] for o in prev_data if o.get("_unique_key")}
-        curr_keys = {o["_unique_key"] for item in offers_by_network.values() for o in item if o.get("_unique_key")}
+        curr_keys = {o["_unique_key"] for item in offers_by_network.values() for _, o in item if o.get("_unique_key")}
         new_offer_keys = curr_keys - prev_keys
     except FileNotFoundError:
         log.warning("[digest] offers_previous.json missing — treating all offers as new")
-        new_offer_keys = {o["_unique_key"] for item in offers_by_network.values() for o in item if o.get("_unique_key")}
+        new_offer_keys = {o["_unique_key"] for item in offers_by_network.values() for _, o in item if o.get("_unique_key")}
     except json.JSONDecodeError:
         log.warning("[digest] offers_previous.json corrupt — treating all offers as new")
-        new_offer_keys = {o["_unique_key"] for item in offers_by_network.values() for o in item if o.get("_unique_key")}
+        new_offer_keys = {o["_unique_key"] for item in offers_by_network.values() for _, o in item if o.get("_unique_key")}
 
     # ── Event-driven gate: post only when meaningful ──────────────────────────
     # Skip if: no new offers AND not Monday (weekly review) AND not forced
