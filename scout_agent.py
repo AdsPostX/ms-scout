@@ -26,16 +26,13 @@ log = logging.getLogger("scout_agent")
 
 
 def _run_parallel(fns: list):
-    """Run a list of zero-argument callables in parallel.
-    Falls back to sequential if ThreadPoolExecutor is unavailable (e.g. during shutdown).
+    """Run a list of zero-argument callables sequentially.
+    Previously used ThreadPoolExecutor, but clickhouse_connect clients are not thread-safe —
+    concurrent queries on the same client raise ProgrammingError. Sequential is correct here;
+    ClickHouse queries are fast enough that the ~200ms parallelism gain doesn't justify the risk.
     Returns a list of results in the same order as fns.
     """
-    try:
-        with ThreadPoolExecutor(max_workers=len(fns)) as ex:
-            futures = [ex.submit(fn) for fn in fns]
-            return [f.result() for f in futures]
-    except RuntimeError:
-        return [fn() for fn in fns]
+    return [fn() for fn in fns]
 
 
 def _get_ch_client():
@@ -4043,7 +4040,7 @@ def _select_model(user_message: str) -> str:
                 "trend", "brief", "compare", "analyze", "performance",
                 "velocity", "benchmark", "opportunity", "why"]
     if sum(1 for p in simple if p in msg) > sum(1 for p in complex_ if p in msg):
-        return "claude-haiku-3-5-20251001"
+        return "claude-haiku-3-5-20241022"
     return "claude-sonnet-4-6"
 
 
