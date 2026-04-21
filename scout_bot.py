@@ -26,6 +26,10 @@ from scout_agent import ask
 
 load_dotenv()  # plist env vars (SCOUT_ENV, PULSE_CHANNEL, etc.) take precedence over .env
 
+# ── Data directory — created here so it exists on first boot (Render, fresh clone, etc.) ──
+_DATA_DIR = pathlib.Path(__file__).parent / "data"
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -39,7 +43,7 @@ APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 # ── Persistent brief state ────────────────────────────────────────────────────
 # Briefs are written to disk so process restarts (launchd restarts, deploys, etc.)
 # never cause "No brief found" on the Launch button click.
-_STATE_FILE = pathlib.Path(__file__).parent / "data" / "pending_briefs.json"
+_STATE_FILE = _DATA_DIR / "pending_briefs.json"
 _LAST_THREAD_PER_CHANNEL: dict = {}  # channel → thread_ts
 _LAST_THREAD_LOCK = threading.Lock()
 _BOT_USER_ID: str = ""  # cached at startup — never changes
@@ -116,7 +120,7 @@ def _delete_brief(thread_ts: str):
 # Injected at position 0 in history so follow-ups like "@Scout yes, $50 CPA"
 # always have the entities from earlier in the thread available.
 
-_THREAD_CTX_FILE = pathlib.Path(__file__).parent / "data" / "thread_context.json"
+_THREAD_CTX_FILE = _DATA_DIR / "thread_context.json"
 
 
 def _load_thread_contexts() -> dict:
@@ -937,10 +941,10 @@ def _slack_thread_url(channel: str, thread_ts: str) -> str:
     return f"https://momentscience.slack.com/archives/{channel}/p{ts_nodot}"
 
 
-_LAUNCHED_OFFERS_FILE        = pathlib.Path(__file__).parent / "data" / "launched_offers.json"
-_PULSE_STATE_FILE            = pathlib.Path(__file__).parent / "data" / "pulse_state.json"
-_LEARNINGS_FILE              = pathlib.Path(__file__).parent / "data" / "learnings.json"
-_LEARNED_BENCHMARKS_FILE     = pathlib.Path(__file__).parent / "data" / "learned_benchmarks.json"
+_LAUNCHED_OFFERS_FILE        = _DATA_DIR / "launched_offers.json"
+_PULSE_STATE_FILE            = _DATA_DIR / "pulse_state.json"
+_LEARNINGS_FILE              = _DATA_DIR / "learnings.json"
+_LEARNED_BENCHMARKS_FILE     = _DATA_DIR / "learned_benchmarks.json"
 _PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # kept for backwards compat
 _PULSE_ENABLED               = os.getenv("PULSE_ENABLED", "true").lower() == "true"
 
@@ -1004,7 +1008,7 @@ def _save_pulse_state(state: dict):
 
 # ── Watchdog state ────────────────────────────────────────────────────────────
 
-_WATCHDOG_STATE_PATH = pathlib.Path(__file__).parent / "data" / "watchdog_state.json"
+_WATCHDOG_STATE_PATH = _DATA_DIR / "watchdog_state.json"
 
 
 def _load_watchdog_state() -> dict:
@@ -4102,7 +4106,7 @@ def _cleanup_state() -> None:
 
         # 3. digest_state.json — keep approved forever, drop rejected > 90 days
         try:
-            digest_state_path = pathlib.Path(__file__).parent / "data" / "digest_state.json"
+            digest_state_path = _DATA_DIR / "digest_state.json"
             if digest_state_path.exists():
                 state = json.loads(digest_state_path.read_text())
                 rejected = state.get("rejected", {})
@@ -4161,7 +4165,7 @@ def _nightly_harvest():
             time.sleep(3600)  # retry in 1 hour on failure
 
 
-_PID_FILE = pathlib.Path(__file__).parent / "data" / "scout.pid"
+_PID_FILE = _DATA_DIR / "scout.pid"
 
 
 def _check_singleton() -> None:
