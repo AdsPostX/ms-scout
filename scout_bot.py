@@ -3599,6 +3599,25 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 log.warning(f"app_home_opened: views_publish failed: {e}")
         return
 
+    # ── 🗑️ reaction → delete Scout's own message ─────────────────────────────
+    # Any team member can add a :wastebasket: reaction to a Scout message to delete it.
+    # Scout only deletes messages it posted (bot_id check). Works on any channel.
+    if event.get("type") == "reaction_added" and event.get("reaction") == "wastebasket":
+        item = event.get("item", {})
+        if item.get("type") == "message":
+            try:
+                msg = web.conversations_replies(
+                    channel=item["channel"],
+                    ts=item["ts"],
+                    limit=1,
+                ).get("messages", [{}])[0]
+                if msg.get("bot_id"):  # only delete Scout's own messages
+                    web.chat_delete(channel=item["channel"], ts=item["ts"])
+                    log.info(f"[delete] removed Scout message {item['ts']} in {item['channel']}")
+            except Exception as e:
+                log.warning(f"[delete] failed to delete {item.get('ts')}: {e}")
+        return
+
     if event.get("type") != "app_mention":
         return
 
