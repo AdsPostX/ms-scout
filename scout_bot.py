@@ -30,6 +30,10 @@ load_dotenv()  # plist env vars (SCOUT_ENV, PULSE_CHANNEL, etc.) take precedence
 _DATA_DIR = pathlib.Path(__file__).parent / "data"
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# Mutex: prevents daemon and on-demand trigger from running run_headless() concurrently.
+# On-demand run_offer_scraper() checks this before calling run_headless().
+_SCRAPER_RUNNING = threading.Event()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -4211,7 +4215,11 @@ def _run_scraper_daemon() -> None:
             if should_run:
                 reason = "first boot" if is_first_boot else "daily run"
                 log.info(f"[scraper] running offer fetch ({reason})")
-                _run_scraper()
+                _SCRAPER_RUNNING.set()
+                try:
+                    _run_scraper()
+                finally:
+                    _SCRAPER_RUNNING.clear()
                 state["last_run_date"] = today_str
                 _save_state(state)
                 log.info("[scraper] done — offers_latest.json updated")

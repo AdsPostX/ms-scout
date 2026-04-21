@@ -3736,15 +3736,20 @@ def run_offer_scraper() -> str:
     (Impact, FlexOffers, MaxBounty). Run when offer inventory is empty or stale.
     Takes ~2 minutes. Writes data/offers_latest.json and posts digest.
     """
+    import scout_bot as _sb
+    if _sb._SCRAPER_RUNNING.is_set():
+        return (
+            ":hourglass_flowing_sand: Scraper is already running (daily 6am CT run in progress). "
+            "Check back in a few minutes — offer inventory will be fresh when it completes."
+        )
     try:
         from offer_scraper import run_headless
         log.info("[scraper] on-demand refresh triggered via @Scout")
         run_headless()
         # Report results
-        offers_path = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
-        if offers_path.exists():
+        if SNAPSHOT_PATH.exists():
             import json as _json
-            offers = _json.loads(offers_path.read_text())
+            offers = _json.loads(SNAPSHOT_PATH.read_text())
             active = sum(1 for o in offers if o.get("status") == "Active")
             return (
                 f":white_check_mark: Offer inventory refreshed — {len(offers)} total offers, "
@@ -3769,8 +3774,7 @@ def get_offers_for_publisher(publisher_name: str) -> str:
     """
     import json as _json
 
-    offers_path = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
-    if not offers_path.exists():
+    if not SNAPSHOT_PATH.exists():
         return (
             f"Offer inventory is empty — the scraper hasn't run yet on Render. "
             f"Run `@Scout refresh offers` to fetch now (~2 min), "
@@ -3778,7 +3782,7 @@ def get_offers_for_publisher(publisher_name: str) -> str:
         )
 
     try:
-        all_offers = _json.loads(offers_path.read_text())
+        all_offers = _json.loads(SNAPSHOT_PATH.read_text())
     except Exception as e:
         return f"Offer inventory file is corrupt: {e}. Try `@Scout refresh offers`."
 
