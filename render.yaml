@@ -1,0 +1,61 @@
+services:
+  - type: worker
+    name: ms-scout
+    runtime: python
+    region: oregon
+    plan: starter          # $7/mo — never sleeps, auto-restarts on crash
+    rootDir: tools/offer-scraper
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scout_bot.py
+    disk:
+      name: scout-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1            # Persists data/ across deploys (state files, context, digests)
+    envVars:
+      - key: SCOUT_ENV
+        value: production
+      - key: PULSE_CHANNEL
+        value: C06F1RPPVBL      # #revenue-operations
+      - key: SCOUT_DIGEST_CHANNEL
+        value: C0ARLAMDL1K      # #scout-offers
+      # All secrets below — set these in Render dashboard, never commit values
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_APP_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CH_HOST
+        sync: false
+      - key: CH_USER
+        sync: false
+      - key: CH_PASSWORD
+        sync: false
+      - key: CH_DATABASE
+        sync: false
+      - key: IMPACT_SID
+        sync: false
+      - key: IMPACT_TOKEN
+        sync: false
+      - key: FLEXOFFERS_API_KEY
+        sync: false
+      - key: FLEXOFFERS_DOMAIN_ID
+        sync: false
+      - key: MAXBOUNTY_EMAIL
+        sync: false
+      - key: MAXBOUNTY_PASSWORD
+        sync: false
+      - key: NOTION_TOKEN
+        sync: false
+      - key: NOTION_DB_ID
+        sync: false
+      - key: NOTION_QUEUE_DB_ID
+        sync: false
+      - key: MS_PLATFORM_URL
+        sync: false
+      - key: ADOPS_NOTIFY_USER_ID
+        sync: false
+      - key: GIPHY_API_KEY
+        sync: false
+      - key: GSHEET_ID
+        sync: false
