@@ -4233,8 +4233,23 @@ _PID_FILE = _DATA_DIR / "scout.pid"
 
 
 def _check_singleton() -> None:
-    """Prevent two Scout processes from running simultaneously and double-posting."""
+    """Prevent two Scout processes from running simultaneously and double-posting.
+
+    On Render, Background Workers are single-instance by platform design — skip
+    the PID check entirely.  Render recycles small container PIDs (1-10) between
+    restarts, so os.kill(stale_pid, 0) would hit an unrelated system process,
+    return successfully, and cause a false-positive sys.exit(1) crash loop.
+    """
     import atexit, sys
+
+    # Render sets RENDER=true automatically; trust the platform for single-instance.
+    if os.getenv("RENDER"):
+        log.info("[main] Running on Render — skipping singleton PID check")
+        _PID_FILE.write_text(str(os.getpid()))
+        atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
+        return
+
+    # Local: check for an already-running Scout process via PID file
     if _PID_FILE.exists():
         try:
             existing_pid = int(_PID_FILE.read_text().strip())
