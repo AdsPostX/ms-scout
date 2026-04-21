@@ -3824,36 +3824,82 @@ def get_offers_for_publisher(publisher_name: str) -> str:
 
     # Score using existing benchmark infrastructure
     benchmarks = _load_performance_benchmarks()
-    scored = [(o, _scout_score(o, benchmarks)) for o in candidates]
-    scored = [(o, s) for o, s in scored if s > 0]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    top = scored[:10]
+    scored_all = [(o, _scout_score(o, benchmarks)) for o in candidates]
 
-    if not top:
+    # Split: confirmed rate (score > 0, has real payout) vs uncontracted (Rate TBD)
+    confirmed = [(o, s) for o, s in scored_all if s > 0]
+    confirmed.sort(key=lambda x: x[1], reverse=True)
+    confirmed_top = confirmed[:8]
+
+    # Uncontracted = active, net-new, no payout confirmed yet — show top 5 by category fit
+    uncontracted = [
+        o for o, s in scored_all if s == 0
+        and (o.get("_raw_payout") or "").lower() in ("rate tbd", "tbd", "", "?")
+    ]
+    uncontracted = uncontracted[:5]
+
+    if not confirmed_top and not uncontracted:
         return (
             f"{len(candidates)} net-new affiliate offers found for {pub_org}, "
             f"but none have MS benchmark data yet (no prior run history). "
             f"Try `@Scout revenue opportunities` for cross-publisher revenue gaps with proven estimates."
         )
 
-    lines = [
-        f"*{pub_org} — Recommended Offers* "
-        f"({len(candidates)} net-new candidates · showing top {len(top)} by est. RPM)\n"
-    ]
-    for i, (o, score) in enumerate(top, 1):
-        raw_payout = o.get("_raw_payout") or o.get("payout") or "?"
-        lines.append(
-            f"{i}. *{o['advertiser']}* · {raw_payout} · {o.get('category','?')} · "
-            f"est. *${score:.2f} RPM* · {o['network'].title()}"
-        )
+    _NETWORK_EMOJI = {"impact": "⚡", "maxbounty": "💰", "flexoffers": "🔗"}
 
-    lines.append(
-        f"\nThese are affiliate offers not yet provisioned in {pub_org}, "
-        f"ranked by estimated RPM using real MS conversion benchmarks."
-    )
-    lines.append(
-        ":zap: Add the top 2-3 to the demand queue: `@Scout brief [offer name]`"
-    )
+    lines = [
+        f"*🎯  {pub_org} — Offer Recommendations*",
+        f"_{len(candidates)} net-new candidates screened · {len(confirmed_top)} with confirmed rates · "
+        f"{len(uncontracted)} uncontracted_",
+        "",
+    ]
+
+    # ── Section 1: Confirmed rates — ranked by Scout Score ────────────────────
+    if confirmed_top:
+        lines.append("*✅  Confirmed Rate — Ready to Pitch*")
+        lines.append("─" * 32)
+        for i, (o, score) in enumerate(confirmed_top, 1):
+            advertiser  = o.get("advertiser") or "Unknown"
+            raw_payout  = o.get("_raw_payout") or o.get("payout") or "?"
+            category    = o.get("category") or "Uncategorized"
+            geo         = (o.get("geo") or "").strip()
+            network     = o.get("network") or ""
+            net_emoji   = _NETWORK_EMOJI.get(network.lower(), "•")
+            net_label   = network.title()
+            geo_str     = f" · {geo}" if geo and geo.lower() not in ("us", "usa", "united states") else " · US"
+            lines.append(
+                f"*{i}. {advertiser}*   {net_emoji} {net_label}\n"
+                f"   `{raw_payout}` · {category}{geo_str} · est. *${score:.2f} RPM*"
+            )
+        lines.append("")
+
+    # ── Section 2: Uncontracted — apply to unlock ─────────────────────────────
+    if uncontracted:
+        lines.append("*🔍  Uncontracted — Apply to Unlock Rate*")
+        lines.append(
+            "_These are in the affiliate network's marketplace but need a contract "
+            "before they can be pitched. Once approved, the daily scrape picks up the rate._"
+        )
+        lines.append("─" * 32)
+        for o in uncontracted:
+            advertiser = o.get("advertiser") or "Unknown"
+            category   = o.get("category") or "Uncategorized"
+            geo        = (o.get("geo") or "").strip()
+            network    = o.get("network") or ""
+            net_emoji  = _NETWORK_EMOJI.get(network.lower(), "•")
+            geo_str    = f" · {geo}" if geo and geo.lower() not in ("us", "usa", "united states") else " · US"
+            lines.append(f"• *{advertiser}*   {net_emoji} {network.title()} · {category}{geo_str}")
+        lines.append("")
+
+    # ── Footer CTA ────────────────────────────────────────────────────────────
+    if confirmed_top:
+        top_name = confirmed_top[0][0].get("advertiser") or "top offer"
+        lines.append(f":zap:  `@Scout brief {top_name}` to build a campaign brief · "
+                     f"`@Scout brief [name]` for any other offer above")
+    else:
+        lines.append(":zap:  Apply for contracts in Impact's publisher portal to unlock rates — "
+                     "Scout will pick them up automatically on the next daily scrape.")
+
     return "\n".join(lines)
 
 
