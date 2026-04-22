@@ -3711,6 +3711,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     log.info(f"Query from {event.get('user')}: {query!r}")
     user_id_event = event.get("user", "")
+    user_id = user_id_event  # alias used by ask() and usage logging below
 
     # ── Correction capture — if this thread has a pending correction, store it ─
     learnings_state = _load_learnings()
