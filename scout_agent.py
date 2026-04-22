@@ -882,7 +882,7 @@ def get_supply_demand_gaps(
             "  AND pc.is_active = true AND pc.deleted_at IS NULL AND c.deleted_at IS NULL",
             parameters={"pub_id": pub_id}
         ).result_rows
-        existing = {r[0] for r in existing_rows}
+        existing = {r[0].lower() for r in existing_rows}
 
         def q_gaps():
             # Pre-aggregate to avoid 582M row scan
@@ -949,10 +949,16 @@ def get_supply_demand_gaps(
 
         gap_rows, dead_rows, sessions_30d = _run_parallel([q_gaps, q_dead_weight, q_pub_sessions])
 
-        # Filter gaps to advertisers not already in this publisher
+        # Filter gaps to advertisers not already in this publisher.
+        # Fuzzy match: suppress if existing adv name is a substring of the candidate
+        # or vice versa — catches "Disney+" suppressing "Disney+ and Hulu" variants.
+        def _already_provisioned(adv_name: str) -> bool:
+            a = adv_name.lower()
+            return any(a == ex or a in ex or ex in a for ex in existing)
+
         gaps = [(adv, pub_count, imp, rev, rpm)
                 for (adv, pub_count, imp, rev, rpm) in gap_rows
-                if adv not in existing]
+                if not _already_provisioned(adv)]
 
         daily_sessions = sessions_30d / 30 if sessions_30d else 0
 
