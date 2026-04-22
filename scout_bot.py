@@ -1040,16 +1040,9 @@ _PULSE_STATE_FILE            = _DATA_DIR / "pulse_state.json"
 _LEARNINGS_FILE              = _DATA_DIR / "learnings.json"
 _LEARNED_BENCHMARKS_FILE     = _DATA_DIR / "learned_benchmarks.json"
 
-# Publishers excluded from specific Pulse signals due to known implementation quirks.
-# Fill rate exclusions: publishers whose sessions are structurally not post-transaction,
-# so low fill rate is expected behavior, not an actionable signal.
-_PULSE_FILL_EXCLUSIONS: dict[str, str] = {
-    "Button": (
-        "Pre-purchase SDK calls — Button cannot detect the purchase page, so they fire "
-        "SDK calls early in the user journey before a purchase is confirmed. "
-        "High session counts with low fill are expected, not a signal failure."
-    ),
-}
+# Fill rate exclusions are now managed dynamically via data/entity_overrides.json.
+# Use _load_entity_overrides() at pulse time (imported from scout_agent).
+# Seeded with Button on first deploy by _seed_entity_overrides() in main().
 _PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # kept for backwards compat
 _PULSE_ENABLED               = os.getenv("PULSE_ENABLED", "true").lower() == "true"
 
@@ -1635,10 +1628,13 @@ def _run_pulse_signals() -> dict:
             LIMIT 5
             """
         ).result_rows
+        from scout_agent import _load_entity_overrides as _load_eo
+        _pub_overrides = _load_eo().get("publishers", {})
         for pub_id, pub_name, sessions_7d, with_imps, fill_pct, missed in fill_rows:
             name = pub_name or f"Pub #{pub_id}"
-            if name in _PULSE_FILL_EXCLUSIONS:
-                log.info(f"[pulse] fill rate: skipping {name!r} — {_PULSE_FILL_EXCLUSIONS[name][:60]}...")
+            _override = _pub_overrides.get(name, {})
+            if _override.get("exclude_from_fill_rate"):
+                log.info(f"[pulse] fill rate: skipping {name!r} — {_override.get('note', '')[:60]}...")
                 continue
             signals["fill_rate"].append({
                 "publisher_id":   int(pub_id),
@@ -4498,9 +4494,31 @@ def _check_singleton() -> None:
     atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
 
 
+def _seed_entity_overrides() -> None:
+    """Ensure Button fill-rate exclusion exists in data/entity_overrides.json on first deploy."""
+    from scout_agent import _load_entity_overrides, _save_entity_overrides
+    import datetime as _dt
+    overrides = _load_entity_overrides()
+    pubs = overrides.setdefault("publishers", {})
+    if "Button" not in pubs:
+        pubs["Button"] = {
+            "note": (
+                "Pre-purchase SDK calls — Button cannot detect the purchase page, so they fire "
+                "SDK calls early in the user journey before a purchase is confirmed. "
+                "High session counts with low fill rate are expected behavior, not a signal failure."
+            ),
+            "exclude_from_fill_rate": True,
+            "added": _dt.date.today().isoformat(),
+            "added_by": "seed",
+        }
+        _save_entity_overrides(overrides)
+        log.info("[startup] seeded Button exclusion into data/entity_overrides.json")
+
+
 def main():
     global _BOT_USER_ID
     _check_singleton()
+    _seed_entity_overrides()  # ensure Button exclusion survives fresh Render deploys
     if not BOT_TOKEN or not APP_TOKEN:
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env")
 

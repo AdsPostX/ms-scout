@@ -106,6 +106,25 @@ def _data_quality_tier(days_of_data: int, sessions: int = 0) -> dict:
 _LEARNINGS_PATH = pathlib.Path(__file__).parent / "data" / "learnings.json"
 _LEARNED_BENCHMARKS_PATH = pathlib.Path(__file__).parent / "data" / "learned_benchmarks.json"
 _TEAM_CORRECTIONS_PATH = pathlib.Path(__file__).parent / "config" / "team_corrections.json"
+_ENTITY_OVERRIDES_PATH = pathlib.Path(__file__).parent / "data" / "entity_overrides.json"
+
+
+def _load_entity_overrides() -> dict:
+    """Load publisher/advertiser knowledge store. Returns empty structure if missing or corrupt."""
+    try:
+        if _ENTITY_OVERRIDES_PATH.exists():
+            return json.loads(_ENTITY_OVERRIDES_PATH.read_text())
+    except Exception:
+        pass
+    return {"publishers": {}, "advertisers": {}}
+
+
+def _save_entity_overrides(overrides: dict) -> None:
+    """Atomic write to entity_overrides.json using temp+rename (safe on Linux/Render)."""
+    _ENTITY_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _ENTITY_OVERRIDES_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(overrides, indent=2))
+    tmp.replace(_ENTITY_OVERRIDES_PATH)
 
 
 def _get_corrections_context() -> str:
@@ -133,9 +152,18 @@ def _get_corrections_context() -> str:
             corrections += [c for c in data.get("corrections", []) if c.get("confidence") == "high"]
     except Exception:
         pass
+    # Entity overrides (publisher + advertiser notes recorded by the team via @Scout)
+    try:
+        overrides = _load_entity_overrides()
+        for pub, data in overrides.get("publishers", {}).items():
+            corrections.append({"confidence": "high", "correction": f"Publisher {pub}: {data['note']}"})
+        for adv, data in overrides.get("advertisers", {}).items():
+            corrections.append({"confidence": "high", "correction": f"Advertiser {adv}: {data['note']}"})
+    except Exception:
+        pass
     if not corrections:
         return ""
-    lines = [f"- {c['correction']}" for c in corrections[-12:]]
+    lines = [f"- {c['correction']}" for c in corrections[-16:]]
     return (
         "TEAM CORRECTIONS (from prior feedback — treat these as ground truth):\n"
         + "\n".join(lines)
@@ -635,6 +663,17 @@ INTENTS — resolve every query to one, then act immediately.
     Pass the requesting user's Slack user_id — the tool enforces admin authorization check.
     Returns: queries per period (7d + 30d), top users, most-called tools, avg response time.
     If not admin: returns lock message.
+
+31. RECORD ENTITY KNOWLEDGE — "note that [entity]...", "[entity] has a known limitation", "log this about [entity]",
+    "exclude [publisher] from fill rate", "remember that [advertiser]...", "[advertiser] caps every [month]",
+    "[advertiser] has attribution issues", "scout, [entity] does X because...", "make a record of this"
+    → record_entity_note(entity_name=<name>, entity_type=<"publisher"|"advertiser">, note=<knowledge>, exclude_from_fill_rate=<bool for publishers>).
+    Detect when team members share publisher or advertiser-specific context — integration quirks, known signal distortions,
+    budget cap seasonality, attribution issues, pre-purchase SDK behaviors.
+    Publishers: set exclude_from_fill_rate=True when high session count + low fill is expected behavior (pre-purchase SDKs).
+    Advertisers: capture budget patterns, cap seasonality, attribution issues — context that explains revenue signals.
+    Write immediately. Show exactly what was stored. Invite correction in the same message.
+    Do NOT wait for "log this" — if they're explaining entity behavior to Scout in a way that should change signal interpretation, that IS a record request.
 
 DEFAULT: Unclear intent → Intent 17. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
@@ -1447,6 +1486,44 @@ TOOLS = [
                     "description": "Slack user ID of the person asking — for admin authorization check.",
                 }
             },
+        },
+    },
+    {
+        "name": "record_entity_note",
+        "description": (
+            "Record publisher or advertiser knowledge in Scout's persistent learning store. "
+            "Use when a team member explains a publisher's integration quirk, SDK limitation, or signal distortion, "
+            "OR an advertiser's budget cap pattern, seasonality, attribution issue, or payout reliability. "
+            "Publisher notes: set exclude_from_fill_rate=True when high session count with low fill is expected behavior "
+            "(e.g., pre-purchase SDK calls, non-standard integration). "
+            "Advertiser notes: budget caps, seasonal patterns, attribution quirks, campaign status context. "
+            "Use for: '[entity] has a known limitation', 'note that [entity] does X', "
+            "'log this about [entity]', 'exclude [publisher] from fill rate', "
+            "'[advertiser] caps every [month]', '[advertiser] has attribution issues', "
+            "'remember that [entity]...', 'scout, [entity] does X because...'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_name": {
+                    "type": "string",
+                    "description": "Publisher or advertiser name (e.g., 'Button', 'TurboTax').",
+                },
+                "entity_type": {
+                    "type": "string",
+                    "enum": ["publisher", "advertiser"],
+                    "description": "'publisher' for SDK/platform integrators, 'advertiser' for campaign/budget owners.",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "The knowledge to record — what the team knows about this entity.",
+                },
+                "exclude_from_fill_rate": {
+                    "type": "boolean",
+                    "description": "Publishers only: True to suppress from Pulse fill rate signals (pre-purchase or non-standard integrations).",
+                },
+            },
+            "required": ["entity_name", "entity_type", "note"],
         },
     },
     {
@@ -3954,6 +4031,35 @@ def get_usage_report(requesting_user_id: str = "") -> str:
     return "\n".join(lines)
 
 
+def record_entity_note(entity_name: str, entity_type: str, note: str,
+                       exclude_from_fill_rate: bool = False) -> str:
+    """
+    Record publisher or advertiser knowledge in Scout's persistent learning store.
+    Writes immediately and shows exactly what was stored (write-confirm-correct pattern).
+    Calling again overwrites the previous entry — idempotent upsert.
+    entity_type: 'publisher' or 'advertiser'
+    exclude_from_fill_rate: publishers only — True suppresses from Pulse fill rate signals.
+    """
+    import datetime as _dt
+
+    overrides = _load_entity_overrides()
+    section = "publishers" if entity_type.lower() == "publisher" else "advertisers"
+    overrides.setdefault(section, {})[entity_name] = {
+        "note": note,
+        "exclude_from_fill_rate": exclude_from_fill_rate if section == "publishers" else False,
+        "added": _dt.date.today().isoformat(),
+        "added_by": "scout-agent",
+    }
+    _save_entity_overrides(overrides)
+
+    lines = [f":white_check_mark: *{entity_name}* ({entity_type}) logged:"]
+    lines.append(f"> _{note}_")
+    if exclude_from_fill_rate and section == "publishers":
+        lines.append(":no_entry_sign: Excluded from Pulse fill rate signals starting tomorrow's 8am run.")
+    lines.append("_Reply to correct if I got anything wrong — I'll overwrite it._")
+    return "\n".join(lines)
+
+
 def get_offers_for_publisher(publisher_name: str) -> str:
     """
     Return top affiliate offers (Impact/FlexOffers/MaxBounty inventory) that are
@@ -4123,6 +4229,7 @@ TOOL_MAP = {
     "run_offer_scraper": run_offer_scraper,
     "get_pipeline_health": get_pipeline_health,
     "get_usage_report": get_usage_report,
+    "record_entity_note": record_entity_note,
     "get_offers_for_publisher": get_offers_for_publisher,
 }
 

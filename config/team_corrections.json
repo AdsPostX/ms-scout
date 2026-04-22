@@ -1,11 +1,4 @@
 {
-  "_note": "Static team corrections. Committed to git. Read-only at runtime — add entries here, not in data/learnings.json.",
-  "corrections": [
-    {
-      "confidence": "high",
-      "correction": "Button publisher has a known implementation limitation: they cannot detect the purchase page, so they fire SDK calls early in the user journey before a purchase is confirmed. This means Button sessions are NOT post-transaction — high session counts with low fill rate are expected behavior, not a signal failure. Button is excluded from the Pulse fill rate signal.",
-      "source": "team-feedback",
-      "added": "2026-04-22"
-    }
-  ]
+  "_note": "Static team corrections. Committed to git. Read-only at runtime — add entries here for platform-wide facts that should survive a data/ wipe. Publisher/advertiser-specific knowledge belongs in data/entity_overrides.json (managed autonomously by Scout via record_entity_note).",
+  "corrections": []
 }
