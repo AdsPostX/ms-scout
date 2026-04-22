@@ -1039,6 +1039,17 @@ _LAUNCHED_OFFERS_FILE        = _DATA_DIR / "launched_offers.json"
 _PULSE_STATE_FILE            = _DATA_DIR / "pulse_state.json"
 _LEARNINGS_FILE              = _DATA_DIR / "learnings.json"
 _LEARNED_BENCHMARKS_FILE     = _DATA_DIR / "learned_benchmarks.json"
+
+# Publishers excluded from specific Pulse signals due to known implementation quirks.
+# Fill rate exclusions: publishers whose sessions are structurally not post-transaction,
+# so low fill rate is expected behavior, not an actionable signal.
+_PULSE_FILL_EXCLUSIONS: dict[str, str] = {
+    "Button": (
+        "Pre-purchase SDK calls — Button cannot detect the purchase page, so they fire "
+        "SDK calls early in the user journey before a purchase is confirmed. "
+        "High session counts with low fill are expected, not a signal failure."
+    ),
+}
 _PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # kept for backwards compat
 _PULSE_ENABLED               = os.getenv("PULSE_ENABLED", "true").lower() == "true"
 
@@ -1625,9 +1636,13 @@ def _run_pulse_signals() -> dict:
             """
         ).result_rows
         for pub_id, pub_name, sessions_7d, with_imps, fill_pct, missed in fill_rows:
+            name = pub_name or f"Pub #{pub_id}"
+            if name in _PULSE_FILL_EXCLUSIONS:
+                log.info(f"[pulse] fill rate: skipping {name!r} — {_PULSE_FILL_EXCLUSIONS[name][:60]}...")
+                continue
             signals["fill_rate"].append({
                 "publisher_id":   int(pub_id),
-                "publisher_name": pub_name or f"Pub #{pub_id}",
+                "publisher_name": name,
                 "sessions_7d":    int(sessions_7d),
                 "fill_rate_pct":  round(float(fill_pct), 1),
                 "missed_sessions": int(missed),

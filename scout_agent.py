@@ -105,31 +105,42 @@ def _data_quality_tier(days_of_data: int, sessions: int = 0) -> dict:
 
 _LEARNINGS_PATH = pathlib.Path(__file__).parent / "data" / "learnings.json"
 _LEARNED_BENCHMARKS_PATH = pathlib.Path(__file__).parent / "data" / "learned_benchmarks.json"
+_TEAM_CORRECTIONS_PATH = pathlib.Path(__file__).parent / "config" / "team_corrections.json"
 
 
 def _get_corrections_context() -> str:
     """
-    Load high-confidence corrections from learnings.json and return as a
-    context string to prepend to user queries in ask().
-    Returns empty string if no corrections or file missing.
+    Load high-confidence corrections from two sources and return as a grounding
+    context string prepended to user queries in ask().
+
+    Sources (merged, static corrections listed first):
+    - config/team_corrections.json — static team knowledge, committed to git
+    - data/learnings.json — runtime corrections learned from feedback
+    Returns empty string if no corrections or files missing.
     """
+    corrections: list = []
     try:
-        if not _LEARNINGS_PATH.exists():
-            return ""
-        data = json.loads(_LEARNINGS_PATH.read_text())
-        corrections = [c for c in data.get("corrections", []) if c.get("confidence") == "high"]
-        if not corrections:
-            return ""
-        lines = []
-        for c in corrections[-10:]:  # last 10 high-confidence corrections
-            lines.append(f"- {c['correction']}")
-        return (
-            "TEAM CORRECTIONS (from prior feedback — treat these as ground truth):\n"
-            + "\n".join(lines)
-            + "\n\n"
-        )
+        # Static team corrections (git-tracked, always present after deploy)
+        if _TEAM_CORRECTIONS_PATH.exists():
+            data = json.loads(_TEAM_CORRECTIONS_PATH.read_text())
+            corrections += [c for c in data.get("corrections", []) if c.get("confidence") == "high"]
     except Exception:
+        pass
+    try:
+        # Runtime corrections (accumulated from team feedback via @Scout learn)
+        if _LEARNINGS_PATH.exists():
+            data = json.loads(_LEARNINGS_PATH.read_text())
+            corrections += [c for c in data.get("corrections", []) if c.get("confidence") == "high"]
+    except Exception:
+        pass
+    if not corrections:
         return ""
+    lines = [f"- {c['correction']}" for c in corrections[-12:]]
+    return (
+        "TEAM CORRECTIONS (from prior feedback — treat these as ground truth):\n"
+        + "\n".join(lines)
+        + "\n\n"
+    )
 
 
 _CHANNEL_CONTEXT_PATH = pathlib.Path(__file__).parent / "data" / "channel_context.json"
