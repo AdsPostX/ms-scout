@@ -3004,6 +3004,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     msg       = payload.get("message", {})
     thread_ts = msg.get("thread_ts") or msg.get("ts", "")
     query     = action.get("value", "").strip()
+    user_id   = (payload.get("user") or {}).get("id", "")
     if not query or not channel or not thread_ts:
         return
 
@@ -3070,7 +3071,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
 
     try:
         _t0 = time.monotonic()
-        response = ask(query, history=history)
+        response = ask(query, history=history, user_id=user_id)
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
     except Exception as e:

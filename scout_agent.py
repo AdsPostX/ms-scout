@@ -3911,10 +3911,20 @@ def get_usage_report(requesting_user_id: str = "") -> str:
     if not log_path.exists():
         return "No usage data yet — logging started after this deploy. Check back after a few queries."
 
-    records = [_json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-    now = datetime.now(timezone.utc)
-    recent_7d  = [r for r in records if datetime.fromisoformat(r["ts"]) >= now - timedelta(days=7)]
-    recent_30d = [r for r in records if datetime.fromisoformat(r["ts"]) >= now - timedelta(days=30)]
+    records = []
+    for line in log_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(_json.loads(line))
+        except Exception:
+            pass  # skip malformed lines
+    now = datetime.utcnow()  # naive UTC to match stored timestamps (utcnow().isoformat())
+    cutoff_7d  = now - timedelta(days=7)
+    cutoff_30d = now - timedelta(days=30)
+    recent_7d  = [r for r in records if datetime.fromisoformat(r["ts"]) >= cutoff_7d]
+    recent_30d = [r for r in records if datetime.fromisoformat(r["ts"]) >= cutoff_30d]
 
     user_counts = Counter(r.get("user_name", r.get("user_id", "unknown")) for r in recent_30d)
     tool_counts = Counter(t for r in recent_30d for t in (r.get("tools") or []))
