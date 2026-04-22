@@ -497,7 +497,10 @@ def _post_offer_queue_card(
 
     # Compact header line
     score_str = f" · est. ${score:.2f} RPM" if score else ""
-    header = f":white_check_mark: *{advertiser}* approved by <@{user_id}> · {network} · {payout} {payout_type}{score_str}"
+    payout_str = payout if payout and payout != "Rate TBD" else ""
+    ptype_str  = payout_type if payout_type and payout_type.lower() not in ("unknown", "") else ""
+    payout_display = " · ".join(filter(None, [payout_str, ptype_str])) or "Rate TBD"
+    header = f":white_check_mark: *{advertiser}* approved by <@{user_id}> · {network} · {payout_display}{score_str}"
 
     # Body: everything needed to enter in MS platform
     lines = [header, ""]
