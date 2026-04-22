@@ -470,6 +470,72 @@ def _run_preflight_qa(  # replaces _check_url_async (removed — this is a stric
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _post_offer_queue_card(
+    web: WebClient,
+    brief_data: dict,
+    copy: dict,
+    user_id: str,
+    digest_thread_url: str,
+    notion_url: str | None,
+    score: float,
+) -> None:
+    """
+    Post a structured offer card to #scout-offers when an offer is approved.
+    This IS the brief — all components Gordon needs to enter the campaign in MS platform.
+    One message. No thread noise.
+    """
+    offers_channel = _route_channel("offers")
+    advertiser  = brief_data.get("advertiser", "Offer")
+    network     = brief_data.get("network", "").title()
+    payout      = brief_data.get("payout", "Rate TBD")
+    payout_type = brief_data.get("payout_type", "CPA")
+    tracking_url = brief_data.get("tracking_url", "Not available")
+    title       = copy.get("title", "")
+    description = copy.get("description", "")
+    cta_yes     = (copy.get("cta") or {}).get("yes", "")
+    cta_no      = (copy.get("cta") or {}).get("no", "")
+
+    # Compact header line
+    score_str = f" · est. ${score:.2f} RPM" if score else ""
+    header = f":white_check_mark: *{advertiser}* approved by <@{user_id}> · {network} · {payout} {payout_type}{score_str}"
+
+    # Body: everything needed to enter in MS platform
+    lines = [header, ""]
+    if title:
+        lines.append(f"*Title:* {title}")
+    if description:
+        lines.append(f"*Description:* {description}")
+    if cta_yes or cta_no:
+        cta_parts = []
+        if cta_yes:
+            cta_parts.append(f"Yes: _{cta_yes}_")
+        if cta_no:
+            cta_parts.append(f"No: _{cta_no}_")
+        lines.append(f"*CTA:* " + "  ·  ".join(cta_parts))
+    if tracking_url and not tracking_url.startswith("Not available"):
+        lines.append(f"*Tracking URL:* {tracking_url}")
+    lines.append("")
+    footer_parts = [f"<{digest_thread_url}|Digest thread>"]
+    if notion_url:
+        footer_parts.append(f"<{notion_url}|Notion queue entry>")
+    lines.append("_" + "  ·  ".join(footer_parts) + "_")
+
+    try:
+        web.chat_postMessage(
+            channel=offers_channel,
+            text=header,
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "\n".join(lines)},
+                }
+            ],
+            unfurl_links=False,
+        )
+    except Exception as e:
+        log.warning(f"[approve] failed to post queue card to #scout-offers: {e}")
+
+
 def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:  # noqa: ARG001
     """Build a Slack Block Kit message for a campaign brief."""
     advertiser   = brief_data.get("advertiser", "Offer")
@@ -2642,17 +2708,12 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     Handle ✓ Add to Queue button click from SCOUT Sniper digest.
 
     One-click flow:
-      1. Record approval (won't resurface in future digests)
-      2. Fetch full brief via draft_campaign_brief — images, tracking URL, performance context
-      3. Post rich _build_brief_blocks() card in thread (same format as @Scout briefs)
-      4. Try to write item to Slack Demand Queue list (best-effort, requires lists:write scope)
-      5. Post confirmation with queue link if auto-write failed
+      1. Record approval (excludes from future digests)
+      2. Fetch full brief — tracking URL, copy, performance context
+      3. Write to Notion queue
+      4. Post structured offer card to #scout-offers (this IS the brief)
+      5. One terse confirmation in the digest thread — no further noise
     """
-    # NOTE: Same data path as _handle_brief_queue / scout_brief_queue button.
-    # Full copy comes from _make_copy_for_brief (not a truncated button value).
-    # Both flows write to launched_offers.json + Notion via _try_add_to_demand_queue.
-    # _write_to_notion_queue handles both short-key schema (t/d/cy/cn from button value)
-    # and long-key schema (title/description from _make_copy_for_brief) transparently.
     import scout_digest
 
     channel    = (payload.get("channel") or {}).get("id", "")
@@ -2676,39 +2737,26 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     # 2. Fetch full brief (OG image scrape happens inside draft_campaign_brief)
     brief_data = _fetch_brief_for_approve(advertiser, offer)
     copy       = _make_copy_for_brief(brief_data, offer)
+    score      = brief_data.get("scout_score_rpm", 0) or 0
 
-    # 3. Build thread URL — used in Notion page body as brief reference
+    # 3. Build thread URL — used in Notion page body and queue card
     thread_url = _slack_thread_url(channel, message_ts)
 
-    # 4. Post rich brief in thread — no queue button (auto-queued immediately)
-    brief_blocks = _build_brief_blocks(brief_data, copy, thread_ts="")
-    brief_resp = web.chat_postMessage(
-        channel=channel,
-        thread_ts=message_ts,
-        text=f":clipboard: Campaign brief for {advertiser}",
-        blocks=brief_blocks,
-        unfurl_links=False,
-    )
-    brief_ts = (brief_resp.get("ts") or "")
-    brief_channel = channel
-
-    # 5. Write to Notion queue + update brief card in-place with ⏳ status
+    # 4. Write to Notion queue (no brief_ts — we're not posting a brief card in thread)
     copy_data = {
         "t":   copy.get("title", ""),
         "d":   copy.get("description", ""),
         "cy":  (copy.get("cta") or {}).get("yes", ""),
         "cn":  (copy.get("cta") or {}).get("no", ""),
-        "rpm": brief_data.get("scout_score_rpm", 0),
+        "rpm": score,
         "pf":  brief_data.get("performance_context", ""),
         "rf":  brief_data.get("risk_flag", ""),
         "pt":  brief_data.get("payout_type", "CPA"),
     }
-    notion_url = _try_add_to_demand_queue(
-        web, brief_data, user_id, thread_url,
-        copy_data=copy_data,
-        brief_channel=brief_channel,
-        brief_ts=brief_ts,
-    )
+    notion_url = _write_to_notion_queue(brief_data, copy_data, user_id, thread_url)
+
+    # 5. Post structured offer card to #scout-offers — this IS the brief
+    _post_offer_queue_card(web, brief_data, copy, user_id, thread_url, notion_url, score)
 
     # 6. Persist approval state (for lifecycle tracking + launch notification)
     _record_queued_offer(
@@ -2716,11 +2764,8 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
         notion_url=notion_url or "", copy_data=copy_data,
     )
 
-    # Pre-flight QA in background — URL check + MS history, posts consolidated result
-    _run_preflight_qa(web, channel, brief_ts, brief_data)
-
-    # 7. Confirm in the digest thread
-    notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
+    # 7. One terse confirmation in the digest thread — no noise
+    notion_link = f" · <{notion_url}|Notion>" if notion_url else ""
     confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
     web.chat_postMessage(channel=channel, thread_ts=message_ts, text=confirm)
     log.info(f"Approved: {advertiser} ({offer_id}) by {user_id}")
