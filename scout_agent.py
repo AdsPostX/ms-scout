@@ -3633,7 +3633,7 @@ pub_volume AS (
 active_pairs AS (
     SELECT DISTINCT
         toInt64(pc.user_id) AS publisher_id,
-        c.adv_name
+        lower(c.adv_name)   AS adv_name_lower
     FROM from_airbyte_publisher_campaigns pc
     JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
     WHERE pc.is_active = 1 AND pc.deleted_at IS NULL
@@ -3643,13 +3643,17 @@ candidates AS (
         pv.publisher_name,
         pv.publisher_id,
         adv.adv_name,
-        adv.rev_30d       AS adv_total_rev_30d,
+        lower(adv.adv_name) AS adv_name_lower,
+        adv.rev_30d         AS adv_total_rev_30d,
         adv.avg_rev_per_pub AS est_monthly_rev,
         adv.publisher_count AS adv_pub_count,
         pv.sessions_30d
     FROM pub_volume pv
     CROSS JOIN adv_perf adv
 )
+-- Fuzzy-match exclusion via direct LEFT JOIN anti-join.
+-- Catches "Disney+" provisioned in PMC suppressing "Disney+ and Hulu" recommendation.
+-- Uses position() substring check so adv_name variants don't escape the filter.
 SELECT
     c.publisher_name,
     c.publisher_id,
@@ -3661,7 +3665,11 @@ SELECT
 FROM candidates c
 LEFT JOIN active_pairs ap
     ON ap.publisher_id = c.publisher_id
-   AND ap.adv_name = c.adv_name
+    AND (
+        ap.adv_name_lower = c.adv_name_lower
+        OR position(c.adv_name_lower, ap.adv_name_lower) > 0
+        OR position(ap.adv_name_lower, c.adv_name_lower) > 0
+    )
 WHERE ap.publisher_id IS NULL
 ORDER BY c.est_monthly_rev DESC, c.sessions_30d DESC
 LIMIT 20
