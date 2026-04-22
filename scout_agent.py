@@ -4341,7 +4341,7 @@ def _select_model(user_message: str) -> str:
                 "trend", "brief", "compare", "analyze", "performance",
                 "velocity", "benchmark", "opportunity", "why"]
     if sum(1 for p in simple if p in msg) > sum(1 for p in complex_ if p in msg):
-        return "claude-haiku-3-5-20241022"
+        return "claude-haiku-4-5"
     return "claude-sonnet-4-6"
 
 
