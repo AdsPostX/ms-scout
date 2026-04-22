@@ -1430,7 +1430,6 @@ TOOLS = [
                     "description": "Slack user ID of the person asking — for admin authorization check.",
                 }
             },
-            "required": ["requesting_user_id"],
         },
     },
     {
@@ -3881,7 +3880,7 @@ def get_pipeline_health() -> str:
     return "\n".join(lines)
 
 
-def get_usage_report(requesting_user_id: str) -> str:
+def get_usage_report(requesting_user_id: str = "") -> str:
     """
     Return Scout usage statistics. Admin-only (SCOUT_ADMIN_USER_ID env var).
     Shows: queries per period, top users, most-used tools, avg response time.
@@ -4093,10 +4092,14 @@ TOOL_MAP = {
 }
 
 
-def _run_tool(name: str, inputs: dict):
+def _run_tool(name: str, inputs: dict, _caller_user_id: str = ""):
     fn = TOOL_MAP.get(name)
     if not fn:
         return {"error": f"Unknown tool: {name}"}
+    # Inject caller identity for admin-gated tools so the model doesn't need to
+    # manually extract and pass the user_id from the injected context prefix.
+    if name == "get_usage_report" and not inputs.get("requesting_user_id"):
+        inputs = {**inputs, "requesting_user_id": _caller_user_id}
     return fn(**inputs)
 
 
@@ -4340,7 +4343,7 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
             try:
                 with ThreadPoolExecutor(max_workers=len(tool_blocks)) as executor:
                     futures = {
-                        executor.submit(_run_tool, block.name, block.input): (i, block)
+                        executor.submit(_run_tool, block.name, block.input, user_id): (i, block)
                         for i, block in tool_blocks
                     }
                     results_map = {}
@@ -4362,7 +4365,7 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
             except RuntimeError:
                 # Interpreter shutting down — fall back to sequential
                 for i, block in tool_blocks:
-                    result = _run_tool(block.name, block.input)
+                    result = _run_tool(block.name, block.input, user_id)
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
                     _all_tool_results.append(result)
@@ -4374,7 +4377,7 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
         else:
             # Single tool call — keep sequential path unchanged
             for i, block in tool_blocks:
-                result = _run_tool(block.name, block.input)
+                result = _run_tool(block.name, block.input, user_id)
                 if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                     _brief_results.append(result)  # collect all, use first for primary
                 _all_tool_results.append(result)  # accumulate all for entity extraction

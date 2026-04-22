@@ -2298,6 +2298,93 @@ def _launch_watchdog(web: WebClient) -> None:
             time.sleep(3600)
 
 
+def _run_pulse_once(web: WebClient, force: bool = False) -> None:
+    """
+    Execute one pulse run immediately. If force=True, always routes to #scout-qa
+    and skips the idempotency state write (so the scheduled pulse still fires today).
+    Called by _proactive_pulse daemon and by the @Scout force pulse admin command.
+    """
+    import pytz
+    from datetime import datetime as _dt
+
+    chicago = pytz.timezone("America/Chicago")
+    now_chi = _dt.now(chicago)
+    today_str = now_chi.strftime("%Y-%m-%d")
+    is_weekend = now_chi.weekday() >= 5
+
+    state = _load_pulse_state()
+    flagged_history: dict = state.get("flagged_history", {})
+    today_s = today_str
+    from datetime import datetime as _fdt
+
+    signals = _run_pulse_signals()
+
+    for v in signals.get("velocity_shifts", []):
+        if v.get("direction") != "down":
+            continue
+        pname = v["publisher_name"]
+        rec   = flagged_history.get(pname, {})
+        last  = rec.get("last_flagged", "")
+        if last and (_fdt.strptime(today_s, "%Y-%m-%d") - _fdt.strptime(last, "%Y-%m-%d")).days <= 2:
+            rec["count"] = rec.get("count", 1) + 1
+        else:
+            rec = {"count": 1, "first_flagged": today_s}
+        rec["last_flagged"] = today_s
+        flagged_history[pname] = rec
+    state["flagged_history"] = flagged_history
+
+    chronic: list = state.get("chronic", [])
+    today_dt = _fdt.strptime(today_s, "%Y-%m-%d")
+    evicted = [
+        pname for pname in chronic
+        if (today_dt - _fdt.strptime(
+            flagged_history.get(pname, {}).get("last_flagged") or "2000-01-01",
+            "%Y-%m-%d",
+        )).days > 14
+    ]
+    for pname in evicted:
+        chronic.remove(pname)
+    for pname, rec in flagged_history.items():
+        if pname in chronic:
+            continue
+        count = rec.get("count", 0)
+        first = rec.get("first_flagged", "")
+        last  = rec.get("last_flagged", "")
+        if not first or not last:
+            continue
+        span_days = (_fdt.strptime(last, "%Y-%m-%d") - _fdt.strptime(first, "%Y-%m-%d")).days
+        if count >= 3 and span_days <= 14:
+            chronic.append(pname)
+    state["chronic"] = chronic
+
+    has_content = (
+        signals.get("cap_alerts")
+        or signals.get("velocity_shifts")
+        or signals.get("overnight_events")
+        or signals.get("ghost_campaigns")
+        or signals.get("fill_rate")
+        or signals.get("opportunities")
+    )
+    # Force pulse always routes to #scout-qa; normal pulse uses _route_channel
+    channel = _route_channel("pulse", force=force)
+    if has_content:
+        fallback, blocks = _format_pulse_blocks(
+            signals,
+            is_weekend=is_weekend,
+            flagged_history=flagged_history,
+            chronic=chronic,
+        )
+        web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
+        log.info(f"[pulse{'|force' if force else ''}] posted to {channel}")
+    else:
+        log.info("[pulse] no signals — skipping post")
+
+    # Only update state for scheduled (non-force) runs
+    if not force:
+        state["last_pulse_date"] = today_str
+        _save_pulse_state(state)
+
+
 def _proactive_pulse(web: WebClient) -> None:
     """
     Daily proactive intelligence briefing daemon.
@@ -3755,6 +3842,22 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             text="Here's what Scout can help with:",
             blocks=_build_help_blocks(),
         )
+        return
+
+    # "force pulse" — admin command to trigger the pulse immediately to #scout-qa
+    if re.search(r'\bforce\s+pulse\b', lower):
+        web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                             text=":hourglass_flowing_sand: Running pulse signals now — will post to #scout-qa...")
+        def _run_force_pulse():
+            try:
+                _run_pulse_once(web, force=True)
+                web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                     text=":white_check_mark: Force pulse complete — check #scout-qa.")
+            except Exception as e:
+                log.error(f"[force pulse] failed: {e}", exc_info=True)
+                web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                     text=f":x: Force pulse failed: {e}")
+        threading.Thread(target=_run_force_pulse, daemon=True).start()
         return
 
     # "launch this", "launch it", etc. — redirect to the Approve button flow
