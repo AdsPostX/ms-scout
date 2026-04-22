@@ -56,3 +56,5 @@ services:
         sync: false
       - key: GIPHY_API_KEY
         sync: false
+      - key: SCOUT_ADMIN_USER_ID
+        sync: false

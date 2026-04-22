@@ -775,6 +775,25 @@ def _is_help_query(query: str) -> bool:
     return False
 
 
+def _log_usage(user_id: str, user_name: str, query: str, tools: list, elapsed_ms: int) -> None:
+    """Append one query record to data/usage_log.jsonl for admin reporting."""
+    import datetime as _dt2
+    record = {
+        "ts": _dt2.datetime.utcnow().isoformat(),
+        "user_id": user_id,
+        "user_name": user_name,
+        "query": query[:200],
+        "tools": tools,
+        "ms": elapsed_ms,
+    }
+    try:
+        log_path = _DATA_DIR / "usage_log.jsonl"
+        with open(log_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as e:
+        log.warning(f"[usage] log write failed: {e}")
+
+
 def _text_to_blocks(text: str) -> list:
     """
     Convert mrkdwn response text into Block Kit blocks.
@@ -798,6 +817,8 @@ def _text_to_blocks(text: str) -> list:
             if line.startswith('>'):
                 context_lines.append(line[1:].strip())
             else:
+                # Normalize - and * bullet prefixes to • for proper Slack rendering
+                line = re.sub(r'^[-\*]\s+', '• ', line)
                 body_lines.append(line)
         body = '\n'.join(body_lines).strip()
         if body:
@@ -1949,6 +1970,12 @@ def _format_pulse_blocks(
                     "type": "context",
                     "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0↳ *Missing:* {',  '.join(gap_parts)}"}],
                 })
+            # Offer recommendation CTA — closes the urgency-to-action loop
+            pub_name = v["publisher_name"]
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0:zap:  Run `@Scout offers for {pub_name}` to surface unprovisioned affiliate offers."}],
+            })
 
         for a in urgent_caps[:3]:
             hit_note = f"~{a['days_to_cap']:.0f}d to cap"
@@ -3826,9 +3853,18 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     try:
         _t0 = time.monotonic()
-        response = ask(query, history=history)
+        response = ask(query, history=history, user_id=user_id)
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
+        # Log usage for admin reporting
+        _tools_called = response.get("tools_called", []) if isinstance(response, dict) else []
+        try:
+            user_info = web.users_info(user=user_id)
+            _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
+                      or user_info.get("user", {}).get("name", user_id))
+        except Exception:
+            _uname = user_id
+        _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
     except Exception as e:
         log.error(f"Agent error: {e}")
         stop_rotating()

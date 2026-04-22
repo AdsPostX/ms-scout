@@ -437,6 +437,43 @@ When a request requires something above, respond:
 Never attempt the action. Never error silently. Redirect to what you CAN do.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RESPONSE STYLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Lead with the verdict. Always. Never lead with data and bury the answer.
+Cut: "Based on the data...", "Looking at this...", "It's worth noting...", "I can see that...", "To summarize..."
+Short sentences. Conversational. Use ~ not false precision. No preamble, no trailing summary.
+Max 5 offers or publishers in any breakdown. Flag gotchas inline: geo-limited, complex conversion, high-friction.
+
+SLACK FORMATTING:
+One-line verdict before the first ---
+---
+*Offer Name* · Network · Payout
+What you found. 2 lines max.
+>Scout Score, caveats, secondary context — renders as gray text
+---
+*Bottom line:* One sentence. Bold it.
+
+Rules:
+- SECTION BREAKS: \n---\n exactly — no blank lines, no spaces around dashes. Breaks renderer otherwise.
+- > prefix for caveats, footnotes, Scout Scores.
+- *bold* for offer names, verdicts, key numbers.
+- LEAD NUMBER: First sentence of every non-trivial response must contain the single most important number, bolded. Cap: "*$100* cap on Campaign [ID]." Revenue: "*$62K* gross." Rank: "Disney+ ranks *#8 of 13*."
+- LEAD NUMBER CONSISTENCY: Lead count must match the list below it. If showing fewer, adjust: "*3 active campaigns*" not "*14 campaigns*."
+- STATUS EMOJI: :large_green_circle: live/serving · :yellow_circle: marginal/near-cap · :red_circle: capped/ended/dead
+- CONFIDENCE LINE (required before :zap: on every data response):
+    :large_green_circle: Strong (≥14 days, ≥1K sessions): `> _Based on [N] days · [X] sessions_`
+    :yellow_circle: Directional (7-13 days or 100-999 sessions): `> _Directional — [N] days · [X] sessions_`
+    :red_circle: Thin (<7 days or <100 sessions): `> _Thin data — [N] days, [X] sessions. Treat as estimate only._`
+    run_sql_query: `> _Free-form query — [N] rows. Verify column semantics before acting._`
+    Omit for pure operational responses (queue status, campaign status, scout status, yes/no).
+- ACTION LINE: End every response with :zap: *Action:* [one specific step]. Never skip.
+- BULLETS: For any list of items, use • (literal bullet character) followed by a space. Never use - or * as bullet substitutes in list context.
+- NO EM OR EN DASHES IN PROSE: Never use — or – in sentences. Use a comma, period, or colon instead. Dashes only in compound words (cost-per-lead) or numeric ranges ($10-$20).
+- Simple answers (yes/no, queue status): plain text, no --- needed.
+- Never: | tables | **double asterisks** | ## headers | methodology unless asked.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INTENTS — resolve every query to one, then act immediately.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -576,6 +613,18 @@ INTENTS — resolve every query to one, then act immediately.
     Returns click-through rate, session engagement, and offer interaction breakdown for the partner's Perkswall placement.
     Lead with publisher name + total sessions. Highlight CTR and top-performing offer slots. Flag low-engagement placements.
 
+29. PIPELINE HEALTH — "pipeline health", "how many offers went live", "what's stuck in the queue", "are we launching offers", "pipeline status", "offer queue status", "how many approved offers", "what's pending"
+    → get_pipeline_health().
+    Returns total approved offers, stale count (>7 days without Live status), oldest pending offers.
+    Lead with total count and pass/fail signal. If stale offers exist: ends with action to mark Live or ping Gordon.
+    Different from get_demand_queue_status (which is real-time queue for the current digest session).
+
+30. USAGE REPORT — "scout usage", "usage report", "who uses scout", "usage stats", "how often is scout used", "who asks the most questions", "scout analytics"
+    → get_usage_report(requesting_user_id=<caller's Slack user_id>).
+    Pass the requesting user's Slack user_id — the tool enforces admin authorization check.
+    Returns: queries per period (7d + 30d), top users, most-called tools, avg response time.
+    If not admin: returns lock message.
+
 DEFAULT: Unclear intent → Intent 17. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
 
@@ -589,41 +638,6 @@ Before citing RPM or impression estimates for a publisher query:
 3. If using category benchmark (no live CVR): say it once — "Category estimate — no live CVR yet."
 4. One sharp insight on the biggest variable: "Tax season peaks through April — CVR is elevated right now."
 No boilerplate caveat lists.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RESPONSE STYLE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Lead with the verdict. Always. Never lead with data and bury the answer.
-Cut: "Based on the data...", "Looking at this...", "It's worth noting...", "I can see that...", "To summarize..."
-Short sentences. Conversational. Use ~ not false precision. No preamble, no trailing summary.
-Max 5 offers or publishers in any breakdown. Flag gotchas inline: geo-limited, complex conversion, high-friction.
-
-SLACK FORMATTING:
-One-line verdict before the first ---
----
-*Offer Name* · Network · Payout
-What you found. 2 lines max.
->Scout Score, caveats, secondary context — renders as gray text
----
-*Bottom line:* One sentence. Bold it.
-
-Rules:
-- SECTION BREAKS: \n---\n exactly — no blank lines, no spaces around dashes. Breaks renderer otherwise.
-- > prefix for caveats, footnotes, Scout Scores.
-- *bold* for offer names, verdicts, key numbers.
-- LEAD NUMBER: First sentence of every non-trivial response must contain the single most important number, bolded. Cap: "*$100* cap on Campaign [ID]." Revenue: "*$62K* gross." Rank: "Disney+ ranks *#8 of 13*."
-- LEAD NUMBER CONSISTENCY: Lead count must match the list below it. If showing fewer, adjust: "*3 active campaigns*" not "*14 campaigns*."
-- STATUS EMOJI: :large_green_circle: live/serving · :yellow_circle: marginal/near-cap · :red_circle: capped/ended/dead
-- CONFIDENCE LINE (required before :zap: on every data response):
-    :large_green_circle: Strong (≥14 days, ≥1K sessions): `> _Based on [N] days · [X] sessions_`
-    :yellow_circle: Directional (7-13 days or 100-999 sessions): `> _Directional — [N] days · [X] sessions_`
-    :red_circle: Thin (<7 days or <100 sessions): `> _Thin data — [N] days, [X] sessions. Treat as estimate only._`
-    run_sql_query: `> _Free-form query — [N] rows. Verify column semantics before acting._`
-    Omit for pure operational responses (queue status, campaign status, scout status, yes/no).
-- ACTION LINE: End every response with :zap: *Action:* [one specific step]. Never skip.
-- Simple answers (yes/no, queue status): plain text, no --- needed.
-- Never: | tables | **double asterisks** | ## headers | methodology unless asked.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FOLLOW-UP SUGGESTIONS
@@ -1385,6 +1399,38 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {},
+        },
+    },
+    {
+        "name": "get_pipeline_health",
+        "description": (
+            "Report on the Scout offer approval pipeline: total approved offers, "
+            "stale offers (>7 days without Live/Done status), and oldest pending. "
+            "Use for: 'pipeline health', 'how many offers went live', 'what is stuck in the queue', "
+            "'pipeline status', 'are we launching offers', 'offer queue status'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_usage_report",
+        "description": (
+            "Return Scout usage statistics: queries per period, top users, most-used tools, avg response time. "
+            "Admin-only — requires SCOUT_ADMIN_USER_ID env var match. "
+            "Use for: 'scout usage', 'usage report', 'who uses scout', 'usage stats', "
+            "'how often is scout used', 'who asks the most questions'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "requesting_user_id": {
+                    "type": "string",
+                    "description": "Slack user ID of the person asking — for admin authorization check.",
+                }
+            },
+            "required": ["requesting_user_id"],
         },
     },
     {
@@ -3766,6 +3812,114 @@ def run_offer_scraper() -> str:
         return f":x: Scraper failed: {e}. Check Render logs for details."
 
 
+def get_pipeline_health() -> str:
+    """
+    Report on the Scout offer approval pipeline: how many offers are approved,
+    how many are stale (>7 days without a Live/Done status), and the oldest pending.
+    Reads from the Notion Scout Demand Queue database.
+    """
+    import os, requests as _req, json as _json
+    from datetime import datetime, timezone, timedelta
+
+    notion_token = os.getenv("NOTION_TOKEN")
+    db_id = os.getenv("NOTION_QUEUE_DB_ID")
+    if not notion_token or not db_id:
+        return (":warning: Pipeline health unavailable — `NOTION_QUEUE_DB_ID` not configured. "
+                "Add it to Render env vars.")
+
+    headers = {
+        "Authorization": f"Bearer {notion_token}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+    resp = _req.post(
+        f"https://api.notion.com/v1/databases/{db_id}/query",
+        headers=headers, json={"page_size": 100}
+    )
+    if not resp.ok:
+        return f":x: Notion query failed: {resp.status_code}"
+
+    pages = resp.json().get("results", [])
+    now = datetime.now(timezone.utc)
+    stale = []
+
+    for page in pages:
+        props = page.get("properties", {})
+        status_prop = props.get("Status", {})
+        status_val = ""
+        if status_prop.get("type") == "select" and status_prop.get("select"):
+            status_val = status_prop["select"].get("name", "")
+        if status_val.lower() in ("live", "done", "launched"):
+            continue
+        created = page.get("created_time", "")
+        if not created:
+            continue
+        age = now - datetime.fromisoformat(created.replace("Z", "+00:00"))
+        if age > timedelta(days=7):
+            adv = ""
+            for key in ("Offer", "Name", "title"):
+                tp = props.get(key, {})
+                if tp.get("type") == "title":
+                    items = tp.get("title", [])
+                    adv = items[0]["plain_text"] if items else ""
+                    break
+            stale.append((adv or "Unknown", age.days))
+
+    stale.sort(key=lambda x: x[1], reverse=True)
+    total = len(pages)
+    lines = [f"*Scout Offer Pipeline* — *{total}* offers approved total"]
+    if not stale:
+        lines.append(":white_check_mark: Pipeline clear — no offers stale beyond 7 days.")
+        lines.append("\n:zap: *Action:* Pipeline looks healthy. Consider adding Commission Junction to expand offer supply.")
+    else:
+        lines.append(f":warning: *{len(stale)} offers pending >7 days* without a Live status.")
+        for adv, age_days in stale[:5]:
+            lines.append(f"• {adv} — *{age_days} days* without Live status")
+        if len(stale) > 5:
+            lines.append(f"• ...and {len(stale)-5} more")
+        lines.append(f"\n:zap: *Action:* Mark offers Live in Notion once entered in MS platform, or ping Gordon for a status update.")
+    return "\n".join(lines)
+
+
+def get_usage_report(requesting_user_id: str) -> str:
+    """
+    Return Scout usage statistics. Admin-only (SCOUT_ADMIN_USER_ID env var).
+    Shows: queries per period, top users, most-used tools, avg response time.
+    """
+    import os, pathlib, json as _json
+    from collections import Counter
+    from datetime import datetime, timezone, timedelta
+
+    admin_uid = os.getenv("SCOUT_ADMIN_USER_ID", "")
+    if not admin_uid or requesting_user_id != admin_uid:
+        return ":lock: Usage reports are admin-only."
+
+    log_path = pathlib.Path(__file__).parent / "data" / "usage_log.jsonl"
+    if not log_path.exists():
+        return "No usage data yet — logging started after this deploy. Check back after a few queries."
+
+    records = [_json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+    now = datetime.now(timezone.utc)
+    recent_7d  = [r for r in records if datetime.fromisoformat(r["ts"]) >= now - timedelta(days=7)]
+    recent_30d = [r for r in records if datetime.fromisoformat(r["ts"]) >= now - timedelta(days=30)]
+
+    user_counts = Counter(r.get("user_name", r.get("user_id", "unknown")) for r in recent_30d)
+    tool_counts = Counter(t for r in recent_30d for t in (r.get("tools") or []))
+    avg_ms = int(sum(r.get("ms", 0) for r in recent_7d) / max(len(recent_7d), 1))
+
+    lines = [f"*Scout Usage Report*\n"]
+    lines.append(f"• *{len(recent_7d)}* queries last 7 days, *{len(recent_30d)}* last 30 days")
+    lines.append(f"• Avg response time (7d): *{avg_ms // 1000}s*\n")
+    lines.append("*Top users (30d):*")
+    for name, count in user_counts.most_common(8):
+        lines.append(f"• {name} — *{count}* queries")
+    if tool_counts:
+        lines.append("\n*Top tools called (30d):*")
+        for tool, count in tool_counts.most_common(10):
+            lines.append(f"• {tool} — *{count}x*")
+    return "\n".join(lines)
+
+
 def get_offers_for_publisher(publisher_name: str) -> str:
     """
     Return top affiliate offers (Impact/FlexOffers/MaxBounty inventory) that are
@@ -3933,6 +4087,8 @@ TOOL_MAP = {
     "get_low_fill_publishers": get_low_fill_publishers,
     "get_top_revenue_opportunities": get_top_revenue_opportunities,
     "run_offer_scraper": run_offer_scraper,
+    "get_pipeline_health": get_pipeline_health,
+    "get_usage_report": get_usage_report,
     "get_offers_for_publisher": get_offers_for_publisher,
 }
 
@@ -4044,11 +4200,13 @@ def _select_model(user_message: str) -> str:
     return "claude-sonnet-4-6"
 
 
-def ask(user_message: str, history: list = None) -> str:
+def ask(user_message: str, history: list = None, user_id: str = "") -> str:
     """
     Send a message to Scout and get a response.
     history: optional list of prior {"role": "user"/"assistant", "content": str} messages
              from the Slack thread, providing conversation context.
+    user_id: Slack user ID of the caller — injected into context so tools like
+             get_usage_report can enforce admin-only access.
     """
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -4061,7 +4219,8 @@ def ask(user_message: str, history: list = None) -> str:
     # Prepend team context (from Slack channels) + corrections as grounding context
     channel_ctx     = _get_channel_context(user_message)
     corrections_ctx = _get_corrections_context()
-    prefix = channel_ctx + corrections_ctx
+    caller_ctx      = f"[Caller Slack user_id: {user_id}]\n" if user_id else ""
+    prefix = caller_ctx + channel_ctx + corrections_ctx
     effective_message = (prefix + user_message) if prefix else user_message
     messages = list(history or []) + [{"role": "user", "content": effective_message}]
     # List of brief results — append each draft_campaign_brief call result.
