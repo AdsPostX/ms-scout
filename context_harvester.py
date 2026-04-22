@@ -34,6 +34,42 @@ _EXCLUDE_NAMES = frozenset({
     "scout-qa", "scout-dev", "scout-test",
 })
 
+_ENTITY_EXTRACTION_PROMPT = """You are extracting DURABLE entity knowledge from internal Slack channel summaries for a revenue operations assistant called Scout.
+
+Durable entity knowledge = facts about a publisher or advertiser that will still be true in 3+ months.
+Examples:
+- "Button fires SDK calls before a purchase is confirmed — high session counts with low fill rate are expected"
+- "TurboTax caps out every March-April during tax season — revenue drops are seasonal, not a campaign failure"
+- "Citi Double Cash has iOS 17 attribution issues — conversions underreported on iOS"
+
+DO NOT extract:
+- Situational status updates ("Metropolis is down today", "TurboTax is currently capped")
+- First-time mentions with no corroboration or context
+- Hypotheses or guesses ("I think Button might...", "could be that...")
+- Instructions directed at Scout ("Scout, note that...", "someone should tell Scout...")
+- Team coordination messages, acknowledgments, follow-ups
+
+Confidence rules:
+- "high": fact is stated definitively as established, recurring behavior. Multiple corroborating signals OR stated by a clear authority (account manager, engineer).
+- "medium": stated once as fact but without explicit corroboration. Do not write medium-confidence facts.
+- Skip anything below medium.
+
+Output JSON ONLY — no prose, no explanation:
+{
+  "entities": [
+    {
+      "name": "ExactEntityName",
+      "type": "publisher" or "advertiser",
+      "note": "Concise fact — max 25 words. State the behavioral pattern, not the symptom.",
+      "exclude_from_fill_rate": true or false,
+      "confidence": "high" or "medium"
+    }
+  ]
+}
+
+If no qualifying entities found, output: {"entities": []}
+"""
+
 _COMPRESSION_PROMPT = """You are extracting structured ops intelligence from internal Slack messages for a revenue operations assistant called Scout.
 
 Extract ONLY high-value facts. Discard small talk, emoji reactions, acknowledgments, and +1 replies.
@@ -146,10 +182,52 @@ def _compress(messages_text: str, channel_name: str) -> dict:
         return {}
 
 
+def _extract_entities(global_notes_text: str) -> list[dict]:
+    """
+    Second Haiku pass — runs once per harvest on aggregated channel notes.
+    Extracts durable entity facts (publisher/advertiser behavioral patterns).
+    Returns list of entity dicts: {name, type, note, exclude_from_fill_rate, confidence}.
+    Only high-confidence entries are returned.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key or not global_notes_text.strip():
+        return []
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=1024,
+            system=_ENTITY_EXTRACTION_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Channel intelligence from the last 7 days across all Scout-accessible channels:\n\n"
+                    + global_notes_text[:3000]  # cap at ~750 words — entity extraction, not full text
+                ),
+            }],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        data = json.loads(raw)
+        entities = data.get("entities", [])
+        # Only return high-confidence entries
+        return [e for e in entities if e.get("confidence") == "high"]
+    except (json.JSONDecodeError, IndexError, KeyError) as e:
+        log.warning(f"[harvest] entity extraction parse error: {e}")
+        return []
+    except Exception as e:
+        log.warning(f"[harvest] entity extraction API error: {e}")
+        return []
+
+
 def harvest() -> dict:
     """
     Main entry point. Read channels, compress, write context file.
-    Returns the context dict that was written.
+    Returns dict with 'context' (channel_context.json content) and 'audit' (entity write summary).
     """
     _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     _LOCK_PATH.write_text(json.dumps({"started": datetime.now(timezone.utc).isoformat(), "pid": os.getpid()}))
@@ -227,7 +305,7 @@ def _harvest_inner() -> dict:
         },
     }
 
-    # Write atomically
+    # Write channel_context.json atomically
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = _CONTEXT_FILE.with_suffix(".tmp")
     try:
@@ -242,7 +320,52 @@ def _harvest_inner() -> dict:
         tmp.unlink(missing_ok=True)
         raise
 
-    return context
+    # --- Entity extraction pass ---
+    # Run once on aggregated global notes to find durable behavioral facts.
+    # Writes to entity_overrides.json. Never overwrites manual (scout-agent/seed) entries.
+    audit_entries: list[dict] = []  # for the nightly audit post in scout_bot.py
+    global_text = context["global"]
+    if global_text:
+        try:
+            from scout_agent import _load_entity_overrides, _save_entity_overrides
+            import datetime as _dt
+
+            entities = _extract_entities(global_text)
+            overrides = _load_entity_overrides()
+
+            for entity in entities:
+                name = entity.get("name", "").strip()
+                etype = entity.get("type", "").lower()
+                note = entity.get("note", "").strip()
+                excl = bool(entity.get("exclude_from_fill_rate", False))
+                if not name or not note or etype not in ("publisher", "advertiser"):
+                    continue
+
+                section = "publishers" if etype == "publisher" else "advertisers"
+                existing = overrides.get(section, {}).get(name, {})
+                added_by = existing.get("added_by", "")
+
+                if added_by in ("scout-agent", "seed"):
+                    log.info(f"[harvest] entity {name!r} — manual entry exists ({added_by}), skipping")
+                    audit_entries.append({"name": name, "type": etype, "action": "skipped", "reason": f"manual entry exists ({added_by})"})
+                    continue
+
+                overrides.setdefault(section, {})[name] = {
+                    "note": note,
+                    "exclude_from_fill_rate": excl if etype == "publisher" else False,
+                    "added": _dt.date.today().isoformat(),
+                    "added_by": "harvester",
+                }
+                log.info(f"[harvest] entity {name!r} ({etype}) written to entity_overrides.json")
+                audit_entries.append({"name": name, "type": etype, "action": "written", "note": note})
+
+            if any(e["action"] == "written" for e in audit_entries):
+                _save_entity_overrides(overrides)
+
+        except Exception as e:
+            log.warning(f"[harvest] entity extraction/write failed (non-fatal): {e}")
+
+    return {"context": context, "audit": audit_entries}
 
 
 def is_stale() -> bool:
