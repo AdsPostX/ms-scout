@@ -4192,6 +4192,23 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         threading.Thread(target=_run_force_pulse, daemon=True).start()
         return
 
+    # "force sniper" — run the offer digest immediately, posts to #scout-qa
+    if re.search(r'\bforce\s+sniper\b', lower):
+        web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                             text=":hourglass_flowing_sand: Running sniper digest now — offer cards will post to #scout-qa...")
+        def _run_force_sniper():
+            try:
+                import scout_digest
+                scout_digest.post_digest(is_force=True)
+                web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                     text=":white_check_mark: Sniper digest posted to #scout-qa — click ✓ Add to Queue on any offer to test the flow.")
+            except Exception as e:
+                log.error(f"[force sniper] failed: {e}", exc_info=True)
+                web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                     text=f":x: Force sniper failed: `{e}`")
+        threading.Thread(target=_run_force_sniper, daemon=True).start()
+        return
+
     # "QA yourself" / "self test" — run the QA suite with live per-question posting
     _QA_TRIGGERS = ("qa yourself", "self test", "run qa", "test yourself",
                     "run the qa suite", "scout qa", "run self-qa", "check yourself",
