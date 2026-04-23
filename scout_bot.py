@@ -1610,19 +1610,41 @@ def _pulse_signal_velocity(ch) -> list:
             except Exception as e:
                 log.warning(f"Pulse advertiser attribution failed: {e}")
 
+        # ── Batch: fetch existing advertisers for all down publishers in one query ──
         for v in results:
             v["hypothesis"] = ""
             v["gaps"] = []
-            if v["direction"] != "down":
-                continue
-            pub_id   = v.get("publisher_id")
-            pub_name = v.get("publisher_name", "")
-            top_advs = v.get("top_advertisers", [])
 
-            top_adv = next((a for a in top_advs if a.get("delta_ann", 0) < 0), None)
-            if top_adv and pub_id:
+        down_entries = [
+            (v, v["publisher_id"], v.get("publisher_name", ""),
+             next((a for a in v.get("top_advertisers", []) if a.get("delta_ann", 0) < 0), None))
+            for v in results
+            if v["direction"] == "down" and v.get("publisher_id")
+        ]
+
+        existing_by_pub: dict[int, set] = {}
+        if down_entries:
+            try:
+                uid_csv = ",".join(str(e[1]) for e in down_entries)
+                batch_existing = ch.query(
+                    f"SELECT pc.user_id, c.adv_name "
+                    f"FROM from_airbyte_publisher_campaigns pc "
+                    f"JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id) "
+                    f"WHERE pc.user_id IN ({uid_csv}) AND pc.is_active = true AND pc.deleted_at IS NULL"
+                ).result_rows
+                for uid, adv in batch_existing:
+                    existing_by_pub.setdefault(int(uid), set()).add(adv)
+            except Exception as e:
+                log.warning(f"Pulse batch existing-advertisers fetch failed: {e}")
+
+        def _hyp_and_gap(pub_id, pub_name, top_adv):
+            from scout_agent import _get_ch_client as _gcc
+            _ch = _gcc()
+            hyp = ""
+            gaps = []
+            if top_adv:
                 try:
-                    hyp_rows = ch.query(
+                    hyp_rows = _ch.query(
                         """
                         SELECT
                             u.organization,
@@ -1647,66 +1669,75 @@ def _pulse_signal_velocity(ch) -> list:
                     adv_abs   = abs(top_adv["delta_ann"])
                     delta_fmt = f"${adv_abs/1000:.0f}K" if adv_abs >= 1000 else f"${adv_abs:.0f}"
                     if also_down:
-                        also_str = " & ".join(also_down)
-                        v["hypothesis"] = (
+                        hyp = (
                             f"_{top_adv['adv_name']} dropped {delta_fmt} — "
-                            f"also down at {also_str}. Likely advertiser-side cap, not a {pub_name} issue._"
+                            f"also down at {' & '.join(also_down)}. "
+                            f"Likely advertiser-side cap, not a {pub_name} issue._"
                         )
                     else:
-                        v["hypothesis"] = (
+                        hyp = (
                             f"_{top_adv['adv_name']} dropped {delta_fmt} here but holding elsewhere — "
                             f"check {pub_name} provisioning or targeting config._"
                         )
                 except Exception as e:
                     log.warning(f"Pulse hypothesis failed for {pub_name}: {e}")
 
-            if pub_id:
-                try:
-                    existing_rows = ch.query(
-                        f"SELECT DISTINCT c.adv_name "
-                        f"FROM from_airbyte_publisher_campaigns pc "
-                        f"JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id) "
-                        f"WHERE pc.user_id = {pub_id} AND pc.is_active = true AND pc.deleted_at IS NULL"
-                    ).result_rows
-                    existing = {r[0] for r in existing_rows}
+            existing = existing_by_pub.get(pub_id, set())
+            try:
+                gap_rows = _ch.query(f"""
+                    WITH imp_agg AS (
+                        SELECT campaign_id, count() AS imp_30d
+                        FROM adpx_impressions_details
+                        PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+                        WHERE created_at >= today() - 30
+                        GROUP BY campaign_id
+                    ),
+                    conv_agg AS (
+                        SELECT campaign_id, sum(toFloat64OrNull(revenue)) AS rev_30d
+                        FROM adpx_conversionsdetails
+                        PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+                        WHERE created_at >= today() - 30
+                        GROUP BY campaign_id
+                    )
+                    SELECT
+                        c.adv_name,
+                        count(DISTINCT pc.user_id) AS pub_count,
+                        sum(ca.rev_30d)             AS revenue_30d,
+                        round(sum(ca.rev_30d) / nullIf(sum(ia.imp_30d), 0) * 1000, 2) AS rpm
+                    FROM from_airbyte_publisher_campaigns pc
+                    JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
+                    LEFT JOIN imp_agg ia ON toString(ia.campaign_id) = toString(pc.campaign_id)
+                    LEFT JOIN conv_agg ca ON toString(ca.campaign_id) = toString(pc.campaign_id)
+                    WHERE pc.is_active = true AND pc.deleted_at IS NULL
+                      AND pc.user_id != {pub_id}
+                    GROUP BY c.adv_name
+                    HAVING pub_count >= 2 AND sum(ca.rev_30d) > 0
+                    ORDER BY sum(ca.rev_30d) DESC
+                    LIMIT 20
+                """).result_rows
+                gaps = [
+                    (adv, rpm) for adv, _cnt, _rev, rpm in gap_rows
+                    if adv not in existing and rpm and rpm > 0
+                ][:3]
+            except Exception as e:
+                log.warning(f"Pulse gap check failed for {pub_name}: {e}")
+            return hyp, gaps
 
-                    gap_rows = ch.query(f"""
-                        WITH imp_agg AS (
-                            SELECT campaign_id, count() AS imp_30d
-                            FROM adpx_impressions_details
-                            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-                            WHERE created_at >= today() - 30
-                            GROUP BY campaign_id
-                        ),
-                        conv_agg AS (
-                            SELECT campaign_id, sum(toFloat64OrNull(revenue)) AS rev_30d
-                            FROM adpx_conversionsdetails
-                            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-                            WHERE created_at >= today() - 30
-                            GROUP BY campaign_id
-                        )
-                        SELECT
-                            c.adv_name,
-                            count(DISTINCT pc.user_id) AS pub_count,
-                            sum(ca.rev_30d)             AS revenue_30d,
-                            round(sum(ca.rev_30d) / nullIf(sum(ia.imp_30d), 0) * 1000, 2) AS rpm
-                        FROM from_airbyte_publisher_campaigns pc
-                        JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
-                        LEFT JOIN imp_agg ia ON toString(ia.campaign_id) = toString(pc.campaign_id)
-                        LEFT JOIN conv_agg ca ON toString(ca.campaign_id) = toString(pc.campaign_id)
-                        WHERE pc.is_active = true AND pc.deleted_at IS NULL
-                          AND pc.user_id != {pub_id}
-                        GROUP BY c.adv_name
-                        HAVING pub_count >= 2 AND sum(ca.rev_30d) > 0
-                        ORDER BY sum(ca.rev_30d) DESC
-                        LIMIT 20
-                    """).result_rows
-                    v["gaps"] = [
-                        (adv, rpm) for adv, _cnt, _rev, rpm in gap_rows
-                        if adv not in existing and rpm and rpm > 0
-                    ][:3]
-                except Exception as e:
-                    log.warning(f"Pulse gap check failed for {pub_name}: {e}")
+        if down_entries:
+            from concurrent.futures import ThreadPoolExecutor as _TPEX, as_completed as _ac
+            with _TPEX(max_workers=min(len(down_entries), 5), thread_name_prefix="pulse-hyp") as pool:
+                futs = {
+                    pool.submit(_hyp_and_gap, pub_id, pub_name, top_adv): v
+                    for v, pub_id, pub_name, top_adv in down_entries
+                }
+                for fut in _ac(futs):
+                    v = futs[fut]
+                    try:
+                        hyp, gaps = fut.result()
+                        v["hypothesis"] = hyp
+                        v["gaps"] = gaps
+                    except Exception as e:
+                        log.warning(f"Pulse hyp+gap future failed: {e}")
 
     except Exception as e:
         log.warning(f"Pulse velocity signal failed: {e}")
