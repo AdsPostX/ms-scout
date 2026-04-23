@@ -4391,12 +4391,15 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
     # All tool results from every loop iteration — used for entity extraction.
     _all_tool_results: list = []
 
-    while True:
+    MAX_ROUNDS = 12  # hard cap — prevents runaway loops on complex / ambiguous queries
+    _round = 0
+    while _round < MAX_ROUNDS:
+        _round += 1
         for attempt in range(4):
             try:
                 response = client.messages.create(
                     model=_select_model(user_message),
-                    max_tokens=2048,
+                    max_tokens=4096,
                     system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                     tools=TOOLS,
                     messages=messages,
@@ -4553,6 +4556,14 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
+
+    # Round cap hit — return a graceful degraded response rather than dying silently
+    log.warning(f"ask() hit MAX_ROUNDS ({MAX_ROUNDS}) for query: {user_message[:120]!r}")
+    return (
+        "I gathered a lot of data on this but hit my analysis limit before finishing the synthesis. "
+        "Try breaking the question into smaller parts — e.g. ask about revenue performance separately "
+        "from recommendations, or ask about a specific publisher or campaign directly."
+    )
 
 
 # ── CLI test ──────────────────────────────────────────────────────────────────
