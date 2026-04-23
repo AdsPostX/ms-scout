@@ -3872,6 +3872,117 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         threading.Thread(target=_run_force_pulse, daemon=True).start()
         return
 
+    # "QA yourself" / "self test" — run the QA suite with live per-question posting
+    _QA_TRIGGERS = ("qa yourself", "self test", "run qa", "test yourself",
+                    "run the qa suite", "scout qa", "run self-qa", "check yourself",
+                    "run self qa", "qa suite")
+    if any(t in lower for t in _QA_TRIGGERS):
+        from scout_agent import _QA_SUITE
+        import time as _time
+
+        def _run_live_qa():
+            try:
+                web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=(
+                        ":test_tube: *Scout Self-QA — 15 questions, live results*\n"
+                        "Testing every major intent. Pass = responded + expected content present.\n"
+                        "Posting each result as it completes...\n---"
+                    ),
+                )
+
+                results = []
+                groups = {
+                    "Core Health": ["System status", "Ghost campaigns"],
+                    "Offer Intelligence": [
+                        "Offer search — finance vertical",
+                        "Offers for named publisher",
+                        "Supply demand gaps",
+                        "Offer inventory count",
+                        "Pipeline health",
+                    ],
+                    "Revenue & Publisher": [
+                        "WoW revenue drop",
+                        "Publisher health",
+                        "Campaign status check",
+                        "Revenue projection",
+                        "Perkswall engagement",
+                        "Multi-part question decomposition",
+                    ],
+                    "Data Boundaries": [
+                        "Data boundary — SOV",
+                        "Data boundary — strategic intent",
+                    ],
+                }
+
+                for label, question, pass_hints in _QA_SUITE:
+                    t0 = _time.monotonic()
+                    try:
+                        response = ask(question, history=[], user_id="self-qa")
+                        elapsed = _time.monotonic() - t0
+                        if isinstance(response, dict):
+                            text = response.get("fallback_text") or response.get("text") or str(response)
+                        else:
+                            text = str(response)
+                        responded = len(text.strip()) > 40
+                        hint_match = any(h.lower() in text.lower() for h in pass_hints)
+                        passed = responded and hint_match
+                        snippet = text.strip()[:200].replace("\n", " ")
+                    except Exception as e:
+                        elapsed = _time.monotonic() - t0
+                        passed = False
+                        snippet = f"ERROR: {e}"
+
+                    icon = ":white_check_mark:" if passed else ":x:"
+                    results.append({"label": label, "passed": passed, "elapsed": round(elapsed, 1), "snippet": snippet})
+
+                    web.chat_postMessage(
+                        channel=channel, thread_ts=thread_ts,
+                        text=(
+                            f"{icon} *{label}* · {round(elapsed, 1)}s\n"
+                            f"Q: _{question[:80]}_\n"
+                            f"A: {snippet[:160]}{'…' if len(snippet) > 160 else ''}"
+                        ),
+                    )
+
+                # Final scorecard
+                passed_count = sum(1 for r in results if r["passed"])
+                total = len(results)
+                if passed_count >= 13:
+                    overall = ":large_green_circle:"
+                elif passed_count >= 9:
+                    overall = ":yellow_circle:"
+                else:
+                    overall = ":red_circle:"
+
+                scorecard_lines = [f"{overall} *{passed_count}/{total} passed* — Scout self-QA complete.\n---"]
+                for group, labels in groups.items():
+                    scorecard_lines.append(f"*{group}*")
+                    for r in results:
+                        if r["label"] in labels:
+                            icon = ":white_check_mark:" if r["passed"] else ":x:"
+                            scorecard_lines.append(f"{icon} {r['label']} · {r['elapsed']}s")
+                    scorecard_lines.append("")
+
+                failed = [r for r in results if not r["passed"]]
+                if failed:
+                    scorecard_lines.append(f":zap: *Action:* {len(failed)} test(s) failed — check snippets above.")
+                else:
+                    scorecard_lines.append(":zap: All systems nominal.")
+
+                web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text="\n".join(scorecard_lines),
+                )
+
+            except Exception as e:
+                log.error(f"[self-qa] failed: {e}", exc_info=True)
+                web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                     text=f":x: Self-QA error: {e}")
+
+        threading.Thread(target=_run_live_qa, daemon=True).start()
+        return
+
     # "launch this", "launch it", etc. — redirect to the Approve button flow
     if re.search(r"\blaunch\b", lower) and not re.search(r"\bbuild\b|\bcreate\b|\bbrief\b", lower):
         pending = _get_brief(thread_ts)
