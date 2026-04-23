@@ -1,5 +1,11 @@
 """
 campaign_builder.py — MS Platform Campaign Builder
+
+STATUS: PARKED — pending platform automation sign-off (Vamsee).
+Not wired to Scout. The "Add to Queue" Notion write is the interim path.
+When ready: wire to scout_agent.py as a tool called after brief approval.
+
+────────────────────────────────────────────────────────────────────────
 Single-shot: fill all 4 tabs, save with Test Offer ON, return the offer URL.
 
 Architecture

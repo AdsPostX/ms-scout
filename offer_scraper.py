@@ -969,6 +969,54 @@ def _notion_properties(o: dict, is_new: bool = False) -> dict:
     # Outreach Status — only set on new pages to preserve manual team edits
     if is_new:
         props["Outreach Status"] = {"select": {"name": "Not Reviewed"}}
+
+    # ── Creative & copy fields — everything needed to enter a campaign in MS platform ──
+
+    # Offer title / headline (short version of advertiser offer)
+    title = o.get("title", "")
+    if title:
+        props["Title"] = {"rich_text": [{"text": {"content": title[:500]}}]}
+
+    # CTA text (e.g. "Get Offer", "Shop Now") — goes in MS platform CTA field
+    cta = o.get("cta", "")
+    if cta:
+        props["CTA"] = {"rich_text": [{"text": {"content": cta[:200]}}]}
+
+    # Mini description — short teaser copy for smaller placements
+    mini = o.get("mini_description", "")
+    if mini:
+        props["Mini Description"] = {"rich_text": [{"text": {"content": mini[:500]}}]}
+
+    # Terms & conditions / restrictions from the network
+    terms = o.get("terms", "")
+    if terms:
+        props["Terms"] = {"rich_text": [{"text": {"content": terms[:2000]}}]}
+
+    # Icon / logo URL (square, ~150×150)
+    icon = o.get("icon_url", "")
+    if icon and icon.startswith("http"):
+        props["Icon URL"] = {"url": icon}
+
+    # Creative / banner URL (wide format, ~1000×280)
+    creative = o.get("hero_url") or o.get("banner_url") or ""
+    if creative and creative.startswith("http"):
+        props["Creative URL"] = {"url": creative}
+
+    # Landing page preview URL (for QA before launching)
+    preview = o.get("preview_url", "")
+    if preview and preview.startswith("http"):
+        props["Preview URL"] = {"url": preview}
+
+    # Device / OS targeting (e.g. "iOS,Android", "All")
+    os_t = o.get("os_targeting", "")
+    if os_t and os_t not in ("All", ""):
+        props["OS Targeting"] = {"rich_text": [{"text": {"content": os_t[:200]}}]}
+
+    # Platform targeting (Mobile / Desktop / All)
+    platform = o.get("platform_targeting", "")
+    if platform and platform not in ("All", ""):
+        props["Platform"] = {"rich_text": [{"text": {"content": platform[:100]}}]}
+
     return props
 
 def write_notion(offers: list):
