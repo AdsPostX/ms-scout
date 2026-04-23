@@ -4471,7 +4471,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
                 scout_digest.post_digest(is_force=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text=f":white_check_mark: Sniper digest posted to #scout-qa ({offer_count} offers in pool) — click *Add to Queue* on any offer to test the flow.")
+                                     text=":white_check_mark: Sniper digest posted to #scout-qa — click *Add to Queue* on any offer to test the flow.")
+            except RuntimeError as e:
+                # post_digest raises RuntimeError with filter breakdown when 0 offers pass
+                log.warning(f"[force sniper] 0 offers posted: {e}")
+                web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                     text=f":warning: Force sniper ran but no offers posted.\n{e}")
             except Exception as e:
                 log.error(f"[force sniper] failed: {e}", exc_info=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,

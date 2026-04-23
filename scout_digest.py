@@ -743,12 +743,14 @@ def select_offers(
     n_per_network: int = 5,
     ms_campaigns:  list[dict] | None = None,
     benchmarks:    dict | None = None,
-) -> dict[str, list[tuple[float, dict]]]:
+    force:         bool = False,
+) -> tuple[dict[str, list[tuple[float, dict]]], dict]:
     """
-    Returns top-N scored offers per network, diversity-capped by category (max 2 per category).
+    Returns (offers_by_network, meta) where meta has skip counts.
     Result: {"impact": [(score, offer), ...], "maxbounty": [...], "flexoffers": [...]}
     Networks with no qualifying offers are omitted.
     ms_campaigns and benchmarks can be passed in to avoid redundant external calls.
+    force=True bypasses the is_already_in_ms filter so testing always surfaces real offers.
     """
     from scout_agent import _get_benchmarks
 
@@ -769,7 +771,7 @@ def select_offers(
         if not network:
             continue
 
-        if is_already_in_ms(offer, ms_campaigns):
+        if not force and is_already_in_ms(offer, ms_campaigns):
             skipped_in_ms += 1
             continue
 
@@ -813,13 +815,20 @@ def select_offers(
             result[network] = selected
             total_selected += len(selected)
 
+    meta = {
+        "candidates": sum(len(v) for v in by_network.values()),
+        "skipped_in_ms": skipped_in_ms,
+        "skipped_no_score": skipped_no_score,
+        "total_selected": total_selected,
+        "total_offers": len(offers),
+    }
     log.info(
-        f"Selection: {sum(len(v) for v in by_network.values())} candidates across "
+        f"Selection: {meta['candidates']} candidates across "
         f"{len(by_network)} networks "
         f"(skipped: {skipped_in_ms} in-platform, {skipped_no_score} below-threshold/state) "
         f"→ {total_selected} selected"
     )
-    return result
+    return result, meta
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -842,11 +851,19 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
     payout_cache     = json.loads(PAYOUT_CACHE.read_text()) if PAYOUT_CACHE.exists() else {}
     ms_campaigns     = get_active_ms_campaigns()
     benchmarks       = _get_benchmarks()
-    offers_by_network = select_offers(n_per_network=3, ms_campaigns=ms_campaigns, benchmarks=benchmarks)
+    offers_by_network, sel_meta = select_offers(
+        n_per_network=3, ms_campaigns=ms_campaigns, benchmarks=benchmarks, force=is_force
+    )
 
-    total_selected = sum(len(v) for v in offers_by_network.values())
+    total_selected = sel_meta["total_selected"]
     if total_selected == 0:
         log.info("No offers to surface — skipping digest.")
+        if is_force:
+            raise RuntimeError(
+                f"0 offers selected from {sel_meta['total_offers']} total "
+                f"({sel_meta['skipped_in_ms']} in-platform filtered, "
+                f"{sel_meta['skipped_no_score']} below-threshold/state)"
+            )
         return
 
     # ── Diff detection: new offers since last scraper run ────────────────────
