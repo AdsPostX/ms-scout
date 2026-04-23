@@ -66,11 +66,14 @@ TUNE_INSTANCES = [
     # (label, network_id, api_key, base_url)
     # Populated at startup from env vars; add more as needed
 ]
-# Dynamically populate from env vars: TUNE_KASHKICK_NETWORK_ID / TUNE_KASHKICK_API_KEY
+# Dynamically populate from env vars: TUNE_{NAME}_NETWORK_ID (subdomain) + TUNE_{NAME}_API_KEY
+# base_url should be https://{subdomain}.api.hasoffers.com for the V3 JSON API
 for _inst_name in ("KASHKICK", "BROWNBOOTS", "ADACTION", "REVOFFERS", "ADBLOOM", "SUCCESSFUL_MEDIA"):
     _nid = os.environ.get(f"TUNE_{_inst_name}_NETWORK_ID", "")
     _key = os.environ.get(f"TUNE_{_inst_name}_API_KEY", "")
-    _url = os.environ.get(f"TUNE_{_inst_name}_BASE_URL", f"https://{_inst_name.lower().replace('_', '')}.hasoffers.com")
+    # If BASE_URL is explicitly set, use it; otherwise derive from network_id (subdomain)
+    _default_url = f"https://{_nid}.api.hasoffers.com" if _nid else ""
+    _url = os.environ.get(f"TUNE_{_inst_name}_BASE_URL", _default_url)
     if _nid and _key:
         TUNE_INSTANCES.append((_inst_name.lower(), _nid, _key, _url))
 
@@ -1460,7 +1463,9 @@ def fetch_awin() -> list:
 def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str) -> list:
     """
     TUNE/HasOffers publisher API — single instance.
-    Endpoint: {base_url}/Affiliate_Offer/findAll?affiliate_id={network_id}&api_key={api_key}
+    Uses HasOffers V3 JSON API: {NetworkId}.api.hasoffers.com/Apiv3/json
+    Auth: NetworkAffiliateToken (publisher's API key from their dashboard)
+    The base_url should be: https://{NetworkId}.api.hasoffers.com
     """
     offers: list[dict] = []
     page = 1
@@ -1468,17 +1473,14 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
     while True:
         try:
             resp = requests.get(
-                f"{base_url.rstrip('/')}/Affiliate_Offer/findAll",
+                f"{base_url.rstrip('/')}/Apiv3/json",
                 params={
-                    "affiliate_id": network_id,
-                    "api_key":      api_key,
-                    "status":       "active",
-                    "page":         page,
-                    "limit":        500,
-                    "fields[]":     ["id", "name", "description", "preview_url",
-                                     "payout_type", "default_payout",
-                                     "advertiser_id", "advertiser.company",
-                                     "categories"],
+                    "Target":                 "Affiliate_Offer",
+                    "Method":                 "findAll",
+                    "NetworkAffiliateToken":  api_key,
+                    "filters[status]":        "active",
+                    "page":                   page,
+                    "limit":                  500,
                 },
                 timeout=30,
             )
@@ -1498,10 +1500,21 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
             log.warning(f"TUNE/{label}: non-JSON response — {resp.text[:200]}")
             break
 
-        # TUNE response shape: {request: {}, response: {status: 1, data: {data: [...]}}}
+        # HasOffers V3 response: {request:{}, response:{status:1, data:{count:N, data:{id: {Offer:{...}}, ...}}}}
         resp_body = data.get("response", data)
-        inner     = resp_body.get("data", {}) if isinstance(resp_body, dict) else {}
-        records   = inner.get("data", []) if isinstance(inner, dict) else (inner if isinstance(inner, list) else [])
+        if resp_body.get("status") == -1:
+            errs = resp_body.get("errors", [])
+            log.warning(f"TUNE/{label}: API error — {errs}")
+            break
+        inner  = resp_body.get("data", {})
+        # data.data is a dict keyed by offer_id in HasOffers V3
+        raw    = inner.get("data", {}) if isinstance(inner, dict) else {}
+        if isinstance(raw, dict):
+            records = list(raw.values())
+        elif isinstance(raw, list):
+            records = raw
+        else:
+            records = []
 
         if not records:
             # Alternative: top-level list
@@ -1514,12 +1527,14 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
             if isinstance(o_raw, list):
                 continue  # skip malformed
 
-            offer_id   = str(o_raw.get("id") or o_raw.get("Offer", {}).get("id", ""))
-            name       = o_raw.get("name") or (o_raw.get("Offer") or {}).get("name", "")
-            desc       = o_raw.get("description") or (o_raw.get("Offer") or {}).get("description", "")
-            ptype_raw  = o_raw.get("payout_type") or (o_raw.get("Offer") or {}).get("payout_type", "CPA")
-            payout_val = o_raw.get("default_payout") or (o_raw.get("Offer") or {}).get("default_payout", "")
-            preview    = o_raw.get("preview_url") or (o_raw.get("Offer") or {}).get("preview_url", "")
+            # HasOffers V3: fields nested under "Offer" sub-object
+            offer_obj  = o_raw.get("Offer") or o_raw
+            offer_id   = str(offer_obj.get("id") or o_raw.get("id", ""))
+            name       = offer_obj.get("name") or o_raw.get("name", "")
+            desc       = offer_obj.get("description") or o_raw.get("description", "")
+            ptype_raw  = offer_obj.get("payout_type") or o_raw.get("payout_type", "CPA")
+            payout_val = offer_obj.get("default_payout") or o_raw.get("default_payout", "")
+            preview    = offer_obj.get("preview_url") or o_raw.get("preview_url", "")
 
             adv_obj    = o_raw.get("Advertiser") or {}
             adv_name   = adv_obj.get("company") or adv_obj.get("name") or name
