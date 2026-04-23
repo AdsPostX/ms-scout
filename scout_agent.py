@@ -700,6 +700,16 @@ INTENTS — resolve every query to one, then act immediately.
     Write immediately. Show exactly what was stored. Invite correction in the same message.
     Do NOT wait for "log this" — if they're explaining entity behavior to Scout in a way that should change signal interpretation, that IS a record request.
 
+32. SELF-QA / SELF-TEST — "QA yourself", "self test", "run QA", "test yourself", "run the QA suite", "scout QA", "run self-qa", "check yourself"
+    → run_self_qa().
+    Runs Scout's full 15-question test suite against itself. Evaluates pass/fail for each question by checking response content against expected signals.
+    Format the result as a Slack-friendly report:
+    - Lead with overall score: "*[N]/15 passed* — Scout self-QA complete." with :large_green_circle: (≥12), :yellow_circle: (8-11), or :red_circle: (<8)
+    - List each test: :white_check_mark: PASS or :x: FAIL + label + elapsed time (e.g. "12.3s")
+    - Group: Core Health · Offer Intelligence · Revenue & Publisher · Data Boundaries
+    - End with :zap: Action if any failures, or ":zap: All systems nominal." if all pass.
+    Never show raw JSON. Always format as a readable Slack message.
+
 DEFAULT: Unclear intent → Intent 17. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
 
@@ -1573,6 +1583,23 @@ TOOLS = [
                 }
             },
             "required": ["publisher_name"],
+        },
+    },
+    {
+        "name": "run_self_qa",
+        "description": (
+            "Run Scout's full self-QA suite — 15 representative questions covering every major intent "
+            "(system status, ghost campaigns, offer search, revenue analysis, publisher health, "
+            "campaign status, revenue projection, supply gaps, perkswall, pipeline health, "
+            "multi-part question protocol, and data boundary tests). "
+            "Each question is evaluated for pass/fail by checking expected content signals. "
+            "Use when the user says: 'QA yourself', 'self test', 'run QA', 'test yourself', "
+            "'run the QA suite', 'scout QA', 'run self-qa', 'check yourself'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
         },
     },
 ]
@@ -4272,7 +4299,146 @@ TOOL_MAP = {
     "get_usage_report": get_usage_report,
     "record_entity_note": record_entity_note,
     "get_offers_for_publisher": get_offers_for_publisher,
+    "run_self_qa": None,  # registered below after function definition
 }
+
+
+# ── Self-QA suite ─────────────────────────────────────────────────────────────
+
+# Every major intent Scout supports, plus data-boundary probes.
+# Format: (label, question, pass_hints)
+# pass_hints: strings that should appear in a passing response (any one match = pass)
+_QA_SUITE: list[tuple[str, str, list[str]]] = [
+    # ── Core health ──────────────────────────────────────────────────────────
+    ("System status",
+     "status",
+     ["alive", "healthy", "offer", "clickhouse", "inventory"]),
+
+    # ── Ghost campaigns ───────────────────────────────────────────────────────
+    ("Ghost campaigns",
+     "ghost campaigns",
+     ["ghost", "campaign", "impression", "revenue", "postback", "no ghost"]),
+
+    # ── Offer search — vertical ───────────────────────────────────────────────
+    ("Offer search — finance vertical",
+     "best offers for a financial services partner",
+     ["capital one", "rocket", "payout", "rpm", "cpa", "offer"]),
+
+    # ── Offer search — specific publisher ────────────────────────────────────
+    ("Offers for named publisher",
+     "what offers should we pitch to AT&T?",
+     ["offer", "payout", "rpm", "finance", "campaign", "epc"]),
+
+    # ── Revenue drop analysis ─────────────────────────────────────────────────
+    ("WoW revenue drop",
+     "which publishers dropped the most revenue this week vs last week?",
+     ["publisher", "revenue", "drop", "week", "$"]),
+
+    # ── Publisher health ──────────────────────────────────────────────────────
+    ("Publisher health",
+     "how is TextNow performing?",
+     ["textnow", "impression", "revenue", "click", "cvr", "funnel"]),
+
+    # ── Campaign status ───────────────────────────────────────────────────────
+    ("Campaign status check",
+     "is Capital One Shopping still active?",
+     ["capital one", "active", "campaign", "status", "paused"]),
+
+    # ── Revenue projection ────────────────────────────────────────────────────
+    ("Revenue projection",
+     "project Truist revenue for this month",
+     ["truist", "revenue", "$", "projection", "month", "forecast"]),
+
+    # ── Supply/demand gaps ────────────────────────────────────────────────────
+    ("Supply demand gaps",
+     "where are our biggest supply gaps right now?",
+     ["gap", "publisher", "offer", "category", "missing", "opportunity"]),
+
+    # ── Offer inventory count ─────────────────────────────────────────────────
+    ("Offer inventory count",
+     "how many offers do we have in the inventory and which network has the most?",
+     ["offer", "network", "cj", "impact", "total", "active"]),
+
+    # ── Perkswall ────────────────────────────────────────────────────────────
+    ("Perkswall engagement",
+     "how is perkswall performing?",
+     ["perkswall", "engagement", "click", "impression", "session"]),
+
+    # ── Pipeline health ───────────────────────────────────────────────────────
+    ("Pipeline health",
+     "what is the health of our offer pipeline?",
+     ["pipeline", "offer", "notion", "queue", "network", "active"]),
+
+    # ── Multi-part question (new protocol test) ───────────────────────────────
+    ("Multi-part question decomposition",
+     "For our Intuit TurboTax review: what revenue did they drive this year? What were the top publishers? What offers worked best?",
+     ["turbotax", "revenue", "publisher", "campaign", "$"]),
+
+    # ── Data boundary: SOV (should gracefully decline) ────────────────────────
+    ("Data boundary — SOV",
+     "what is our share of voice vs competitors?",
+     ["don't have", "not tracked", "not in", "isn't in", "network", "dashboard", "sov"]),
+
+    # ── Data boundary: strategic question ────────────────────────────────────
+    ("Data boundary — strategic intent",
+     "what does AT&T want from us next year?",
+     ["don't have", "not in", "judgment", "can't", "call", "data"]),
+]
+
+
+def run_self_qa() -> dict:
+    """
+    Run Scout's full QA suite against itself and return a structured report.
+    Each test calls ask() with a representative question, checks the response
+    for expected content, and records pass/fail + elapsed time.
+    Called when a user says 'QA yourself', 'self test', 'run QA suite'.
+    """
+    import time as _time
+
+    results = []
+    total = len(_QA_SUITE)
+
+    for label, question, pass_hints in _QA_SUITE:
+        t0 = _time.monotonic()
+        try:
+            response = ask(question, history=[], user_id="self-qa")
+            elapsed = _time.monotonic() - t0
+
+            # Normalise — ask() can return str or dict (brief type)
+            if isinstance(response, dict):
+                text = response.get("fallback_text") or response.get("text") or str(response)
+            else:
+                text = str(response)
+
+            text_lower = text.lower()
+            responded = len(text.strip()) > 40
+            hint_match = any(h.lower() in text_lower for h in pass_hints)
+            passed = responded and hint_match
+            snippet = text[:120].replace("\n", " ")
+
+        except Exception as e:
+            elapsed = _time.monotonic() - t0
+            passed = False
+            snippet = f"ERROR: {e}"
+
+        results.append({
+            "label": label,
+            "question": question,
+            "passed": passed,
+            "elapsed": round(elapsed, 1),
+            "snippet": snippet,
+        })
+
+    passed_count = sum(1 for r in results if r["passed"])
+    return {
+        "total": total,
+        "passed": passed_count,
+        "failed": total - passed_count,
+        "results": results,
+    }
+
+
+TOOL_MAP["run_self_qa"] = run_self_qa
 
 
 def _run_tool(name: str, inputs: dict, _caller_user_id: str = ""):
