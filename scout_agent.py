@@ -476,6 +476,31 @@ When a request requires something above, respond:
 Never attempt the action. Never error silently. Redirect to what you CAN do.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DATA BOUNDARIES — what exists vs. what doesn't
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ClickHouse contains: sessions, impressions, clicks, conversions, revenue, publisher-campaign pairings, campaign config (status, payout, geo, targeting), audit log changes. Use these for any revenue, performance, or funnel question.
+
+ClickHouse does NOT contain — do not query for these, do not loop trying to find them:
+- SOV (Share of Voice) / market share — not tracked. Tell the user this data lives in the network's own reporting dashboard.
+- Competitor performance or benchmarks outside MomentScience
+- Strategic intent ("what does [partner] want from us?") — judgment call, not data
+- Email open rates, CRM activity, relationship history
+- Publisher-side revenue (we only see our payout, not their total revenue)
+- Attribution outside MomentScience's own SDK events
+
+MULTI-PART QUESTION PROTOCOL — apply when a message contains 3+ questions or a bulleted list of questions:
+1. Scan all sub-questions BEFORE calling any tool
+2. Sort them into two groups: CAN ANSWER (data exists in ClickHouse or offer inventory) vs. CANNOT ANSWER (not in our data)
+3. Answer the CAN ANSWER questions with tool calls
+4. For CANNOT ANSWER questions: state explicitly what's missing and where the team can find it
+5. Never loop trying to answer an unanswerable question. One failed tool call = mark it as outside data boundary and move on.
+
+Example response shape for a mixed question:
+"Here's what I have data on: [answer the answerable sub-questions]
+What I don't have: SOV data isn't tracked in ClickHouse — pull that from [network] reporting. Strategic context on what [partner] needs isn't in our data — that's a judgment call for the call itself."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RESPONSE STYLE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -4349,8 +4374,25 @@ def _extract_thread_entities(tool_results: list) -> dict:
 
 
 def _select_model(user_message: str) -> str:
-    """Route simple queries to Haiku, complex analytical queries to Sonnet."""
+    """
+    Route queries to the right model based on complexity.
+
+    Haiku  → simple single-intent lookups (fast, cheap)
+    Sonnet → everything else, including all multi-part questions
+
+    Multi-part questions (3+ question marks, bullet lists, prep-for-call context)
+    always go to Sonnet — they require decomposition, synthesis across multiple
+    tool results, and graceful handling of unanswerable sub-questions.
+    """
     msg = user_message.lower()
+
+    # Multi-part signals → always Sonnet regardless of other signals
+    question_count = msg.count("?")
+    has_bullets = any(line.strip().startswith(("•", "-", "*")) for line in msg.splitlines())
+    has_prep_context = any(p in msg for p in ["call tomorrow", "prep", "review", "questions from", "help me answer"])
+    if question_count >= 3 or has_bullets or has_prep_context:
+        return "claude-sonnet-4-6"
+
     simple = ["status", "queue", "is scout", "help", "paused", "active",
               "how many", "count", "list all", "what is the cap"]
     complex_ = ["health", "competitive", "projection", "revenue", "rpm",
