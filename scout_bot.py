@@ -995,26 +995,48 @@ def _fetch_brief_for_approve(advertiser: str, offer_payload: dict) -> dict:
 
 def _make_copy_for_brief(brief_data: dict, offer_payload: dict) -> dict:
     """
-    Build copy dict in the format _build_brief_blocks() expects.
-    Derives a practical title option from the offer description.
+    Build baseline copy dict for _handle_approve / _post_offer_queue_card / _write_to_notion_queue.
+    Returns keys: title, description, cta (dict), short_headline, short_desc, bottom_line.
+
+    This is the SYNCHRONOUS fallback. AI-quality copy is generated asynchronously by
+    _generate_offer_copy() and PATCHed onto the Notion page within ~10 seconds of approval.
+    Callers must use: copy.get("title"), copy.get("cta", {}).get("yes"), etc.
     """
     advertiser  = brief_data.get("advertiser", "")
     description = (brief_data.get("description") or offer_payload.get("description") or "").strip()
-    payout_type = brief_data.get("payout_type") or offer_payload.get("payout_type", "")
+    payout_type = (brief_data.get("payout_type") or offer_payload.get("payout_type", "")).upper()
     portal_url  = brief_data.get("portal_url", "")
     network     = brief_data.get("network", "Impact")
 
-    first_sent = description.split(".")[0].strip()[:60] if description else ""
-    titles = [first_sent] if first_sent else [f"Exclusive offer from {advertiser}"]
+    # Build a safe title from the first complete sentence (never truncate mid-word)
+    first_sent = description.split(".")[0].strip() if description else ""
+    if len(first_sent) > 90:
+        first_sent = first_sent[:87].rsplit(" ", 1)[0] + "..."
+    title = first_sent if first_sent else f"Exclusive offer from {advertiser}"
 
+    # Short headline: title truncated to 60 at a word boundary
+    if len(title) > 60:
+        short_headline = title[:57].rsplit(" ", 1)[0] + "..."
+    else:
+        short_headline = title
+
+    # Description and short_desc from offer description
+    desc = description[:220] if description else ""
+    if len(description) > 140:
+        short_desc = description[:137].rsplit(" ", 1)[0] + "..."
+    else:
+        short_desc = description[:140]
+
+    # CTAs: specific to commitment level, not just payout type
     cta_map = {
-        "CPL":        {"yes": "Get started", "no": "Maybe later"},
-        "CPS":        {"yes": "Shop now", "no": "Maybe later"},
-        "CPA":        {"yes": "Claim offer", "no": "Maybe later"},
-        "MOBILE_APP": {"yes": "Download now", "no": "Maybe later"},
-        "APP_INSTALL":{"yes": "Download now", "no": "Maybe later"},
+        "CPL":        {"yes": "Get my free quote", "no": "Not now"},
+        "CPS":        {"yes": "Shop now", "no": "Not now"},
+        "CPA":        {"yes": "Claim offer", "no": "Not now"},
+        "MOBILE_APP": {"yes": "Download free", "no": "Not now"},
+        "APP_INSTALL":{"yes": "Download free", "no": "Not now"},
+        "CPC":        {"yes": "Learn more", "no": "Not now"},
     }
-    cta = cta_map.get(payout_type, {"yes": "Learn more", "no": "Maybe later"})
+    cta = cta_map.get(payout_type, {"yes": "Get started", "no": "Not now"})
 
     if portal_url:
         bottom_line = f"Ready to build? <{portal_url}|View on {network}> to pull creatives, then add to the MS platform."
@@ -1022,11 +1044,231 @@ def _make_copy_for_brief(brief_data: dict, offer_payload: dict) -> dict:
         bottom_line = "Ready to build? Pull creatives from the network portal and add to the MS platform."
 
     return {
-        "titles":     titles,
-        "ctas":       [cta],
-        "targeting":  "",
-        "bottom_line": bottom_line,
+        "title":          title,
+        "short_headline": short_headline,
+        "description":    desc,
+        "short_desc":     short_desc,
+        "cta":            cta,          # single dict {yes: ..., no: ...}
+        "bottom_line":    bottom_line,
+        # Legacy list keys kept for _build_brief_blocks() compatibility
+        "titles":         [title],
+        "ctas":           [cta],
+        "targeting":      "",
     }
+
+
+def _generate_offer_copy(
+    advertiser: str,
+    description: str,
+    payout_type: str,
+    category: str,
+    payout: str = "",
+    geo: str = "US",
+) -> dict | None:
+    """
+    Use Claude Haiku to generate platform-ready copy for all 6 MS platform copy fields.
+    Called in a background thread — never blocks the approval flow.
+    Returns a dict with keys: headline, short_headline, description, short_desc, cta_yes, cta_no.
+    Returns None on failure — callers must handle gracefully (keep baseline copy).
+    """
+    import json as _json
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        log.warning("_generate_offer_copy: ANTHROPIC_API_KEY not set, skipping AI copy")
+        return None
+
+    prompt = f"""You are a world-class direct response copywriter specializing in post-transaction offers — ads that appear right after someone completes a purchase. The user just transacted. Your copy should feel like a valuable follow-on, not an interruption.
+
+Context:
+- Advertiser: {advertiser}
+- Description: {description}
+- Payout: {payout} {payout_type}
+- Category: {category}
+- Geo: {geo}
+
+Motivation framework:
+- Post-transaction users are in ACTION MODE. Their decision muscle is warm. Lead with the SPECIFIC OUTCOME they get, not the brand name. "$50 back" beats "Join {advertiser}."
+- The offer is a REWARD, not an ad. Frame it as value delivered, not as an ask.
+- Match confidence to payout size: high payout = be specific about the dollar reward. Low payout = emphasize convenience and speed over the dollar amount.
+
+Category to primary motivator (use this to pick the emotional angle):
+- Financial/loans/insurance: control, savings, security. "Lock in your rate" not "Sign up."
+- Shopping/cashback/rewards: deal-seeking, FOMO. "Claim your savings" not "Learn more."
+- Health/wellness: transformation, aspiration. "Start your journey" not "Try it."
+- Entertainment/streaming: convenience, discovery. "Watch free" not "Subscribe."
+- Travel: escape, possibility. "Book your next trip" not "Sign up for deals."
+- Apps/software: productivity, speed. "Try it free" not "Download now."
+
+CTA design rules:
+- cta_yes: Match commitment level. High commitment (purchase) = "Shop now". Low commitment (lead) = "See my rate" or "Get your quote". If payout has a specific dollar amount, use it: "Claim $15" for a $15 CPA. Never: "Learn more", "Click here", "Submit".
+- cta_no: Make it feel like a timing issue, not a hard rejection. "Not now" or "Maybe later" — not "No thanks" or "Skip."
+
+Return ONLY a JSON object. Enforce char limits precisely — count every character:
+- headline: max 90 chars. Specific benefit first. Does NOT start with the advertiser name.
+- short_headline: max 60 chars. Distilled. Every word earns its place.
+- description: max 220 chars. Expands the headline. Answers "why now?" or "why me?"
+- short_desc: max 140 chars. The single most compelling sentence from the description.
+- cta_yes: max 25 chars. Action verb first. Specific to this offer type.
+- cta_no: max 25 chars. Timing language, not rejection language.
+
+Hard rules — enforce without exception:
+- No em dashes (—), en dashes (–), trademark (TM), registered (R), copyright (C) symbols — these break platform rendering
+- No exclamation marks — they read as spam in confirmation page contexts and reduce CTR
+- No "Free" unless the offer description explicitly confirms no cost to user
+- Verify char counts before outputting. A 91-char headline when 90 is the limit is a failure.
+
+JSON only, no explanation:
+{{"headline":"...","short_headline":"...","description":"...","short_desc":"...","cta_yes":"...","cta_no":"..."}}"""
+
+    try:
+        import requests as _req
+        resp = _req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-3-5-haiku-20241022",
+                "max_tokens": 512,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            log.warning(f"_generate_offer_copy: Anthropic API {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        text = resp.json().get("content", [{}])[0].get("text", "").strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+
+        data = _json.loads(text)
+
+        # Hard-enforce char limits — if Claude exceeded, truncate at word boundary
+        def _trunc(s: str, n: int) -> str:
+            s = str(s or "").strip()
+            if len(s) <= n:
+                return s
+            return s[:n - 1].rsplit(" ", 1)[0].rstrip(",.:;") + "..."
+
+        return {
+            "headline":       _trunc(data.get("headline", ""), 90),
+            "short_headline": _trunc(data.get("short_headline", ""), 60),
+            "description":    _trunc(data.get("description", ""), 220),
+            "short_desc":     _trunc(data.get("short_desc", ""), 140),
+            "cta_yes":        _trunc(data.get("cta_yes", ""), 25),
+            "cta_no":         _trunc(data.get("cta_no", ""), 25),
+        }
+    except Exception as e:
+        log.warning(f"_generate_offer_copy failed: {e}")
+        return None
+
+
+def _patch_notion_copy(notion_url: str, ai_copy: dict) -> None:
+    """
+    PATCH an existing Notion queue page to update the copy section with AI-generated fields.
+    Called from a background thread after _write_to_notion_queue() creates the initial page.
+    Appends an updated copy block to the page — simple and reliable.
+    """
+    import requests as _req
+    notion_token = os.environ.get("NOTION_TOKEN", "")
+    if not notion_token or not notion_url:
+        return
+
+    # Extract page ID from URL
+    page_id_raw = notion_url.rstrip("/").split("/")[-1].replace("-", "")
+    if len(page_id_raw) != 32:
+        log.warning(f"_patch_notion_copy: unexpected page_id from {notion_url}")
+        return
+    page_id = f"{page_id_raw[:8]}-{page_id_raw[8:12]}-{page_id_raw[12:16]}-{page_id_raw[16:20]}-{page_id_raw[20:]}"
+
+    def _callout(text: str, emoji: str, qa: str) -> dict:
+        return {
+            "object": "block", "type": "callout",
+            "callout": {
+                "rich_text": [{"type": "text", "text": {"content": text}}],
+                "icon": {"emoji": emoji},
+                "color": "green_background",
+            },
+        }
+
+    def _rt(text: str) -> dict:
+        return {"object": "block", "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+
+    def _heading(text: str) -> dict:
+        return {"object": "block", "type": "heading_2",
+                "heading_2": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+
+    headline       = ai_copy.get("headline", "")
+    short_headline = ai_copy.get("short_headline", "")
+    description    = ai_copy.get("description", "")
+    short_desc     = ai_copy.get("short_desc", "")
+    cta_yes        = ai_copy.get("cta_yes", "")
+    cta_no         = ai_copy.get("cta_no", "")
+
+    new_blocks = [
+        _heading("AI Copy (ready to paste)"),
+        _callout(headline, "✏️", f"{len(headline)}/90"),
+        _rt(f"Headline — {len(headline)}/90 chars"),
+        _callout(short_headline, "🔤", f"{len(short_headline)}/60"),
+        _rt(f"Short Headline — {len(short_headline)}/60 chars"),
+        _callout(description, "📝", f"{len(description)}/220"),
+        _rt(f"Description — {len(description)}/220 chars"),
+        _callout(short_desc, "📋", f"{len(short_desc)}/140"),
+        _rt(f"Short Description — {len(short_desc)}/140 chars"),
+        _callout(cta_yes, "👍", f"{len(cta_yes)}/25"),
+        _rt(f"Positive CTA — {len(cta_yes)}/25 chars"),
+        _callout(cta_no, "👎", f"{len(cta_no)}/25"),
+        _rt(f"Negative CTA — {len(cta_no)}/25 chars"),
+    ]
+
+    try:
+        resp = _req.patch(
+            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            headers={
+                "Authorization": f"Bearer {notion_token}",
+                "Content-Type": "application/json",
+                "Notion-Version": "2022-06-28",
+            },
+            json={"children": new_blocks},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            log.info(f"AI copy patched onto Notion page {page_id}")
+        else:
+            log.warning(f"_patch_notion_copy failed {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        log.warning(f"_patch_notion_copy error: {e}")
+
+
+def _enrich_notion_with_ai_copy(
+    notion_url: str,
+    advertiser: str,
+    description: str,
+    payout_type: str,
+    category: str,
+    payout: str = "",
+    geo: str = "US",
+) -> None:
+    """
+    Background-thread target: generate AI copy and patch it onto a Notion queue page.
+    Safe to call from threading.Thread — never raises.
+    """
+    try:
+        ai_copy = _generate_offer_copy(advertiser, description, payout_type, category, payout, geo)
+        if ai_copy and notion_url:
+            _patch_notion_copy(notion_url, ai_copy)
+            log.info(f"AI copy enrichment complete for {advertiser}")
+        else:
+            log.info(f"AI copy skipped for {advertiser} (no copy returned)")
+    except Exception as e:
+        log.warning(f"AI copy enrichment error for {advertiser}: {e}")
 
 
 def _slack_thread_url(channel: str, thread_ts: str) -> str:
@@ -1037,6 +1279,7 @@ def _slack_thread_url(channel: str, thread_ts: str) -> str:
 
 _LAUNCHED_OFFERS_FILE        = _DATA_DIR / "launched_offers.json"
 _PULSE_STATE_FILE            = _DATA_DIR / "pulse_state.json"
+_NOTION_NOTIFIED_FILE        = _DATA_DIR / "notion_notified.json"
 _LEARNINGS_FILE              = _DATA_DIR / "learnings.json"
 _LEARNED_BENCHMARKS_FILE     = _DATA_DIR / "learned_benchmarks.json"
 
@@ -2573,21 +2816,15 @@ def _write_to_notion_queue(
     perf_ctx     = copy_data.get("pf", "") or brief_data.get("performance_context", "")
     risk_flag    = copy_data.get("rf", "") or brief_data.get("risk_flag", "")
 
-    title_copy  = copy_data.get("t", "") or copy_data.get("title", "")
-    desc_copy   = copy_data.get("d", "") or copy_data.get("description", "")
-    cta_yes     = copy_data.get("cy", "") or copy_data.get("cta_yes", "")
-    cta_no      = copy_data.get("cn", "") or copy_data.get("cta_no", "")
+    title_copy   = copy_data.get("t", "") or copy_data.get("title", "")
+    sh_copy      = copy_data.get("sh", "") or title_copy[:60]
+    desc_copy    = copy_data.get("d", "") or copy_data.get("description", "")
+    sd_copy      = copy_data.get("sd", "") or desc_copy[:140]
+    cta_yes      = copy_data.get("cy", "") or copy_data.get("cta_yes", "")
+    cta_no       = copy_data.get("cn", "") or copy_data.get("cta_no", "")
+    offer_id     = copy_data.get("oid", "") or brief_data.get("offer_id", "")
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    # ── Copy QA checks ────────────────────────────────────────────────────────
-    _PROHIBITED = ("—", "–", "™", "®")
-    title_len   = len(title_copy)
-    desc_len    = len(desc_copy)
-    title_ok    = title_len <= 58 and not any(c in title_copy for c in _PROHIBITED)
-    desc_ok     = desc_len  <= 170 and not any(c in desc_copy for c in _PROHIBITED)
-    title_qa    = f"✓ {title_len} chars" if title_ok else f"⚠ {title_len} chars (max 58)" if title_len > 58 else "⚠ prohibited chars"
-    desc_qa     = f"✓ {desc_len} chars" if desc_ok else f"⚠ {desc_len} chars (max 170)" if desc_len > 170 else "⚠ prohibited chars"
 
     # ── Properties ────────────────────────────────────────────────────────────
     page_name = f"{advertiser} — {payout_str} · {network}"
@@ -2606,10 +2843,15 @@ def _write_to_notion_queue(
     # Remove empty property blocks (Notion rejects empty select/number/url)
     properties = {k: v for k, v in properties.items() if v}
 
-    # ── Page body ─────────────────────────────────────────────────────────────
+    # ── Page body helpers ─────────────────────────────────────────────────────
     def _rt(text: str) -> dict:
         return {"object": "block", "type": "paragraph",
                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+
+    def _rt_muted(text: str) -> dict:
+        return {"object": "block", "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": text},
+                                              "annotations": {"color": "gray"}}]}}
 
     def _heading(text: str, level: int = 2) -> dict:
         h = f"heading_{level}"
@@ -2619,37 +2861,68 @@ def _write_to_notion_queue(
     def _divider() -> dict:
         return {"object": "block", "type": "divider", "divider": {}}
 
-    def _callout(text: str, emoji: str = "📋") -> dict:
+    def _callout(text: str, emoji: str = "📋", color: str = "gray_background") -> dict:
         return {
             "object": "block", "type": "callout",
             "callout": {
-                "rich_text": [{"type": "text", "text": {"content": text}}],
+                "rich_text": [{"type": "text", "text": {"content": text or "(AI copy pending — opens in ~10 sec)"}}],
                 "icon": {"emoji": emoji},
-                "color": "blue_background",
+                "color": color,
             }
         }
 
+    def _copy_field(label: str, emoji: str, value: str, max_chars: int) -> list:
+        """Callout block for a copy field + muted char-count line below it."""
+        n = len(value)
+        ok = n <= max_chars and n > 0
+        qa = f"  {n}/{max_chars} chars" if ok else f"  {n}/{max_chars} chars (over limit)" if n > max_chars else f"  empty — AI copy pending"
+        color = "green_background" if ok else "red_background" if n > max_chars else "yellow_background"
+        return [
+            _callout(value or "", emoji, color),
+            _rt_muted(f"{label}{qa}"),
+        ]
+
+    # ── Platform Entry checklist — all 12 MS platform fields ─────────────────
+    internal_name = f"{advertiser} — {network} — {now_iso}"
+    goal_type = "CPC" if "click" in payout_type.lower() else "CPA"
+
     children = [
-        _heading("Copy", 2),
-        _callout(title_copy, "✏️"),
-        _rt(title_qa),
-        _callout(desc_copy, "📝"),
-        _rt(desc_qa),
-        _callout(f'Yes: "{cta_yes}"  /  No: "{cta_no}"', "👆"),
+        _heading("Platform Entry Checklist", 2),
+        _rt_muted("Copy and paste each field directly into the MS platform form. AI copy arrives in ~10 sec if blank."),
         _divider(),
-        _heading("Offer Details", 2),
-        _rt(f"Payout: {payout_str}  ·  Network: {network}  ·  Payout Type: {payout_type}"),
-        _rt(f"Tracking URL: {tracking_url}" if tracking_url else "Tracking URL: pull from network portal"),
+
+        # --- Copy fields (6 fields) ---
+        _heading("Copy", 3),
+        *_copy_field("Headline", "✏️", title_copy, 90),
+        *_copy_field("Short Headline", "🔤", sh_copy, 60),
+        *_copy_field("Description", "📝", desc_copy, 220),
+        *_copy_field("Short Description", "📋", sd_copy, 140),
+        *_copy_field("Positive CTA", "👍", cta_yes, 25),
+        *_copy_field("Negative CTA", "👎", cta_no, 25),
         _divider(),
-        _heading("Scout Analysis", 2),
-        _rt(f"Est. RPM: ${rpm:,.0f}" if rpm else "Est. RPM: N/A"),
-        _rt(f"Benchmark basis: {perf_ctx}" if perf_ctx else "Benchmark basis: No MS data"),
-        _rt(f"Fit note: {risk_flag}" if risk_flag else "Fit note: None flagged"),
+
+        # --- Platform config (6 fields) ---
+        _heading("Platform Config", 3),
+        _rt(f"Internal Offer Name:  {internal_name[:100]}"),
+        _rt(f"Partner Offer Name:   {advertiser[:80]}"),
+        _rt(f"Advertiser Name:      {advertiser[:28]}"),
+        _rt(f"Destination URL:      {tracking_url}" if tracking_url else "Destination URL:      pull from network portal"),
+        _rt(f"Goal Type:            {goal_type}"),
+        _rt(f"Goal (Payout):        {payout_str}"),
+        _rt(f"Network:              {network}" if network else "Network:              set in platform"),
+        _rt(f"Network Offer ID:     {offer_id}" if offer_id else "Network Offer ID:     pull from network portal"),
+        _rt("Perkswall Enabled:    ON"),
+        _rt("Test Offer:           ON  (flip OFF when ready to go live)"),
         _divider(),
-        _heading("Brief Thread", 2),
-        _rt(f"Approved by: {user_id}  ·  {now_iso}"),
+
+        # --- Scout intelligence ---
+        _heading("Scout Intelligence", 3),
+        _rt(f"Est. RPM:   ${rpm:,.0f}" if rpm else "Est. RPM:   N/A"),
+        _rt(f"Basis:      {perf_ctx}" if perf_ctx else "Basis:      No MS historical data"),
+        _rt(f"Risk note:  {risk_flag}" if risk_flag else "Risk note:  None flagged"),
+        _rt(f"Approved:   <@{user_id}>  ·  {now_iso}"),
         {"object": "block", "type": "bookmark",
-         "bookmark": {"url": thread_url, "caption": [{"type": "text", "text": {"content": "View brief thread in Slack →"}}]}}
+         "bookmark": {"url": thread_url, "caption": [{"type": "text", "text": {"content": "Brief thread in Slack"}}]}}
         if thread_url else _rt("Brief thread: not available"),
     ]
 
@@ -2844,29 +3117,49 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     # 3. Build thread URL — used in Notion page body and queue card
     thread_url = _slack_thread_url(channel, message_ts)
 
-    # 4. Write to Notion queue (no brief_ts — we're not posting a brief card in thread)
+    # 4. Write to Notion queue (baseline copy — AI enrichment follows asynchronously)
     copy_data = {
-        "t":   copy.get("title", ""),
-        "d":   copy.get("description", ""),
-        "cy":  (copy.get("cta") or {}).get("yes", ""),
-        "cn":  (copy.get("cta") or {}).get("no", ""),
+        "t":   copy.get("title", "")[:90],
+        "sh":  copy.get("short_headline", copy.get("title", "")[:60])[:60],
+        "d":   copy.get("description", "")[:220],
+        "sd":  copy.get("short_desc", copy.get("description", "")[:140])[:140],
+        "cy":  (copy.get("cta") or {}).get("yes", "")[:25],
+        "cn":  (copy.get("cta") or {}).get("no", "")[:25],
         "rpm": score,
         "pf":  brief_data.get("performance_context", ""),
         "rf":  brief_data.get("risk_flag", ""),
         "pt":  brief_data.get("payout_type", "CPA"),
+        "oid": brief_data.get("offer_id", ""),
     }
     notion_url = _write_to_notion_queue(brief_data, copy_data, user_id, thread_url)
 
-    # 5. Post structured offer card to #scout-offers — this IS the brief
+    # 5. Enrich Notion page with AI-generated copy in background (non-blocking)
+    if notion_url:
+        threading.Thread(
+            target=_enrich_notion_with_ai_copy,
+            args=(
+                notion_url,
+                brief_data.get("advertiser", advertiser),
+                brief_data.get("description", offer.get("description", "")),
+                brief_data.get("payout_type", offer.get("payout_type", "CPA")),
+                brief_data.get("category", offer.get("category", "")),
+                offer.get("payout", ""),
+                brief_data.get("geo", offer.get("geo", "US")),
+            ),
+            daemon=True,
+            name=f"ai-copy-{advertiser[:20]}",
+        ).start()
+
+    # 6. Post structured offer card to #scout-offers — this IS the brief
     _post_offer_queue_card(web, brief_data, copy, user_id, thread_url, notion_url, score)
 
-    # 6. Persist approval state (for lifecycle tracking + launch notification)
+    # 7. Persist approval state (for lifecycle tracking + launch notification)
     _record_queued_offer(
         advertiser, brief_data, user_id, thread_url,
         notion_url=notion_url or "", copy_data=copy_data,
     )
 
-    # 7. One terse confirmation in the digest thread — no noise
+    # 8. One terse confirmation in the digest thread — no noise
     notion_link = f" · <{notion_url}|Notion>" if notion_url else ""
     confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
     web.chat_postMessage(channel=channel, thread_ts=message_ts, text=confirm)
@@ -2923,13 +3216,16 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
     # Copy data (packed into button value with short keys)
     copy_data = {
         "t":   data.get("t", ""),
+        "sh":  data.get("sh", ""),
         "d":   data.get("d", ""),
+        "sd":  data.get("sd", ""),
         "cy":  data.get("cy", ""),
         "cn":  data.get("cn", ""),
         "rpm": data.get("rpm", 0),
         "pf":  data.get("pf", ""),
         "rf":  data.get("rf", ""),
         "pt":  data.get("pt", "CPA"),
+        "oid": data.get("offer_id", ""),
     }
 
     # Write to Notion + update brief card in-place with ⏳ status
@@ -2943,6 +3239,23 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
         advertiser, brief_data, user_id, thread_url,
         notion_url=notion_url or "", copy_data=copy_data,
     )
+
+    # Enrich Notion page with AI-generated copy (non-blocking background thread)
+    if notion_url:
+        threading.Thread(
+            target=_enrich_notion_with_ai_copy,
+            args=(
+                notion_url,
+                brief_data.get("advertiser", advertiser),
+                data.get("d", ""),
+                brief_data.get("payout_type", data.get("pt", "CPA")),
+                brief_data.get("category", data.get("category", "")),
+                brief_data.get("payout", ""),
+                brief_data.get("geo", "US"),
+            ),
+            daemon=True,
+            name=f"ai-copy-{advertiser[:20]}",
+        ).start()
 
     # Pre-flight QA in background — URL check + MS history, posts consolidated result
     _run_preflight_qa(web, channel, thread_ts, brief_data)
@@ -4690,6 +5003,134 @@ def _run_startup_smoke_test(web: WebClient) -> None:
             pass
 
 
+# ── Notion → Slack status watcher ────────────────────────────────────────────
+
+def _load_notion_notified() -> dict:
+    """Load the set of Notion page IDs we've already posted status updates for."""
+    try:
+        if _NOTION_NOTIFIED_FILE.exists():
+            return json.loads(_NOTION_NOTIFIED_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_notion_notified(state: dict) -> None:
+    try:
+        _NOTION_NOTIFIED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(_NOTION_NOTIFIED_FILE, state)
+    except Exception as e:
+        log.warning(f"[notion-watcher] save error: {e}")
+
+
+def _check_notion_queue_changes(web: WebClient, notion_token: str, queue_db_id: str, notified: dict) -> None:
+    """
+    Query the Notion Demand Queue DB for pages where Status != 'Awaiting Entry'.
+    For each unseen page, post a status update to the Scout offers channel and tag the approver.
+    """
+    offers_channel = _route_channel("offers")
+
+    try:
+        resp = requests.post(
+            f"https://api.notion.com/v1/databases/{queue_db_id}/query",
+            headers={
+                "Authorization": f"Bearer {notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            json={
+                "filter": {
+                    "property": "Status",
+                    "select": {"does_not_equal": "Awaiting Entry"},
+                }
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            log.warning(f"[notion-watcher] query failed {resp.status_code}: {resp.text[:200]}")
+            return
+
+        results = resp.json().get("results", [])
+    except Exception as e:
+        log.warning(f"[notion-watcher] request error: {e}")
+        return
+
+    changed = False
+    for page in results:
+        page_id = page.get("id", "").replace("-", "")
+        if not page_id or page_id in notified:
+            continue
+
+        props       = page.get("properties", {})
+        status      = (props.get("Status") or {}).get("select", {}).get("name", "Unknown")
+        adv_raw     = (props.get("Name") or {}).get("title", [{}])
+        adv_name    = adv_raw[0].get("plain_text", "Offer") if adv_raw else "Offer"
+        approved_by = ""
+        ab_rt       = (props.get("Approved By") or {}).get("rich_text", [])
+        if ab_rt:
+            approved_by = ab_rt[0].get("plain_text", "")
+        notion_url  = f"https://www.notion.so/{page_id}"
+
+        _STATUS_EMOJI = {
+            "Live":       ":white_check_mark:",
+            "Needs Work": ":warning:",
+            "Rejected":   ":x:",
+        }
+        emoji = _STATUS_EMOJI.get(status, ":bell:")
+
+        lines = [f"{emoji} *{adv_name}* status changed to *{status}*"]
+        if status == "Live":
+            lines.append("Offer is live in the MS platform.")
+        elif status == "Needs Work":
+            lines.append("Review the Notion page and revise copy before going live.")
+        elif status == "Rejected":
+            lines.append("Offer will not be entered — marked rejected.")
+        if approved_by:
+            lines.append(f"Originally approved by <@{approved_by}>")
+        lines.append(f"<{notion_url}|View in Notion>")
+
+        try:
+            web.chat_postMessage(channel=offers_channel, text="\n".join(lines))
+            log.info(f"[notion-watcher] posted status change: {adv_name} → {status}")
+        except Exception as e:
+            log.warning(f"[notion-watcher] post error for {adv_name}: {e}")
+            continue
+
+        notified[page_id] = status
+        changed = True
+
+    if changed:
+        _save_notion_notified(notified)
+
+
+def _notion_watcher_loop(web: WebClient) -> None:
+    """
+    Background daemon: polls the Notion Demand Queue DB every 5 minutes.
+    When a page's Status changes from 'Awaiting Entry', posts to #scout-offers
+    and tags the original approver. State stored in notion_notified.json so
+    each transition fires exactly once.
+    """
+    import time
+
+    POLL_INTERVAL = 300  # 5 minutes — fast enough for same-day awareness
+
+    notion_token = os.environ.get("NOTION_TOKEN", "")
+    queue_db_id  = os.environ.get("NOTION_QUEUE_DB_ID", "")
+    if not notion_token or not queue_db_id:
+        log.info("[notion-watcher] disabled — NOTION_TOKEN or NOTION_QUEUE_DB_ID not set")
+        return
+
+    log.info("[notion-watcher] started — polling every 5 min")
+    notified = _load_notion_notified()
+
+    while True:
+        try:
+            _check_notion_queue_changes(web, notion_token, queue_db_id, notified)
+        except Exception as e:
+            log.warning(f"[notion-watcher] loop error: {e}")
+        time.sleep(POLL_INTERVAL)
+
+
 def main():
     global _BOT_USER_ID
     _check_singleton()
@@ -4723,6 +5164,8 @@ def main():
     threading.Thread(target=_nightly_harvest, daemon=True, name="context-harvest").start()
     # Background: daily offer scraper — keeps offers_latest.json fresh (6am CT, or immediately on first boot)
     threading.Thread(target=_run_scraper_daemon, daemon=True, name="scraper").start()
+    # Background: Notion → Slack watcher — posts when queue page Status changes from "Awaiting Entry"
+    threading.Thread(target=_notion_watcher_loop, args=(web_client,), daemon=True, name="notion-watcher").start()
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
