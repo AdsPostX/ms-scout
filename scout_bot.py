@@ -4547,6 +4547,31 @@ def _seed_entity_overrides() -> None:
         log.info("[startup] seeded Button exclusion into data/entity_overrides.json")
 
 
+def _run_startup_smoke_test(web: WebClient) -> None:
+    """
+    Run smoke tests on every startup and post results to #scout-qa.
+    Non-blocking — runs in a background thread so it doesn't delay bot startup.
+    Catches the class of bug that just burned us: bad model name, broken import,
+    ClickHouse down, etc. — all invisible until someone @mentions Scout.
+    """
+    try:
+        import smoke_test as _st
+        results, pass_count = _st.run_tests(quiet=True)
+        total = len(results)
+        msg = _st.format_slack_message(results, pass_count)
+        web.chat_postMessage(channel=_SCOUT_HQ_CHANNEL, text=msg)
+        log.info(f"[smoke] {pass_count}/{total} checks passed — posted to #scout-qa")
+    except Exception as e:
+        log.warning(f"[smoke] startup smoke test failed to run: {e}")
+        try:
+            web.chat_postMessage(
+                channel=_SCOUT_HQ_CHANNEL,
+                text=f":red_circle: *Scout startup smoke test crashed* — `{e}`\nCheck Render logs.",
+            )
+        except Exception:
+            pass
+
+
 def main():
     global _BOT_USER_ID
     _check_singleton()
@@ -4559,6 +4584,9 @@ def main():
     socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
 
+    # Startup: smoke test — runs immediately in background, posts pass/fail to #scout-qa.
+    # Catches bad model names, broken imports, ClickHouse down, etc. before anyone @mentions Scout.
+    threading.Thread(target=_run_startup_smoke_test, args=(web_client,), daemon=True, name="smoke-test").start()
     # Background: daily stale queue alerts (daemon thread dies cleanly on exit)
     threading.Thread(target=_check_stale_queue, args=(web_client,), daemon=True).start()
     # Background: 14-day performance recap — compares Scout estimates to actual ClickHouse RPM
