@@ -4443,9 +4443,35 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         def _run_force_sniper():
             try:
                 import scout_digest
+                offers_file = _DATA_DIR / "offers_latest.json"
+
+                # If no offer data yet, run the scraper first so there's something to post
+                if not offers_file.exists() or offers_file.stat().st_size < 100:
+                    web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                         text=":screwdriver: No offer data yet — running scraper first (~60s)...")
+                    try:
+                        import offer_scraper
+                        offer_scraper.run_all()
+                    except Exception as scrape_err:
+                        web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                             text=f":x: Scraper failed: `{scrape_err}`")
+                        return
+
+                # Check offer count before calling post_digest
+                try:
+                    import json as _j
+                    offer_count = len(_j.loads(offers_file.read_text()))
+                except Exception:
+                    offer_count = 0
+
+                if offer_count == 0:
+                    web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                         text=":warning: Scraper ran but returned 0 offers — check network credentials in env vars.")
+                    return
+
                 scout_digest.post_digest(is_force=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text=":white_check_mark: Sniper digest posted to #scout-qa — click ✓ Add to Queue on any offer to test the flow.")
+                                     text=f":white_check_mark: Sniper digest posted to #scout-qa ({offer_count} offers in pool) — click *Add to Queue* on any offer to test the flow.")
             except Exception as e:
                 log.error(f"[force sniper] failed: {e}", exc_info=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
