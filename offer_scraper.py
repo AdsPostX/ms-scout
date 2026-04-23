@@ -46,6 +46,45 @@ CJ_API_KEY         = os.environ.get("CJ_API_KEY", "")      # Personal Access Tok
 CJ_WEBSITE_ID      = os.environ.get("CJ_WEBSITE_ID", "")   # CJ Company ID (CID) — used for advertiser lookup
 CJ_PUBLISHER_ID    = os.environ.get("CJ_PUBLISHER_ID", "") # CJ Publisher Website ID (PID) — used for link-search
 
+# ShareASale
+SHAREASALE_AFFILIATE_ID = os.environ.get("SHAREASALE_AFFILIATE_ID", "3279349")
+SHAREASALE_API_TOKEN    = os.environ.get("SHAREASALE_API_TOKEN", "")   # API token from dashboard
+SHAREASALE_API_SECRET   = os.environ.get("SHAREASALE_API_SECRET", "")  # API secret from dashboard
+
+# Rakuten Advertising (formerly LinkShare)
+RAKUTEN_PUBLISHER_ID    = os.environ.get("RAKUTEN_PUBLISHER_ID", "3948979")
+RAKUTEN_API_TOKEN       = os.environ.get("RAKUTEN_API_TOKEN", "")  # OAuth token from Rakuten dashboard
+
+# Awin
+AWIN_PUBLISHER_ID       = os.environ.get("AWIN_PUBLISHER_ID", "")
+AWIN_API_KEY            = os.environ.get("AWIN_API_KEY", "")  # API key from awin.com/us/en/interface/api/
+
+# TUNE / HasOffers — multiple white-label instances (KashKick, BrownBoots, AdAction, Revoffers, etc.)
+# Each instance is at {subdomain}.hasoffers.com (or {subdomain}.tune.com for newer Revoffers)
+# Credentials stored per-instance: TUNE_{NAME}_NETWORK_ID + TUNE_{NAME}_API_KEY
+TUNE_INSTANCES = [
+    # (label, network_id, api_key, base_url)
+    # Populated at startup from env vars; add more as needed
+]
+# Dynamically populate from env vars: TUNE_KASHKICK_NETWORK_ID / TUNE_KASHKICK_API_KEY
+for _inst_name in ("KASHKICK", "BROWNBOOTS", "ADACTION", "REVOFFERS", "ADBLOOM", "SUCCESSFUL_MEDIA"):
+    _nid = os.environ.get(f"TUNE_{_inst_name}_NETWORK_ID", "")
+    _key = os.environ.get(f"TUNE_{_inst_name}_API_KEY", "")
+    _url = os.environ.get(f"TUNE_{_inst_name}_BASE_URL", f"https://{_inst_name.lower().replace('_', '')}.hasoffers.com")
+    if _nid and _key:
+        TUNE_INSTANCES.append((_inst_name.lower(), _nid, _key, _url))
+
+# Everflow — multiple white-label instances (GiddyUp, Accio Ads, Klay, Credit.com, etc.)
+EVERFLOW_INSTANCES = [
+    # (label, api_key, base_url)
+    # Populated at startup from env vars
+]
+for _ef_name in ("GIDDYUP", "ACCIOADS", "KLAYMEDIA", "CREDITCOM", "MWKCONSULTING", "PAWZITIVITY", "ARAGONPREMIUM"):
+    _ef_key = os.environ.get(f"EVERFLOW_{_ef_name}_API_KEY", "")
+    _ef_url = os.environ.get(f"EVERFLOW_{_ef_name}_BASE_URL", "")
+    if _ef_key and _ef_url:
+        EVERFLOW_INSTANCES.append((_ef_name.lower(), _ef_key, _ef_url))
+
 # Notion — primary output destination
 # Setup: notion.so/my-integrations → create integration → copy secret_... token
 #        Then share the "Offer Inventory — MS Network" database with that integration
@@ -1117,6 +1156,534 @@ def fetch_cj() -> list:
 
 
 # ---------------------------------------------------------------------------
+# ShareASale
+# ---------------------------------------------------------------------------
+
+def fetch_shareasale() -> list:
+    """
+    ShareASale — publisher affiliate programs.
+    Uses ShareASale REST API v1.0 with HMAC-SHA256 authentication.
+    Publisher ID: 3279349
+    Docs: https://api.shareasale.com/r.cfm?b=1433704&u=3279349&m=47189&urllink=&afftrack=
+    """
+    import hashlib
+    import hmac
+    from datetime import datetime, timezone
+
+    if not SHAREASALE_API_TOKEN or not SHAREASALE_API_SECRET:
+        log.warning("ShareASale: SHAREASALE_API_TOKEN or SHAREASALE_API_SECRET not set — skipping")
+        return []
+
+    aff_id   = SHAREASALE_AFFILIATE_ID
+    token    = SHAREASALE_API_TOKEN
+    secret   = SHAREASALE_API_SECRET
+
+    def _auth_headers(action: str) -> dict:
+        ts = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+        sig_str = f"{token}:{ts}:{action}:{secret}"
+        sig = hmac.new(secret.encode(), sig_str.encode(), hashlib.sha256).hexdigest()
+        return {
+            "x-ShareASale-APIToken": token,
+            "x-ShareASale-Date": ts,
+            "x-ShareASale-Authentication": sig,
+        }
+
+    offers: list[dict] = []
+    page = 1
+
+    while True:
+        try:
+            params = {
+                "affiliateId": aff_id,
+                "action":      "getMerchants",
+                "version":     "2.8",
+                "pageNumber":  page,
+            }
+            headers = _auth_headers("getMerchants")
+            resp = requests.get(
+                f"https://api.shareasale.com/x.cfm",
+                headers=headers,
+                params=params,
+                timeout=30,
+            )
+            if not resp.ok:
+                log.warning(f"ShareASale: API {resp.status_code} — {resp.text[:200]}")
+                break
+        except Exception as e:
+            log.warning(f"ShareASale: request failed — {e}")
+            break
+
+        try:
+            data = resp.json()
+        except Exception:
+            log.warning(f"ShareASale: non-JSON response — {resp.text[:200]}")
+            break
+
+        merchants = data if isinstance(data, list) else data.get("data", [])
+        if not merchants:
+            break
+
+        for m in merchants:
+            merchant_id = str(m.get("merchantId") or m.get("MerchantID", ""))
+            name        = m.get("name") or m.get("Name") or m.get("MerchantName", "")
+            category    = m.get("category") or m.get("Category", "")
+            commission  = m.get("commissionRate") or m.get("CommissionRate", "")
+            status      = m.get("activationStatus", "active")
+            url         = m.get("url") or m.get("Website", "")
+
+            if not merchant_id or str(status).lower() not in ("active", "1", "true"):
+                continue
+
+            payout_str = str(commission).strip()
+            if "%" in payout_str:
+                ptype, raw = "CPS", f"{payout_str} CPS"
+            elif payout_str and payout_str not in ("0", "0.0"):
+                ptype, raw = "CPL", f"${payout_str} CPL"
+            else:
+                ptype, raw = "CPA", "Commission varies"
+
+            tracking = f"https://www.shareasale.com/r.cfm?b=1&u={aff_id}&m={merchant_id}"
+
+            o = empty_offer()
+            o["network"]     = "shareasale"
+            o["offer_id"]    = merchant_id
+            o["advertiser"]  = name
+            o["title"]       = name
+            o["description"] = m.get("description") or m.get("Description", "")
+            o["payout"]      = payout_str
+            o["payout_type"] = ptype
+            o["_raw_payout"] = raw[:120]
+            o["currency"]    = "USD"
+            o["category"]    = category
+            o["geo"]         = "US"
+            o["tracking_url"] = tracking
+            o["status"]      = "Active"
+            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            offers.append(o)
+
+        if len(merchants) < 50:
+            break
+        page += 1
+
+    log.info(f"ShareASale: {len(offers)} merchant programs fetched")
+    return offers
+
+
+# ---------------------------------------------------------------------------
+# Rakuten Advertising
+# ---------------------------------------------------------------------------
+
+def fetch_rakuten() -> list:
+    """
+    Rakuten Advertising (formerly LinkShare) — publisher programs.
+    REST API: https://api.rakutenmarketing.com/1.0/publisher/advertisers
+    OAuth Bearer token required.
+    Publisher ID: 3948979
+    """
+    if not RAKUTEN_API_TOKEN:
+        log.warning("Rakuten: RAKUTEN_API_TOKEN not set — skipping")
+        return []
+
+    headers = {
+        "Authorization": f"Bearer {RAKUTEN_API_TOKEN}",
+        "Accept": "application/json",
+    }
+
+    offers: list[dict] = []
+    page = 1
+
+    while True:
+        try:
+            resp = requests.get(
+                "https://api.rakutenmarketing.com/1.0/publisher/advertisers",
+                headers=headers,
+                params={"network": "2", "page": page, "limit": 100},
+                timeout=30,
+            )
+            if resp.status_code == 401:
+                log.warning("Rakuten: 401 Unauthorized — check RAKUTEN_API_TOKEN")
+                break
+            if not resp.ok:
+                log.warning(f"Rakuten: API {resp.status_code} — {resp.text[:200]}")
+                break
+        except Exception as e:
+            log.warning(f"Rakuten: request failed — {e}")
+            break
+
+        try:
+            data = resp.json()
+        except Exception:
+            log.warning(f"Rakuten: non-JSON response — {resp.text[:200]}")
+            break
+
+        advertisers = data.get("advertisers") or data.get("data") or (data if isinstance(data, list) else [])
+        if not advertisers:
+            break
+
+        for a in advertisers:
+            adv_id   = str(a.get("id") or a.get("advertiserId", ""))
+            name     = a.get("name") or a.get("advertiserName", "")
+            category = a.get("category") or a.get("vertical", "")
+            status   = a.get("status", "")
+            site_url = a.get("siteUrl") or a.get("websiteUrl", "")
+
+            if not adv_id or str(status).lower() not in ("active", "approved", "joined", "1", ""):
+                continue
+
+            # Rakuten publisher link format
+            mid     = a.get("mid") or adv_id
+            tracking = f"https://click.linksynergy.com/deeplink?id={RAKUTEN_PUBLISHER_ID}&mid={mid}&murl={site_url}"
+
+            commission = a.get("commissionRate") or a.get("baseCommission", "")
+            payout_str = str(commission).strip()
+            if "%" in payout_str:
+                ptype, raw = "CPS", f"{payout_str} CPS"
+            elif payout_str and payout_str not in ("0", "0.0"):
+                ptype, raw = "CPA", f"${payout_str} CPA"
+            else:
+                ptype, raw = "CPA", "Commission varies"
+
+            o = empty_offer()
+            o["network"]     = "rakuten"
+            o["offer_id"]    = adv_id
+            o["advertiser"]  = name
+            o["title"]       = name
+            o["description"] = a.get("description", "")
+            o["payout"]      = payout_str
+            o["payout_type"] = ptype
+            o["_raw_payout"] = raw[:120]
+            o["currency"]    = "USD"
+            o["category"]    = category
+            o["geo"]         = "US"
+            o["tracking_url"] = tracking
+            o["status"]      = "Active"
+            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            offers.append(o)
+
+        if len(advertisers) < 100:
+            break
+        page += 1
+
+    log.info(f"Rakuten: {len(offers)} advertiser programs fetched")
+    return offers
+
+
+# ---------------------------------------------------------------------------
+# Awin
+# ---------------------------------------------------------------------------
+
+def fetch_awin() -> list:
+    """
+    Awin (formerly Affiliate Window) — publisher programmes.
+    REST API: https://api.awin.com/publishers/{publisherId}/programmes
+    API key from awin.com dashboard → API Credentials tab.
+    """
+    if not AWIN_API_KEY or not AWIN_PUBLISHER_ID:
+        log.warning("Awin: AWIN_API_KEY or AWIN_PUBLISHER_ID not set — skipping")
+        return []
+
+    headers = {
+        "Authorization": f"Bearer {AWIN_API_KEY}",
+        "Accept": "application/json",
+    }
+
+    offers: list[dict] = []
+
+    try:
+        resp = requests.get(
+            f"https://api.awin.com/publishers/{AWIN_PUBLISHER_ID}/programmes",
+            headers=headers,
+            params={"relationship": "joined", "countryCode": "US"},
+            timeout=60,
+        )
+        if resp.status_code == 401:
+            log.warning("Awin: 401 — check AWIN_API_KEY")
+            return []
+        if not resp.ok:
+            log.warning(f"Awin: {resp.status_code} — {resp.text[:200]}")
+            return []
+    except Exception as e:
+        log.warning(f"Awin: request failed — {e}")
+        return []
+
+    try:
+        programmes = resp.json()
+    except Exception:
+        log.warning(f"Awin: non-JSON response — {resp.text[:200]}")
+        return []
+
+    if isinstance(programmes, dict):
+        programmes = programmes.get("programmes") or programmes.get("data") or []
+
+    for p in programmes:
+        prog_id  = str(p.get("id") or p.get("programId", ""))
+        name     = p.get("name") or p.get("programName", "")
+        category = p.get("primarySector") or p.get("category", "")
+        ctype    = p.get("commissionRange", {})
+        comm_max = ctype.get("max") if isinstance(ctype, dict) else None
+        site_url = p.get("primaryUrl") or p.get("url", "")
+
+        if not prog_id or not name:
+            continue
+
+        payout_str = str(comm_max or "").strip() if comm_max is not None else ""
+        ptype = "CPS"  # Awin is primarily revenue share
+        raw   = f"{payout_str}% CPS" if payout_str else "Commission varies"
+
+        tracking = f"https://www.awin1.com/cread.php?awinmid={prog_id}&awinaffid={AWIN_PUBLISHER_ID}&p={site_url}"
+
+        o = empty_offer()
+        o["network"]     = "awin"
+        o["offer_id"]    = prog_id
+        o["advertiser"]  = name
+        o["title"]       = name
+        o["description"] = p.get("shortDescription") or p.get("description", "")
+        o["payout"]      = payout_str
+        o["payout_type"] = ptype
+        o["_raw_payout"] = raw[:120]
+        o["currency"]    = "USD"
+        o["category"]    = category
+        o["geo"]         = "US"
+        o["tracking_url"] = tracking
+        o["status"]      = "Active"
+        o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+        offers.append(o)
+
+    log.info(f"Awin: {len(offers)} programmes fetched")
+    return offers
+
+
+# ---------------------------------------------------------------------------
+# TUNE / HasOffers (multi-instance)
+# ---------------------------------------------------------------------------
+
+def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str) -> list:
+    """
+    TUNE/HasOffers publisher API — single instance.
+    Endpoint: {base_url}/Affiliate_Offer/findAll?affiliate_id={network_id}&api_key={api_key}
+    """
+    offers: list[dict] = []
+    page = 1
+
+    while True:
+        try:
+            resp = requests.get(
+                f"{base_url.rstrip('/')}/Affiliate_Offer/findAll",
+                params={
+                    "affiliate_id": network_id,
+                    "api_key":      api_key,
+                    "status":       "active",
+                    "page":         page,
+                    "limit":        500,
+                    "fields[]":     ["id", "name", "description", "preview_url",
+                                     "payout_type", "default_payout",
+                                     "advertiser_id", "advertiser.company",
+                                     "categories"],
+                },
+                timeout=30,
+            )
+            if resp.status_code in (401, 403):
+                log.warning(f"TUNE/{label}: {resp.status_code} — check credentials")
+                break
+            if not resp.ok:
+                log.warning(f"TUNE/{label}: {resp.status_code} — {resp.text[:200]}")
+                break
+        except Exception as e:
+            log.warning(f"TUNE/{label}: request error — {e}")
+            break
+
+        try:
+            data = resp.json()
+        except Exception:
+            log.warning(f"TUNE/{label}: non-JSON response — {resp.text[:200]}")
+            break
+
+        # TUNE response shape: {request: {}, response: {status: 1, data: {data: [...]}}}
+        resp_body = data.get("response", data)
+        inner     = resp_body.get("data", {}) if isinstance(resp_body, dict) else {}
+        records   = inner.get("data", []) if isinstance(inner, dict) else (inner if isinstance(inner, list) else [])
+
+        if not records:
+            # Alternative: top-level list
+            records = data if isinstance(data, list) else []
+
+        if not records:
+            break
+
+        for o_raw in records:
+            if isinstance(o_raw, list):
+                continue  # skip malformed
+
+            offer_id   = str(o_raw.get("id") or o_raw.get("Offer", {}).get("id", ""))
+            name       = o_raw.get("name") or (o_raw.get("Offer") or {}).get("name", "")
+            desc       = o_raw.get("description") or (o_raw.get("Offer") or {}).get("description", "")
+            ptype_raw  = o_raw.get("payout_type") or (o_raw.get("Offer") or {}).get("payout_type", "CPA")
+            payout_val = o_raw.get("default_payout") or (o_raw.get("Offer") or {}).get("default_payout", "")
+            preview    = o_raw.get("preview_url") or (o_raw.get("Offer") or {}).get("preview_url", "")
+
+            adv_obj    = o_raw.get("Advertiser") or {}
+            adv_name   = adv_obj.get("company") or adv_obj.get("name") or name
+
+            cats_obj   = o_raw.get("Category") or o_raw.get("categories") or {}
+            if isinstance(cats_obj, dict):
+                cats_obj = list(cats_obj.values())
+            category   = cats_obj[0].get("name") if cats_obj else ""
+
+            if not offer_id or not name:
+                continue
+
+            ptype_map  = {"cpa": "CPA", "cpl": "CPL", "cps": "CPS", "cpc": "CPC", "revshare": "CPS"}
+            ptype      = ptype_map.get(str(ptype_raw).lower(), "CPA")
+            payout_str = str(payout_val or "")
+            raw_payout = f"${payout_str} {ptype}" if payout_str else "Commission varies"
+
+            # TUNE affiliate tracking link format
+            tracking   = f"{base_url.rstrip('/')}/aff_c?offer_id={offer_id}&aff_id={network_id}"
+
+            o = empty_offer()
+            o["network"]     = f"tune_{label}"
+            o["offer_id"]    = offer_id
+            o["advertiser"]  = adv_name
+            o["title"]       = name
+            o["description"] = (desc or "")[:300]
+            o["payout"]      = payout_str
+            o["payout_type"] = ptype
+            o["_raw_payout"] = raw_payout[:120]
+            o["currency"]    = "USD"
+            o["category"]    = category
+            o["geo"]         = "US"
+            o["tracking_url"] = tracking
+            o["status"]      = "Active"
+            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            offers.append(o)
+
+        if len(records) < 500:
+            break
+        page += 1
+
+    log.info(f"TUNE/{label}: {len(offers)} offers fetched")
+    return offers
+
+
+def fetch_tune_all() -> list:
+    """Run all configured TUNE/HasOffers instances in sequence."""
+    if not TUNE_INSTANCES:
+        return []
+    all_offers = []
+    for label, nid, key, url in TUNE_INSTANCES:
+        try:
+            all_offers.extend(fetch_tune_instance(label, nid, key, url))
+        except Exception as e:
+            log.error(f"TUNE/{label}: unhandled error — {e}")
+    return all_offers
+
+
+# ---------------------------------------------------------------------------
+# Everflow (multi-instance)
+# ---------------------------------------------------------------------------
+
+def fetch_everflow_instance(label: str, api_key: str, base_url: str) -> list:
+    """
+    Everflow publisher API — single white-label instance.
+    Endpoint: {base_url}/v1/publisher/offers
+    Auth: X-Eflow-API-Key header
+    """
+    offers: list[dict] = []
+    page = 1
+
+    while True:
+        try:
+            resp = requests.get(
+                f"{base_url.rstrip('/')}/v1/publisher/offers",
+                headers={"X-Eflow-API-Key": api_key, "Accept": "application/json"},
+                params={
+                    "status":      "active",
+                    "page":        page,
+                    "page-size":   200,
+                    "relationship": "joined",
+                },
+                timeout=30,
+            )
+            if resp.status_code in (401, 403):
+                log.warning(f"Everflow/{label}: {resp.status_code} — check API key")
+                break
+            if not resp.ok:
+                log.warning(f"Everflow/{label}: {resp.status_code} — {resp.text[:200]}")
+                break
+        except Exception as e:
+            log.warning(f"Everflow/{label}: request error — {e}")
+            break
+
+        try:
+            data = resp.json()
+        except Exception:
+            log.warning(f"Everflow/{label}: non-JSON — {resp.text[:200]}")
+            break
+
+        records = data.get("offers") or data.get("data") or (data if isinstance(data, list) else [])
+        if not records:
+            break
+
+        for rec in records:
+            offer_id   = str(rec.get("id") or rec.get("offer_id", ""))
+            name       = rec.get("name") or rec.get("offer_name", "")
+            desc       = rec.get("description", "")
+            ptype_raw  = rec.get("payout_type") or rec.get("type", "CPA")
+            payout_val = rec.get("default_payout") or rec.get("payout", "")
+            adv_name   = (rec.get("advertiser") or {}).get("name") or name
+            category   = (rec.get("categories") or [{}])[0].get("name") if rec.get("categories") else ""
+            preview    = rec.get("preview_url") or rec.get("destination_url", "")
+
+            if not offer_id or not name:
+                continue
+
+            ptype_map = {"cpa": "CPA", "cpl": "CPL", "cps": "CPS", "cpc": "CPC", "revshare": "CPS"}
+            ptype     = ptype_map.get(str(ptype_raw).lower(), "CPA")
+            payout_str = str(payout_val or "")
+            raw_payout = f"${payout_str} {ptype}" if payout_str and payout_str not in ("0", "0.0") else "Commission varies"
+
+            # Everflow tracking URL format (publisher must be configured in dashboard)
+            tracking  = rec.get("tracking_url") or f"{base_url.rstrip('/')}/click?offer_id={offer_id}"
+
+            o = empty_offer()
+            o["network"]     = f"everflow_{label}"
+            o["offer_id"]    = offer_id
+            o["advertiser"]  = adv_name
+            o["title"]       = name
+            o["description"] = (desc or "")[:300]
+            o["payout"]      = payout_str
+            o["payout_type"] = ptype
+            o["_raw_payout"] = raw_payout[:120]
+            o["currency"]    = "USD"
+            o["category"]    = category
+            o["geo"]         = "US"
+            o["tracking_url"] = tracking
+            o["status"]      = "Active"
+            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            offers.append(o)
+
+        if len(records) < 200:
+            break
+        page += 1
+
+    log.info(f"Everflow/{label}: {len(offers)} offers fetched")
+    return offers
+
+
+def fetch_everflow_all() -> list:
+    """Run all configured Everflow instances in sequence."""
+    if not EVERFLOW_INSTANCES:
+        return []
+    all_offers = []
+    for label, key, url in EVERFLOW_INSTANCES:
+        try:
+            all_offers.extend(fetch_everflow_instance(label, key, url))
+        except Exception as e:
+            log.error(f"Everflow/{label}: unhandled error — {e}")
+    return all_offers
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
@@ -1125,6 +1692,11 @@ NETWORK_MAP = {
     "flexoffers":  fetch_flexoffers,
     "maxbounty":   fetch_maxbounty,
     "cj":          fetch_cj,
+    "shareasale":  fetch_shareasale,
+    "rakuten":     fetch_rakuten,
+    "awin":        fetch_awin,
+    "tune":        fetch_tune_all,
+    "everflow":    fetch_everflow_all,
 }
 
 def run_headless() -> None:
