@@ -401,6 +401,15 @@ def _strip_mention(text: str) -> str:
     return re.sub(r"<@[A-Z0-9]+>", "", text).strip()
 
 
+def _sanitize_slack(text: str) -> str:
+    import re as _re
+    text = _re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    text = _re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', r'<\2|\1>', text)
+    text = _re.sub(r'^#{1,3} (.+)$', r'*\1*', text, flags=_re.MULTILINE)
+    text = _re.sub(r'^---+$', '', text, flags=_re.MULTILINE)
+    return text
+
+
 # ── Block Kit brief builder ───────────────────────────────────────────────────
 
 def _run_preflight_qa(  # replaces _check_url_async (removed — this is a strict superset)
@@ -4112,18 +4121,26 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 log.warning(f"[delete] failed to delete {item.get('ts')}: {e}")
         return
 
-    if event.get("type") != "app_mention":
+    is_mention = event.get("type") == "app_mention"
+    is_dm      = event.get("type") == "message" and event.get("channel_type") == "im"
+
+    if not is_mention and not is_dm:
         return
 
-    # Skip bot's own messages
-    if event.get("bot_id"):
+    # Skip bot's own messages and message edits/deletions (subtypes)
+    if event.get("bot_id") or event.get("subtype"):
         return
 
     channel  = event.get("channel")
     msg_ts   = event.get("ts")
-    thread_ts = event.get("thread_ts") or msg_ts
     raw_text = event.get("text", "")
-    query    = _strip_mention(raw_text)
+
+    if is_mention:
+        thread_ts = event.get("thread_ts") or msg_ts
+        query     = _strip_mention(raw_text)
+    else:  # DM
+        thread_ts = event.get("thread_ts") or msg_ts
+        query     = raw_text.strip()
 
     if not query:
         return
@@ -4515,7 +4532,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
-        response_text     = response if isinstance(response, str) else str(response)
+        response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))
         content_blocks    = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
         web.chat_update(
