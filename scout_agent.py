@@ -3468,12 +3468,23 @@ def get_ghost_campaigns() -> str:
     ch = _get_ch_client()
     sql = """
 WITH imp_agg AS (
+    -- 7-day window: used for diagnosis (how long broken, total waste)
     SELECT campaign_id, count() AS impressions_7d, min(created_at)::Date AS first_impression_date
     FROM adpx_impressions_details
     PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
     WHERE created_at >= today() - 7
     GROUP BY campaign_id
     HAVING impressions_7d > 5000
+),
+recent_imp AS (
+    -- 2-day window: ground truth for "actively serving right now"
+    -- A true ghost must be burning inventory TODAY, not just last week
+    SELECT campaign_id, count() AS impressions_2d
+    FROM adpx_impressions_details
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 2)
+    WHERE created_at >= today() - 2
+    GROUP BY campaign_id
+    HAVING impressions_2d >= 2000
 ),
 click_agg AS (
     SELECT campaign_id, count() AS clicks_7d
@@ -3497,12 +3508,14 @@ SELECT
     c.adv_name,
     c.title                                       AS campaign_title,
     ia.impressions_7d,
+    ri.impressions_2d,
     ca.clicks_7d,
     coalesce(ra.revenue_7d, 0)                    AS revenue_7d,
     toString(ia.first_impression_date)            AS first_impression_date,
     groupArray(toInt64(pc.user_id))               AS publisher_ids,
     groupArray(u.organization)                    AS publisher_names
 FROM imp_agg ia
+JOIN recent_imp ri ON toString(ri.campaign_id) = toString(ia.campaign_id)
 JOIN click_agg ca ON toString(ca.campaign_id) = toString(ia.campaign_id)
 JOIN from_airbyte_campaigns c ON toInt64(ia.campaign_id) = c.id
     AND JSONLength(c.conversion_events) > 0
@@ -3516,7 +3529,7 @@ LEFT JOIN from_airbyte_users u ON pc.user_id = u.id
 WHERE coalesce(ra.conversion_count_7d, 0) = 0
   AND ia.first_impression_date <= today() - 7
   AND c.deleted_at IS NULL
-GROUP BY c.id, c.adv_name, c.title, ia.impressions_7d, ca.clicks_7d, revenue_7d, ia.first_impression_date
+GROUP BY c.id, c.adv_name, c.title, ia.impressions_7d, ri.impressions_2d, ca.clicks_7d, revenue_7d, ia.first_impression_date
 HAVING impressions_7d > 5000 AND clicks_7d > 200
 ORDER BY impressions_7d DESC
 LIMIT 25
@@ -3534,8 +3547,9 @@ LIMIT 25
         )
 
     lines = [f"*Ghost Campaign Report — Full List* ({len(rows)} campaigns)\n"]
-    for campaign_id, adv_name, campaign_title, imps, clicks, rev, first_date_str, pub_ids, pub_names in rows:
+    for campaign_id, adv_name, campaign_title, imps, imps_2d, clicks, rev, first_date_str, pub_ids, pub_names in rows:
         imp_str = f"{imps / 1000:.0f}K" if imps >= 1000 else str(imps)
+        imp_2d_str = f"{imps_2d / 1000:.1f}K" if imps_2d >= 1000 else str(imps_2d)
         rev_str = f"${rev:.2f}" if rev > 0 else "$0"
         first_date_str = str(first_date_str)[:10] if first_date_str else "unknown"
 
@@ -3554,7 +3568,7 @@ LIMIT 25
 
         lines.append(
             f"• *{adv_name}* · Campaign #{campaign_id} · {pub_str}\n"
-            f"  {imp_str} impressions · {clicks:,} clicks · {rev_str} · since {first_date_str}\n"
+            f"  {imp_str} impressions (7d) · {imp_2d_str} in last 48h · {clicks:,} clicks · {rev_str} · since {first_date_str}\n"
             f"  ↳ _{hypothesis}_"
         )
 
