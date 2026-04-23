@@ -120,18 +120,42 @@ log = logging.getLogger(__name__)
 # Every network adapter must return a list of dicts matching these keys.
 # ---------------------------------------------------------------------------
 OFFER_FIELDS = [
+    # Identity
     "network",
     "offer_id",
-    "advertiser",
-    "description",
-    "payout",
-    "payout_type",   # CPA | CPL | CPS | RevShare
-    "currency",
-    "category",
-    "geo",
-    "tracking_url",
-    "icon_url",      # 150x150 creative (for Slack brief + MS platform upload)
-    "hero_url",      # wide banner creative, target 1000x280
+    "advertiser",      # brand/company name (maps to adv_name in MS platform)
+
+    # Creative & copy — what the MS platform team needs to enter a campaign
+    "title",           # short offer headline (e.g. "Save 15% on your first order")
+    "description",     # longer ad copy / offer details (maps to MS description field)
+    "cta",             # call-to-action button text (e.g. "Get Offer", "Shop Now")
+    "terms",           # terms & conditions / fine print
+    "mini_description",# very short teaser (fits in small placements)
+
+    # Payout — multiple signals, highest fidelity wins
+    "payout",          # numeric amount string (e.g. "12.50")
+    "payout_type",     # CPA | CPL | CPS | CPC | RevShare
+    "currency",        # ISO code (USD, GBP, etc.)
+
+    # Targeting & geo
+    "geo",             # normalized Notion select (e.g. "US Only", "Global")
+    "geo_raw",         # raw string from network before normalization (for MS geo_targeting)
+    "os_targeting",    # OS/device targeting if provided (e.g. "iOS,Android", "All")
+    "platform_targeting", # platform type (Mobile, Desktop, All)
+
+    # Categorization
+    "category",        # normalized string for Notion (may be comma-joined)
+
+    # Creatives — URLs for MS platform upload
+    "icon_url",        # square logo/icon (150×150 target)
+    "hero_url",        # wide banner creative (1000×280 target)
+    "banner_url",      # medium rectangle or alternate creative
+
+    # Tracking
+    "tracking_url",    # affiliate tracking URL (goes in MS campaign tracking field)
+    "preview_url",     # landing page preview URL (for QA)
+
+    # Status & metadata
     "status",
     "date_scraped",
 ]
@@ -338,21 +362,34 @@ def fetch_impact() -> list:
         regions = c.get("ShippingRegions", [])
         geo = ", ".join(r.title() for r in regions) if regions else "US"
 
+        # Creative URLs — Impact provides logo and banner via LogoUri / ImageUri
+        logo_url   = c.get("LogoUri", "") or c.get("LogoUrl", "") or ""
+        image_url  = c.get("ImageUri", "") or c.get("BannerUri", "") or logo_url
+
         o = empty_offer()
-        o["network"]      = "impact"
-        o["offer_id"]     = cid
-        o["advertiser"]   = c.get("CampaignName", "")
-        o["description"]  = str(c.get("CampaignDescription", ""))[:200]
-        o["payout"]       = ""    # requires /Campaigns/{id}/Actions — future enrichment
-        o["payout_type"]  = ""    # same — Impact payouts are per action type
-        o["currency"]     = "USD"
-        o["category"]     = cat_map.get(cid, "")
-        o["geo"]          = geo
-        o["tracking_url"] = c.get("TrackingLink", "")
-        o["icon_url"]     = ""
-        o["hero_url"]     = ""
-        o["status"]       = c.get("ContractStatus", "")
-        o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+        o["network"]           = "impact"
+        o["offer_id"]          = cid
+        o["advertiser"]        = c.get("CampaignName", "")
+        o["title"]             = c.get("CampaignName", "")  # Impact uses campaign name as the offer headline
+        o["description"]       = str(c.get("CampaignDescription", ""))[:500]
+        o["mini_description"]  = str(c.get("CampaignDescription", ""))[:120]
+        o["cta"]               = ""  # not provided by Impact API
+        o["terms"]             = str(c.get("Terms", c.get("Restrictions", "")))[:500]
+        o["payout"]            = ""    # requires /Campaigns/{id}/Actions — auto-enriched below
+        o["payout_type"]       = ""
+        o["currency"]          = "USD"
+        o["category"]          = cat_map.get(cid, "")
+        o["geo"]               = geo
+        o["geo_raw"]           = ", ".join(regions) if regions else ""
+        o["os_targeting"]      = c.get("MobileOptimized", "")  # True/False string
+        o["platform_targeting"] = "Mobile" if c.get("MobileOptimized") else "All"
+        o["tracking_url"]      = c.get("TrackingLink", "")
+        o["preview_url"]       = c.get("CampaignUrl", "")
+        o["icon_url"]          = logo_url
+        o["hero_url"]          = image_url
+        o["banner_url"]        = image_url
+        o["status"]            = c.get("ContractStatus", "")
+        o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
         offers.append(o)
 
     # Auto-enrich payouts: fetch Actions for any campaign not already in cache
@@ -440,24 +477,38 @@ def fetch_flexoffers() -> list:
             # Build human-readable raw payout (preserves context parse_payout() loses)
             raw_payout = f"{payout_str} {payout_type}".strip() if payout_type else payout_str
 
-            o = empty_offer()
             logo = (a.get("logoUrl") or a.get("logo_url") or
                     a.get("thumbnailUrl") or a.get("imageUrl") or "")
-            o["network"]      = "flexoffers"
-            o["offer_id"]     = str(a.get("id", ""))
-            o["advertiser"]   = a.get("name", "")
-            o["description"]  = str(a.get("description", ""))[:200]
-            o["payout"]       = payout_str
-            o["payout_type"]  = payout_type
-            o["_raw_payout"]  = raw_payout[:120]
-            o["currency"]     = "USD"
-            o["category"]     = a.get("categoryNames", "")
-            o["geo"]          = a.get("country", "US")
-            o["tracking_url"] = a.get("deeplinkURL", a.get("defaultUrl", ""))
-            o["icon_url"]     = logo
-            o["hero_url"]     = logo
-            o["status"]       = a.get("applicationStatus", a.get("programStatus", ""))
-            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            banner = a.get("bannerUrl") or a.get("banner_url") or logo
+            geo_raw = a.get("country", "") or a.get("countries", "")
+            if isinstance(geo_raw, list):
+                geo_raw = ", ".join(geo_raw)
+
+            o = empty_offer()
+            o["network"]           = "flexoffers"
+            o["offer_id"]          = str(a.get("id", ""))
+            o["advertiser"]        = a.get("name", "")
+            o["title"]             = a.get("headline") or a.get("name", "")
+            o["description"]       = str(a.get("description", ""))[:500]
+            o["mini_description"]  = str(a.get("shortDescription") or a.get("description", ""))[:120]
+            o["cta"]               = a.get("ctaText") or a.get("cta", "")
+            o["terms"]             = str(a.get("termsAndConditions") or a.get("restrictions", ""))[:500]
+            o["payout"]            = payout_str
+            o["payout_type"]       = payout_type
+            o["_raw_payout"]       = raw_payout[:120]
+            o["currency"]          = "USD"
+            o["category"]          = a.get("categoryNames", "")
+            o["geo"]               = a.get("country", "US")
+            o["geo_raw"]           = geo_raw
+            o["os_targeting"]      = a.get("mobileSupportedTypes") or a.get("deviceType", "All")
+            o["platform_targeting"] = a.get("networkType", "All")
+            o["tracking_url"]      = a.get("deeplinkURL", a.get("defaultUrl", ""))
+            o["preview_url"]       = a.get("landingPageUrl") or a.get("defaultUrl", "")
+            o["icon_url"]          = logo
+            o["hero_url"]          = banner
+            o["banner_url"]        = banner
+            o["status"]            = a.get("applicationStatus", a.get("programStatus", ""))
+            o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
             offers.append(o)
 
         if len(items) < 25:   # fewer than a full page = last page
@@ -555,23 +606,40 @@ def fetch_maxbounty() -> list:
         payout     = c.get("rate", "")
         rate_type  = c.get("rate_type", "")   # e.g. "$ per lead", "% of sale"
 
-        o = empty_offer()
-        o["network"]      = "maxbounty"
-        o["offer_id"]     = str(c.get("campaign_id", ""))
-        o["advertiser"]   = c.get("name", "")
-        o["description"]  = str(c.get("description", ""))[:200]
-        o["payout"]       = str(payout) if payout != "" else ""
-        o["payout_type"]  = rate_type
-        o["currency"]     = "USD"
-        o["category"]     = category
-        o["geo"]          = "US"  # MaxBounty is a US-centric CPA network; list API omits geo
-        o["_raw_payout"]  = f"{payout} {rate_type}".strip() if payout != "" else ""
-        o["tracking_url"] = c.get("landing_page_sample", "")
         thumbnail = c.get("thumbnail", "")
-        o["icon_url"]     = thumbnail   # MaxBounty CDN thumbnail URL
-        o["hero_url"]     = thumbnail   # same image used for both until we get banner
-        o["status"]       = c.get("affiliate_campaign_status", c.get("status", ""))
-        o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+        banner = c.get("banner_image") or c.get("banner_url") or thumbnail
+        geo_countries = c.get("countries") or c.get("geo") or []
+        if isinstance(geo_countries, list):
+            geo_raw = ", ".join(str(x) for x in geo_countries) if geo_countries else "US"
+        else:
+            geo_raw = str(geo_countries) or "US"
+        os_raw = ", ".join(c.get("platforms") or []) if isinstance(c.get("platforms"), list) else (c.get("platforms") or "All")
+
+        o = empty_offer()
+        o["network"]           = "maxbounty"
+        o["offer_id"]          = str(c.get("campaign_id", ""))
+        o["advertiser"]        = c.get("name", "")
+        o["title"]             = c.get("headline") or c.get("name", "")
+        o["description"]       = str(c.get("description", ""))[:500]
+        o["mini_description"]  = str(c.get("short_description") or c.get("description", ""))[:120]
+        o["cta"]               = c.get("cta_text") or c.get("cta") or ""
+        o["terms"]             = str(c.get("restrictions") or c.get("terms", ""))[:500]
+        o["payout"]            = str(payout) if payout != "" else ""
+        o["payout_type"]       = rate_type
+        o["currency"]          = "USD"
+        o["category"]          = category
+        o["geo"]               = "US"
+        o["geo_raw"]           = geo_raw
+        o["os_targeting"]      = os_raw
+        o["platform_targeting"] = "All"
+        o["_raw_payout"]       = f"{payout} {rate_type}".strip() if payout != "" else ""
+        o["tracking_url"]      = c.get("landing_page_sample", "")
+        o["preview_url"]       = c.get("preview_url") or c.get("landing_page_sample", "")
+        o["icon_url"]          = thumbnail
+        o["hero_url"]          = banner
+        o["banner_url"]        = banner
+        o["status"]            = c.get("affiliate_campaign_status", c.get("status", ""))
+        o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
         offers.append(o)
 
     log.info(f"MaxBounty: {len(offers)} offers fetched")
@@ -1133,21 +1201,36 @@ def fetch_cj() -> list:
                 payout_type = "CPC"
                 raw_payout  = f"${click_comm} CPC" if click_comm and click_comm not in ("0", "0.0") else "Commission varies"
 
+            # CJ links include image URLs
+            img_url = link.findtext("img-url", "").strip()
+            img_src = link.findtext("img", "").strip()
+            banner  = img_url or img_src
+
             o = empty_offer()
-            o["network"]      = "cj"
-            o["offer_id"]     = link_id
-            o["advertiser"]   = adv_name
-            o["title"]        = link_name or adv_name
-            o["description"]  = description
-            o["payout"]       = payout_amt
-            o["payout_type"]  = payout_type
-            o["_raw_payout"]  = raw_payout[:120]
-            o["currency"]     = "USD"
-            o["category"]     = category
-            o["geo"]          = "US"
-            o["tracking_url"] = tracking_url
-            o["status"]       = "Active"
-            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            o["network"]           = "cj"
+            o["offer_id"]          = link_id
+            o["advertiser"]        = adv_name
+            o["title"]             = link_name or adv_name
+            o["description"]       = description
+            o["mini_description"]  = description[:120]
+            o["cta"]               = ""  # CJ text links have name but no explicit CTA field
+            o["terms"]             = ""
+            o["payout"]            = payout_amt
+            o["payout_type"]       = payout_type
+            o["_raw_payout"]       = raw_payout[:120]
+            o["currency"]          = "USD"
+            o["category"]          = category
+            o["geo"]               = "US"
+            o["geo_raw"]           = "US"
+            o["os_targeting"]      = "All"
+            o["platform_targeting"] = "All"
+            o["tracking_url"]      = tracking_url
+            o["preview_url"]       = destination
+            o["icon_url"]          = banner
+            o["hero_url"]          = banner
+            o["banner_url"]        = banner
+            o["status"]            = "Active"
+            o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
             offers.append(o)
 
         if len(links) < 100:
@@ -1247,21 +1330,34 @@ def fetch_shareasale() -> list:
 
             tracking = f"https://www.shareasale.com/r.cfm?b=1&u={aff_id}&m={merchant_id}"
 
+            logo = m.get("logoUrl") or m.get("LogoURL") or m.get("thumbnail", "")
+            desc_text = m.get("description") or m.get("Description", "")
+
             o = empty_offer()
-            o["network"]     = "shareasale"
-            o["offer_id"]    = merchant_id
-            o["advertiser"]  = name
-            o["title"]       = name
-            o["description"] = m.get("description") or m.get("Description", "")
-            o["payout"]      = payout_str
-            o["payout_type"] = ptype
-            o["_raw_payout"] = raw[:120]
-            o["currency"]    = "USD"
-            o["category"]    = category
-            o["geo"]         = "US"
-            o["tracking_url"] = tracking
-            o["status"]      = "Active"
-            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            o["network"]           = "shareasale"
+            o["offer_id"]          = merchant_id
+            o["advertiser"]        = name
+            o["title"]             = name
+            o["description"]       = (desc_text or "")[:500]
+            o["mini_description"]  = (desc_text or "")[:120]
+            o["cta"]               = ""
+            o["terms"]             = str(m.get("termsAndConditions") or m.get("Terms", ""))[:500]
+            o["payout"]            = payout_str
+            o["payout_type"]       = ptype
+            o["_raw_payout"]       = raw[:120]
+            o["currency"]          = "USD"
+            o["category"]          = category
+            o["geo"]               = "US"
+            o["geo_raw"]           = "US"
+            o["os_targeting"]      = "All"
+            o["platform_targeting"] = "All"
+            o["tracking_url"]      = tracking
+            o["preview_url"]       = url
+            o["icon_url"]          = logo
+            o["hero_url"]          = logo
+            o["banner_url"]        = logo
+            o["status"]            = "Active"
+            o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
             offers.append(o)
 
         if len(merchants) < 50:
@@ -1346,21 +1442,34 @@ def fetch_rakuten() -> list:
             else:
                 ptype, raw = "CPA", "Commission varies"
 
+            logo = a.get("logoUrl") or a.get("bannerUrl") or a.get("imageUrl", "")
+            desc_text = a.get("description", "")
+
             o = empty_offer()
-            o["network"]     = "rakuten"
-            o["offer_id"]    = adv_id
-            o["advertiser"]  = name
-            o["title"]       = name
-            o["description"] = a.get("description", "")
-            o["payout"]      = payout_str
-            o["payout_type"] = ptype
-            o["_raw_payout"] = raw[:120]
-            o["currency"]    = "USD"
-            o["category"]    = category
-            o["geo"]         = "US"
-            o["tracking_url"] = tracking
-            o["status"]      = "Active"
-            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            o["network"]           = "rakuten"
+            o["offer_id"]          = adv_id
+            o["advertiser"]        = name
+            o["title"]             = name
+            o["description"]       = (desc_text or "")[:500]
+            o["mini_description"]  = (desc_text or "")[:120]
+            o["cta"]               = ""
+            o["terms"]             = ""
+            o["payout"]            = payout_str
+            o["payout_type"]       = ptype
+            o["_raw_payout"]       = raw[:120]
+            o["currency"]          = "USD"
+            o["category"]          = category
+            o["geo"]               = "US"
+            o["geo_raw"]           = "US"
+            o["os_targeting"]      = "All"
+            o["platform_targeting"] = "All"
+            o["tracking_url"]      = tracking
+            o["preview_url"]       = site_url
+            o["icon_url"]          = logo
+            o["hero_url"]          = logo
+            o["banner_url"]        = logo
+            o["status"]            = "Active"
+            o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
             offers.append(o)
 
         if len(advertisers) < 100:
@@ -1435,21 +1544,37 @@ def fetch_awin() -> list:
 
         tracking = f"https://www.awin1.com/cread.php?awinmid={prog_id}&awinaffid={AWIN_PUBLISHER_ID}&p={site_url}"
 
+        desc_long  = p.get("longDescription") or p.get("description", "")
+        desc_short = p.get("shortDescription") or desc_long
+        logo_large = p.get("logoUrlLarge") or p.get("displayUrl", "")
+        logo_small = p.get("logoUrl") or logo_large
+        geo_raw    = p.get("primaryRegion") or p.get("countryCode", "US")
+
         o = empty_offer()
-        o["network"]     = "awin"
-        o["offer_id"]    = prog_id
-        o["advertiser"]  = name
-        o["title"]       = name
-        o["description"] = p.get("shortDescription") or p.get("description", "")
-        o["payout"]      = payout_str
-        o["payout_type"] = ptype
-        o["_raw_payout"] = raw[:120]
-        o["currency"]    = "USD"
-        o["category"]    = category
-        o["geo"]         = "US"
-        o["tracking_url"] = tracking
-        o["status"]      = "Active"
-        o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+        o["network"]           = "awin"
+        o["offer_id"]          = prog_id
+        o["advertiser"]        = name
+        o["title"]             = name
+        o["description"]       = desc_long[:500]
+        o["mini_description"]  = desc_short[:120]
+        o["cta"]               = ""
+        o["terms"]             = str(p.get("terms") or p.get("termsUrl", ""))[:200]
+        o["payout"]            = payout_str
+        o["payout_type"]       = ptype
+        o["_raw_payout"]       = raw[:120]
+        o["currency"]          = "USD"
+        o["category"]          = category
+        o["geo"]               = "US"
+        o["geo_raw"]           = geo_raw
+        o["os_targeting"]      = "All"
+        o["platform_targeting"] = "All"
+        o["tracking_url"]      = tracking
+        o["preview_url"]       = site_url
+        o["icon_url"]          = logo_small
+        o["hero_url"]          = logo_large
+        o["banner_url"]        = logo_large
+        o["status"]            = "Active"
+        o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
         offers.append(o)
 
     log.info(f"Awin: {len(offers)} programmes fetched")
@@ -1555,21 +1680,42 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
             # TUNE affiliate tracking link format
             tracking   = f"{base_url.rstrip('/')}/aff_c?offer_id={offer_id}&aff_id={network_id}"
 
+            # TUNE HasOffers fields
+            thumbnail  = offer_obj.get("thumbnail_url") or offer_obj.get("logo_url") or ""
+            terms_text = offer_obj.get("terms_of_service") or offer_obj.get("restrictions") or ""
+            geo_raw    = offer_obj.get("countries") or offer_obj.get("country") or "US"
+            if isinstance(geo_raw, (list, dict)):
+                geo_raw = ", ".join(geo_raw.keys() if isinstance(geo_raw, dict) else geo_raw)
+            os_raw     = offer_obj.get("mobile_device_targeting") or offer_obj.get("os_list") or "All"
+            if isinstance(os_raw, list):
+                os_raw = ", ".join(os_raw)
+            cta_text   = offer_obj.get("cta") or offer_obj.get("call_to_action") or ""
+
             o = empty_offer()
-            o["network"]     = f"tune_{label}"
-            o["offer_id"]    = offer_id
-            o["advertiser"]  = adv_name
-            o["title"]       = name
-            o["description"] = (desc or "")[:300]
-            o["payout"]      = payout_str
-            o["payout_type"] = ptype
-            o["_raw_payout"] = raw_payout[:120]
-            o["currency"]    = "USD"
-            o["category"]    = category
-            o["geo"]         = "US"
-            o["tracking_url"] = tracking
-            o["status"]      = "Active"
-            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            o["network"]           = f"tune_{label}"
+            o["offer_id"]          = offer_id
+            o["advertiser"]        = adv_name
+            o["title"]             = name
+            o["description"]       = (desc or "")[:500]
+            o["mini_description"]  = (desc or "")[:120]
+            o["cta"]               = cta_text
+            o["terms"]             = (terms_text or "")[:500]
+            o["payout"]            = payout_str
+            o["payout_type"]       = ptype
+            o["_raw_payout"]       = raw_payout[:120]
+            o["currency"]          = "USD"
+            o["category"]          = category
+            o["geo"]               = "US"
+            o["geo_raw"]           = str(geo_raw)
+            o["os_targeting"]      = str(os_raw)
+            o["platform_targeting"] = "All"
+            o["tracking_url"]      = tracking
+            o["preview_url"]       = preview or ""
+            o["icon_url"]          = thumbnail
+            o["hero_url"]          = thumbnail
+            o["banner_url"]        = thumbnail
+            o["status"]            = "Active"
+            o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
             offers.append(o)
 
         if len(records) < 500:
@@ -1660,21 +1806,41 @@ def fetch_everflow_instance(label: str, api_key: str, base_url: str) -> list:
             # Everflow tracking URL format (publisher must be configured in dashboard)
             tracking  = rec.get("tracking_url") or f"{base_url.rstrip('/')}/click?offer_id={offer_id}"
 
+            thumbnail  = rec.get("thumbnail_url") or rec.get("logo_url") or rec.get("image_url") or ""
+            terms_text = rec.get("terms_and_conditions") or rec.get("restrictions") or ""
+            geo_raw    = rec.get("countries") or rec.get("geo") or "US"
+            if isinstance(geo_raw, list):
+                geo_raw = ", ".join(str(x) for x in geo_raw)
+            os_raw     = rec.get("os_targeting") or rec.get("platforms") or "All"
+            if isinstance(os_raw, list):
+                os_raw = ", ".join(str(x) for x in os_raw)
+            cta_text   = rec.get("cta") or rec.get("call_to_action") or ""
+
             o = empty_offer()
-            o["network"]     = f"everflow_{label}"
-            o["offer_id"]    = offer_id
-            o["advertiser"]  = adv_name
-            o["title"]       = name
-            o["description"] = (desc or "")[:300]
-            o["payout"]      = payout_str
-            o["payout_type"] = ptype
-            o["_raw_payout"] = raw_payout[:120]
-            o["currency"]    = "USD"
-            o["category"]    = category
-            o["geo"]         = "US"
-            o["tracking_url"] = tracking
-            o["status"]      = "Active"
-            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            o["network"]           = f"everflow_{label}"
+            o["offer_id"]          = offer_id
+            o["advertiser"]        = adv_name
+            o["title"]             = name
+            o["description"]       = (desc or "")[:500]
+            o["mini_description"]  = (desc or "")[:120]
+            o["cta"]               = cta_text
+            o["terms"]             = (terms_text or "")[:500]
+            o["payout"]            = payout_str
+            o["payout_type"]       = ptype
+            o["_raw_payout"]       = raw_payout[:120]
+            o["currency"]          = "USD"
+            o["category"]          = category
+            o["geo"]               = "US"
+            o["geo_raw"]           = str(geo_raw)
+            o["os_targeting"]      = str(os_raw)
+            o["platform_targeting"] = "All"
+            o["tracking_url"]      = tracking
+            o["preview_url"]       = preview or ""
+            o["icon_url"]          = thumbnail
+            o["hero_url"]          = thumbnail
+            o["banner_url"]        = thumbnail
+            o["status"]            = "Active"
+            o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
             offers.append(o)
 
         if len(records) < 200:
