@@ -1066,6 +1066,38 @@ def _make_copy_for_brief(brief_data: dict, offer_payload: dict) -> dict:
     }
 
 
+# ── AI copy coalescer: cache + batch queue ────────────────────────────────────
+# Keyed by (advertiser.lower(), payout_type, category) → copy dict + expiry
+_COPY_CACHE: dict[tuple, tuple] = {}   # key → (copy_dict, expires_at_monotonic)
+_COPY_CACHE_TTL = 86_400               # 24h — same advertiser+config reuses copy
+_COPY_CACHE_LOCK = threading.Lock()
+
+# Pending enrichment jobs: list of (notion_url, offer_kwargs_dict)
+_COPY_QUEUE: list[tuple[str, dict]] = []
+_COPY_QUEUE_LOCK = threading.Lock()
+_COPY_QUEUE_EVENT = threading.Event()
+_COPY_COALESCE_WINDOW = 10            # seconds to wait before flushing the queue
+
+
+def _copy_cache_key(advertiser: str, payout_type: str, category: str) -> tuple:
+    return (advertiser.lower().strip(), (payout_type or "").upper(), (category or "").lower())
+
+
+def _copy_cache_get(key: tuple) -> dict | None:
+    with _COPY_CACHE_LOCK:
+        entry = _COPY_CACHE.get(key)
+        if entry and entry[1] > time.monotonic():
+            return entry[0]
+        if entry:
+            del _COPY_CACHE[key]
+    return None
+
+
+def _copy_cache_set(key: tuple, copy_dict: dict) -> None:
+    with _COPY_CACHE_LOCK:
+        _COPY_CACHE[key] = (copy_dict, time.monotonic() + _COPY_CACHE_TTL)
+
+
 def _generate_offer_copy(
     advertiser: str,
     description: str,
@@ -1278,6 +1310,160 @@ def _enrich_notion_with_ai_copy(
             log.info(f"AI copy skipped for {advertiser} (no copy returned)")
     except Exception as e:
         log.warning(f"AI copy enrichment error for {advertiser}: {e}")
+
+
+def _generate_offer_copy_batch(offers: list[dict]) -> list[dict | None]:
+    """
+    Generate copy for 1–N offers in a single Claude Haiku API call.
+    Returns a list in the same order as input; None for any offer that failed.
+    Falls back to sequential individual calls if batch parse fails.
+    """
+    import json as _json
+    if not offers:
+        return []
+    if len(offers) == 1:
+        return [_generate_offer_copy(**offers[0])]
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return [_generate_offer_copy(**o) for o in offers]
+
+    offer_lines = "\n".join(
+        f"{i+1}. Advertiser={o['advertiser']} | Payout={o.get('payout','')} {o.get('payout_type','CPA')} "
+        f"| Category={o.get('category','')} | Geo={o.get('geo','US')} | Desc={o.get('description','')[:120]}"
+        for i, o in enumerate(offers)
+    )
+
+    prompt = (
+        "You are a world-class direct response copywriter for post-transaction offers. "
+        "Generate platform-ready copy for each offer below.\n\n"
+        "Copy field rules (enforce char limits precisely):\n"
+        "- headline: max 90 chars. Benefit first, not brand name.\n"
+        "- short_headline: max 60 chars.\n"
+        "- description: max 220 chars. Answers 'why now?'.\n"
+        "- short_desc: max 140 chars. Single most compelling sentence.\n"
+        "- cta_yes: max 25 chars. Action verb first, specific to offer.\n"
+        "- cta_no: max 25 chars. Timing language ('Not now'), not rejection.\n"
+        "No em dashes, no exclamation marks, no 'Free' unless explicitly free.\n\n"
+        f"Offers ({len(offers)} total):\n{offer_lines}\n\n"
+        f"Return ONLY a JSON array of exactly {len(offers)} objects in the same order:\n"
+        '[{"headline":"...","short_headline":"...","description":"...","short_desc":"...","cta_yes":"...","cta_no":"..."}, ...]'
+    )
+
+    def _trunc(s: str, n: int) -> str:
+        s = str(s or "").strip()
+        return s if len(s) <= n else s[:n - 1].rsplit(" ", 1)[0].rstrip(",.:;") + "..."
+
+    try:
+        import requests as _req
+        resp = _req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-3-5-haiku-20241022",
+                "max_tokens": 512 * len(offers),
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            log.warning(f"_generate_offer_copy_batch: API {resp.status_code}")
+            return [_generate_offer_copy(**o) for o in offers]
+
+        text = resp.json().get("content", [{}])[0].get("text", "").strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+
+        parsed = _json.loads(text)
+        if not isinstance(parsed, list) or len(parsed) != len(offers):
+            log.warning("_generate_offer_copy_batch: unexpected response shape, falling back")
+            return [_generate_offer_copy(**o) for o in offers]
+
+        results = []
+        for item in parsed:
+            results.append({
+                "headline":       _trunc(item.get("headline", ""), 90),
+                "short_headline": _trunc(item.get("short_headline", ""), 60),
+                "description":    _trunc(item.get("description", ""), 220),
+                "short_desc":     _trunc(item.get("short_desc", ""), 140),
+                "cta_yes":        _trunc(item.get("cta_yes", ""), 25),
+                "cta_no":         _trunc(item.get("cta_no", ""), 25),
+            })
+        return results
+    except Exception as e:
+        log.warning(f"_generate_offer_copy_batch failed ({e}), falling back to sequential")
+        return [_generate_offer_copy(**o) for o in offers]
+
+
+def _queue_copy_enrichment(
+    notion_url: str,
+    advertiser: str,
+    description: str,
+    payout_type: str,
+    category: str,
+    payout: str = "",
+    geo: str = "US",
+) -> None:
+    """Push an enrichment job to the coalescing queue (non-blocking)."""
+    offer_kwargs = dict(
+        advertiser=advertiser, description=description,
+        payout_type=payout_type, category=category, payout=payout, geo=geo,
+    )
+    with _COPY_QUEUE_LOCK:
+        _COPY_QUEUE.append((notion_url, offer_kwargs))
+    _COPY_QUEUE_EVENT.set()
+
+
+def _copy_coalescer_loop() -> None:
+    """
+    Daemon: drains the enrichment queue every _COPY_COALESCE_WINDOW seconds.
+    Cache hit → instant Notion patch, no API call.
+    Cache miss → batch all misses into one Claude call, then patch and cache.
+    """
+    while True:
+        _COPY_QUEUE_EVENT.wait(timeout=_COPY_COALESCE_WINDOW)
+        _COPY_QUEUE_EVENT.clear()
+
+        with _COPY_QUEUE_LOCK:
+            pending = _COPY_QUEUE[:]
+            _COPY_QUEUE.clear()
+
+        if not pending:
+            continue
+
+        urls      = [p[0] for p in pending]
+        offer_kws = [p[1] for p in pending]
+        keys      = [_copy_cache_key(o["advertiser"], o["payout_type"], o["category"]) for o in offer_kws]
+
+        # Serve cache hits immediately
+        results: list[dict | None] = [_copy_cache_get(k) for k in keys]
+
+        # Batch only the cache misses
+        miss_idx   = [i for i, r in enumerate(results) if r is None]
+        miss_offers = [offer_kws[i] for i in miss_idx]
+
+        if miss_offers:
+            batch_results = _generate_offer_copy_batch(miss_offers)
+            for i, copy_dict in zip(miss_idx, batch_results):
+                results[i] = copy_dict
+                if copy_dict:
+                    _copy_cache_set(keys[i], copy_dict)
+
+        for notion_url, copy_dict, offer in zip(urls, results, offer_kws):
+            if copy_dict and notion_url:
+                try:
+                    _patch_notion_copy(notion_url, copy_dict)
+                    log.info(f"AI copy enrichment complete for {offer['advertiser']}")
+                except Exception as e:
+                    log.warning(f"Notion copy patch failed for {offer['advertiser']}: {e}")
+            elif not copy_dict:
+                log.info(f"AI copy skipped for {offer['advertiser']} (no copy returned)")
 
 
 def _slack_thread_url(channel: str, thread_ts: str) -> str:
@@ -3193,22 +3379,17 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     }
     notion_url = _write_to_notion_queue(brief_data, copy_data, user_id, thread_url)
 
-    # 5. Enrich Notion page with AI-generated copy in background (non-blocking)
+    # 5. Enrich Notion page with AI-generated copy via coalescing queue (non-blocking)
     if notion_url:
-        threading.Thread(
-            target=_enrich_notion_with_ai_copy,
-            args=(
-                notion_url,
-                brief_data.get("advertiser", advertiser),
-                brief_data.get("description", offer.get("description", "")),
-                brief_data.get("payout_type", offer.get("payout_type", "CPA")),
-                brief_data.get("category", offer.get("category", "")),
-                offer.get("payout", ""),
-                brief_data.get("geo", offer.get("geo", "US")),
-            ),
-            daemon=True,
-            name=f"ai-copy-{advertiser[:20]}",
-        ).start()
+        _queue_copy_enrichment(
+            notion_url,
+            brief_data.get("advertiser", advertiser),
+            brief_data.get("description", offer.get("description", "")),
+            brief_data.get("payout_type", offer.get("payout_type", "CPA")),
+            brief_data.get("category", offer.get("category", "")),
+            offer.get("payout", ""),
+            brief_data.get("geo", offer.get("geo", "US")),
+        )
 
     # 6. Post structured offer card to #scout-offers — this IS the brief
     _post_offer_queue_card(web, brief_data, copy, user_id, thread_url, notion_url, score)
@@ -3300,22 +3481,17 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
         notion_url=notion_url or "", copy_data=copy_data,
     )
 
-    # Enrich Notion page with AI-generated copy (non-blocking background thread)
+    # Enrich Notion page with AI-generated copy via coalescing queue (non-blocking)
     if notion_url:
-        threading.Thread(
-            target=_enrich_notion_with_ai_copy,
-            args=(
-                notion_url,
-                brief_data.get("advertiser", advertiser),
-                data.get("d", ""),
-                brief_data.get("payout_type", data.get("pt", "CPA")),
-                brief_data.get("category", data.get("category", "")),
-                brief_data.get("payout", ""),
-                brief_data.get("geo", "US"),
-            ),
-            daemon=True,
-            name=f"ai-copy-{advertiser[:20]}",
-        ).start()
+        _queue_copy_enrichment(
+            notion_url,
+            brief_data.get("advertiser", advertiser),
+            data.get("d", ""),
+            brief_data.get("payout_type", data.get("pt", "CPA")),
+            brief_data.get("category", data.get("category", "")),
+            brief_data.get("payout", ""),
+            brief_data.get("geo", "US"),
+        )
 
     # Pre-flight QA in background — URL check + MS history, posts consolidated result
     _run_preflight_qa(web, channel, thread_ts, brief_data)
@@ -5251,6 +5427,8 @@ def main():
     threading.Thread(target=_run_scraper_daemon, daemon=True, name="scraper").start()
     # Background: Notion → Slack watcher — posts when queue page Status changes from "Awaiting Entry"
     threading.Thread(target=_notion_watcher_loop, args=(web_client,), daemon=True, name="notion-watcher").start()
+    # Background: AI copy coalescer — batches enrichment requests with 10s window + 24h cache
+    threading.Thread(target=_copy_coalescer_loop, daemon=True, name="copy-coalescer").start()
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
