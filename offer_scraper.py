@@ -42,6 +42,10 @@ FLEXOFFERS_DOMAIN_ID = os.environ.get("FLEXOFFERS_DOMAIN_ID", "")
 MAXBOUNTY_EMAIL    = os.environ.get("MAXBOUNTY_EMAIL", "")
 MAXBOUNTY_PASSWORD = os.environ.get("MAXBOUNTY_PASSWORD", "")
 
+CJ_API_KEY         = os.environ.get("CJ_API_KEY", "")      # Personal Access Token from developers.cj.com
+CJ_WEBSITE_ID      = os.environ.get("CJ_WEBSITE_ID", "")   # CJ Company ID (CID) — used for advertiser lookup
+CJ_PUBLISHER_ID    = os.environ.get("CJ_PUBLISHER_ID", "") # CJ Publisher Website ID (PID) — used for link-search
+
 # Notion — primary output destination
 # Setup: notion.so/my-integrations → create integration → copy secret_... token
 #        Then share the "Offer Inventory — MS Network" database with that integration
@@ -945,6 +949,174 @@ def write_notion(offers: list):
 
 
 # ---------------------------------------------------------------------------
+# CJ Affiliate (Commission Junction)
+# ---------------------------------------------------------------------------
+
+def fetch_cj() -> list:
+    """
+    CJ Affiliate — two-source scraper:
+    1. publisherCommissions GraphQL → actual commission rates per advertiser (best payout signal)
+    2. REST link-search → real tracking URLs (3,755 text links across joined programs)
+
+    Auth: Authorization: Bearer {CJ_API_KEY}
+    CID (CJ_WEBSITE_ID): company account ID — for commission query
+    PID (CJ_PUBLISHER_ID): website property ID — for link-search tracking URLs
+    """
+    import xml.etree.ElementTree as ET
+
+    if not CJ_API_KEY:
+        log.warning("CJ: CJ_API_KEY not set — skipping")
+        return []
+
+    HEADERS     = {"Authorization": f"Bearer {CJ_API_KEY}"}
+    pid         = CJ_PUBLISHER_ID or ""
+    cid         = CJ_WEBSITE_ID or ""
+
+    # ── Step 1: Commission rates per advertiser (last 12 months) ──────────────
+    # Groups by advertiser to get max payout seen — better signal than EPC
+    commission_by_adv: dict[str, dict] = {}   # advertiser_id → {amount, type, name}
+    if cid:
+        log.info("CJ: fetching commission rates from publisherCommissions API...")
+        try:
+            cr = requests.post(
+                "https://commissions.api.cj.com/query",
+                headers={**HEADERS, "Content-Type": "application/json"},
+                json={"query": f"""{{
+                  publisherCommissions(
+                    forPublishers: ["{cid}"]
+                    sincePostingDate: "2024-01-01T00:00:00Z"
+                  ) {{
+                    count
+                    records {{
+                      advertiserId advertiserName actionType
+                      pubCommissionAmountUsd
+                    }}
+                  }}
+                }}"""},
+                timeout=30,
+            )
+            if cr.ok:
+                data = cr.json()
+                records = (data.get("data") or {}).get("publisherCommissions", {}).get("records") or []
+                for rec in records:
+                    adv_id  = str(rec.get("advertiserId", ""))
+                    amt     = float(rec.get("pubCommissionAmountUsd") or 0)
+                    atype   = rec.get("actionType", "")
+                    adv_name = rec.get("advertiserName", "")
+                    prev = commission_by_adv.get(adv_id, {})
+                    if amt > prev.get("amount", 0):
+                        commission_by_adv[adv_id] = {"amount": amt, "type": atype, "name": adv_name}
+                log.info(f"CJ: commission data loaded for {len(commission_by_adv)} advertisers")
+        except Exception as e:
+            log.warning(f"CJ: commission query failed (non-fatal) — {e}")
+
+    # ── Step 2: Text links with real tracking URLs ────────────────────────────
+    if not pid:
+        log.warning("CJ: CJ_PUBLISHER_ID not set — using program URLs only (no tracked links)")
+
+    offers: list[dict] = []
+    seen_offer_ids: set[str] = set()
+    page_num = 1
+
+    while True:
+        params: dict = {
+            "website-id":       pid or cid,
+            "advertiser-ids":   "joined",
+            "link-type":        "Text Link",
+            "records-per-page": 100,
+            "page-number":      page_num,
+        }
+        try:
+            resp = requests.get(
+                "https://linksearch.api.cj.com/v2/link-search",
+                headers=HEADERS, params=params, timeout=30,
+            )
+            if resp.status_code in (400, 401, 403):
+                log.warning(f"CJ link-search: {resp.status_code} — {resp.text[:200]}")
+                break
+            resp.raise_for_status()
+        except Exception as e:
+            log.warning(f"CJ link-search failed (page {page_num}): {e}")
+            break
+
+        try:
+            lroot = ET.fromstring(resp.text)
+        except ET.ParseError:
+            break
+
+        links = list(lroot.iter("link"))
+        if not links:
+            break
+
+        for link in links:
+            link_id     = link.findtext("link-id", "").strip()
+            if link_id in seen_offer_ids:
+                continue
+            seen_offer_ids.add(link_id)
+
+            adv_id      = link.findtext("advertiser-id", "").strip()
+            adv_name    = link.findtext("advertiser-name", "").strip()
+            category    = link.findtext("category", "").strip()
+            link_name   = link.findtext("link-name", "").strip()
+            description = link.findtext("description", "").strip()[:200]
+            destination = link.findtext("destination", "").strip()
+            sale_comm   = link.findtext("sale-commission", "").strip()
+            lead_comm   = link.findtext("lead-commission", "").strip()
+            click_comm  = link.findtext("click-commission", "").strip()
+
+            # Build tracking URL from link-code-html (extract href)
+            link_html   = link.findtext("link-code-html", "").strip()
+            tracking_url = destination  # fallback
+            if link_html and 'href="' in link_html:
+                start = link_html.index('href="') + 6
+                end   = link_html.index('"', start)
+                tracking_url = link_html[start:end]
+
+            # Payout: prefer commission data, then sale/lead commission from link
+            comm_info = commission_by_adv.get(adv_id, {})
+            if comm_info.get("amount", 0) > 0:
+                payout_amt  = str(comm_info["amount"])
+                payout_type = "CPA"
+                raw_payout  = f"${comm_info['amount']} {comm_info.get('type', 'CPA')}"
+            elif lead_comm:
+                payout_amt  = lead_comm
+                payout_type = "CPL"
+                raw_payout  = f"{lead_comm} CPL" if "%" in lead_comm else f"${lead_comm} CPL"
+            elif sale_comm:
+                payout_amt  = sale_comm
+                payout_type = "CPS"
+                raw_payout  = f"{sale_comm} CPS" if "%" in sale_comm else f"${sale_comm} CPS"
+            else:
+                payout_amt  = click_comm or "0"
+                payout_type = "CPC"
+                raw_payout  = f"${click_comm} CPC" if click_comm and click_comm not in ("0", "0.0") else "Commission varies"
+
+            o = empty_offer()
+            o["network"]      = "cj"
+            o["offer_id"]     = link_id
+            o["advertiser"]   = adv_name
+            o["title"]        = link_name or adv_name
+            o["description"]  = description
+            o["payout"]       = payout_amt
+            o["payout_type"]  = payout_type
+            o["_raw_payout"]  = raw_payout[:120]
+            o["currency"]     = "USD"
+            o["category"]     = category
+            o["geo"]          = "US"
+            o["tracking_url"] = tracking_url
+            o["status"]       = "Active"
+            o["date_scraped"] = datetime.today().strftime("%Y-%m-%d")
+            offers.append(o)
+
+        if len(links) < 100:
+            break
+        page_num += 1
+
+    log.info(f"CJ: {len(offers)} text links fetched")
+    return offers
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
@@ -952,6 +1124,7 @@ NETWORK_MAP = {
     "impact":      fetch_impact,
     "flexoffers":  fetch_flexoffers,
     "maxbounty":   fetch_maxbounty,
+    "cj":          fetch_cj,
 }
 
 def run_headless() -> None:
