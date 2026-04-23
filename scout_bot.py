@@ -1509,78 +1509,20 @@ def _run_pulse_signals() -> dict:
     # Detects campaigns with broken tracking/pixels that all other signals miss.
     # All other signals assume revenue exists — ghost campaigns earn $0 and are
     # invisible to velocity shifts, cap alerts, and the watchdog.
+    # NOTE: calls _query_ghost_campaigns() from scout_agent — NEVER add duplicate ghost SQL here.
+    # To change detection logic (thresholds, filters, windows), edit _query_ghost_campaigns() only.
     try:
-        ghost_rows = ch.query(
-            """
-            WITH imp_agg AS (
-                SELECT
-                    i.campaign_id,
-                    count()                           AS impressions_7d,
-                    min(i.created_at)::Date           AS first_impression_date
-                FROM adpx_impressions_details i
-                PREWHERE toYYYYMM(i.created_at) >= toYYYYMM(today() - 7)
-                WHERE i.created_at >= today() - 7
-                GROUP BY i.campaign_id
-            ),
-            click_agg AS (
-                SELECT campaign_id, count() AS clicks_7d
-                FROM adpx_tracked_clicks
-                PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-                WHERE created_at >= today() - 7
-                GROUP BY campaign_id
-            ),
-            rev_agg AS (
-                SELECT
-                    campaign_id,
-                    coalesce(sum(toFloat64OrNull(revenue)), 0) AS revenue_7d,
-                    count()                                    AS conversion_count_7d
-                FROM adpx_conversionsdetails
-                PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-                WHERE created_at >= today() - 7
-                GROUP BY campaign_id
-            ),
-            joined AS (
-                SELECT
-                    c.adv_name,
-                    ia.impressions_7d,
-                    coalesce(ca.clicks_7d, 0)              AS clicks_7d,
-                    coalesce(ra.revenue_7d, 0)             AS revenue_7d,
-                    coalesce(ra.conversion_count_7d, 0)    AS conversion_count_7d,
-                    ia.first_impression_date
-                FROM imp_agg ia
-                JOIN from_airbyte_campaigns c ON toInt64(ia.campaign_id) = c.id
-                    AND JSONLength(c.conversion_events) > 0
-                    AND (c.is_test = false OR c.is_test IS NULL)
-                    AND c.deleted_at IS NULL
-                LEFT JOIN click_agg ca ON ca.campaign_id = ia.campaign_id
-                LEFT JOIN rev_agg ra  ON ra.campaign_id  = ia.campaign_id
-                WHERE coalesce(ra.conversion_count_7d, 0) = 0
-                  AND ia.first_impression_date <= today() - 7
-            )
-            SELECT
-                adv_name,
-                sum(impressions_7d)       AS total_impressions,
-                sum(clicks_7d)            AS total_clicks,
-                sum(revenue_7d)           AS total_revenue
-            FROM joined
-            GROUP BY adv_name
-            HAVING total_impressions > 5000 AND total_clicks > 200
-            ORDER BY total_impressions DESC
-            LIMIT 10
-            """
-        ).result_rows
-        for adv_name, impressions, clicks, revenue in ghost_rows:
-            if revenue == 0:
-                hypothesis = "Zero conversions in 7 days — postback not firing post-click. Check pixel/postback URL config."
-            else:
-                hypothesis = "Near-zero RPM — may be a test campaign or fundamentally non-converting offer. Review or pause."
-            signals["ghost_campaigns"].append({
-                "adv_name":       adv_name,
-                "impressions_7d": int(impressions),
-                "clicks_7d":      int(clicks),
-                "revenue_7d":     round(float(revenue), 2),
-                "hypothesis":     hypothesis,
-            })
+        from scout_agent import _query_ghost_campaigns
+        ghost_detail_rows = _query_ghost_campaigns(ch)
+        # Group by adv_name for Pulse display (agent keeps per-campaign detail)
+        by_adv: dict = {}
+        for r in ghost_detail_rows:
+            adv = r["adv_name"]
+            by_adv.setdefault(adv, {"impressions_7d": 0, "impressions_2d": 0})
+            by_adv[adv]["impressions_7d"] += r["impressions_7d"]
+            by_adv[adv]["impressions_2d"] += r["impressions_2d"]
+        for adv, agg in sorted(by_adv.items(), key=lambda x: -x[1]["impressions_7d"])[:10]:
+            signals["ghost_campaigns"].append({"adv_name": adv, **agg})
     except Exception as e:
         log.warning(f"Pulse ghost campaign signal failed: {e}")
 

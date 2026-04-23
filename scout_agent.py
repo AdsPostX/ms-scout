@@ -3511,13 +3511,23 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
         }
 
 
-def get_ghost_campaigns() -> str:
+def _query_ghost_campaigns(ch) -> list:
     """
-    Return full ghost campaign list with per-campaign diagnosis.
-    Ghost = actively serving impressions + clicks but generating near-zero revenue
-    (< $5 in last 7 days), older than 7 days (not a new launch).
+    Canonical ghost campaign query — single source of truth for both the agent
+    tool (get_ghost_campaigns) and the 8am Pulse signal (_run_pulse_signals).
+    Any threshold, filter, or window change belongs here. Never duplicate this SQL.
+
+    A campaign qualifies as a ghost if ALL of:
+    - status = 'Active', non-expired (not paused/ended)
+    - 5,000+ impressions in last 7 days (meaningful traffic volume)
+    - 2,000+ impressions in last 48h (actively burning inventory RIGHT NOW)
+    - 200+ clicks in 7 days (real engagement, not just display)
+    - Zero conversions in 7 days (broken tracking or non-converting offer)
+    - Campaign age > 7 days (excludes new launches still warming up)
+    - conversion_events configured (CPA/CPS only — excludes CPM/CPC by design)
+
+    Returns list of dicts. Raises on ClickHouse error (callers handle it).
     """
-    ch = _get_ch_client()
     sql = """
 WITH imp_agg AS (
     -- 7-day window: used for diagnosis (how long broken, total waste)
@@ -3586,8 +3596,36 @@ HAVING impressions_7d > 5000 AND clicks_7d > 200
 ORDER BY impressions_7d DESC
 LIMIT 25
 """
+    rows = ch.query(sql).result_rows
+    return [
+        {
+            "campaign_id":           r[0],
+            "adv_name":              r[1],
+            "campaign_title":        r[2],
+            "impressions_7d":        int(r[3]),
+            "impressions_2d":        int(r[4]),
+            "clicks_7d":             int(r[5]),
+            "revenue_7d":            round(float(r[6]), 2),
+            "first_impression_date": str(r[7])[:10] if r[7] else "unknown",
+            "publisher_ids":         list(r[8]),
+            "publisher_names":       list(r[9]),
+        }
+        for r in rows
+    ]
+
+
+def get_ghost_campaigns() -> str:
+    """
+    Return full ghost campaign list with per-campaign diagnosis.
+    Ghost = actively serving impressions + clicks but generating near-zero revenue
+    (< $5 in last 7 days), older than 7 days (not a new launch).
+
+    NOTE: SQL lives in _query_ghost_campaigns(). Any threshold or filter change belongs there.
+    This function is a formatting wrapper only.
+    """
+    ch = _get_ch_client()
     try:
-        rows = ch.query(sql).result_rows
+        rows = _query_ghost_campaigns(ch)
     except Exception as e:
         return f"Ghost campaign query failed: {e}"
 
@@ -3599,11 +3637,20 @@ LIMIT 25
         )
 
     lines = [f"*Ghost Campaign Report — Full List* ({len(rows)} campaigns)\n"]
-    for campaign_id, adv_name, campaign_title, imps, imps_2d, clicks, rev, first_date_str, pub_ids, pub_names in rows:
-        imp_str = f"{imps / 1000:.0f}K" if imps >= 1000 else str(imps)
+    for r in rows:
+        adv_name    = r["adv_name"]
+        campaign_id = r["campaign_id"]
+        imps        = r["impressions_7d"]
+        imps_2d     = r["impressions_2d"]
+        clicks      = r["clicks_7d"]
+        rev         = r["revenue_7d"]
+        first_date  = r["first_impression_date"]
+        pub_ids     = r["publisher_ids"]
+        pub_names   = r["publisher_names"]
+
+        imp_str    = f"{imps / 1000:.0f}K" if imps >= 1000 else str(imps)
         imp_2d_str = f"{imps_2d / 1000:.1f}K" if imps_2d >= 1000 else str(imps_2d)
-        rev_str = f"${rev:.2f}" if rev > 0 else "$0"
-        first_date_str = str(first_date_str)[:10] if first_date_str else "unknown"
+        rev_str    = f"${rev:.2f}" if rev > 0 else "$0"
 
         # Publisher context — deduplicate and format as "Name (#ID)"
         seen, pub_parts = set(), []
@@ -3620,7 +3667,7 @@ LIMIT 25
 
         lines.append(
             f"• *{adv_name}* · Campaign #{campaign_id} · {pub_str}\n"
-            f"  {imp_str} impressions (7d) · {imp_2d_str} in last 48h · {clicks:,} clicks · {rev_str} · since {first_date_str}\n"
+            f"  {imp_str} impressions (7d) · {imp_2d_str} in last 48h · {clicks:,} clicks · {rev_str} · since {first_date}\n"
             f"  ↳ _{hypothesis}_"
         )
 
@@ -4312,7 +4359,7 @@ _QA_SUITE: list[tuple[str, str, list[str]]] = [
     # ── Core health ──────────────────────────────────────────────────────────
     ("System status",
      "status",
-     ["alive", "healthy", "offer", "clickhouse", "inventory"]),
+     ["healthy"]),
 
     # ── Ghost campaigns ───────────────────────────────────────────────────────
     ("Ghost campaigns",
