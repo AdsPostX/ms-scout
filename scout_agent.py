@@ -3507,6 +3507,8 @@ JOIN click_agg ca ON toString(ca.campaign_id) = toString(ia.campaign_id)
 JOIN from_airbyte_campaigns c ON toInt64(ia.campaign_id) = c.id
     AND JSONLength(c.conversion_events) > 0
     AND (c.is_test = false OR c.is_test IS NULL)
+    AND c.status = 'Active'
+    AND (c.end_date IS NULL OR c.end_date >= today())
 LEFT JOIN rev_agg ra ON toString(ra.campaign_id) = toString(ia.campaign_id)
 LEFT JOIN from_airbyte_publisher_campaigns pc
     ON toString(pc.campaign_id) = toString(ia.campaign_id) AND pc.is_active = 1
