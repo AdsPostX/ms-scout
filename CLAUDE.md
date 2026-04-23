@@ -87,3 +87,14 @@ def _query_ghost_campaigns(ch) -> list[dict]:
 ```
 
 Always return plain Python dicts — let the caller decide how to format for Slack, Pulse display, etc.
+
+---
+
+## Known Data Quality Issues
+
+### "Major Rocket Real Real" publisher name
+- **Publisher ID**: 927 in `mv_adpx_users`
+- **Status**: Genuine organization name in ClickHouse — not a Scout artifact
+- **Verified**: Apr 23 2026 — 1,388 impressions in last 30 days, active publisher
+- **Fix needed**: Platform ops — update organization name in the MS platform for publisher 927 to "Major Rocket" (flag for Vamsee)
+- **Do not**: Edit pulse_state.json to rename this — the name comes directly from ClickHouse and will revert next Pulse run

@@ -1830,8 +1830,13 @@ def _format_pulse_blocks(
             "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0{ghost_inline}"}],
         })
         blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "\u00a0\u00a0\u00a0\u00a0`@Scout ghost brief` \u2192 full list + pixel/postback diagnosis per campaign"}],
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Get Ghost Brief", "emoji": True},
+                "action_id": "pulse_ghost_brief",
+                "style": "primary",
+            }],
         })
 
     # ── Low fill rate (P0 — burned post-transaction traffic) ─────────────────
@@ -1855,8 +1860,13 @@ def _format_pulse_blocks(
             "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0{fill_inline}"}],
         })
         blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "\u00a0\u00a0\u00a0\u00a0`@Scout fill rate brief` \u2192 breakdown by publisher + root cause diagnosis"}],
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Get Fill Rate Brief", "emoji": True},
+                "action_id": "pulse_fill_rate_brief",
+                "style": "primary",
+            }],
         })
 
     # ── Revenue opportunities (weekly, Mondays only) ──────────────────────────
@@ -1926,8 +1936,22 @@ def _format_pulse_blocks(
             # Offer recommendation CTA — closes the urgency-to-action loop
             pub_name = v["publisher_name"]
             blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0:zap:  Run `@Scout offers for {pub_name}` to surface unprovisioned affiliate offers."}],
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": f"Scout offers for {pub_name}", "emoji": True},
+                        "action_id": "pulse_scout_offers",
+                        "value": pub_name,
+                        "style": "primary",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Dig deeper", "emoji": True},
+                        "action_id": "pulse_dig_in",
+                        "value": pub_name,
+                    },
+                ],
             })
 
         for a in urgent_caps[:3]:
@@ -1992,11 +2016,19 @@ def _format_pulse_blocks(
         standing.append("🟢  No caps at risk")
 
     for e in night_events[:4]:
-        ts     = e["timestamp"][11:16] if len(e.get("timestamp", "")) >= 16 else ""
+        raw_ts = e.get("timestamp", "")
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            _utc_dt = datetime.fromisoformat(raw_ts)
+            if _utc_dt.tzinfo is None:
+                _utc_dt = _utc_dt.replace(tzinfo=timezone.utc)
+            ts = _utc_dt.astimezone(_ZI("America/Chicago")).strftime("%-I:%M %p CT")
+        except Exception:
+            ts = raw_ts[11:16] + " UTC" if len(raw_ts) >= 16 else ""
         name   = e["adv_name"] or "Unknown"
         icon   = "⏸" if e["type"] == "pause" else "▶"
         action = "paused" if e["type"] == "pause" else "resumed"
-        standing.append(f"{icon}  *{name}* {action} {ts} UTC")
+        standing.append(f"{icon}  *{name}* {action} {ts}")
 
     if standing:
         blocks.append({"type": "divider"})
@@ -3140,6 +3172,39 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
     # ── Feedback buttons (👍 / 👎 / ✏️) ──────────────────────────────────────
     if action_id in ("scout_feedback_good", "scout_feedback_bad", "scout_feedback_correct"):
         _handle_feedback(action, payload, web)
+        return
+
+    # ── Pulse interactive buttons ─────────────────────────────────────────────
+    if action_id == "pulse_ghost_brief":
+        user_id = payload.get("user", {}).get("id", "")
+        msg_ts  = (payload.get("message") or {}).get("ts", "")
+        def _run_ghost(u=user_id, t=msg_ts):
+            resp = ask("ghost campaigns", history=[], user_id=u)
+            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
+        threading.Thread(target=_run_ghost, daemon=True).start()
+        return
+
+    if action_id == "pulse_fill_rate_brief":
+        user_id = payload.get("user", {}).get("id", "")
+        msg_ts  = (payload.get("message") or {}).get("ts", "")
+        def _run_fill(u=user_id, t=msg_ts):
+            resp = ask("fill rate brief", history=[], user_id=u)
+            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
+        threading.Thread(target=_run_fill, daemon=True).start()
+        return
+
+    if action_id in ("pulse_scout_offers", "pulse_dig_in"):
+        pub     = action.get("value", "").strip()
+        user_id = payload.get("user", {}).get("id", "")
+        msg_ts  = (payload.get("message") or {}).get("ts", "")
+        query   = f"offers for {pub}" if action_id == "pulse_scout_offers" else f"dig into {pub}"
+        def _run_pub(q=query, u=user_id, t=msg_ts):
+            resp = ask(q, history=[], user_id=u)
+            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
+        threading.Thread(target=_run_pub, daemon=True).start()
         return
 
 
