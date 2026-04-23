@@ -1461,21 +1461,13 @@ def _build_feedback_buttons(query_hash: str) -> list:
     ]
 
 
-# ── Pulse signal runners ──────────────────────────────────────────────────────
+# ── Pulse signal helpers (one per signal, each owns its own ch connection) ────
 
-def _run_pulse_signals() -> dict:
-    """
-    Run the three proactive pulse signals against ClickHouse.
-    Returns a dict with cap_alerts, velocity_shifts, overnight_events.
-    Each is a list (may be empty if no signal or query failed).
-    """
-    from scout_agent import _get_ch_client
+def _pulse_signal_cap(ch) -> list:
     import json as _json
-    ch = _get_ch_client()
-
-    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": [], "ghost_campaigns": [], "fill_rate": [], "opportunities": []}
-
-    # ── Signal 1: Cap proximity (campaigns ≥70% of monthly cap) ──────────────
+    from datetime import date as _date
+    import calendar as _cal
+    results = []
     try:
         cap_rows = ch.query(
             """
@@ -1495,8 +1487,6 @@ def _run_pulse_signals() -> dict:
             GROUP BY c.id, c.adv_name, c.capping_config
             """
         ).result_rows
-        from datetime import date as _date
-        import calendar as _cal
         today_d = _date.today()
         days_in_month = _cal.monthrange(today_d.year, today_d.month)[1]
         days_remaining = days_in_month - today_d.day + 1
@@ -1513,7 +1503,7 @@ def _run_pulse_signals() -> dict:
                 continue
             daily_run_rate = revenue_mtd / max(today_d.day, 1)
             days_to_cap    = (mb - revenue_mtd) / daily_run_rate if daily_run_rate > 0 else 999
-            signals["cap_alerts"].append({
+            results.append({
                 "adv_name":       adv_name,
                 "campaign_id":    int(camp_id) if camp_id else None,
                 "monthly_cap":    mb,
@@ -1522,11 +1512,14 @@ def _run_pulse_signals() -> dict:
                 "days_remaining": days_remaining,
                 "days_to_cap":    round(days_to_cap, 1),
             })
-        signals["cap_alerts"].sort(key=lambda x: x["cap_pct"], reverse=True)
+        results.sort(key=lambda x: x["cap_pct"], reverse=True)
     except Exception as e:
         log.warning(f"Pulse cap signal failed: {e}")
+    return results
 
-    # ── Signal 2: Revenue velocity (7d vs 30d run rate, ≥40% delta, >$5K/mo) ─
+
+def _pulse_signal_velocity(ch) -> list:
+    results: list = []
     try:
         vel_rows = ch.query(
             """
@@ -1538,13 +1531,12 @@ def _run_pulse_signals() -> dict:
             PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
             WHERE created_at >= today() - 30
             GROUP BY user_id
-            HAVING revenue_30d > 5000  -- exclude ramp-ups from near-zero baseline
+            HAVING revenue_30d > 5000
             ORDER BY revenue_30d DESC
             LIMIT 200
             """
         ).result_rows
 
-        # Resolve publisher names in one batch query
         uid_list = [str(r[0]) for r in vel_rows if r[0]]
         org_map: dict = {}
         if uid_list:
@@ -1557,7 +1549,6 @@ def _run_pulse_signals() -> dict:
             except Exception:
                 pass
 
-        # Build velocity shifts list (filter to ≥40% delta)
         for user_id, rev_30d, rev_7d in vel_rows:
             rev_7d_ann = (rev_7d / 7) * 30 if rev_7d else 0
             if rev_30d <= 0:
@@ -1565,7 +1556,7 @@ def _run_pulse_signals() -> dict:
             pct_delta = (rev_7d_ann - rev_30d) / rev_30d * 100
             if abs(pct_delta) < 40:
                 continue
-            signals["velocity_shifts"].append({
+            results.append({
                 "publisher_name":  org_map.get(str(user_id), f"Partner {user_id}"),
                 "publisher_id":    int(user_id) if user_id else None,
                 "revenue_30d":     round(rev_30d, 2),
@@ -1574,11 +1565,10 @@ def _run_pulse_signals() -> dict:
                 "direction":       "up" if pct_delta > 0 else "down",
                 "top_advertisers": [],
             })
-        signals["velocity_shifts"].sort(key=lambda x: abs(x["pct_delta"]), reverse=True)
-        signals["velocity_shifts"] = signals["velocity_shifts"][:5]
+        results.sort(key=lambda x: abs(x["pct_delta"]), reverse=True)
+        results = results[:5]
 
-        # ── Advertiser attribution: top-2 per publisher by revenue delta ──────
-        vel_pub_ids = [v["publisher_id"] for v in signals["velocity_shifts"] if v["publisher_id"]]
+        vel_pub_ids = [v["publisher_id"] for v in results if v["publisher_id"]]
         if vel_pub_ids:
             try:
                 pub_id_csv = ",".join(str(p) for p in vel_pub_ids)
@@ -1601,14 +1591,12 @@ def _run_pulse_signals() -> dict:
                     ORDER BY cv.user_id, abs(delta_ann) DESC
                     """
                 ).result_rows
-                # Group by publisher_id → top 2 advertisers by |delta_ann|
                 attr_map: dict = {}
                 for uid, adv_name, rev_30d_a, rev_7d_a, delta_a in attr_rows:
                     key = int(uid) if uid else None
                     if key not in attr_map:
                         attr_map[key] = []
                     delta_rounded = round(delta_a or 0, 0)
-                    # Skip flat advertisers — no meaningful signal
                     if abs(delta_rounded) < 100:
                         continue
                     if len(attr_map[key]) < 2:
@@ -1617,119 +1605,117 @@ def _run_pulse_signals() -> dict:
                             "delta_ann": delta_rounded,
                             "rev_7d":    round(rev_7d_a or 0, 0),
                         })
-                # Attach to velocity shifts
-                for v in signals["velocity_shifts"]:
+                for v in results:
                     v["top_advertisers"] = attr_map.get(v["publisher_id"], [])
             except Exception as e:
                 log.warning(f"Pulse advertiser attribution failed: {e}")
 
+        for v in results:
+            v["hypothesis"] = ""
+            v["gaps"] = []
+            if v["direction"] != "down":
+                continue
+            pub_id   = v.get("publisher_id")
+            pub_name = v.get("publisher_name", "")
+            top_advs = v.get("top_advertisers", [])
+
+            top_adv = next((a for a in top_advs if a.get("delta_ann", 0) < 0), None)
+            if top_adv and pub_id:
+                try:
+                    hyp_rows = ch.query(
+                        """
+                        SELECT
+                            u.organization,
+                            sum(toFloat64OrNull(cv.revenue))                                    AS rev_30d,
+                            sumIf(toFloat64OrNull(cv.revenue), cv.created_at >= today() - 7)   AS rev_7d
+                        FROM adpx_conversionsdetails cv
+                        JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
+                        JOIN from_airbyte_users u ON toInt64(cv.user_id) = u.id
+                        PREWHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
+                        WHERE cv.created_at >= today() - 30
+                          AND c.adv_name ILIKE %(adv)s
+                          AND cv.user_id != %(pub_id)s
+                        GROUP BY u.organization
+                        HAVING rev_30d > 500
+                        ORDER BY rev_30d DESC
+                        LIMIT 5
+                        """,
+                        parameters={"adv": f"%{top_adv['adv_name']}%", "pub_id": pub_id},
+                    ).result_rows
+                    also_down = [r[0] for r in hyp_rows
+                                 if r[2] > 0 and (r[2] / 7 * 30) < r[1] * 0.80][:2]
+                    adv_abs   = abs(top_adv["delta_ann"])
+                    delta_fmt = f"${adv_abs/1000:.0f}K" if adv_abs >= 1000 else f"${adv_abs:.0f}"
+                    if also_down:
+                        also_str = " & ".join(also_down)
+                        v["hypothesis"] = (
+                            f"_{top_adv['adv_name']} dropped {delta_fmt} — "
+                            f"also down at {also_str}. Likely advertiser-side cap, not a {pub_name} issue._"
+                        )
+                    else:
+                        v["hypothesis"] = (
+                            f"_{top_adv['adv_name']} dropped {delta_fmt} here but holding elsewhere — "
+                            f"check {pub_name} provisioning or targeting config._"
+                        )
+                except Exception as e:
+                    log.warning(f"Pulse hypothesis failed for {pub_name}: {e}")
+
+            if pub_id:
+                try:
+                    existing_rows = ch.query(
+                        f"SELECT DISTINCT c.adv_name "
+                        f"FROM from_airbyte_publisher_campaigns pc "
+                        f"JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id) "
+                        f"WHERE pc.user_id = {pub_id} AND pc.is_active = true AND pc.deleted_at IS NULL"
+                    ).result_rows
+                    existing = {r[0] for r in existing_rows}
+
+                    gap_rows = ch.query(f"""
+                        WITH imp_agg AS (
+                            SELECT campaign_id, count() AS imp_30d
+                            FROM adpx_impressions_details
+                            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+                            WHERE created_at >= today() - 30
+                            GROUP BY campaign_id
+                        ),
+                        conv_agg AS (
+                            SELECT campaign_id, sum(toFloat64OrNull(revenue)) AS rev_30d
+                            FROM adpx_conversionsdetails
+                            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+                            WHERE created_at >= today() - 30
+                            GROUP BY campaign_id
+                        )
+                        SELECT
+                            c.adv_name,
+                            count(DISTINCT pc.user_id) AS pub_count,
+                            sum(ca.rev_30d)             AS revenue_30d,
+                            round(sum(ca.rev_30d) / nullIf(sum(ia.imp_30d), 0) * 1000, 2) AS rpm
+                        FROM from_airbyte_publisher_campaigns pc
+                        JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
+                        LEFT JOIN imp_agg ia ON toString(ia.campaign_id) = toString(pc.campaign_id)
+                        LEFT JOIN conv_agg ca ON toString(ca.campaign_id) = toString(pc.campaign_id)
+                        WHERE pc.is_active = true AND pc.deleted_at IS NULL
+                          AND pc.user_id != {pub_id}
+                        GROUP BY c.adv_name
+                        HAVING pub_count >= 2 AND sum(ca.rev_30d) > 0
+                        ORDER BY sum(ca.rev_30d) DESC
+                        LIMIT 20
+                    """).result_rows
+                    v["gaps"] = [
+                        (adv, rpm) for adv, _cnt, _rev, rpm in gap_rows
+                        if adv not in existing and rpm and rpm > 0
+                    ][:3]
+                except Exception as e:
+                    log.warning(f"Pulse gap check failed for {pub_name}: {e}")
+
     except Exception as e:
         log.warning(f"Pulse velocity signal failed: {e}")
+    return results
 
-    # ── Causal hypothesis + gap opportunities for each down publisher ──────────
-    # Runs after velocity + attribution so top_advertisers is already populated.
-    for v in signals["velocity_shifts"]:
-        v["hypothesis"] = ""
-        v["gaps"] = []
-        if v["direction"] != "down":
-            continue
-        pub_id   = v.get("publisher_id")
-        pub_name = v.get("publisher_name", "")
-        top_advs = v.get("top_advertisers", [])
 
-        # ── Causal hypothesis: is the top-drop advertiser also down elsewhere? ─
-        top_adv = next((a for a in top_advs if a.get("delta_ann", 0) < 0), None)
-        if top_adv and pub_id:
-            try:
-                hyp_rows = ch.query(
-                    """
-                    SELECT
-                        u.organization,
-                        sum(toFloat64OrNull(cv.revenue))                                    AS rev_30d,
-                        sumIf(toFloat64OrNull(cv.revenue), cv.created_at >= today() - 7)   AS rev_7d
-                    FROM adpx_conversionsdetails cv
-                    JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
-                    JOIN from_airbyte_users u ON toInt64(cv.user_id) = u.id
-                    PREWHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
-                    WHERE cv.created_at >= today() - 30
-                      AND c.adv_name ILIKE %(adv)s
-                      AND cv.user_id != %(pub_id)s
-                    GROUP BY u.organization
-                    HAVING rev_30d > 500
-                    ORDER BY rev_30d DESC
-                    LIMIT 5
-                    """,
-                    parameters={"adv": f"%{top_adv['adv_name']}%", "pub_id": pub_id},
-                ).result_rows
-                # A publisher "also down" = 7d annualized < 80% of 30d run rate
-                also_down = [r[0] for r in hyp_rows
-                             if r[2] > 0 and (r[2] / 7 * 30) < r[1] * 0.80][:2]
-                adv_abs   = abs(top_adv["delta_ann"])
-                delta_fmt = f"${adv_abs/1000:.0f}K" if adv_abs >= 1000 else f"${adv_abs:.0f}"
-                if also_down:
-                    also_str = " & ".join(also_down)
-                    v["hypothesis"] = (
-                        f"_{top_adv['adv_name']} dropped {delta_fmt} — "
-                        f"also down at {also_str}. Likely advertiser-side cap, not a {pub_name} issue._"
-                    )
-                else:
-                    v["hypothesis"] = (
-                        f"_{top_adv['adv_name']} dropped {delta_fmt} here but holding elsewhere — "
-                        f"check {pub_name} provisioning or targeting config._"
-                    )
-            except Exception as e:
-                log.warning(f"Pulse hypothesis failed for {pub_name}: {e}")
-
-        # ── Quick gap check: top earners on 2+ publishers not yet in this one ──
-        if pub_id:
-            try:
-                existing_rows = ch.query(
-                    f"SELECT DISTINCT c.adv_name "
-                    f"FROM from_airbyte_publisher_campaigns pc "
-                    f"JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id) "
-                    f"WHERE pc.user_id = {pub_id} AND pc.is_active = true AND pc.deleted_at IS NULL"
-                ).result_rows
-                existing = {r[0] for r in existing_rows}
-
-                gap_rows = ch.query(f"""
-                    WITH imp_agg AS (
-                        SELECT campaign_id, count() AS imp_30d
-                        FROM adpx_impressions_details
-                        PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-                        WHERE created_at >= today() - 30
-                        GROUP BY campaign_id
-                    ),
-                    conv_agg AS (
-                        SELECT campaign_id, sum(toFloat64OrNull(revenue)) AS rev_30d
-                        FROM adpx_conversionsdetails
-                        PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-                        WHERE created_at >= today() - 30
-                        GROUP BY campaign_id
-                    )
-                    SELECT
-                        c.adv_name,
-                        count(DISTINCT pc.user_id) AS pub_count,
-                        sum(ca.rev_30d)             AS revenue_30d,
-                        round(sum(ca.rev_30d) / nullIf(sum(ia.imp_30d), 0) * 1000, 2) AS rpm
-                    FROM from_airbyte_publisher_campaigns pc
-                    JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
-                    LEFT JOIN imp_agg ia ON toString(ia.campaign_id) = toString(pc.campaign_id)
-                    LEFT JOIN conv_agg ca ON toString(ca.campaign_id) = toString(pc.campaign_id)
-                    WHERE pc.is_active = true AND pc.deleted_at IS NULL
-                      AND pc.user_id != {pub_id}
-                    GROUP BY c.adv_name
-                    HAVING pub_count >= 2 AND sum(ca.rev_30d) > 0
-                    ORDER BY sum(ca.rev_30d) DESC
-                    LIMIT 20
-                """).result_rows
-                v["gaps"] = [
-                    (adv, rpm) for adv, _cnt, _rev, rpm in gap_rows
-                    if adv not in existing and rpm and rpm > 0
-                ][:3]
-            except Exception as e:
-                log.warning(f"Pulse gap check failed for {pub_name}: {e}")
-
-    # ── Signal 3: Overnight campaign events (last 24h pauses/resumes) ─────────
+def _pulse_signal_overnight(ch) -> list:
+    import json as _json
+    results = []
     try:
         event_rows = ch.query(
             """
@@ -1749,24 +1735,21 @@ def _run_pulse_signals() -> dict:
                 adv_name = od.get("adv_name") or od.get("name") or ""
             except Exception:
                 pass
-            signals["overnight_events"].append({
+            results.append({
                 "type":      ev_type,
                 "adv_name":  adv_name,
                 "timestamp": str(created_at) if created_at else "",
             })
     except Exception as e:
         log.warning(f"Pulse events signal failed: {e}")
+    return results
 
-    # ── Signal 4: Ghost campaigns (serving + clicking but near-zero revenue) ────
-    # Detects campaigns with broken tracking/pixels that all other signals miss.
-    # All other signals assume revenue exists — ghost campaigns earn $0 and are
-    # invisible to velocity shifts, cap alerts, and the watchdog.
-    # NOTE: calls _query_ghost_campaigns() from scout_agent — NEVER add duplicate ghost SQL here.
-    # To change detection logic (thresholds, filters, windows), edit _query_ghost_campaigns() only.
+
+def _pulse_signal_ghost(ch) -> list:
+    results = []
     try:
         from scout_agent import _query_ghost_campaigns
         ghost_detail_rows = _query_ghost_campaigns(ch)
-        # Group by adv_name for Pulse display (agent keeps per-campaign detail)
         by_adv: dict = {}
         for r in ghost_detail_rows:
             adv = r["adv_name"]
@@ -1774,16 +1757,16 @@ def _run_pulse_signals() -> dict:
             by_adv[adv]["impressions_7d"] += r["impressions_7d"]
             by_adv[adv]["impressions_2d"] += r["impressions_2d"]
         for adv, agg in sorted(by_adv.items(), key=lambda x: -x[1]["impressions_7d"])[:10]:
-            signals["ghost_campaigns"].append({"adv_name": adv, **agg})
+            results.append({"adv_name": adv, **agg})
     except Exception as e:
         log.warning(f"Pulse ghost campaign signal failed: {e}")
+    return results
 
-    # ── Signal 5: Low fill rate on post-transaction placements ───────────────────
-    # Detects publishers on checkout/receipt/order-confirmation pages where
-    # fewer than 15% of sessions receive an offer. These are the highest-value
-    # real estate in MomentScience's inventory — burned sessions = burned revenue.
+
+def _pulse_signal_fill_rate(ch) -> list:
+    results = []
     try:
-        from scout_agent import _POST_TX_PLACEMENTS
+        from scout_agent import _POST_TX_PLACEMENTS, _load_entity_overrides as _load_eo
         placements_sql = ", ".join(_POST_TX_PLACEMENTS)
         fill_rows = ch.query(
             f"""
@@ -1822,7 +1805,6 @@ def _run_pulse_signals() -> dict:
             LIMIT 5
             """
         ).result_rows
-        from scout_agent import _load_entity_overrides as _load_eo
         _pub_overrides = _load_eo().get("publishers", {})
         for pub_id, pub_name, sessions_7d, with_imps, fill_pct, missed in fill_rows:
             name = pub_name or f"Pub #{pub_id}"
@@ -1830,7 +1812,7 @@ def _run_pulse_signals() -> dict:
             if _override.get("exclude_from_fill_rate"):
                 log.info(f"[pulse] fill rate: skipping {name!r} — {_override.get('note', '')[:60]}...")
                 continue
-            signals["fill_rate"].append({
+            results.append({
                 "publisher_id":   int(pub_id),
                 "publisher_name": name,
                 "sessions_7d":    int(sessions_7d),
@@ -1839,11 +1821,11 @@ def _run_pulse_signals() -> dict:
             })
     except Exception as e:
         log.warning(f"Pulse fill rate signal failed: {e}")
+    return results
 
-    # ── Signal 6: Revenue opportunities (cross-publisher gaps) ───────────────
-    # Finds high-performing advertisers not active in high-volume publishers.
-    # Shown weekly (Mondays) to surface proactive expansion opportunities —
-    # separate from the reactive gaps embedded in velocity-shift downs.
+
+def _pulse_signal_opportunities(ch) -> list:
+    results = []
     try:
         opp_rows = ch.query(
             """
@@ -1906,7 +1888,7 @@ def _run_pulse_signals() -> dict:
             """
         ).result_rows
         for pub_name, adv_name, est_rev, sessions in opp_rows:
-            signals["opportunities"].append({
+            results.append({
                 "publisher_name": pub_name or "Unknown Publisher",
                 "adv_name":       adv_name,
                 "est_monthly_rev": round(float(est_rev), 0),
@@ -1914,6 +1896,44 @@ def _run_pulse_signals() -> dict:
             })
     except Exception as e:
         log.warning(f"Pulse opportunities signal failed: {e}")
+    return results
+
+
+# ── Pulse signal orchestrator ─────────────────────────────────────────────────
+
+def _run_pulse_signals() -> dict:
+    """
+    Run all 6 Pulse signals in parallel against ClickHouse.
+    Each signal owns its own connection — no shared state, no lock needed.
+    Returns a dict with cap_alerts, velocity_shifts, overnight_events,
+    ghost_campaigns, fill_rate, opportunities.
+    """
+    from scout_agent import _get_ch_client
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": [], "ghost_campaigns": [], "fill_rate": [], "opportunities": []}
+
+    _signal_fns = [
+        ("cap_alerts",       _pulse_signal_cap),
+        ("velocity_shifts",  _pulse_signal_velocity),
+        ("overnight_events", _pulse_signal_overnight),
+        ("ghost_campaigns",  _pulse_signal_ghost),
+        ("fill_rate",        _pulse_signal_fill_rate),
+        ("opportunities",    _pulse_signal_opportunities),
+    ]
+
+    def _run_one(key, fn):
+        ch = _get_ch_client()
+        return key, fn(ch)
+
+    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="pulse") as pool:
+        futures = {pool.submit(_run_one, key, fn): key for key, fn in _signal_fns}
+        for future in as_completed(futures):
+            try:
+                key, result = future.result()
+                signals[key] = result
+            except Exception as e:
+                log.warning(f"Pulse {futures[future]} signal failed unexpectedly: {e}")
 
     return signals
 
