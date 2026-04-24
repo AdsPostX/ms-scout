@@ -859,9 +859,16 @@ def _build_opportunity_cards(offers: list, thread_ts: str = "") -> list:
         if detail_parts:
             text += "\n" + "  ·  ".join(detail_parts)
 
+        risk_flag = offer.get("risk_flag", "")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
 
-        if thread_ts:
+        if risk_flag:
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f":warning: _{risk_flag}_"}],
+            })
+
+        if thread_ts and not risk_flag:
             btn_val = json.dumps({
                 "advertiser": advertiser,
                 "offer_id":   offer.get("offer_id", ""),
@@ -1083,8 +1090,28 @@ def _text_to_blocks(text: str) -> list:
 
         return rt_elems, ctx_lines
 
+    _SOLO_HEADER_RE = re.compile(r'^\*[^*]{15,}\*\s*$')
+
+    def _inject_section_dividers(raw: str) -> str:
+        """Insert --- before standalone bold section headers that follow content."""
+        lines = raw.strip().split('\n')
+        out: list[str] = []
+        saw_content = False
+        for line in lines:
+            stripped = line.strip()
+            if (
+                _SOLO_HEADER_RE.match(stripped)
+                and saw_content
+                and (not out or out[-1].strip() not in ('---', ''))
+            ):
+                out.append('---')
+            out.append(line)
+            if stripped and not stripped.startswith('>') and stripped != '---':
+                saw_content = True
+        return '\n'.join(out)
+
     try:
-        parts = re.split(r'\n+\s*---\s*\n+', text.strip())
+        parts = re.split(r'\n+\s*---\s*\n+', _inject_section_dividers(text.strip()))
         blocks: list = []
 
         for i, part in enumerate(parts):
@@ -1115,12 +1142,18 @@ def _text_to_blocks(text: str) -> list:
 
 def _build_suggestion_buttons(suggestions: list) -> list:
     """Build a Slack actions block with 2-3 contextual follow-up suggestion buttons."""
+    def _fit(s: str, max_len: int = 25) -> str:
+        if len(s) <= max_len:
+            return s
+        cut = s[:max_len].rsplit(' ', 1)[0]
+        return cut if cut else s[:max_len]
+
     if not suggestions:
         return []
     buttons = [
         {
             "type": "button",
-            "text": {"type": "plain_text", "text": s[:30], "emoji": False},
+            "text": {"type": "plain_text", "text": _fit(s), "emoji": False},
             "value": s,
             "action_id": f"scout_suggestion_{i}",
         }
