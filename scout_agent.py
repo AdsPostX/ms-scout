@@ -670,7 +670,18 @@ INTENTS — resolve every query to one, then act immediately.
     → get_offers_for_publisher(publisher_name=<partner>).
     Returns top affiliate network offers (not yet provisioned) scored by estimated RPM using real MS conversion benchmarks.
     DIFFERENT from get_supply_demand_gaps (which shows MS advertisers already on the platform) — this surfaces net-new affiliate inventory.
-    Lead with partner name and candidate count. Ranked list. End with :zap: demand queue CTA.
+
+    MANDATORY RESPONSE SHAPE — always follow this order:
+    1. PUBLISHER PROFILE (1 sentence): What does this publisher sell, and who is their customer?
+       Use your knowledge of the company + any category signals in the tool output.
+       Example: "WB Mason is an office supplies company serving B2B buyers — their audience is
+       purchasing managers, not consumers. Best fits: business services, travel, SaaS, financial tools."
+    2. RANKED LIST: Lead with the subset of offers that actually fit that audience. Explain the fit
+       for each top recommendation in 1 line ("good fit — their B2B buyers skew toward business tools").
+       Deprioritize or omit offers that clearly don't match the audience, even if they score high by RPM.
+    3. CTA: End with :zap: demand queue CTA.
+
+    Do NOT skip step 1. A pure RPM-ranked list without audience context is not a useful recommendation.
 
 27. RUN SCRAPER / REFRESH OFFERS — "refresh offers", "run scraper", "update offer inventory", "load benchmarks", "inventory is empty", "reload offers", "fetch latest offers", "scraper"
     → run_offer_scraper().
@@ -4218,6 +4229,33 @@ def get_offers_for_publisher(publisher_name: str) -> str:
         return f"Publisher '{publisher_name}' not found in MomentScience."
     pub_id, pub_org = pub_rows[0]
 
+    # Pull top-converting categories for this publisher from ClickHouse.
+    # Used downstream to re-rank offers by audience fit, not just RPM.
+    top_categories: list[str] = []
+    try:
+        cat_rows = ch.query(
+            """
+            SELECT
+                c.category,
+                count()          AS conversions,
+                sum(toFloat64OrNull(cv.revenue)) AS revenue
+            FROM default.adpx_conversionsdetails cv
+            JOIN default.mv_adpx_campaigns c ON cv.campaign_id = c.campaign_id
+            PREWHERE cv.user_id = %(uid)s
+              AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 6 MONTH)
+            WHERE cv.created_at >= today() - INTERVAL 6 MONTH
+              AND c.category != ''
+              AND c.category IS NOT NULL
+            GROUP BY c.category
+            ORDER BY revenue DESC NULLS LAST
+            LIMIT 5
+            """,
+            parameters={"uid": int(pub_id)}
+        ).result_rows
+        top_categories = [row[0] for row in cat_rows if row[0]]
+    except Exception:
+        pass  # Category signals are best-effort; fall back to RPM-only ranking
+
     # Existing advertiser set for this publisher (active campaigns only)
     existing_rows = ch.query(
         "SELECT DISTINCT c.adv_name "
@@ -4265,12 +4303,18 @@ def get_offers_for_publisher(publisher_name: str) -> str:
             f"Try `@Scout revenue opportunities` for cross-publisher revenue gaps with proven estimates."
         )
 
-    _NETWORK_EMOJI = {"impact": "⚡", "maxbounty": "💰", "flexoffers": "🔗"}
+    _NETWORK_EMOJI = {"impact": "⚡", "maxbounty": "💰", "flexoffers": "🔗", "cj": "🌐"}
+
+    # Surface category signals so the model can reason about audience fit
+    category_signal = ""
+    if top_categories:
+        category_signal = f"\n*📊  Top-Converting Categories on {pub_org} (last 6mo):* {', '.join(top_categories)}"
 
     lines = [
         f"*🎯  {pub_org} — Offer Recommendations*",
         f"_{len(candidates)} net-new candidates screened · {len(confirmed_top)} with confirmed rates · "
         f"{len(uncontracted)} uncontracted_",
+        category_signal,
         "",
     ]
 
