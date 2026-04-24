@@ -981,7 +981,7 @@ def _build_help_blocks() -> list:
                     "`@Scout build a brief for Checkr`\n"
                     "Scout generates copy, tracking URL, RPM estimate, and a "
                     "pre-filled queue record — then posts *Add to Queue* buttons "
-                    "so you can send it straight to the Demand Queue."
+                    "so you can send it straight to the Pipeline."
                 ),
             },
         },
@@ -1000,7 +1000,7 @@ def _build_help_blocks() -> list:
     ]
 
 
-# ── SCOUT Sniper: approve / reject handlers ───────────────────────────────────
+# ── Scout Signal: approve / reject handlers ───────────────────────────────────
 
 _SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #scout-qa (was #scout-hq)
 
@@ -2362,7 +2362,7 @@ def _format_pulse_blocks(
             ghost_inline += f"  +{remainder} more"
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f":ghost:  *GHOST CAMPAIGNS*  ({len(ghost_camps)} active · high impressions · $0 revenue)"},
+            "text": {"type": "mrkdwn", "text": f":ghost:  *DARK OFFERS*  ({len(ghost_camps)} active · high impressions · $0 revenue)"},
         })
         blocks.append({
             "type": "context",
@@ -3383,7 +3383,7 @@ def _try_add_to_demand_queue(
 
 def _handle_approve(action: dict, payload: dict, web: WebClient):
     """
-    Handle ✓ Add to Queue button click from SCOUT Sniper digest.
+    Handle ✓ Add to Queue button click from Scout Signal digest.
 
     One-click flow:
       1. Record approval (excludes from future digests)
@@ -3578,7 +3578,7 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
 
 
 def _handle_reject(action: dict, payload: dict, web: WebClient):
-    """Handle ✕ Skip button click from SCOUT Sniper digest."""
+    """Handle ✕ Skip button click from Scout Signal digest."""
     import scout_digest
 
     channel    = (payload.get("channel") or {}).get("id", "")
@@ -3773,7 +3773,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         _handle_suggestion(action, payload, web)
         return
 
-    # ── SCOUT Sniper digest actions ───────────────────────────────────────────
+    # ── Scout Signal digest actions ───────────────────────────────────────────
     if action_id == "scout_approve":
         _handle_approve(action, payload, web)
         return
@@ -4032,7 +4032,7 @@ def _build_home_view() -> dict:
                     "*Slash commands — responses are only visible to you:*\n"
                     "• `/scout-pub [publisher name]` — revenue health, active offers, what to pitch\n"
                     "• `/scout-enter [advertiser or URL]` — campaign entry card for the MS platform\n"
-                    "• `/scout-queue` — what's pending in the demand queue\n"
+                    "• `/scout-queue` — what's pending in the pipeline\n"
                     "• `/scout-status` — system health + data freshness\n\n"
                     ":lock: _Slash command responses are private — only you can see them. Great for quick lookups mid-call._\n\n"
                     "*Try one →*"
@@ -4521,10 +4521,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         threading.Thread(target=_run_force_pulse, daemon=True).start()
         return
 
-    # "force sniper" — run the offer digest immediately, posts to #scout-qa
-    if re.search(r'\bforce\s+sniper\b', lower):
+    # "force signal" / "force sniper" — run the offer digest immediately, posts to #scout-qa
+    if re.search(r'\bforce\s+s(?:ignal|niper)\b', lower):
         web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                             text=":hourglass_flowing_sand: Running sniper digest now — offer cards will post to #scout-qa...")
+                             text=":hourglass_flowing_sand: Running Scout Signal digest now — offer cards will post to #scout-qa...")
         def _run_force_sniper():
             try:
                 import scout_digest
@@ -4556,16 +4556,16 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
                 scout_digest.post_digest(is_force=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text=":white_check_mark: Sniper digest posted to #scout-qa — click *Add to Queue* on any offer to test the flow.")
+                                     text=":white_check_mark: Signal digest posted to #scout-qa — click *Add to Queue* on any offer to test the flow.")
             except RuntimeError as e:
                 # post_digest raises RuntimeError with filter breakdown when 0 offers pass
-                log.warning(f"[force sniper] 0 offers posted: {e}")
+                log.warning(f"[force signal] 0 offers posted: {e}")
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text=f":warning: Force sniper ran but no offers posted.\n{e}")
+                                     text=f":warning: Force signal ran but no offers posted.\n{e}")
             except Exception as e:
-                log.error(f"[force sniper] failed: {e}", exc_info=True)
+                log.error(f"[force signal] failed: {e}", exc_info=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text=f":x: Force sniper failed: `{e}`")
+                                     text=f":x: Force signal failed: `{e}`")
         threading.Thread(target=_run_force_sniper, daemon=True).start()
         return
 
@@ -4590,7 +4590,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
                 results = []
                 groups = {
-                    "Core Health": ["System status", "Ghost campaigns"],
+                    "Core Health": ["System status", "Dark offers"],
                     "Offer Intelligence": [
                         "Offer search — finance vertical",
                         "Offers for named publisher",
@@ -5232,7 +5232,7 @@ def _post_harvest_audit(harvest_result: dict) -> None:
 def _run_scraper_daemon() -> None:
     """
     Offer scraper daemon — fetches affiliate inventory (Impact/FlexOffers/MaxBounty)
-    once per day at 6:00 AM CT, then posts the Scout Sniper digest.
+    once per day at 6:00 AM CT, then posts the Scout Signal digest.
 
     First-boot behaviour: if scraper_state.json doesn't exist, run immediately
     regardless of time of day. This ensures Render deployments (which can happen
