@@ -4451,7 +4451,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         thread_ts = event.get("thread_ts") or msg_ts
         query     = _strip_mention(raw_text)
     else:  # DM
-        thread_ts = event.get("thread_ts") or msg_ts
+        thread_ts = event.get("thread_ts")  # None for top-level DM — reply flat, not in a sub-thread
         query     = raw_text.strip()
 
     if not query:
@@ -4749,6 +4749,88 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 {"role": "assistant", "content": "Understood — I have this thread context loaded."},
             ] + history
             log.info(f"Injected thread context for {thread_ts}: {ctx_line}")
+
+    # ── DM path: emoji-reaction, no placeholder, no GIF, no spinner ─────────────
+    if is_dm:
+        # Add 🤔 reaction to the user's message — the "I saw it, thinking" signal.
+        # Appears on their message specifically, not as a bot post. Disappears when ready.
+        try:
+            web.reactions_add(channel=channel, timestamp=msg_ts, name="thinking_face")
+        except Exception:
+            pass  # reactions:write scope may not be set yet — degrade gracefully
+
+        try:
+            _t0 = time.monotonic()
+            response = ask(query, history=history, user_id=user_id)
+            _elapsed = int(time.monotonic() - _t0)
+            _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
+            _tools_called = response.get("tools_called", []) if isinstance(response, dict) else []
+            try:
+                user_info = web.users_info(user=user_id)
+                _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
+                          or user_info.get("user", {}).get("name", user_id))
+            except Exception:
+                _uname = user_id
+            _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
+        except Exception as e:
+            log.error(f"Agent error (DM): {e}", exc_info=True)
+            try:
+                web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
+            except Exception:
+                pass
+            web.chat_postMessage(channel=channel, text=f":warning: Something went wrong — `{e}`")
+            return
+        finally:
+            # Always remove the 🤔 — even on error — so it doesn't hang
+            try:
+                web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
+            except Exception:
+                pass
+
+        # Track active thread for follow-up context retention
+        with _LAST_THREAD_LOCK:
+            _LAST_THREAD_PER_CHANNEL[channel] = thread_ts or msg_ts
+
+        # Extract structured context + suggestion buttons
+        suggestions: list = []
+        if isinstance(response, dict) and response.get("type") == "text_with_context":
+            extracted = response.get("extracted_context", {})
+            if extracted:
+                launched_offer_dm = extracted.pop("launched_offer", None)
+                _merge_thread_context(thread_ts or msg_ts, extracted)
+            suggestions = response.get("suggestions", [])
+            response = response["text"]
+
+        # Post reply — flat DM message (thread_ts=None) or in-thread if user was already in one
+        if isinstance(response, dict) and response.get("type") == "brief":
+            brief_data = response["brief_data"]
+            copy       = response["copy"]
+            _store_brief(thread_ts or msg_ts, brief_data, copy)
+            _merge_thread_context(thread_ts or msg_ts, {
+                "offer":       brief_data.get("advertiser"),
+                "payout":      brief_data.get("payout_num"),
+                "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
+            })
+            blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=response.get("fallback_text", "Campaign Brief ready."),
+                blocks=blocks,
+                unfurl_links=False,
+            )
+        else:
+            response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))
+            content_blocks    = _text_to_blocks(response_text)
+            suggestion_blocks = _build_suggestion_buttons(suggestions)
+            # No elapsed-time footer in DMs — the reaction disappearing IS the signal
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=response_text,
+                blocks=[*content_blocks, *suggestion_blocks],
+                unfurl_links=False,
+            )
+        return
+    # ── END DM path ──────────────────────────────────────────────────────────────
 
     # Post placeholder immediately — GIF injected async so there's no Giphy latency on first render
     _msg_text, _giphy_tag = _pick_loading_message(query)
