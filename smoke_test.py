@@ -298,3 +298,4 @@ if __name__ == "__main__":
             print(f"Slack: {'posted to #scout-qa' if posted else 'failed'}")
 
     sys.exit(0 if pass_count == total else 1)
+
