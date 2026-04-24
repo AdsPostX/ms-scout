@@ -265,13 +265,18 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
 
 # --- Impact -----------------------------------------------------------------
 
-def _fetch_impact_ads_data() -> dict:
+def _fetch_impact_ads_data() -> tuple:
     """
     Fetch Impact /Ads endpoint in a single pass.
-    Returns cat_map: {campaign_id: label_string}  e.g. "Payments,Capital,US"
+    Returns (cat_map, creative_map):
+      cat_map:     {campaign_id: label_string}  e.g. "Payments,Capital,US"
+      creative_map:{campaign_id: {"icon_url": ..., "banner_url": ...}}
+                   MediaUrl = full-size ad banner; ThumbnailUrl = smaller preview.
+                   Zero extra API calls — this endpoint already runs every scrape cycle.
     """
     url = f"https://api.impact.com/Mediapartners/{IMPACT_SID}/Ads"
-    cat_map = {}
+    cat_map     = {}
+    creative_map = {}
     page = 1
 
     while True:
@@ -304,13 +309,23 @@ def _fetch_impact_ads_data() -> dict:
             if labels and cid not in cat_map:
                 cat_map[cid] = labels
 
+            # Creative URLs — capture on first ad seen per campaign (usually the primary)
+            if cid not in creative_map:
+                media  = (ad.get("MediaUrl") or ad.get("ImageUrl") or "").strip()
+                thumb  = (ad.get("ThumbnailUrl") or ad.get("IconUrl") or "").strip()
+                if media or thumb:
+                    creative_map[cid] = {
+                        "icon_url":   thumb or media,
+                        "banner_url": media or thumb,
+                    }
+
         total = int(data.get("@totalrecords", 0))
         if page * 1000 >= total:
             break
         page += 1
 
-    log.info(f"Impact: ads data loaded — {len(cat_map)} categories")
-    return cat_map
+    log.info(f"Impact: ads data loaded — {len(cat_map)} categories, {len(creative_map)} creatives")
+    return cat_map, creative_map
 
 
 def _fetch_impact_campaigns_raw() -> list:
@@ -351,8 +366,8 @@ def fetch_impact() -> list:
     log.info("Impact: fetching campaigns...")
     campaigns_all = _fetch_impact_campaigns_raw()
 
-    log.info("Impact: fetching ads data (categories)...")
-    cat_map = _fetch_impact_ads_data()
+    log.info("Impact: fetching ads data (categories + creatives)...")
+    cat_map, creative_map = _fetch_impact_ads_data()
 
     offers = []
     for c in campaigns_all:
@@ -362,7 +377,8 @@ def fetch_impact() -> list:
         regions = c.get("ShippingRegions", [])
         geo = ", ".join(r.title() for r in regions) if regions else "US"
 
-        # Creative URLs — Impact provides logo and banner via LogoUri / ImageUri
+        # Creative URLs — start with campaign-level logos, then override with richer
+        # /Ads creative data (MediaUrl = actual ad banner, not just brand logo)
         logo_url   = c.get("LogoUri", "") or c.get("LogoUrl", "") or ""
         image_url  = c.get("ImageUri", "") or c.get("BannerUri", "") or logo_url
 
@@ -390,6 +406,18 @@ def fetch_impact() -> list:
         o["banner_url"]        = image_url
         o["status"]            = c.get("ContractStatus", "")
         o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
+
+        # Override with richer creative data from /Ads (MediaUrl = actual ad banner creative)
+        # The /Ads endpoint already runs every cycle — no extra API calls needed.
+        if cid in creative_map:
+            ads_icon   = creative_map[cid].get("icon_url", "")
+            ads_banner = creative_map[cid].get("banner_url", "")
+            if ads_icon:
+                o["icon_url"]   = ads_icon
+            if ads_banner:
+                o["hero_url"]   = ads_banner
+                o["banner_url"] = ads_banner
+
         offers.append(o)
 
     # Auto-enrich payouts: fetch Actions for any campaign not already in cache
