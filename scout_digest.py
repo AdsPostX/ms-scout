@@ -1,6 +1,6 @@
 """
 scout_digest.py
-SCOUT Sniper — Weekly Offer Digest
+Scout Signal — Weekly Offer Digest
 
 Selects top candidate offers from the scraper output, filters duplicates,
 scores by payout + category fit, and posts a curated Slack digest with
@@ -579,7 +579,7 @@ def build_digest_blocks(
     blocks: list = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"🎯  SCOUT Sniper  ·  {run_date}"},
+            "text": {"type": "plain_text", "text": f"🎯  Scout Signal  ·  {run_date}"},
         },
         {
             "type": "section",
@@ -923,7 +923,7 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
         ]
     blocks = new_block + blocks
 
-    fallback = f"🎯 SCOUT Sniper — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
+    fallback = f"🎯 Scout Signal — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
 
     if dry_run:
         print(json.dumps(blocks, indent=2))
@@ -943,7 +943,7 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    parser = argparse.ArgumentParser(description="SCOUT Sniper — offer digest")
+    parser = argparse.ArgumentParser(description="Scout Signal — offer digest")
     parser.add_argument("--dry-run", action="store_true", help="Print blocks without posting")
     parser.add_argument("--force", action="store_true", help="Bypass new-offer gate, always post to #scout-qa")
     args = parser.parse_args()

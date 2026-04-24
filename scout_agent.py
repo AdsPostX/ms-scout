@@ -557,7 +557,7 @@ INTENTS — resolve every query to one, then act immediately.
    NOTE: "let's do the projection/analysis/breakdown for [publisher]" is Intent 12 or 18, not this.
    → draft_campaign_brief(advertiser=X). Output ONLY the JSON block (see BRIEF MODE below).
 
-2. DEMAND QUEUE STATUS — "queue", "pending", "what's approved", "waiting to go live", "queue status"
+2. PIPELINE STATUS — "queue", "pending", "what's approved", "waiting to go live", "queue status"
    → get_demand_queue_status(). Lead with count. For each offer: name · network · payout · days in queue · Notion link (notion_url field). Flag likely-live offers. If empty: "Queue is clear."
 
 3. CONFIRM LIVE — "X is live", "confirm X is live", "mark X as launched"
@@ -655,7 +655,7 @@ INTENTS — resolve every query to one, then act immediately.
     Never pass both parameters simultaneously.
     Lead with total revenue estimate, then the ranked gap list. End with dead weight if present.
 
-23. GHOST CAMPAIGN BRIEF — "ghost brief", "ghost campaigns", "what campaigns are earning nothing", "campaigns with no revenue", "show me the ghosts", "zero revenue campaigns", "which campaigns have impressions but no revenue"
+23. DARK OFFERS BRIEF — "ghost brief", "ghost campaigns", "what campaigns are earning nothing", "campaigns with no revenue", "show me the ghosts", "zero revenue campaigns", "which campaigns have impressions but no revenue"
     → get_ghost_campaigns().
     Returns full list with per-campaign pixel/postback diagnosis. No parameters needed.
     Lead with count, then ranked list by impressions. End with :zap: action prompt.
@@ -1506,7 +1506,7 @@ TOOLS = [
         "description": (
             "Trigger an immediate offer inventory refresh from affiliate networks "
             "(Impact, FlexOffers, MaxBounty). Takes ~2 minutes. Run when offer inventory "
-            "is empty or stale. Updates offers_latest.json and posts the Scout Sniper digest. "
+            "is empty or stale. Updates offers_latest.json and posts the Scout Signal digest. "
             "Use for: 'refresh offers', 'run scraper', 'update offer inventory', "
             "'load benchmarks', 'inventory is empty', 'reload offers', 'fetch latest offers'."
         ),
@@ -4429,8 +4429,8 @@ _QA_SUITE: list[tuple[str, str, list[str]]] = [
      "status",
      ["healthy"]),
 
-    # ── Ghost campaigns ───────────────────────────────────────────────────────
-    ("Ghost campaigns",
+    # ── Dark offers ───────────────────────────────────────────────────────────
+    ("Dark offers",
      "ghost campaigns",
      ["ghost", "campaign", "impression", "revenue", "postback", "no ghost"]),
 
