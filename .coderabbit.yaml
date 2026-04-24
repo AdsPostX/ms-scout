@@ -1,0 +1,62 @@
+# CodeRabbit configuration for ms-scout
+# https://docs.coderabbit.ai/guides/configure-coderabbit
+
+language: "en-US"
+
+reviews:
+  profile: "chill"          # assertive | chill — assertive for critical infra, chill for internal tools
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+
+  path_filters:
+    - "!data/**"            # runtime JSON state — not code
+    - "!**/*.json"          # launched_offers.json, pulse_state.json etc
+    - "!**/__pycache__/**"
+
+  path_instructions:
+    - path: "scout_bot.py"
+      instructions: |
+        This is a Slack Socket Mode bot running on Render (always-on).
+        Key invariants to enforce:
+        - _handle_approve and _handle_brief_queue must never block the main thread for >30s
+        - Any new Pulse signal (_build_*_signal) must NOT duplicate SQL from scout_agent.py — use shared _query_*() functions
+        - Block actions (_handle_block_action) must thread-dispatch any operation >1s
+        - _patch_notion_copy is the async fallback only — primary path is sync in _handle_approve
+        - Never add bare except: clauses — always log.warning() with context
+        - _route_channel("offers") routes to #scout-qa in dev, #scout-offers in prod — never hardcode channel IDs
+
+    - path: "scout_agent.py"
+      instructions: |
+        This is the Claude tool-calling layer. Key rules:
+        - Every new tool needs: name, description, input_schema, TOOL_MAP entry, and handler function — missing any one silently breaks routing
+        - Shared query functions must be prefixed _query_ and accept ch (ClickHouse client) as first arg
+        - SYSTEM_PROMPT intent routing must have a numbered line for every tool
+        - Never put SQL inline in TOOL_MAP handlers — use or create a _query_*() function
+
+    - path: "scout_digest.py"
+      instructions: |
+        Daily offer digest. scoring and dedup logic is sensitive — any change to
+        scoring weights or dedup windows should be called out explicitly.
+
+    - path: "smoke_test.py"
+      instructions: |
+        Startup health check posted to #scout-qa. Changes here affect what ops
+        sees on every Render redeploy. Verify fallback text= is always set alongside blocks=.
+
+    - path: "offer_scraper.py"
+      instructions: |
+        Scraper runs every 6h. Network-specific parsers are brittle — flag any
+        change that could silently swallow offers (empty list returns, exception swallowing).
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+
+chat:
+  auto_reply: true
+
