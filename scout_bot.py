@@ -5366,8 +5366,8 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         import smoke_test as _st
         results, pass_count = _st.run_tests(quiet=True)
         total = len(results)
-        msg = _st.format_slack_message(results, pass_count)
-        web.chat_postMessage(channel=_SCOUT_HQ_CHANNEL, text=msg)
+        blocks, fallback = _st.format_slack_blocks(results, pass_count)
+        web.chat_postMessage(channel=_SCOUT_HQ_CHANNEL, text=fallback, blocks=blocks, unfurl_links=False)
         log.info(f"[smoke] {pass_count}/{total} checks passed — posted to #scout-qa")
     except Exception as e:
         log.warning(f"[smoke] startup smoke test failed to run: {e}")
