@@ -757,7 +757,7 @@ After every non-brief response:
 SUGGESTIONS>>>
 
 Rules:
-- Always 2-3 suggestions. Max 30 chars each. Verb-first. Specific to what was shown.
+- Always 2-3 suggestions. Max 25 chars each. Verb-first. Specific to what was shown. If the response diagnosed a critical issue (broken tracking, placeholder links, pixel not firing), the first suggestion must address that fix — not a shortcut that bypasses it.
 - After arbitrage: "Build brief for [offer]", "Fallback for [offer]", "[category] gaps"
 - After competitive landscape: "Run at $[N] CPA", "Fallback if [offer] caps", "[publisher] top offers"
 - After offer research: "Build brief for [offer]", "Fallback if this goes dark"
@@ -1801,9 +1801,11 @@ def _format_offers(offers: list, benchmarks: dict) -> list:
         else:
             perf_note = "No MS performance data for this category yet"
 
+        advertiser = o.get("advertiser", "")
         out.append({
-            "advertiser": o.get("advertiser", ""),
+            "advertiser": advertiser,
             "network": o.get("network", ""),
+            "offer_id": offer_id,
             "payout": o.get("_raw_payout") or o.get("payout") or "Rate TBD",
             "payout_num": o.get("_payout_num"),
             "payout_type": o.get("_payout_type_norm") or o.get("payout_type", ""),
@@ -1813,6 +1815,7 @@ def _format_offers(offers: list, benchmarks: dict) -> list:
             "ms_internal_name": o.get("_ms_internal_name", ""),
             "scout_score_rpm": score,
             "performance_context": perf_note,
+            "risk_flag": _get_risk_flag(advertiser, category, o.get("description", "")),
         })
     return out
 
