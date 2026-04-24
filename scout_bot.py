@@ -410,6 +410,60 @@ def _sanitize_slack(text: str) -> str:
     return text
 
 
+# ── Queue confirmation Block Kit helpers ─────────────────────────────────────
+
+def _pitch_signal(score: float) -> str:
+    """Return pitch-readiness emoji + label based on Scout RPM score."""
+    if score >= 2.00:
+        return "✅ Pitch-ready"
+    if score > 0:
+        return "⚠️ Low signal"
+    return "🔍 Rate TBD"
+
+
+def _queue_confirm_blocks(
+    advertiser: str,
+    network: str,
+    payout_display: str,
+    user_id: str,
+    score: float,
+    notion_url: str | None,
+) -> list[dict]:
+    """
+    Block Kit card for queue confirmation — matches _post_offer_queue_card quality.
+
+    Layout:
+      [section]  ✅ *Advertiser* queued · Network · $2.50 CPA    [View Brief →]
+      [context]  Added by @user  ·  $3.40 RPM  ·  ✅ Pitch-ready
+    """
+    signal   = _pitch_signal(score)
+    score_str = f"${score:.2f} RPM" if score else "Rate TBD"
+    section_text = f":white_check_mark: *{advertiser}* queued · {network} · {payout_display}"
+
+    section_block: dict = {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": section_text},
+    }
+    if notion_url:
+        section_block["accessory"] = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "View Brief →", "emoji": True},
+            "url": notion_url,
+        }
+
+    return [
+        section_block,
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"Added by <@{user_id}>"},
+                {"type": "mrkdwn", "text": score_str},
+                {"type": "mrkdwn", "text": signal},
+            ],
+        },
+    ]
+
+
 # ── Block Kit brief builder ───────────────────────────────────────────────────
 
 def _run_preflight_qa(  # replaces _check_url_async (removed — this is a strict superset)
@@ -3159,8 +3213,15 @@ def _write_to_notion_queue(
 
         # --- Scout intelligence ---
         _heading("Scout Intelligence", 3),
-        _rt(f"Est. RPM:   ${rpm:,.0f}" if rpm else "Est. RPM:   N/A"),
-        _rt(f"Basis:      {perf_ctx}" if perf_ctx else "Basis:      No MS historical data"),
+        _rt(f"Est. RPM:   ${rpm:,.2f}" if rpm else "Est. RPM:   N/A"),
+        *([
+            _rt(f"MS history: {perf_ctx}")
+            if perf_ctx.startswith(("Real MS data", "Same advertiser"))
+            else _rt(f"Category benchmark: {perf_ctx}")
+        ] if perf_ctx and perf_ctx != "No MS performance data at any tier" else [
+            _rt("MS history: No MS data — going in cold")
+        ]),
+        *([_rt(f"Category:   {brief_data.get('category')}")] if brief_data.get("category") else []),
         _rt(f"Risk note:  {risk_flag}" if risk_flag else "Risk note:  None flagged"),
         _rt(f"Approved:   <@{user_id}>  ·  {now_iso}"),
         {"object": "block", "type": "bookmark",
@@ -3396,10 +3457,17 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
         notion_url=notion_url or "", copy_data=copy_data,
     )
 
-    # 8. Standalone confirmation in #scout-offers — not threaded into whatever Pulse thread is open
-    notion_link = f" · <{notion_url}|Notion>" if notion_url else ""
-    confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
-    web.chat_postMessage(channel=_route_channel("offers"), text=confirm)
+    # 8. Block Kit confirmation in #scout-offers — standalone, not threaded
+    _network      = (brief_data.get("network") or "").title()
+    _payout       = brief_data.get("payout", "")
+    _payout_type  = (brief_data.get("payout_type") or "").upper()
+    _payout_disp  = " · ".join(filter(None, [_payout, _payout_type])) or "Rate TBD"
+    web.chat_postMessage(
+        channel=_route_channel("offers"),
+        text=f"✅ {advertiser} added to queue",
+        blocks=_queue_confirm_blocks(advertiser, _network, _payout_disp, user_id, score, notion_url),
+        unfurl_links=False,
+    )
     log.info(f"Approved: {advertiser} ({offer_id}) by {user_id}")
 
 
@@ -3492,9 +3560,20 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
     # Pre-flight QA in background — URL check + MS history, posts consolidated result
     _run_preflight_qa(web, channel, thread_ts, brief_data)
 
-    notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
-    confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
-    web.chat_postMessage(channel=_route_channel("offers"), text=confirm)
+    # Block Kit confirmation in #scout-offers — standalone, not threaded
+    _bq_network     = (brief_data.get("network") or "").title()
+    _bq_payout      = brief_data.get("payout", "")
+    _bq_payout_type = (brief_data.get("payout_type") or data.get("pt", "")).upper()
+    _bq_payout_disp = " · ".join(filter(None, [_bq_payout, _bq_payout_type])) or "Rate TBD"
+    _bq_score       = float(data.get("rpm", 0) or 0)
+    web.chat_postMessage(
+        channel=_route_channel("offers"),
+        text=f"✅ {advertiser} added to queue",
+        blocks=_queue_confirm_blocks(
+            advertiser, _bq_network, _bq_payout_disp, user_id, _bq_score, notion_url
+        ),
+        unfurl_links=False,
+    )
     log.info(f"Brief queued: {advertiser} by {user_id}")
 
 

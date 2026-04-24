@@ -542,6 +542,13 @@ Rules:
 - Simple answers (yes/no, queue status): plain text, no --- needed.
 - Never: | tables | **double asterisks** | ## headers | methodology unless asked.
 
+MRKDWN RULES (output Slack mrkdwn natively — never markdown):
+- Bold: *text* (NOT **text** — double asterisks render literally in Slack)
+- Links: <url|label> (NOT [label](url) — markdown links are not clickable in Slack)
+- Headers: *Title* on its own line (NOT ## Title)
+- Never output raw HTML.
+- Under 400 words unless the user explicitly asks for a detailed breakdown. Slack is a feed.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INTENTS — resolve every query to one, then act immediately.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -550,8 +557,8 @@ INTENTS — resolve every query to one, then act immediately.
    NOTE: "let's do the projection/analysis/breakdown for [publisher]" is Intent 12 or 18, not this.
    → draft_campaign_brief(advertiser=X). Output ONLY the JSON block (see BRIEF MODE below).
 
-2. DEMAND QUEUE STATUS — "queue", "pending", "what's approved", "waiting to go live"
-   → get_demand_queue_status(). Lead with count + likely-live flags. If empty: "Queue is clear."
+2. DEMAND QUEUE STATUS — "queue", "pending", "what's approved", "waiting to go live", "queue status"
+   → get_demand_queue_status(). Lead with count. For each offer: name · network · payout · days in queue · Notion link (notion_url field). Flag likely-live offers. If empty: "Queue is clear."
 
 3. CONFIRM LIVE — "X is live", "confirm X is live", "mark X as launched"
    → mark_offer_launched(advertiser=X). Thread-only. No channel broadcast.
@@ -2641,19 +2648,31 @@ def get_demand_queue_status() -> dict:
     except Exception as e:
         log.warning(f"get_demand_queue_status: ClickHouse unavailable: {e}")
 
+    from datetime import datetime, timezone as _tz
+
     result_items = []
     for item in pending:
         adv = item["advertiser"]
         imp = impression_counts.get(adv, 0)
+        approved_at_str = item.get("approved_at", "")
+        days_queued = 0
+        if approved_at_str:
+            try:
+                approved_dt = datetime.fromisoformat(approved_at_str.replace("Z", "+00:00"))
+                days_queued = (datetime.now(_tz.utc) - approved_dt).days
+            except Exception:
+                days_queued = 0
+
         result_items.append({
-            "advertiser": adv,
-            "payout":     item.get("payout", ""),
-            "network":    item.get("network", ""),
-            "brief_url":  item.get("thread_url", ""),
-            "notion_url": item.get("notion_url", ""),
+            "advertiser":  adv,
+            "payout":      item.get("payout", ""),
+            "network":     item.get("network", ""),
+            "brief_url":   item.get("thread_url", ""),
+            "notion_url":  item.get("notion_url", ""),
             "approved_by": item.get("approved_by", ""),
-            "approved_at": item.get("approved_at", ""),
-            "status":     "likely_live" if imp > 0 else "pending",
+            "approved_at": approved_at_str,
+            "days_queued": days_queued,
+            "status":      "likely_live" if imp > 0 else "pending",
             "impressions_since_approval": imp,
         })
 
