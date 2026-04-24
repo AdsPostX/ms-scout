@@ -87,6 +87,7 @@ _NETWORK_LABEL: dict[str, str] = {
     "impact":     "Impact",
     "maxbounty":  "MaxBounty",
     "flexoffers": "FlexOffers",
+    "cj":         "Commission Junction",
 }
 
 # Human-readable display labels for payout types shown in the card right column
@@ -596,7 +597,7 @@ def build_digest_blocks(
     ]
 
     # Emoji per network for fast visual scanning
-    _NETWORK_EMOJI = {"impact": "⚡", "maxbounty": "💰", "flexoffers": "🔗"}
+    _NETWORK_EMOJI = {"impact": "⚡", "maxbounty": "💰", "flexoffers": "🔗", "cj": "🌐"}
 
     # Count total screened per network for the subheader
     network_totals = {}
@@ -605,7 +606,7 @@ def build_digest_blocks(
         network_totals[net] = network_totals.get(net, 0) + 1
 
     # Render each network as its own section with a proper header block
-    for network in ("impact", "maxbounty", "flexoffers"):
+    for network in ("impact", "maxbounty", "flexoffers", "cj"):
         scored_offers = offers_by_network.get(network, [])
         if not scored_offers:
             continue
