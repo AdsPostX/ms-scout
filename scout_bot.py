@@ -1157,6 +1157,7 @@ Hard rules — enforce without exception:
 - No exclamation marks — they read as spam in confirmation page contexts and reduce CTR
 - No "Free" unless the offer description explicitly confirms no cost to user
 - Verify char counts before outputting. A 91-char headline when 90 is the limit is a failure.
+- Do NOT include publisher, website, or platform names in any copy field. Copy is for the advertiser's offer only, shown on any publisher's confirmation page.
 
 JSON only, no explanation:
 {{"headline":"...","short_headline":"...","description":"...","short_desc":"...","cta_yes":"...","cta_no":"..."}}"""
@@ -1256,17 +1257,11 @@ def _patch_notion_copy(notion_url: str, ai_copy: dict) -> None:
     new_blocks = [
         _heading("AI Copy (ready to paste)"),
         _callout(headline, "✏️", f"{len(headline)}/90"),
-        _rt(f"Headline — {len(headline)}/90 chars"),
         _callout(short_headline, "🔤", f"{len(short_headline)}/60"),
-        _rt(f"Short Headline — {len(short_headline)}/60 chars"),
         _callout(description, "📝", f"{len(description)}/220"),
-        _rt(f"Description — {len(description)}/220 chars"),
         _callout(short_desc, "📋", f"{len(short_desc)}/140"),
-        _rt(f"Short Description — {len(short_desc)}/140 chars"),
         _callout(cta_yes, "👍", f"{len(cta_yes)}/25"),
-        _rt(f"Positive CTA — {len(cta_yes)}/25 chars"),
         _callout(cta_no, "👎", f"{len(cta_no)}/25"),
-        _rt(f"Negative CTA — {len(cta_no)}/25 chars"),
     ]
 
     try:
@@ -1344,7 +1339,8 @@ def _generate_offer_copy_batch(offers: list[dict]) -> list[dict | None]:
         "- short_desc: max 140 chars. Single most compelling sentence.\n"
         "- cta_yes: max 25 chars. Action verb first, specific to offer.\n"
         "- cta_no: max 25 chars. Timing language ('Not now'), not rejection.\n"
-        "No em dashes, no exclamation marks, no 'Free' unless explicitly free.\n\n"
+        "No em dashes, no exclamation marks, no 'Free' unless explicitly free.\n"
+        "Do NOT include publisher, website, or platform names — copy runs on any publisher's page.\n\n"
         f"Offers ({len(offers)} total):\n{offer_lines}\n\n"
         f"Return ONLY a JSON array of exactly {len(offers)} objects in the same order:\n"
         '[{"headline":"...","short_headline":"...","description":"...","short_desc":"...","cta_yes":"...","cta_no":"..."}, ...]'
@@ -3142,14 +3138,9 @@ def _write_to_notion_queue(
         _rt_muted("Copy and paste each field directly into the MS platform form. AI copy arrives in ~10 sec if blank."),
         _divider(),
 
-        # --- Copy fields (6 fields) ---
+        # --- Copy section heading (fields arrive via _patch_notion_copy ~10s after page creation) ---
         _heading("Copy", 3),
-        *_copy_field("Headline", "✏️", title_copy, 90),
-        *_copy_field("Short Headline", "🔤", sh_copy, 60),
-        *_copy_field("Description", "📝", desc_copy, 220),
-        *_copy_field("Short Description", "📋", sd_copy, 140),
-        *_copy_field("Positive CTA", "👍", cta_yes, 25),
-        *_copy_field("Negative CTA", "👎", cta_no, 25),
+        _rt_muted("AI copy will appear here in ~10 seconds."),
         _divider(),
 
         # --- Platform config (6 fields) ---
@@ -3405,10 +3396,10 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
         notion_url=notion_url or "", copy_data=copy_data,
     )
 
-    # 8. One terse confirmation in the digest thread — no noise
+    # 8. Standalone confirmation in #scout-offers — not threaded into whatever Pulse thread is open
     notion_link = f" · <{notion_url}|Notion>" if notion_url else ""
     confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
-    web.chat_postMessage(channel=channel, thread_ts=message_ts, text=confirm)
+    web.chat_postMessage(channel=_route_channel("offers"), text=confirm)
     log.info(f"Approved: {advertiser} ({offer_id}) by {user_id}")
 
 
@@ -3503,7 +3494,7 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
 
     notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
     confirm = f":white_check_mark: *{advertiser}* added to queue by <@{user_id}>{notion_link}"
-    web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=confirm)
+    web.chat_postMessage(channel=_route_channel("offers"), text=confirm)
     log.info(f"Brief queued: {advertiser} by {user_id}")
 
 
