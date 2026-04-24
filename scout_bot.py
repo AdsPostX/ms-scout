@@ -3406,14 +3406,14 @@ def _write_to_notion_queue(
         }
 
     def _copy_field(label: str, emoji: str, value: str, max_chars: int) -> list:
-        """Callout (value to paste) + muted char-count caption."""
+        """Label above callout — label establishes context before content appears."""
         n = len(value)
         ok = n <= max_chars and n > 0
         color = "green_background" if ok else "red_background" if n > max_chars else "yellow_background"
         qa = f"{n}/{max_chars}" if ok else f"{n}/{max_chars} — over limit" if n > max_chars else "pending"
         return [
-            _callout(value or "(pending)", emoji, color),
             _rt_muted(f"{label} · {qa}"),
+            _callout(value or "(pending)", emoji, color),
         ]
 
     # ── Build copy section ────────────────────────────────────────────────────
@@ -3776,6 +3776,26 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
         blocks=_queue_confirm_blocks(advertiser, _network, _payout_disp, user_id, score, notion_url),
         unfurl_links=False,
     )
+
+    # Update the original digest card — replace Add to Queue / Skip buttons with
+    # a confirmation line so the card reflects the action taken.
+    try:
+        orig_blocks = (payload.get("message") or {}).get("blocks", [])
+        updated_blocks = [b for b in orig_blocks if b.get("type") != "actions"]
+        _notion_badge = f" · <{notion_url}|Notion →>" if notion_url else ""
+        updated_blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"✅ *Added to Pipeline* by <@{user_id}>{_notion_badge}"}],
+        })
+        web.chat_update(
+            channel=channel,
+            ts=message_ts,
+            text=f"✅ {advertiser} added to Pipeline",
+            blocks=updated_blocks,
+        )
+    except Exception as e:
+        log.warning(f"[approve] digest card update failed: {e}")
+
     log.info(f"Approved: {advertiser} ({offer_id}) by {user_id}")
 
 
@@ -4887,13 +4907,15 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
         def _run_live_qa():
             try:
+                import random as _random
                 web.chat_postMessage(
                     channel=channel, thread_ts=thread_ts,
-                    text=(
-                        ":test_tube: *Scout Self-QA — 15 questions, live results*\n"
-                        "Testing every major intent. Pass = responded + expected content present.\n"
-                        "Posting each result as it completes...\n---"
-                    ),
+                    text=":test_tube: Scout Self-QA — 15 questions, live results",
+                    blocks=[
+                        {"type": "header", "text": {"type": "plain_text", "text": "Scout Self-QA"}},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": "Testing every major intent. Pass = responded + expected content present.\nPosting each result as it completes…"}},
+                        {"type": "divider"},
+                    ],
                 )
 
                 results = []
@@ -4920,7 +4942,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                     ],
                 }
 
-                for label, question, pass_hints in _QA_SUITE:
+                # Shuffle order each run so live results stream differently
+                # and the suite clearly feels live rather than replaying cached output.
+                qa_suite = list(_QA_SUITE)
+                _random.shuffle(qa_suite)
+
+                for label, question, pass_hints in qa_suite:
                     t0 = _time.monotonic()
                     try:
                         response = ask(question, history=[], user_id="self-qa")
@@ -4932,25 +4959,41 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                         responded = len(text.strip()) > 40
                         hint_match = any(h.lower() in text.lower() for h in pass_hints)
                         passed = responded and hint_match
-                        snippet = text.strip()[:200].replace("\n", " ")
+                        snippet = text.strip()[:300].replace("\n", " ")
                     except Exception as e:
                         elapsed = _time.monotonic() - t0
                         passed = False
                         snippet = f"ERROR: {e}"
 
-                    icon = ":white_check_mark:" if passed else ":x:"
+                    emoji_name = "white_check_mark" if passed else "x"
                     results.append({"label": label, "passed": passed, "elapsed": round(elapsed, 1), "snippet": snippet})
 
                     web.chat_postMessage(
                         channel=channel, thread_ts=thread_ts,
-                        text=(
-                            f"{icon} *{label}* · {round(elapsed, 1)}s\n"
-                            f"Q: _{question[:80]}_\n"
-                            f"A: {snippet[:160]}{'…' if len(snippet) > 160 else ''}"
-                        ),
+                        text=f"{'✅' if passed else '❌'} {label} · {round(elapsed, 1)}s",
+                        blocks=[
+                            {
+                                "type": "rich_text",
+                                "elements": [{
+                                    "type": "rich_text_section",
+                                    "elements": [
+                                        {"type": "emoji", "name": emoji_name},
+                                        {"type": "text", "text": f"  {label}", "style": {"bold": True}},
+                                        {"type": "text", "text": f"  ·  {round(elapsed, 1)}s"},
+                                    ],
+                                }],
+                            },
+                            {
+                                "type": "context",
+                                "elements": [
+                                    {"type": "mrkdwn", "text": f"Q: _{question[:80]}_"},
+                                    {"type": "mrkdwn", "text": f"A: {snippet}{'…' if len(text.strip()) > 300 else ''}"},
+                                ],
+                            },
+                        ],
                     )
 
-                # Final scorecard
+                # Final scorecard — Block Kit
                 passed_count = sum(1 for r in results if r["passed"])
                 total = len(results)
                 if passed_count >= 13:
@@ -4960,24 +5003,36 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 else:
                     overall = ":red_circle:"
 
-                scorecard_lines = [f"{overall} *{passed_count}/{total} passed* — Scout self-QA complete.\n---"]
+                scorecard_blocks: list = [
+                    {"type": "divider"},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": f"{overall} *{passed_count}/{total} passed* — Scout self-QA complete."}},
+                ]
                 for group, labels in groups.items():
-                    scorecard_lines.append(f"*{group}*")
+                    group_lines = []
                     for r in results:
                         if r["label"] in labels:
                             icon = ":white_check_mark:" if r["passed"] else ":x:"
-                            scorecard_lines.append(f"{icon} {r['label']} · {r['elapsed']}s")
-                    scorecard_lines.append("")
+                            group_lines.append(f"{icon}  {r['label']}  ·  {r['elapsed']}s")
+                    if group_lines:
+                        scorecard_blocks.append({
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": f"*{group}*\n" + "\n".join(group_lines)},
+                        })
 
                 failed = [r for r in results if not r["passed"]]
-                if failed:
-                    scorecard_lines.append(f":zap: *Action:* {len(failed)} test(s) failed — check snippets above.")
-                else:
-                    scorecard_lines.append(":zap: All systems nominal.")
+                action_line = (
+                    f":zap: *Action:* {len(failed)} test(s) failed — check snippets above."
+                    if failed else ":zap: All systems nominal."
+                )
+                scorecard_blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": action_line}],
+                })
 
                 web.chat_postMessage(
                     channel=channel, thread_ts=thread_ts,
-                    text="\n".join(scorecard_lines),
+                    text=f"{overall.strip(':')} {passed_count}/{total} passed — Scout self-QA complete.",
+                    blocks=scorecard_blocks,
                 )
 
             except Exception as e:
