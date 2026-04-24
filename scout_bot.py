@@ -2382,8 +2382,13 @@ def _format_pulse_blocks(
                 "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0{part}"}],
             })
         blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "\u00a0\u00a0\u00a0\u00a0`@Scout revenue opportunities` \u2192 full ranked list + estimated impact"}],
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Top Opportunities →"},
+                "action_id": "pulse_top_opps",
+                "style": "primary",
+            }],
         })
 
     # ── NEEDS ATTENTION (downs) ───────────────────────────────────────────────
@@ -3742,6 +3747,16 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
             text = resp if isinstance(resp, str) else resp.get("text", str(resp))
             web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
         threading.Thread(target=_run_fill, daemon=True).start()
+        return
+
+    if action_id == "pulse_top_opps":
+        user_id = payload.get("user", {}).get("id", "")
+        msg_ts  = (payload.get("message") or {}).get("ts", "")
+        def _run_opps(u=user_id, t=msg_ts):
+            resp = ask("top revenue opportunities", history=[], user_id=u)
+            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {_sanitize_slack(str(text))}")
+        threading.Thread(target=_run_opps, daemon=True).start()
         return
 
     if action_id in ("pulse_scout_offers", "pulse_dig_in"):

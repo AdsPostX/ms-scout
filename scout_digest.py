@@ -335,14 +335,14 @@ def is_already_in_ms(offer: dict, ms_campaigns: list[dict]) -> bool:
 # One model, one truth: estimated_RPM = payout × predicted_CVR × 1000 × reliability.
 # CVR is sourced from (in order): real MS ClickHouse data → category benchmark → payout-type baseline.
 
-def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict) -> float | None:
+def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, force: bool = False) -> float | None:
     """
     Returns estimated RPM (Scout Score), or None to exclude.
 
     Exclusion:
     - Zero/missing payout
-    - Already approved/queued
-    - Rejected and payout hasn't improved ≥15%
+    - Already approved/queued  (skipped when force=True)
+    - Rejected and payout hasn't improved ≥15%  (skipped when force=True)
 
     Ranking:
     - Primary: Scout Score RPM (payout × predicted_CVR × 1000) — same model as @Scout agent
@@ -352,18 +352,21 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict) 
     1. Real MS data for this exact offer (ClickHouse)
     2. Category benchmark (ClickHouse aggregate)
     3. Payout-type baseline estimate
+
+    force=True bypasses approved/rejected state so test runs always surface real cards.
     """
     from scout_agent import _scout_score
 
     offer_id = str(offer.get("offer_id", ""))
 
-    # Already approved — don't resurface
-    if offer_id in state.get("approved", {}):
-        return None
+    if not force:
+        # Already approved — don't resurface
+        if offer_id in state.get("approved", {}):
+            return None
 
     # Rejected — only resurface if payout improved ≥15%
     rejected = state.get("rejected", {})
-    if offer_id in rejected:
+    if not force and offer_id in rejected:
         payout_data = payout_cache.get(offer_id, {})
         try:
             current = float(payout_data.get("payout") or 0)
@@ -775,7 +778,7 @@ def select_offers(
             skipped_in_ms += 1
             continue
 
-        s = score_offer(offer, payout_cache, state, benchmarks)
+        s = score_offer(offer, payout_cache, state, benchmarks, force=force)
         if s is None:
             skipped_no_score += 1
             continue
@@ -787,7 +790,7 @@ def select_offers(
     result: dict[str, list[tuple[float, dict]]] = {}
     total_selected = 0
 
-    for network in ("impact", "maxbounty", "flexoffers"):
+    for network in ("impact", "maxbounty", "flexoffers", "cj"):
         candidates = sorted(by_network.get(network, []), key=lambda x: x[0], reverse=True)
         selected: list[tuple[float, dict]] = []
         category_counts: dict[str, int] = {}
