@@ -692,8 +692,8 @@ def build_digest_blocks(
             blocks += [
                 offer_block,
                 {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": why},
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": why}],
                 },
                 {
                     "type": "actions",
