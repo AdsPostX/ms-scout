@@ -3213,8 +3213,15 @@ def _write_to_notion_queue(
 
         # --- Scout intelligence ---
         _heading("Scout Intelligence", 3),
-        _rt(f"Est. RPM:   ${rpm:,.0f}" if rpm else "Est. RPM:   N/A"),
-        _rt(f"Basis:      {perf_ctx}" if perf_ctx else "Basis:      No MS historical data"),
+        _rt(f"Est. RPM:   ${rpm:,.2f}" if rpm else "Est. RPM:   N/A"),
+        *([
+            _rt(f"MS history: {perf_ctx}")
+            if perf_ctx.startswith(("Real MS data", "Same advertiser"))
+            else _rt(f"Category benchmark: {perf_ctx}")
+        ] if perf_ctx and perf_ctx != "No MS performance data at any tier" else [
+            _rt("MS history: No MS data — going in cold")
+        ]),
+        *([_rt(f"Category:   {brief_data.get('category')}")] if brief_data.get("category") else []),
         _rt(f"Risk note:  {risk_flag}" if risk_flag else "Risk note:  None flagged"),
         _rt(f"Approved:   <@{user_id}>  ·  {now_iso}"),
         {"object": "block", "type": "bookmark",
