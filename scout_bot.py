@@ -3274,6 +3274,15 @@ def _write_to_notion_queue(
         # ai_copy present → callouts baked in at creation (sync generation succeeded).
         # ai_copy absent  → single placeholder; _patch_notion_copy fills this section async.
         _heading("Copy", 3),
+        # Creative image — prefer banner_url (actual ad creative) over hero_url (may be brand logo).
+        # Notion renders external images inline; if the URL is behind network auth it shows a
+        # broken placeholder — no data loss, no page creation failure.
+        *([{
+            "object": "block", "type": "image",
+            "image": {"type": "external", "external": {"url": (
+                brief_data.get("banner_url") or brief_data.get("hero_url") or ""
+            )}},
+        }] if (brief_data.get("banner_url") or brief_data.get("hero_url") or "").startswith("http") else []),
         *copy_blocks,
     ]
 

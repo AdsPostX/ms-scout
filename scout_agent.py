@@ -2251,8 +2251,9 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
             o.get("category", ""),
             o.get("description", ""),
         ),
-        "icon_url": icon_url,
-        "hero_url": hero_url,
+        "icon_url":   icon_url,
+        "hero_url":   hero_url,
+        "banner_url": o.get("banner_url", ""),  # raw network banner creative (not brand logo)
         # Platform copy — use these directly; generate only when empty
         "platform_title": platform_title,
         "platform_cta_yes": platform_cta_yes,
