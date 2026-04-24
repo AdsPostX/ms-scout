@@ -47,7 +47,8 @@ def _digest_channel(force: bool = False) -> str:
         return _SCOUT_QA_CHANNEL
     return _PROD_OFFERS_CHANNEL
 
-QUEUE_LIST_URL = "https://momentscience.slack.com/lists/T03Q93Q96UD/F07QCKFP0RM"
+_QUEUE_DB_ID   = os.getenv("NOTION_QUEUE_DB_ID", "")
+QUEUE_LIST_URL = f"https://www.notion.so/{_QUEUE_DB_ID}" if _QUEUE_DB_ID else "https://www.notion.so/"
 
 # Stop-words for fuzzy name matching
 _STOP_WORDS = {"the", "and", "for", "inc", "llc", "corp", "ltd", "co", "via"}

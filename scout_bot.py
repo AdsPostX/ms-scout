@@ -3777,16 +3777,33 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
         unfurl_links=False,
     )
 
-    # Update the original digest card — replace Add to Queue / Skip buttons with
-    # a confirmation line so the card reflects the action taken.
+    # Update the original digest card — replace only this offer's actions block
+    # with a confirmation line. Other offer cards in the same message stay intact.
     try:
         orig_blocks = (payload.get("message") or {}).get("blocks", [])
-        updated_blocks = [b for b in orig_blocks if b.get("type") != "actions"]
         _notion_badge = f" · <{notion_url}|Notion →>" if notion_url else ""
-        updated_blocks.append({
+        confirm_block = {
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"✅ *Added to Pipeline* by <@{user_id}>{_notion_badge}"}],
-        })
+        }
+        updated_blocks = []
+        replaced = False
+        for block in orig_blocks:
+            if block.get("type") == "actions" and not replaced:
+                is_clicked = False
+                for el in block.get("elements", []):
+                    try:
+                        v = json.loads(el.get("value", "{}"))
+                        if v.get("offer_id") == offer_id or v.get("advertiser") == advertiser:
+                            is_clicked = True
+                            break
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if is_clicked:
+                    updated_blocks.append(confirm_block)
+                    replaced = True
+                    continue
+            updated_blocks.append(block)
         web.chat_update(
             channel=channel,
             ts=message_ts,

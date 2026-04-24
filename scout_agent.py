@@ -4384,7 +4384,24 @@ def get_offers_for_publisher(publisher_name: str) -> str:
         lines.append(":zap:  Apply for contracts in Impact's publisher portal to unlock rates — "
                      "Scout will pick them up automatically on the next daily scrape.")
 
-    return "\n".join(lines)
+    return {
+        "pub_name": pub_org,
+        "total_candidates": len(candidates),
+        "confirmed_count": len(confirmed_top),
+        "uncontracted_count": len(uncontracted),
+        "category_signals": top_categories,
+        "offers": _format_offers([o for o, _ in confirmed_top], benchmarks),
+        "uncontracted": [
+            {
+                "advertiser": o.get("advertiser") or "Unknown",
+                "network":    o.get("network") or "",
+                "category":   o.get("category") or "Uncategorized",
+                "geo":        (o.get("geo") or "").strip(),
+            }
+            for o in uncontracted
+        ],
+        "summary": "\n".join(l for l in lines if l),
+    }
 
 
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
@@ -4854,6 +4871,8 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
                         _brief_results.append(result)
                     if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
                         _opportunity_offers.extend(result)
+                    if block.name == "get_offers_for_publisher" and isinstance(result, dict) and result.get("offers") and not _opportunity_offers:
+                        _opportunity_offers.extend(result["offers"])
                     _all_tool_results.append(result)
                     tool_results.append({
                         "type": "tool_result",
@@ -4880,6 +4899,8 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
                     _brief_results.append(result)  # collect all, use first for primary
                 if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
                     _opportunity_offers.extend(result)
+                if block.name == "get_offers_for_publisher" and isinstance(result, dict) and result.get("offers") and not _opportunity_offers:
+                    _opportunity_offers.extend(result["offers"])
                 _all_tool_results.append(result)  # accumulate all for entity extraction
                 tool_results.append({
                     "type": "tool_result",
