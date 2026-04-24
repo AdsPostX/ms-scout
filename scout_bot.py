@@ -1161,10 +1161,12 @@ def _generate_offer_copy(
     geo: str = "US",
 ) -> dict | None:
     """
-    Use Claude Haiku to generate platform-ready copy for all 6 MS platform copy fields.
-    Called in a background thread — never blocks the approval flow.
-    Returns a dict with keys: headline, short_headline, description, short_desc, cta_yes, cta_no.
-    Returns None on failure — callers must handle gracefully (keep baseline copy).
+    Use Claude Haiku to generate platform-ready copy for all 7 MS platform copy fields.
+    Called synchronously in _handle_approve (after Slack ack) so the Notion page is
+    complete at creation time — no async patching required.
+    Returns a dict with keys: headline, short_headline, description, short_desc,
+    cta_yes, cta_no, goal_title.
+    Returns None on failure — callers fall back to async enrichment.
     """
     import json as _json
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1205,6 +1207,7 @@ Return ONLY a JSON object. Enforce char limits precisely — count every charact
 - short_desc: max 140 chars. The single most compelling sentence from the description.
 - cta_yes: max 25 chars. Action verb first. Specific to this offer type.
 - cta_no: max 25 chars. Timing language, not rejection language.
+- goal_title: max 128 chars. Plain language description of the conversion event for the MS platform Goal field. Examples: "Membership signup", "Insurance quote request", "Free trial activation", "Cashback account opening". Derives from advertiser + payout type + category. No brand names, no punctuation.
 
 Hard rules — enforce without exception:
 - No em dashes (—), en dashes (–), trademark (TM), registered (R), copyright (C) symbols — these break platform rendering
@@ -1214,7 +1217,7 @@ Hard rules — enforce without exception:
 - Do NOT include publisher, website, or platform names in any copy field. Copy is for the advertiser's offer only, shown on any publisher's confirmation page.
 
 JSON only, no explanation:
-{{"headline":"...","short_headline":"...","description":"...","short_desc":"...","cta_yes":"...","cta_no":"..."}}"""
+{{"headline":"...","short_headline":"...","description":"...","short_desc":"...","cta_yes":"...","cta_no":"...","goal_title":"..."}}"""
 
     try:
         import requests as _req
@@ -1227,7 +1230,7 @@ JSON only, no explanation:
             },
             json={
                 "model": "claude-3-5-haiku-20241022",
-                "max_tokens": 512,
+                "max_tokens": 600,
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=20,
@@ -1259,6 +1262,7 @@ JSON only, no explanation:
             "short_desc":     _trunc(data.get("short_desc", ""), 140),
             "cta_yes":        _trunc(data.get("cta_yes", ""), 25),
             "cta_no":         _trunc(data.get("cta_no", ""), 25),
+            "goal_title":     _trunc(data.get("goal_title", ""), 128),
         }
     except Exception as e:
         log.warning(f"_generate_offer_copy failed: {e}")
@@ -1267,9 +1271,10 @@ JSON only, no explanation:
 
 def _patch_notion_copy(notion_url: str, ai_copy: dict) -> None:
     """
-    PATCH an existing Notion queue page to update the copy section with AI-generated fields.
-    Called from a background thread after _write_to_notion_queue() creates the initial page.
-    Appends an updated copy block to the page — simple and reliable.
+    Fallback: PATCH an existing Notion queue page with AI copy when sync generation failed.
+    Appends copy callouts to the page root — they appear under the Copy heading which is
+    the last section, so ordering is correct.
+    Called only when _generate_offer_copy failed synchronously in _handle_approve.
     """
     import requests as _req
     notion_token = os.environ.get("NOTION_TOKEN", "")
@@ -1283,23 +1288,27 @@ def _patch_notion_copy(notion_url: str, ai_copy: dict) -> None:
         return
     page_id = f"{page_id_raw[:8]}-{page_id_raw[8:12]}-{page_id_raw[12:16]}-{page_id_raw[16:20]}-{page_id_raw[20:]}"
 
-    def _callout(text: str, emoji: str, qa: str) -> dict:
+    def _callout(text: str, emoji: str, color: str = "green_background") -> dict:
         return {
             "object": "block", "type": "callout",
             "callout": {
                 "rich_text": [{"type": "text", "text": {"content": text}}],
                 "icon": {"emoji": emoji},
-                "color": "green_background",
+                "color": color,
             },
         }
 
-    def _rt(text: str) -> dict:
+    def _rt_muted(text: str) -> dict:
         return {"object": "block", "type": "paragraph",
-                "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": text},
+                                              "annotations": {"color": "gray"}}]}}
 
-    def _heading(text: str) -> dict:
-        return {"object": "block", "type": "heading_2",
-                "heading_2": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+    def _copy_callout(value: str, emoji: str, label: str, max_chars: int) -> list:
+        n = len(value)
+        ok = n <= max_chars and n > 0
+        color = "green_background" if ok else "red_background" if n > max_chars else "yellow_background"
+        qa = f"{n}/{max_chars}" if ok else f"{n}/{max_chars} — over limit" if n > max_chars else "empty"
+        return [_callout(value or "(empty)", emoji, color), _rt_muted(f"{label} · {qa}")]
 
     headline       = ai_copy.get("headline", "")
     short_headline = ai_copy.get("short_headline", "")
@@ -1307,15 +1316,17 @@ def _patch_notion_copy(notion_url: str, ai_copy: dict) -> None:
     short_desc     = ai_copy.get("short_desc", "")
     cta_yes        = ai_copy.get("cta_yes", "")
     cta_no         = ai_copy.get("cta_no", "")
+    goal_title     = ai_copy.get("goal_title", "")
 
     new_blocks = [
-        _heading("AI Copy (ready to paste)"),
-        _callout(headline, "✏️", f"{len(headline)}/90"),
-        _callout(short_headline, "🔤", f"{len(short_headline)}/60"),
-        _callout(description, "📝", f"{len(description)}/220"),
-        _callout(short_desc, "📋", f"{len(short_desc)}/140"),
-        _callout(cta_yes, "👍", f"{len(cta_yes)}/25"),
-        _callout(cta_no, "👎", f"{len(cta_no)}/25"),
+        # No heading — Copy h3 already exists as last section of the page
+        *_copy_callout(headline,       "✏️", "Headline · 90 chars",       90),
+        *_copy_callout(short_headline, "🔤", "Short Headline · 60 chars", 60),
+        *_copy_callout(description,    "📝", "Description · 220 chars",  220),
+        *_copy_callout(short_desc,     "📋", "Short Desc · 140 chars",   140),
+        *_copy_callout(cta_yes,        "👍", "CTA Yes · 25 chars",        25),
+        *_copy_callout(cta_no,         "👎", "CTA No · 25 chars",         25),
+        *(_copy_callout(goal_title,    "🎯", "Goal Title · 128 chars",   128) if goal_title else []),
     ]
 
     try:
@@ -3092,11 +3103,16 @@ def _write_to_notion_queue(
     copy_data: dict,
     user_id: str,
     thread_url: str,
+    ai_copy: dict | None = None,
 ) -> str | None:
     """
     Create a Notion page in the Scout Demand Queue DB.
     Properties: machine-readable filtering/sorting/Kanban data.
-    Page body: human-readable MS entry checklist (Ivan Zhao principle).
+    Page body: MS platform entry checklist, ordered for ops workflow:
+      Campaign Config → Copy → Platform Settings → Scout Intelligence.
+    ai_copy: if provided (sync generation succeeded), copy callouts are baked in.
+    If None, copy section shows pending placeholders and _patch_notion_copy is
+    called as fallback by the caller.
     Returns the Notion page URL on success, None on failure.
     """
     from datetime import datetime, timezone
@@ -3116,13 +3132,6 @@ def _write_to_notion_queue(
     rpm          = float(copy_data.get("rpm") or 0)
     perf_ctx     = copy_data.get("pf", "") or brief_data.get("performance_context", "")
     risk_flag    = copy_data.get("rf", "") or brief_data.get("risk_flag", "")
-
-    title_copy   = copy_data.get("t", "") or copy_data.get("title", "")
-    sh_copy      = copy_data.get("sh", "") or title_copy[:60]
-    desc_copy    = copy_data.get("d", "") or copy_data.get("description", "")
-    sd_copy      = copy_data.get("sd", "") or desc_copy[:140]
-    cta_yes      = copy_data.get("cy", "") or copy_data.get("cta_yes", "")
-    cta_no       = copy_data.get("cn", "") or copy_data.get("cta_no", "")
     offer_id     = copy_data.get("oid", "") or brief_data.get("offer_id", "")
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -3154,6 +3163,12 @@ def _write_to_notion_queue(
                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": text},
                                               "annotations": {"color": "gray"}}]}}
 
+    def _rt_code(text: str) -> dict:
+        """Inline code block — triple-click selects exactly the value. Use for URLs."""
+        return {"object": "block", "type": "code",
+                "code": {"rich_text": [{"type": "text", "text": {"content": text}}],
+                         "language": "plain text"}}
+
     def _heading(text: str, level: int = 2) -> dict:
         h = f"heading_{level}"
         return {"object": "block", "type": h,
@@ -3166,52 +3181,79 @@ def _write_to_notion_queue(
         return {
             "object": "block", "type": "callout",
             "callout": {
-                "rich_text": [{"type": "text", "text": {"content": text or "(AI copy pending — opens in ~10 sec)"}}],
+                "rich_text": [{"type": "text", "text": {"content": text or "(pending)"}}],
                 "icon": {"emoji": emoji},
                 "color": color,
             }
         }
 
     def _copy_field(label: str, emoji: str, value: str, max_chars: int) -> list:
-        """Callout block for a copy field + muted char-count line below it."""
+        """Callout (value to paste) + muted char-count caption."""
         n = len(value)
         ok = n <= max_chars and n > 0
-        qa = f"  {n}/{max_chars} chars" if ok else f"  {n}/{max_chars} chars (over limit)" if n > max_chars else f"  empty — AI copy pending"
         color = "green_background" if ok else "red_background" if n > max_chars else "yellow_background"
+        qa = f"{n}/{max_chars}" if ok else f"{n}/{max_chars} — over limit" if n > max_chars else "pending"
         return [
-            _callout(value or "", emoji, color),
-            _rt_muted(f"{label}{qa}"),
+            _callout(value or "(pending)", emoji, color),
+            _rt_muted(f"{label} · {qa}"),
         ]
 
-    # ── Platform Entry checklist — all 12 MS platform fields ─────────────────
+    # ── Build copy section ────────────────────────────────────────────────────
+    if ai_copy:
+        copy_blocks = [
+            *_copy_field("Headline · 90 chars",       "✏️", ai_copy.get("headline", ""),       90),
+            *_copy_field("Short Headline · 60 chars", "🔤", ai_copy.get("short_headline", ""), 60),
+            *_copy_field("Description · 220 chars",   "📝", ai_copy.get("description", ""),   220),
+            *_copy_field("Short Desc · 140 chars",    "📋", ai_copy.get("short_desc", ""),    140),
+            *_copy_field("CTA Yes · 25 chars",        "👍", ai_copy.get("cta_yes", ""),        25),
+            *_copy_field("CTA No · 25 chars",         "👎", ai_copy.get("cta_no", ""),         25),
+        ]
+    else:
+        # Sync generation failed — placeholders shown, _patch_notion_copy fills in async
+        copy_blocks = [
+            _callout("(AI copy generating — check back in ~30 seconds)", "⏳", "yellow_background"),
+        ]
+
+    # ── Platform config values ────────────────────────────────────────────────
     internal_name = f"{advertiser} — {network} — {now_iso}"
-    goal_type = "CPC" if "click" in payout_type.lower() else "CPA"
+    goal_type     = "CPC" if "click" in payout_type.lower() else "CPA"
+    goal_title    = (ai_copy or {}).get("goal_title", "")
+    adv_name_len  = len(advertiser[:28])
 
     children = [
         _heading("Platform Entry Checklist", 2),
-        _rt_muted("Copy and paste each field directly into the MS platform form. AI copy arrives in ~10 sec if blank."),
+        _rt_muted("Copy and paste into the MS platform. Page 1: Campaign Config + Copy. Page 2: Platform Settings."),
         _divider(),
 
-        # --- Copy section heading (fields arrive via _patch_notion_copy ~10s after page creation) ---
+        # ── Campaign Config (Page 1) ──────────────────────────────────────────
+        _heading("Campaign Config", 3),
+        _rt(f"Internal Offer Name:   {internal_name[:100]}"),
+        _rt(f"Partner Offer Name:    {advertiser[:80]}"),
+        _rt(f"Advertiser Name:       {advertiser[:28]}  ({adv_name_len}/28)"),
+        *(
+            [_rt("Destination URL:"), _rt_code(tracking_url)]
+            if tracking_url else
+            [_rt("Destination URL:       pull from network portal")]
+        ),
+        _rt(f"Goal Type:             {goal_type}"),
+        _rt(f"Payout ($):            {payout_str}"),
+        *([_rt(f"Goal Title:            {goal_title}")] if goal_title else []),
+        _divider(),
+
+        # ── Copy (Page 1 — Headlines & Copy) ─────────────────────────────────
         _heading("Copy", 3),
-        _rt_muted("AI copy will appear here in ~10 seconds."),
+        *copy_blocks,
         _divider(),
 
-        # --- Platform config (6 fields) ---
-        _heading("Platform Config", 3),
-        _rt(f"Internal Offer Name:  {internal_name[:100]}"),
-        _rt(f"Partner Offer Name:   {advertiser[:80]}"),
-        _rt(f"Advertiser Name:      {advertiser[:28]}"),
-        _rt(f"Destination URL:      {tracking_url}" if tracking_url else "Destination URL:      pull from network portal"),
-        _rt(f"Goal Type:            {goal_type}"),
-        _rt(f"Goal (Payout):        {payout_str}"),
-        _rt(f"Network:              {network}" if network else "Network:              set in platform"),
-        _rt(f"Network Offer ID:     {offer_id}" if offer_id else "Network Offer ID:     pull from network portal"),
-        _rt("Perkswall Enabled:    ON"),
-        _rt("Test Offer:           ON  (flip OFF when ready to go live)"),
+        # ── Platform Settings (Page 2) ────────────────────────────────────────
+        _heading("Platform Settings", 3),
+        _rt(f"Network:               {network}" if network else "Network:               set in platform"),
+        _rt(f"Network Offer ID:      {offer_id}" if offer_id else "Network Offer ID:      pull from network portal"),
+        _rt("Test Offer:            ON  ← flip OFF when ready to go live"),
+        _rt("Perkswall Enabled:     ON"),
         _divider(),
 
-        # --- Scout intelligence ---
+        # ── Scout Intelligence ────────────────────────────────────────────────
         _heading("Scout Intelligence", 3),
         _rt(f"Est. RPM:   ${rpm:,.2f}" if rpm else "Est. RPM:   N/A"),
         *([
@@ -3385,12 +3427,15 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     """
     Handle ✓ Add to Queue button click from Scout Signal digest.
 
-    One-click flow:
+    Flow (Slack ack sent before this runs — no 3s timeout):
       1. Record approval (excludes from future digests)
-      2. Fetch full brief — tracking URL, copy, performance context
-      3. Write to Notion queue
-      4. Post structured offer card to #scout-offers (this IS the brief)
-      5. One terse confirmation in the digest thread — no further noise
+      2. Fetch full brief — tracking URL, performance context
+      3. Build copy_data (metadata for Notion properties)
+      4. Generate AI copy synchronously — all 7 fields baked into the page at creation
+      5. Write to Notion queue (complete page, no patching needed)
+      6. Thread reply in digest — one terse ack where the user clicked
+      7. Persist state (lifecycle tracking + launch notification)
+      8. Block Kit confirmation card to #scout-offers — canonical pipeline entry
     """
     import scout_digest
 
@@ -3412,32 +3457,41 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     # 1. Persist approval — excludes from future digests
     scout_digest.record_approval(offer_id, advertiser, payout, user_id)
 
-    # 2. Fetch full brief (OG image scrape happens inside draft_campaign_brief)
+    # 2. Fetch full brief
     brief_data = _fetch_brief_for_approve(advertiser, offer)
-    copy       = _make_copy_for_brief(brief_data, offer)
     score      = brief_data.get("scout_score_rpm", 0) or 0
 
-    # 3. Build thread URL — used in Notion page body and queue card
-    thread_url = _slack_thread_url(channel, message_ts)
-
-    # 4. Write to Notion queue (baseline copy — AI enrichment follows asynchronously)
+    # 3. Build copy_data (Notion property metadata — not the display copy)
     copy_data = {
-        "t":   copy.get("title", "")[:90],
-        "sh":  copy.get("short_headline", copy.get("title", "")[:60])[:60],
-        "d":   copy.get("description", "")[:220],
-        "sd":  copy.get("short_desc", copy.get("description", "")[:140])[:140],
-        "cy":  (copy.get("cta") or {}).get("yes", "")[:25],
-        "cn":  (copy.get("cta") or {}).get("no", "")[:25],
         "rpm": score,
         "pf":  brief_data.get("performance_context", ""),
         "rf":  brief_data.get("risk_flag", ""),
         "pt":  brief_data.get("payout_type", "CPA"),
         "oid": brief_data.get("offer_id", ""),
     }
-    notion_url = _write_to_notion_queue(brief_data, copy_data, user_id, thread_url)
 
-    # 5. Enrich Notion page with AI-generated copy via coalescing queue (non-blocking)
-    if notion_url:
+    # 4. Generate AI copy synchronously — page will be complete at creation time.
+    # Slack already sent the ack, so there is no 3-second constraint here.
+    ai_copy = None
+    try:
+        ai_copy = _generate_offer_copy(
+            advertiser   = brief_data.get("advertiser", advertiser),
+            description  = brief_data.get("description", offer.get("description", "")),
+            payout_type  = brief_data.get("payout_type", offer.get("payout_type", "CPA")),
+            category     = brief_data.get("category", offer.get("category", "")),
+            payout       = offer.get("payout", ""),
+            geo          = brief_data.get("geo", offer.get("geo", "US")),
+        )
+    except Exception as e:
+        log.warning(f"AI copy sync generation failed for {advertiser}: {e}")
+
+    # 5. Write to Notion — ai_copy baked in if available, placeholder if not
+    thread_url = _slack_thread_url(channel, message_ts)
+    notion_url = _write_to_notion_queue(brief_data, copy_data, user_id, thread_url, ai_copy=ai_copy)
+
+    # Fallback: if sync generation failed, enrich async so the page eventually fills in
+    if notion_url and not ai_copy:
+        log.warning(f"AI copy sync failed for {advertiser} — falling back to async enrichment")
         _queue_copy_enrichment(
             notion_url,
             brief_data.get("advertiser", advertiser),
@@ -3448,23 +3502,36 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
             brief_data.get("geo", offer.get("geo", "US")),
         )
 
-    # 6. Post structured offer card to #scout-offers — this IS the brief
-    _post_offer_queue_card(web, brief_data, copy, user_id, thread_url, notion_url, score)
+    # 6. Thread reply in the digest card where the user clicked
+    _notion_link = f" · <{notion_url}|Brief in Notion →>" if notion_url else ""
+    try:
+        web.chat_postMessage(
+            channel=channel,
+            thread_ts=message_ts,
+            text=f"✅ Added to Pipeline — {advertiser}{_notion_link}",
+            blocks=[{
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"✅ Added to Pipeline{_notion_link}"},
+            }],
+            unfurl_links=False,
+        )
+    except Exception as e:
+        log.warning(f"[approve] thread reply failed: {e}")
 
-    # 7. Persist approval state (for lifecycle tracking + launch notification)
+    # 7. Persist approval state (lifecycle tracking + launch notification)
     _record_queued_offer(
         advertiser, brief_data, user_id, thread_url,
         notion_url=notion_url or "", copy_data=copy_data,
     )
 
-    # 8. Block Kit confirmation in #scout-offers — standalone, not threaded
-    _network      = (brief_data.get("network") or "").title()
-    _payout       = brief_data.get("payout", "")
-    _payout_type  = (brief_data.get("payout_type") or "").upper()
-    _payout_disp  = " · ".join(filter(None, [_payout, _payout_type])) or "Rate TBD"
+    # 8. Block Kit confirmation card to #scout-offers — canonical pipeline entry
+    _network     = (brief_data.get("network") or "").title()
+    _payout      = brief_data.get("payout", "")
+    _payout_type = (brief_data.get("payout_type") or "").upper()
+    _payout_disp = " · ".join(filter(None, [_payout, _payout_type])) or "Rate TBD"
     web.chat_postMessage(
         channel=_route_channel("offers"),
-        text=f"✅ {advertiser} added to queue",
+        text=f"✅ {advertiser} added to Pipeline",
         blocks=_queue_confirm_blocks(advertiser, _network, _payout_disp, user_id, score, notion_url),
         unfurl_links=False,
     )
