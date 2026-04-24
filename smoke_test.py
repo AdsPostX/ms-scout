@@ -185,16 +185,59 @@ def format_slack_message(results: list[dict], pass_count: int) -> str:
     return "\n".join(lines)
 
 
-def post_to_slack(message: str) -> bool:
-    """Post smoke test results to #scout-qa."""
+def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict], str]:
+    """Return (blocks, fallback_text) for a Block Kit health dashboard card."""
+    total = len(results)
+    all_pass = pass_count == total
+    icon = ":white_check_mark:" if all_pass else ":warning:"
+    headline = (
+        f"{icon} *Scout is healthy — {pass_count}/{total} checks passed*"
+        if all_pass else
+        f"{icon} *Scout has issues — {pass_count}/{total} checks passed*"
+    )
+    fallback = f"Scout: {pass_count}/{total} checks passed"
+
+    fields = []
+    for r in results:
+        status_icon = ":large_green_circle:" if r["passed"] else ":red_circle:"
+        fields.append({
+            "type": "mrkdwn",
+            "text": f"{status_icon} *{r['name']}*\n{r['detail']}"
+        })
+
+    blocks: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
+        {"type": "divider"},
+        {"type": "section", "fields": fields},
+    ]
+    if not all_pass:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":mag: *Check Render logs for the failing checks above.*"},
+        })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": "Startup check · All systems operational" if all_pass else "Startup check · Issues detected — check Render logs"}],
+    })
+    return blocks, fallback
+
+
+def post_to_slack(results: list[dict], pass_count: int) -> bool:
+    """Post Block Kit health dashboard to #scout-qa."""
     token = os.getenv("SLACK_BOT_TOKEN")
     if not token:
         print("SLACK_BOT_TOKEN not set — cannot post to Slack")
         return False
     from slack_sdk.web import WebClient
     try:
+        blocks, fallback = format_slack_blocks(results, pass_count)
         web = WebClient(token=token)
-        web.chat_postMessage(channel="C0AQEECF800", text=message)  # #scout-qa
+        web.chat_postMessage(
+            channel="C0AQEECF800",
+            text=fallback,
+            blocks=blocks,
+            unfurl_links=False,
+        )
         return True
     except Exception as e:
         print(f"Slack post failed: {e}")
@@ -220,8 +263,7 @@ if __name__ == "__main__":
         print(f"\n{status}\n")
 
     if args.slack:
-        msg = format_slack_message(results, pass_count)
-        posted = post_to_slack(msg)
+        posted = post_to_slack(results, pass_count)
         if not args.quiet:
             print(f"Slack: {'posted to #scout-qa' if posted else 'failed'}")
 
