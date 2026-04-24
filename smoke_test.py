@@ -212,9 +212,10 @@ def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict
     blocks: list[dict] = []
 
     if all_pass:
-        # ── All green: headline + one context element per check (name · detail) ──
-        # Context elements never truncate the way section.fields does.
-        # Each check gets its own line so detail is always visible.
+        # ── All green: headline + one rich_text block per check ──────────────────
+        # rich_text blocks don't truncate in thread preview the way mrkdwn context
+        # elements do — critical for the ask('status') and ask('ghost campaigns')
+        # rows which carry the full LLM response preview.
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": f":white_check_mark: *Scout is healthy — {total}/{total} checks passed*"},
@@ -222,8 +223,15 @@ def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict
         for r in results:
             safe_detail = " ".join(r['detail'].splitlines()).strip()
             blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f":large_green_circle: *{r['name']}*  ·  {safe_detail}"}],
+                "type": "rich_text",
+                "elements": [{
+                    "type": "rich_text_section",
+                    "elements": [
+                        {"type": "emoji", "name": "large_green_circle"},
+                        {"type": "text", "text": f"  {r['name']}", "style": {"bold": True}},
+                        {"type": "text", "text": f"  ·  {safe_detail}"},
+                    ],
+                }],
             })
         blocks.append({
             "type": "context",
