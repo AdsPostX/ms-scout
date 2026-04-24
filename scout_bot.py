@@ -344,13 +344,12 @@ def _clean_error(err: Exception) -> tuple[str, str]:
 
 
 def _post_error_update(web: WebClient, channel: str, ts: str, err: Exception) -> None:
-    """Replace the loading placeholder with a GIF + clean human error message."""
-    msg, tag = _clean_error(err)
-    gif_url  = _fetch_giphy_url(tag)
-    blocks: list = []
-    if gif_url:
-        blocks.append({"type": "image", "image_url": gif_url, "alt_text": "oops"})
-    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f":warning: {msg}"}})
+    """Replace the loading placeholder with a clean error block."""
+    msg, _ = _clean_error(err)
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f":warning: *Scout hit a snag* — {msg}"}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": "If this keeps happening, check Render logs."}]},
+    ]
     try:
         web.chat_update(channel=channel, ts=ts, text=msg, blocks=blocks)
     except Exception as _e:
@@ -823,6 +822,67 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     return blocks
 
 
+# ── Opportunity cards ─────────────────────────────────────────────────────────
+
+def _build_opportunity_cards(offers: list, thread_ts: str = "") -> list:
+    """
+    Render a list of formatted offer dicts as compact Slack cards.
+    Each card: one section block (advertiser · payout · category + perf note)
+    followed by an Add to Queue actions block when thread_ts is known.
+    Mirrors the digest card pattern but lighter — no AI copy, no icon.
+    """
+    blocks: list = []
+    for offer in offers[:5]:
+        advertiser = offer.get("advertiser", "Unknown")
+        payout     = offer.get("payout", "Rate TBD")
+        category   = offer.get("category", "")
+        network    = offer.get("network", "")
+        geo        = offer.get("geo", "")
+        perf_note  = offer.get("performance_context", "")
+        score      = offer.get("scout_score_rpm", 0)
+        ms_status  = offer.get("ms_status", "")
+
+        header = f"*{advertiser}*"
+        meta_parts = [p for p in [payout, category, geo] if p]
+        if meta_parts:
+            header += "  ·  " + "  ·  ".join(meta_parts)
+
+        detail_parts = []
+        if perf_note:
+            detail_parts.append(f"_{perf_note}_")
+        if score:
+            detail_parts.append(f"Scout score: {score}")
+        if ms_status and ms_status != "Not in System":
+            detail_parts.append(f"Status: {ms_status}")
+
+        text = header
+        if detail_parts:
+            text += "\n" + "  ·  ".join(detail_parts)
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
+
+        if thread_ts:
+            btn_val = json.dumps({
+                "advertiser": advertiser,
+                "offer_id":   offer.get("offer_id", ""),
+                "payout":     payout,
+                "network":    network,
+                "thread_ts":  thread_ts,
+            }, separators=(",", ":"))[:2900]
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type":      "button",
+                    "text":      {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
+                    "style":     "primary",
+                    "action_id": "scout_brief_queue",
+                    "value":     btn_val,
+                }],
+            })
+
+    return blocks
+
+
 # ── Help / capabilities card ──────────────────────────────────────────────────
 
 _HELP_TRIGGERS = {
@@ -861,43 +921,196 @@ def _log_usage(user_id: str, user_name: str, query: str, tools: list, elapsed_ms
         log.warning(f"[usage] log write failed: {e}")
 
 
+_EMOJI_ALIASES: dict[str, str] = {
+    "yellow_circle": "large_yellow_circle",
+}
+
+# Tokenizer for inline elements within a single text line.
+# Groups: bold_d (**), bold_s (*), italic, code, emoji, link, user, plain
+_INLINE_RE = re.compile(
+    r'\*\*(?P<bold_d>[^*]+?)\*\*'
+    r'|\*(?P<bold_s>[^*\n]+?)\*'
+    r'|_(?P<italic>[^_\n]+?)_'
+    r'|`(?P<code>[^`\n]+?)`'
+    r'|:(?P<emoji>[a-z0-9_\-+]+?):'
+    r'|<(?P<url>[^|>]+)\|(?P<url_text>[^>]*)>'
+    r'|<@(?P<user>[A-Z0-9]+)>'
+    r'|(?P<plain>[^*_`:<\n]+|[*_`:<])'
+)
+
+
+def _parse_inline_elements(text: str) -> list:
+    """Convert a plain-text line into Slack rich_text inline element objects."""
+    elements = []
+    for m in _INLINE_RE.finditer(text):
+        if m.group("bold_d") is not None:
+            elements.append({"type": "text", "text": m.group("bold_d"), "style": {"bold": True}})
+        elif m.group("bold_s") is not None:
+            elements.append({"type": "text", "text": m.group("bold_s"), "style": {"bold": True}})
+        elif m.group("italic") is not None:
+            elements.append({"type": "text", "text": m.group("italic"), "style": {"italic": True}})
+        elif m.group("code") is not None:
+            elements.append({"type": "text", "text": m.group("code"), "style": {"code": True}})
+        elif m.group("emoji") is not None:
+            name = _EMOJI_ALIASES.get(m.group("emoji"), m.group("emoji"))
+            elements.append({"type": "emoji", "name": name})
+        elif m.group("url") is not None:
+            elements.append({"type": "link", "url": m.group("url"), "text": m.group("url_text")})
+        elif m.group("user") is not None:
+            elements.append({"type": "user", "user_id": m.group("user")})
+        elif m.group("plain") is not None:
+            t = m.group("plain")
+            if elements and elements[-1].get("type") == "text" and "style" not in elements[-1]:
+                elements[-1]["text"] += t
+            else:
+                elements.append({"type": "text", "text": t})
+    return elements or [{"type": "text", "text": text}]
+
+
 def _text_to_blocks(text: str) -> list:
     """
-    Convert mrkdwn response text into Block Kit blocks.
-    - Lines of '---' → divider block between sections
-    - Lines starting with '>' → context block (gray, smaller)
-    - Everything else → section block
-    Falls back to a single section block if no --- separators found.
-    """
-    parts = re.split(r'\n+\s*---\s*\n+', text.strip())
-    if len(parts) == 1:
-        # No separators — single section block
-        return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    Convert Claude's markdown response text into Block Kit blocks using native rich_text.
 
-    blocks = []
-    for i, part in enumerate(parts):
-        part = part.strip()
-        if not part:
-            continue
-        body_lines, context_lines = [], []
-        for line in part.split('\n'):
-            if line.startswith('>'):
-                context_lines.append(line[1:].strip())
+    Structure:
+    - '---' separators → divider blocks between sections
+    - Lines starting with '>' → mrkdwn context block (Slack disallows rich_text in context)
+    - Bullet lines (•, -, *) → rich_text_list element
+    - Triple-backtick fences → rich_text_preformatted element
+    - Everything else → rich_text_section with typed inline elements
+
+    Falls back to a single mrkdwn section block on any parse failure.
+    """
+    _BULLET_RE = re.compile(r'^[•\-\*]\s+')
+    _FENCE_RE  = re.compile(r'^```')
+
+    def _flush_section(line_buf: list) -> list | None:
+        """Emit a rich_text_section from accumulated lines, or None if empty."""
+        joined = "\n".join(line_buf).strip()
+        if not joined:
+            return None
+        inline = _parse_inline_elements(joined)
+        return {"type": "rich_text_section", "elements": inline}
+
+    def _flush_list(items: list) -> dict | None:
+        if not items:
+            return None
+        return {
+            "type": "rich_text_list",
+            "style": "bullet",
+            "indent": 0,
+            "elements": [
+                {"type": "rich_text_section", "elements": _parse_inline_elements(item)}
+                for item in items
+            ],
+        }
+
+    def _part_to_rt_elements(part: str) -> tuple[list, list]:
+        """
+        Parse one section (between --- dividers) into:
+          (rich_text_elements, context_lines)
+        rich_text_elements go into a single rich_text block.
+        context_lines are rendered as a separate mrkdwn context block.
+        """
+        rt_elems: list = []
+        ctx_lines: list = []
+        line_buf: list = []
+        list_buf: list = []
+        in_fence = False
+        fence_buf: list = []
+
+        for raw_line in part.split('\n'):
+            # ── Code fence toggle ────────────────────────────────────────────
+            if _FENCE_RE.match(raw_line):
+                if in_fence:
+                    # Close fence
+                    in_fence = False
+                    code_text = "\n".join(fence_buf)
+                    fence_buf = []
+                    if list_buf:
+                        el = _flush_list(list_buf); list_buf = []
+                        if el: rt_elems.append(el)
+                    if line_buf:
+                        el = _flush_section(line_buf); line_buf = []
+                        if el: rt_elems.append(el)
+                    rt_elems.append({
+                        "type": "rich_text_preformatted",
+                        "elements": [{"type": "text", "text": code_text}],
+                    })
+                else:
+                    in_fence = True
+                continue
+
+            if in_fence:
+                fence_buf.append(raw_line)
+                continue
+
+            # ── Context line ('>') ───────────────────────────────────────────
+            if raw_line.startswith('>'):
+                ctx_lines.append(raw_line[1:].strip())
+                continue
+
+            stripped = raw_line.strip()
+
+            # ── Bullet line ──────────────────────────────────────────────────
+            if _BULLET_RE.match(stripped):
+                item_text = _BULLET_RE.sub('', stripped)
+                if line_buf:
+                    el = _flush_section(line_buf); line_buf = []
+                    if el: rt_elems.append(el)
+                list_buf.append(item_text)
+                continue
+
+            # ── Regular line ─────────────────────────────────────────────────
+            if list_buf:
+                el = _flush_list(list_buf); list_buf = []
+                if el: rt_elems.append(el)
+
+            if not stripped:
+                # Blank line → flush current section paragraph
+                if line_buf:
+                    el = _flush_section(line_buf); line_buf = []
+                    if el: rt_elems.append(el)
             else:
-                # Normalize - and * bullet prefixes to • for proper Slack rendering
-                line = re.sub(r'^[-\*]\s+', '• ', line)
-                body_lines.append(line)
-        body = '\n'.join(body_lines).strip()
-        if body:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
-        if context_lines:
-            blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": ' · '.join(context_lines)}],
-            })
-        if i < len(parts) - 1:
-            blocks.append({"type": "divider"})
-    return blocks or [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+                line_buf.append(stripped)
+
+        # Flush remaining buffers
+        if list_buf:
+            el = _flush_list(list_buf)
+            if el: rt_elems.append(el)
+        if line_buf:
+            el = _flush_section(line_buf)
+            if el: rt_elems.append(el)
+
+        return rt_elems, ctx_lines
+
+    try:
+        parts = re.split(r'\n+\s*---\s*\n+', text.strip())
+        blocks: list = []
+
+        for i, part in enumerate(parts):
+            part = part.strip()
+            if not part:
+                if i < len(parts) - 1:
+                    blocks.append({"type": "divider"})
+                continue
+
+            rt_elems, ctx_lines = _part_to_rt_elements(part)
+
+            if rt_elems:
+                blocks.append({"type": "rich_text", "elements": rt_elems})
+            if ctx_lines:
+                ctx_text = " · ".join(ctx_lines)
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": ctx_text}],
+                })
+            if i < len(parts) - 1:
+                blocks.append({"type": "divider"})
+
+        return blocks or [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+    except Exception:
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
 def _build_suggestion_buttons(suggestions: list) -> list:
@@ -4743,7 +4956,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 if passed_count >= 13:
                     overall = ":large_green_circle:"
                 elif passed_count >= 9:
-                    overall = ":yellow_circle:"
+                    overall = ":large_yellow_circle:"
                 else:
                     overall = ":red_circle:"
 
@@ -4913,6 +5126,17 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 blocks=blocks,
                 unfurl_links=False,
             )
+        elif isinstance(response, dict) and response.get("type") == "opportunities":
+            header_text       = _sanitize_slack(response.get("text", ""))
+            offer_cards       = _build_opportunity_cards(response.get("offers", []), thread_ts=thread_ts)
+            suggestion_blocks = _build_suggestion_buttons(response.get("suggestions", []))
+            all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks]
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=header_text or "Top opportunities",
+                blocks=all_blocks,
+                unfurl_links=False,
+            )
         else:
             response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))
             content_blocks    = _text_to_blocks(response_text)
@@ -5049,6 +5273,20 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         _real_url = (brief_data.get("tracking_url", "") or "").strip()
         if _real_url and not _real_url.startswith("Not available"):
             _run_preflight_qa(web, channel, thread_ts, brief_data)
+
+    elif isinstance(response, dict) and response.get("type") == "opportunities":
+        header_text       = _sanitize_slack(response.get("text", ""))
+        offer_cards       = _build_opportunity_cards(response.get("offers", []), thread_ts=thread_ts)
+        suggestion_blocks = _build_suggestion_buttons(response.get("suggestions", []))
+        elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
+        all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, elapsed_ctx]
+        web.chat_update(
+            channel=channel,
+            ts=_placeholder_ts,
+            text=header_text or "Top opportunities",
+            blocks=all_blocks,
+        )
+        log.info(f"Posted opportunity cards ({len(response.get('offers', []))} offers) in {channel}")
 
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
