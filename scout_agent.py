@@ -91,7 +91,7 @@ def _data_quality_tier(days_of_data: int, sessions: int = 0) -> dict:
     if days_of_data >= 14 and sessions >= 1000:
         tier, emoji = "strong", ":large_green_circle:"
     elif days_of_data >= 7 and sessions >= 100:
-        tier, emoji = "directional", ":yellow_circle:"
+        tier, emoji = "directional", ":large_yellow_circle:"
     else:
         tier, emoji = "thin", ":red_circle:"
     if sessions > 0:
@@ -529,10 +529,10 @@ Rules:
 - *bold* for offer names, verdicts, key numbers.
 - LEAD NUMBER: First sentence of every non-trivial response must contain the single most important number, bolded. Cap: "*$100* cap on Campaign [ID]." Revenue: "*$62K* gross." Rank: "Disney+ ranks *#8 of 13*."
 - LEAD NUMBER CONSISTENCY: Lead count must match the list below it. If showing fewer, adjust: "*3 active campaigns*" not "*14 campaigns*."
-- STATUS EMOJI: :large_green_circle: live/serving · :yellow_circle: marginal/near-cap · :red_circle: capped/ended/dead
+- STATUS EMOJI: :large_green_circle: live/serving · :large_yellow_circle: marginal/near-cap · :red_circle: capped/ended/dead
 - CONFIDENCE LINE (required before :zap: on every data response):
     :large_green_circle: Strong (≥14 days, ≥1K sessions): `> _Based on [N] days · [X] sessions_`
-    :yellow_circle: Directional (7-13 days or 100-999 sessions): `> _Directional — [N] days · [X] sessions_`
+    :large_yellow_circle: Directional (7-13 days or 100-999 sessions): `> _Directional — [N] days · [X] sessions_`
     :red_circle: Thin (<7 days or <100 sessions): `> _Thin data — [N] days, [X] sessions. Treat as estimate only._`
     run_sql_query: `> _Free-form query — [N] rows. Verify column semantics before acting._`
     Omit for pure operational responses (queue status, campaign status, scout status, yes/no).
@@ -727,7 +727,7 @@ INTENTS — resolve every query to one, then act immediately.
     → run_self_qa().
     Runs Scout's full 15-question test suite against itself. Evaluates pass/fail for each question by checking response content against expected signals.
     Format the result as a Slack-friendly report:
-    - Lead with overall score: "*[N]/15 passed* — Scout self-QA complete." with :large_green_circle: (≥12), :yellow_circle: (8-11), or :red_circle: (<8)
+    - Lead with overall score: "*[N]/15 passed* — Scout self-QA complete." with :large_green_circle: (≥12), :large_yellow_circle: (8-11), or :red_circle: (<8)
     - List each test: :white_check_mark: PASS or :x: FAIL + label + elapsed time (e.g. "12.3s")
     - Group: Core Health · Offer Intelligence · Revenue & Publisher · Data Boundaries
     - End with :zap: Action if any failures, or ":zap: All systems nominal." if all pass.
@@ -1088,7 +1088,7 @@ def get_supply_demand_gaps(
             lines.append(":white_check_mark: No major gap opportunities found — coverage looks solid.")
 
         if dead_rows:
-            lines.append("\n:yellow_circle: *DEAD WEIGHT* (provisioned here, zero impressions in 30 days)")
+            lines.append("\n:large_yellow_circle: *DEAD WEIGHT* (provisioned here, zero impressions in 30 days)")
             for adv, since in dead_rows:
                 since_str = since.strftime("%b %d") if hasattr(since, "strftime") else str(since)
                 lines.append(f"• *{adv}* — active since {since_str}, 0 impressions. Remove or investigate.")
@@ -4712,6 +4712,8 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
     # We use the FIRST successful result as the primary (handles multi-brief
     # requests where Claude calls the tool multiple times in one turn).
     _brief_results: list = []
+    # Raw offer list from get_top_opportunities — drives per-offer card rendering in scout_bot.
+    _opportunity_offers: list = []
     # All tool results from every loop iteration — used for entity extraction.
     _all_tool_results: list = []
 
@@ -4801,6 +4803,15 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
                     suggestions = []
                 text = text[:sugg_match.start()].rstrip()
 
+            # Opportunity cards — structured list so scout_bot.py can render per-offer cards.
+            if _opportunity_offers:
+                return {
+                    "type": "opportunities",
+                    "text": text or "",
+                    "offers": _opportunity_offers,
+                    "suggestions": suggestions,
+                }
+
             # General entity extraction — runs over all tool results from this turn.
             # Tool-agnostic: picks up publisher, offer, payout, category from any tool.
             # Returns {"type": "text_with_context", ...} so scout_bot.py can persist
@@ -4841,6 +4852,8 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
                     block, result = results_map[i]
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
+                    if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
+                        _opportunity_offers.extend(result)
                     _all_tool_results.append(result)
                     tool_results.append({
                         "type": "tool_result",
@@ -4865,6 +4878,8 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
                 result = _run_tool(block.name, block.input, user_id)
                 if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                     _brief_results.append(result)  # collect all, use first for primary
+                if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
+                    _opportunity_offers.extend(result)
                 _all_tool_results.append(result)  # accumulate all for entity extraction
                 tool_results.append({
                     "type": "tool_result",
