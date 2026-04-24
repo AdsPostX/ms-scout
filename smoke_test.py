@@ -124,7 +124,9 @@ def test_ask_status():
         text = result.get("text", result) if isinstance(result, dict) else result
         if not text or "broke" in text.lower() or "error" in text.lower():
             return False, f"Bad response: {str(text)[:120]}"
-        return True, f"Responded in {elapsed:.1f}s — {str(text)[:80]}..."
+        first_line = str(text).split('\n')[0].strip()
+        preview = (first_line[:60] + "…") if len(first_line) > 60 else first_line
+        return True, f"Responded in {elapsed:.1f}s — {preview}"
     except Exception as e:
         return False, str(e)
 
@@ -142,7 +144,9 @@ def test_ask_tool_call():
         text = result.get("text", result) if isinstance(result, dict) else result
         if not text:
             return False, "Empty response from ghost campaign tool call"
-        return True, f"Tool call returned in {elapsed:.1f}s — {str(text)[:80]}..."
+        first_line = str(text).split('\n')[0].strip()
+        preview = (first_line[:60] + "…") if len(first_line) > 60 else first_line
+        return True, f"Tool call returned in {elapsed:.1f}s — {preview}"
     except Exception as e:
         return False, str(e)
 
@@ -216,9 +220,10 @@ def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict
             "text": {"type": "mrkdwn", "text": f":white_check_mark: *Scout is healthy — {total}/{total} checks passed*"},
         })
         for r in results:
+            safe_detail = " ".join(r['detail'].splitlines()).strip()
             blocks.append({
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f":large_green_circle: *{r['name']}*  ·  {r['detail']}"}],
+                "elements": [{"type": "mrkdwn", "text": f":large_green_circle: *{r['name']}*  ·  {safe_detail}"}],
             })
         blocks.append({
             "type": "context",
@@ -237,9 +242,10 @@ def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict
                 "text": {"type": "mrkdwn", "text": f":red_circle: *{r['name']}*\n{r['detail']}"},
             })
         for r in passed:
+            safe_detail = " ".join(r['detail'].splitlines()).strip()
             blocks.append({
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f":large_green_circle: *{r['name']}*  ·  {r['detail']}"}],
+                "elements": [{"type": "mrkdwn", "text": f":large_green_circle: *{r['name']}*  ·  {safe_detail}"}],
             })
         blocks.append({
             "type": "section",
