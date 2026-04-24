@@ -208,21 +208,24 @@ def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict
     blocks: list[dict] = []
 
     if all_pass:
-        # ── All green: one headline + one dot-line, done ─────────────────────
+        # ── All green: headline + one context element per check (name · detail) ──
+        # Context elements never truncate the way section.fields does.
+        # Each check gets its own line so detail is always visible.
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": f":white_check_mark: *Scout is healthy — {total}/{total} checks passed*"},
         })
-        dot_line = "  ·  ".join(f":large_green_circle: {r['name']}" for r in results)
+        for r in results:
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f":large_green_circle: *{r['name']}*  ·  {r['detail']}"}],
+            })
         blocks.append({
             "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": dot_line},
-                {"type": "mrkdwn", "text": f"Startup check · {now_ct}"},
-            ],
+            "elements": [{"type": "mrkdwn", "text": f"Startup check · {now_ct}"}],
         })
     else:
-        # ── Failures: headline, one full-width section per failure, passing dots ─
+        # ── Failures: headline, full-width section per failure, passing as context ─
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": f":warning: *Scout has issues — {pass_count}/{total} checks passed*"},
@@ -233,12 +236,10 @@ def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f":red_circle: *{r['name']}*\n{r['detail']}"},
             })
-        # Passing checks collapsed to a single context line — they're good, they're noise
-        if passed:
-            passing_dots = "  ·  ".join(f":large_green_circle: {r['name']}" for r in passed)
+        for r in passed:
             blocks.append({
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": passing_dots}],
+                "elements": [{"type": "mrkdwn", "text": f":large_green_circle: *{r['name']}*  ·  {r['detail']}"}],
             })
         blocks.append({
             "type": "section",
