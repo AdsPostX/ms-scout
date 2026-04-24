@@ -1233,11 +1233,11 @@ JSON only, no explanation:
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-3-5-haiku-20241022",
+                "model": "claude-haiku-4-5",
                 "max_tokens": 600,
                 "messages": [{"role": "user", "content": prompt}],
             },
-            timeout=20,
+            timeout=30,
         )
         if resp.status_code != 200:
             log.warning(f"_generate_offer_copy: Anthropic API {resp.status_code}: {resp.text[:200]}")
@@ -3108,15 +3108,16 @@ def _write_to_notion_queue(
     user_id: str,
     thread_url: str,
     ai_copy: dict | None = None,
+    user_display: str = "",
 ) -> str | None:
     """
     Create a Notion page in the Scout Demand Queue DB.
     Properties: machine-readable filtering/sorting/Kanban data.
     Page body: MS platform entry checklist, ordered for ops workflow:
-      Campaign Config → Copy → Platform Settings → Scout Intelligence.
+      Campaign Config → Platform Settings → Scout Intelligence → Copy.
+    Copy goes last so _patch_notion_copy (async fallback) appends in the right position.
     ai_copy: if provided (sync generation succeeded), copy callouts are baked in.
-    If None, copy section shows pending placeholders and _patch_notion_copy is
-    called as fallback by the caller.
+    If None, copy section shows a pending placeholder; _patch_notion_copy fills it async.
     Returns the Notion page URL on success, None on failure.
     """
     from datetime import datetime, timezone
@@ -3229,7 +3230,7 @@ def _write_to_notion_queue(
         _rt_muted("Copy and paste into the MS platform. Page 1: Campaign Config + Copy. Page 2: Platform Settings."),
         _divider(),
 
-        # ── Campaign Config (Page 1) ──────────────────────────────────────────
+        # ── Campaign Config ───────────────────────────────────────────────────
         _heading("Campaign Config", 3),
         _rt(f"Internal Offer Name:   {internal_name[:100]}"),
         _rt(f"Partner Offer Name:    {advertiser[:80]}"),
@@ -3244,17 +3245,11 @@ def _write_to_notion_queue(
         *([_rt(f"Goal Title:            {goal_title}")] if goal_title else []),
         _divider(),
 
-        # ── Copy (Page 1 — Headlines & Copy) ─────────────────────────────────
-        _heading("Copy", 3),
-        *copy_blocks,
-        _divider(),
-
-        # ── Platform Settings (Page 2) ────────────────────────────────────────
+        # ── Platform Settings — scraped offer data only ───────────────────────
+        # Ops config (Test Offer ON/OFF, Perkswall toggle) omitted — ops knows their workflow.
         _heading("Platform Settings", 3),
         _rt(f"Network:               {network}" if network else "Network:               set in platform"),
         _rt(f"Network Offer ID:      {offer_id}" if offer_id else "Network Offer ID:      pull from network portal"),
-        _rt("Test Offer:            ON  ← flip OFF when ready to go live"),
-        _rt("Perkswall Enabled:     ON"),
         _divider(),
 
         # ── Scout Intelligence ────────────────────────────────────────────────
@@ -3269,10 +3264,17 @@ def _write_to_notion_queue(
         ]),
         *([_rt(f"Category:   {brief_data.get('category')}")] if brief_data.get("category") else []),
         _rt(f"Risk note:  {risk_flag}" if risk_flag else "Risk note:  None flagged"),
-        _rt(f"Approved:   <@{user_id}>  ·  {now_iso}"),
+        _rt(f"Approved:   {user_display or user_id}  ·  {now_iso}"),
         {"object": "block", "type": "bookmark",
          "bookmark": {"url": thread_url, "caption": [{"type": "text", "text": {"content": "Brief thread in Slack"}}]}}
         if thread_url else _rt("Brief thread: not available"),
+        _divider(),
+
+        # ── Copy — LAST so _patch_notion_copy appends in the correct position ─
+        # ai_copy present → callouts baked in at creation (sync generation succeeded).
+        # ai_copy absent  → single placeholder; _patch_notion_copy fills this section async.
+        _heading("Copy", 3),
+        *copy_blocks,
     ]
 
     payload = {
@@ -3474,6 +3476,19 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
         "oid": brief_data.get("offer_id", ""),
     }
 
+    # Resolve Slack user_id → display name for Notion (avoids raw "<@U08SLE7M0RH>" in page)
+    user_display = user_id
+    try:
+        _uinfo = web.users_info(user=user_id)
+        _profile = (_uinfo.get("user") or {}).get("profile", {})
+        user_display = (
+            _profile.get("display_name")
+            or _profile.get("real_name")
+            or user_id
+        )
+    except Exception:
+        pass  # fallback to raw user_id — better than crashing approval flow
+
     # 4. Generate AI copy synchronously — page will be complete at creation time.
     # Slack already sent the ack, so there is no 3-second constraint here.
     ai_copy = None
@@ -3491,7 +3506,7 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
 
     # 5. Write to Notion — ai_copy baked in if available, placeholder if not
     thread_url = _slack_thread_url(channel, message_ts)
-    notion_url = _write_to_notion_queue(brief_data, copy_data, user_id, thread_url, ai_copy=ai_copy)
+    notion_url = _write_to_notion_queue(brief_data, copy_data, user_id, thread_url, ai_copy=ai_copy, user_display=user_display)
 
     # Fallback: if sync generation failed, enrich async so the page eventually fills in
     if notion_url and not ai_copy:
