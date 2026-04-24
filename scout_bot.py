@@ -632,15 +632,10 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
 
     blocks = []
 
-    # Hero image
-    if hero_url and hero_url.startswith("http"):
-        blocks.append({
-            "type": "image",
-            "image_url": hero_url,
-            "alt_text": advertiser,
-        })
-
     # Header — include MS status so decision context is instant
+    # No hero_url full-width image — too much scroll cost in a channel with 6-8 briefs.
+    # icon_url (brand mark) becomes an accessory on the stats section: instant brand
+    # recognition right next to the numbers where it helps, without the scroll tax.
     status_tag = {"Not in System": " · New", "Live": " · Already Live", "In System": " · In System"}.get(ms_status, "")
     blocks.append({
         "type": "header",
@@ -678,7 +673,16 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
         {"type": "mrkdwn", "text": f"*Est. RPM*\n{rpm_display}"},
     ]
     # Performance field omitted — RPM already carries the confidence qualifier (est./no prior data)
-    blocks.append({"type": "section", "fields": stat_fields})
+    # icon_url as accessory: brand mark right-aligned on the stats grid — brand recognition
+    # at the decision point without adding scroll. Falls back gracefully when absent.
+    stats_block: dict = {"type": "section", "fields": stat_fields}
+    if icon_url and icon_url.startswith("http"):
+        stats_block["accessory"] = {
+            "type": "image",
+            "image_url": icon_url,
+            "alt_text": advertiser,
+        }
+    blocks.append(stats_block)
 
     # Risk flag — surface before copy so it's not missed
     if risk_flag:
@@ -758,17 +762,17 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
     blocks.append({"type": "divider"})
 
     # ── Bottom line + handoff ─────────────────────────────────────────────────
+    # icon_url moved to stats section accessory — not repeated here.
     context_elements = []
-    if icon_url and icon_url.startswith("http"):
-        context_elements.append({"type": "image", "image_url": icon_url, "alt_text": advertiser})
-
     footer_parts = []
     if bottom:
         footer_parts.append(f"_{bottom}_")
     # "Ready to build?" removed — Creatives field already tells you exactly what to do
 
-    context_elements.append({"type": "mrkdwn", "text": "\n".join(footer_parts)})
-    blocks.append({"type": "context", "elements": context_elements})
+    if footer_parts:
+        context_elements.append({"type": "mrkdwn", "text": "\n".join(footer_parts)})
+    if context_elements:
+        blocks.append({"type": "context", "elements": context_elements})
 
     # ── Add to Queue button ───────────────────────────────────────────────────
     # Only rendered when thread_ts is known (i.e., a real @Scout mention, not a preview).

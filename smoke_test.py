@@ -186,39 +186,69 @@ def format_slack_message(results: list[dict], pass_count: int) -> str:
 
 
 def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict], str]:
-    """Return (blocks, fallback_text) for a Block Kit health dashboard card."""
-    total = len(results)
-    all_pass = pass_count == total
-    icon = ":white_check_mark:" if all_pass else ":warning:"
-    headline = (
-        f"{icon} *Scout is healthy — {pass_count}/{total} checks passed*"
-        if all_pass else
-        f"{icon} *Scout has issues — {pass_count}/{total} checks passed*"
-    )
-    fallback = f"Scout: {pass_count}/{total} checks passed"
+    """Return (blocks, fallback_text) for a Block Kit health dashboard card.
 
-    fields = []
-    for r in results:
-        status_icon = ":large_green_circle:" if r["passed"] else ":red_circle:"
-        fields.append({
-            "type": "mrkdwn",
-            "text": f"{status_icon} *{r['name']}*\n{r['detail']}"
+    Design: progressive disclosure.
+    - All pass → single compact context line with status dots. No scroll, no noise.
+    - Any failure → full-width section per failing check (no truncation), passing
+      checks collapsed to one context dot-line at the bottom.
+
+    Avoids section.fields — Slack hard-truncates field text at display boundaries,
+    which breaks long check details (LLM round-trip, ghost campaign detail, etc.).
+    """
+    from datetime import datetime as _dt
+    import pytz as _pytz
+    total     = len(results)
+    all_pass  = pass_count == total
+    failed    = [r for r in results if not r["passed"]]
+    passed    = [r for r in results if r["passed"]]
+    now_ct    = _dt.now(_pytz.timezone("America/Chicago")).strftime("%-I:%M %p CT")
+    fallback  = f"Scout: {pass_count}/{total} checks passed"
+
+    blocks: list[dict] = []
+
+    if all_pass:
+        # ── All green: one headline + one dot-line, done ─────────────────────
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f":white_check_mark: *Scout is healthy — {total}/{total} checks passed*"},
         })
-
-    blocks: list[dict] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
-        {"type": "divider"},
-        {"type": "section", "fields": fields},
-    ]
-    if not all_pass:
+        dot_line = "  ·  ".join(f":large_green_circle: {r['name']}" for r in results)
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": dot_line},
+                {"type": "mrkdwn", "text": f"Startup check · {now_ct}"},
+            ],
+        })
+    else:
+        # ── Failures: headline, one full-width section per failure, passing dots ─
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f":warning: *Scout has issues — {pass_count}/{total} checks passed*"},
+        })
+        blocks.append({"type": "divider"})
+        for r in failed:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f":red_circle: *{r['name']}*\n{r['detail']}"},
+            })
+        # Passing checks collapsed to a single context line — they're good, they're noise
+        if passed:
+            passing_dots = "  ·  ".join(f":large_green_circle: {r['name']}" for r in passed)
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": passing_dots}],
+            })
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": ":mag: *Check Render logs for the failing checks above.*"},
         })
-    blocks.append({
-        "type": "context",
-        "elements": [{"type": "mrkdwn", "text": "Startup check · All systems operational" if all_pass else "Startup check · Issues detected — check Render logs"}],
-    })
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"Startup check · {now_ct} · Issues detected"}],
+        })
+
     return blocks, fallback
 
 
@@ -268,3 +298,4 @@ if __name__ == "__main__":
             print(f"Slack: {'posted to #scout-qa' if posted else 'failed'}")
 
     sys.exit(0 if pass_count == total else 1)
+
