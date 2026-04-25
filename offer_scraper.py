@@ -26,6 +26,7 @@ import requests
 import time
 from datetime import datetime
 from typing import Optional
+from scout_types import Offer  # type: ignore[import]  # noqa: F401
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -160,8 +161,8 @@ OFFER_FIELDS = [
     "date_scraped",
 ]
 
-def empty_offer() -> dict:
-    return {k: "" for k in OFFER_FIELDS}
+def empty_offer() -> Offer:
+    return {k: "" for k in OFFER_FIELDS}  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
