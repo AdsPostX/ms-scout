@@ -15,8 +15,10 @@ import re
 import threading
 import time
 
+from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
+from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web import WebClient
 
 from scout_agent import ask
