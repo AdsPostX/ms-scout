@@ -208,6 +208,27 @@ def test_notion_queue_db_id():
     return True, f"Set (prefix: {db_id[:8]}…)"
 
 
+# ── Test 10: handler import chain ─────────────────────────────────────────────
+
+@test("Handler symbols — SocketModeResponse and RateLimitErrorRetryHandler importable")
+def test_handler_imports():
+    """
+    Verify that all symbols used inside handle_event() are importable.
+    The smoke test bypasses handle_event entirely — this test catches the class
+    of silent import failures that have broken Scout three times post-module-split.
+    """
+    try:
+        from slack_sdk.socket_mode.response import SocketModeResponse  # noqa: F401
+        from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler  # noqa: F401
+    except ImportError as e:
+        return False, f"Missing Slack SDK symbol (handle_event will crash on first @mention): {e}"
+    try:
+        import scout_handlers  # noqa: F401
+    except ImportError as e:
+        return False, f"scout_handlers import failed (all @mentions will be silent): {e}"
+    return True, "SocketModeResponse ✓  RateLimitErrorRetryHandler ✓  scout_handlers ✓"
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:
