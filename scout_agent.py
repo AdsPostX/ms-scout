@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 import anthropic
 from dotenv import load_dotenv
+import queries as _q
 
 load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 
@@ -256,42 +257,10 @@ def _load_performance_benchmarks() -> dict:
     try:
         ch = _get_ch_client()
 
-        # Single query: join campaigns → conversions → impressions
-        # Pull category + payout_type directly from the campaigns table (source of truth)
-        # Note: from_airbyte_campaigns has 'categories' (plural), no 'payout_type' column.
-        # Payout type is known at score time from offer._payout_type_norm, not from ClickHouse.
-        # Tiers 3/4 are keyed by category only — still real MS data, just without payout_type split.
-        offer_query = """
-        SELECT
-            c.id,
-            c.adv_name,
-            trim(c.internal_network_name)        AS impact_id,
-            coalesce(c.categories, '')            AS category,
-            imp.impression_count,
-            round(conv.conversion_count / nullIf(imp.impression_count, 0) * 100, 4) AS cvr_pct,
-            round(conv.total_revenue    / nullIf(imp.impression_count, 0) * 1000, 2) AS rpm
-        FROM default.from_airbyte_campaigns c
-        JOIN (
-            SELECT campaign_id,
-                   count()                           AS conversion_count,
-                   sum(toFloat64OrNull(revenue))      AS total_revenue
-            FROM default.adpx_conversionsdetails
-            WHERE toYYYYMM(created_at) >= 202501
-            GROUP BY campaign_id
-        ) conv ON toInt64(c.id) = toInt64(conv.campaign_id)
-        JOIN (
-            SELECT campaign_id,
-                   count() AS impression_count
-            FROM default.adpx_impressions_details
-            WHERE toYYYYMM(created_at) >= 202501
-            GROUP BY campaign_id
-        ) imp ON toInt64(c.id) = toInt64(imp.campaign_id)
-        WHERE c.deleted_at IS NULL
-          AND imp.impression_count > 500
-        ORDER BY imp.impression_count DESC
-        """
-
-        rows = ch.query(offer_query).result_rows
+        # SQL lives in queries.performance_benchmarks_raw() — any threshold or
+        # window change belongs there. Tuple columns:
+        # (id, adv_name, impact_id, category, impression_count, cvr_pct, rpm)
+        rows = _q.performance_benchmarks_raw(ch)
 
         # Tier 1: exact offer (by Impact network ID)
         by_offer: dict = {}
@@ -963,99 +932,26 @@ def get_supply_demand_gaps(
     Also surfaces dead weight: provisioned but zero impressions in 30 days.
     Provide either publisher_name OR advertiser_name, not both.
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     ch = _get_ch_client()
 
     if publisher_name and not advertiser_name:
         # --- PUBLISHER-FIRST MODE ---
 
         # Step 1: Resolve publisher
-        pub_rows = ch.query(
-            "SELECT id, organization FROM from_airbyte_users "
-            "WHERE organization ILIKE %(pub)s LIMIT 5",
-            parameters={"pub": f"%{publisher_name}%"}
-        ).result_rows
-        if not pub_rows:
+        pub_results = _q.publisher_lookup_by_name(ch, publisher_name)
+        if not pub_results:
             return f"No publisher found matching '{publisher_name}'."
-        pub_id, pub_org = pub_rows[0][0], pub_rows[0][1]
+        pub_id  = pub_results[0]["id"]
+        pub_org = pub_results[0]["organization"]
         pub_pid = str(pub_id)
 
-        # Step 2: Advertisers already active in this publisher
-        existing_rows = ch.query(
-            "SELECT DISTINCT c.adv_name "
-            "FROM from_airbyte_publisher_campaigns pc "
-            "JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id "
-            "WHERE pc.user_id = %(pub_id)s "
-            "  AND pc.is_active = true AND pc.deleted_at IS NULL AND c.deleted_at IS NULL",
-            parameters={"pub_id": pub_id}
-        ).result_rows
-        existing = {r[0].lower() for r in existing_rows}
+        # Step 2: Advertisers already active in this publisher (for fuzzy dedup)
+        existing = _q.publisher_existing_advertisers(ch, pub_id)
 
-        def q_gaps():
-            # Pre-aggregate to avoid 582M row scan
-            return ch.query("""
-                WITH imp_agg AS (
-                    SELECT campaign_id, count() AS impressions_30d
-                    FROM adpx_impressions_details
-                    WHERE created_at >= today() - 30
-                      AND toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-                    GROUP BY campaign_id
-                ),
-                conv_agg AS (
-                    SELECT campaign_id, sum(toFloat64OrNull(revenue)) AS revenue_30d
-                    FROM adpx_conversionsdetails
-                    WHERE created_at >= today() - 30
-                      AND toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-                    GROUP BY campaign_id
-                )
-                SELECT
-                    c.adv_name,
-                    count(DISTINCT pc.user_id) AS pub_count,
-                    sum(ia.impressions_30d) AS impressions_30d,
-                    coalesce(sum(ca.revenue_30d), 0) AS revenue_30d,
-                    round(coalesce(sum(ca.revenue_30d), 0) /
-                          nullIf(sum(ia.impressions_30d), 0) * 1000, 2) AS rpm
-                FROM from_airbyte_publisher_campaigns pc
-                JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
-                LEFT JOIN imp_agg ia ON ia.campaign_id = toUInt64(pc.campaign_id)
-                LEFT JOIN conv_agg ca ON ca.campaign_id = toUInt64(pc.campaign_id)
-                WHERE pc.is_active = true
-                  AND pc.deleted_at IS NULL AND c.deleted_at IS NULL
-                  AND pc.user_id != %(pub_id)s
-                GROUP BY c.adv_name
-                HAVING revenue_30d > 0 AND pub_count >= 2
-                ORDER BY revenue_30d DESC
-                LIMIT 20
-            """, parameters={"pub_id": pub_id}).result_rows
-
-        def q_dead_weight():
-            return ch.query("""
-                SELECT c.adv_name, min(pc.created_at) AS provisioned_since
-                FROM from_airbyte_publisher_campaigns pc
-                JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
-                LEFT JOIN adpx_impressions_details i
-                    ON i.campaign_id = toUInt64(pc.campaign_id)
-                    AND i.pid = %(pub_pid)s
-                    AND i.created_at >= today() - 30
-                WHERE pc.user_id = %(pub_id)s
-                  AND pc.is_active = true
-                  AND pc.deleted_at IS NULL AND c.deleted_at IS NULL
-                  AND i.campaign_id IS NULL
-                GROUP BY c.adv_name
-                LIMIT 10
-            """, parameters={"pub_id": pub_id, "pub_pid": pub_pid}).result_rows
-
-        def q_pub_sessions():
-            rows = ch.query(
-                "SELECT count() AS sessions FROM adpx_sdk_sessions "
-                "WHERE user_id = %(pub_id)s AND created_at >= today() - 30 "
-                "  AND toYYYYMM(created_at) >= toYYYYMM(today() - 30)",
-                parameters={"pub_id": pub_id}
-            ).result_rows
-            return rows[0][0] if rows else 0
-
-        gap_rows, dead_rows, sessions_30d = _run_parallel([q_gaps, q_dead_weight, q_pub_sessions])
+        # Step 3: Gap opportunities, dead weight, and session volume (sequential — CH client not thread-safe)
+        gap_data     = _q.supply_gap_opportunities(ch, pub_id)
+        dead_data    = _q.supply_dead_weight(ch, pub_id, pub_pid)
+        sessions_30d = _q.publisher_sessions_30d(ch, pub_id)
 
         # Filter gaps to advertisers not already in this publisher.
         # Fuzzy match: suppress if existing adv name is a substring of the candidate
@@ -1064,10 +960,7 @@ def get_supply_demand_gaps(
             a = adv_name.lower()
             return any(a == ex or a in ex or ex in a for ex in existing)
 
-        gaps = [(adv, pub_count, imp, rev, rpm)
-                for (adv, pub_count, imp, rev, rpm) in gap_rows
-                if not _already_provisioned(adv)]
-
+        gaps         = [d for d in gap_data if not _already_provisioned(d["adv_name"])]
         daily_sessions = sessions_30d / 30 if sessions_30d else 0
 
         lines = [f"*{pub_org} — Supply Gap Analysis* (30-day data)\n"]
@@ -1075,7 +968,8 @@ def get_supply_demand_gaps(
         if gaps:
             lines.append(":large_green_circle: *GAP OPPORTUNITIES* (performing on 2+ other publishers, not here)")
             total_est = 0
-            for adv, pub_count, imp, rev, rpm in gaps[:10]:
+            for d in gaps[:10]:
+                adv, pub_count, rev, rpm = d["adv_name"], d["pub_count"], d["revenue_30d"], d["rpm"]
                 est_daily = round(daily_sessions * (rpm / 1000), 0) if rpm else 0
                 total_est += est_daily
                 lines.append(
@@ -1087,11 +981,12 @@ def get_supply_demand_gaps(
         else:
             lines.append(":white_check_mark: No major gap opportunities found — coverage looks solid.")
 
-        if dead_rows:
+        if dead_data:
             lines.append("\n:large_yellow_circle: *DEAD WEIGHT* (provisioned here, zero impressions in 30 days)")
-            for adv, since in dead_rows:
+            for d in dead_data:
+                since = d["provisioned_since"]
                 since_str = since.strftime("%b %d") if hasattr(since, "strftime") else str(since)
-                lines.append(f"• *{adv}* — active since {since_str}, 0 impressions. Remove or investigate.")
+                lines.append(f"• *{d['adv_name']}* — active since {since_str}, 0 impressions. Remove or investigate.")
 
         return "\n".join(lines)
 
@@ -1099,45 +994,25 @@ def get_supply_demand_gaps(
         # --- ADVERTISER-FIRST MODE ---
 
         # Publishers where advertiser IS running (active)
-        active_rows = ch.query(
-            "SELECT DISTINCT pc.user_id, u.organization "
-            "FROM from_airbyte_publisher_campaigns pc "
-            "JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id "
-            "JOIN from_airbyte_users u ON pc.user_id = u.id "
-            "WHERE c.adv_name ILIKE %(adv)s "
-            "  AND pc.is_active = true AND pc.deleted_at IS NULL AND c.deleted_at IS NULL",
-            parameters={"adv": f"%{advertiser_name}%"}
-        ).result_rows
-        active_pub_ids = {r[0] for r in active_rows}
-        active_pub_names = [r[1] for r in active_rows]
+        active_data    = _q.advertiser_active_publishers(ch, advertiser_name)
+        active_pub_ids = [d["publisher_id"] for d in active_data]
+        active_pub_names = [d["organization"] for d in active_data]
 
         if not active_pub_ids:
             return f"No active publisher campaigns found for '{advertiser_name}'."
 
         # Publishers with significant traffic NOT running this advertiser
-        missing_rows = ch.query("""
-            SELECT u.id, u.organization,
-                   count() AS sessions_30d
-            FROM adpx_sdk_sessions s
-            JOIN from_airbyte_users u ON s.user_id = u.id
-            WHERE s.created_at >= today() - 30
-              AND toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
-              AND s.user_id NOT IN %(active_ids)s
-            GROUP BY u.id, u.organization
-            HAVING sessions_30d > 1000
-            ORDER BY sessions_30d DESC
-            LIMIT 20
-        """, parameters={"active_ids": list(active_pub_ids)}).result_rows
+        missing_data = _q.publishers_missing_advertiser(ch, active_pub_ids)
 
         lines = [f"*{advertiser_name} — Publisher Gap Analysis* (30-day data)\n",
                  f":white_check_mark: Currently running in: {', '.join(active_pub_names[:8])}\n"]
 
-        if missing_rows:
+        if missing_data:
             lines.append(":large_green_circle: *NOT RUNNING IN* (publishers with >1K sessions/mo)")
-            for pub_id, pub_org, sessions in missing_rows[:10]:
-                lines.append(f"• *{pub_org}* — {sessions:,} sessions/mo")
+            for d in missing_data[:10]:
+                lines.append(f"• *{d['organization']}* — {d['sessions_30d']:,} sessions/mo")
             lines.append(
-                f"\n:zap: {len(missing_rows)} publishers with meaningful traffic not running {advertiser_name}."
+                f"\n:zap: {len(missing_data)} publishers with meaningful traffic not running {advertiser_name}."
             )
         else:
             lines.append(":white_check_mark: Running in all major publishers — no significant gaps found.")
@@ -2293,52 +2168,23 @@ def get_publisher_competitive_landscape(
             return {"error": "Provide either publisher_name or publisher_id."}
 
         if publisher_id:
-            pub_rows = ch.query(f"""
-                SELECT id, organization, sdk_id
-                FROM default.from_airbyte_users
-                WHERE id = {int(publisher_id)}
-                  AND deletedAt IS NULL
-                  AND sdk_id IS NOT NULL
-                  AND sdk_id != ''
-                LIMIT 1
-            """).result_rows
-            if not pub_rows:
+            pub_result = _q.publisher_lookup_by_id(ch, int(publisher_id))
+            if not pub_result:
                 return {"error": f"No publisher found with ID {publisher_id}."}
+            pub_rows = [(pub_result["id"], pub_result["organization"], pub_result["sdk_id"])]
         else:
-            pub_rows = ch.query(
-                """
-                SELECT id, organization, sdk_id
-                FROM default.from_airbyte_users
-                WHERE (lower(organization) LIKE lower(concat('%', {name:String}, '%'))
-                    OR lower(username) LIKE lower(concat('%', {name:String}, '%')))
-                  AND deletedAt IS NULL
-                  AND sdk_id IS NOT NULL
-                  AND sdk_id != ''
-                ORDER BY createdAt ASC
-                LIMIT 10
-                """,
-                parameters={"name": publisher_name},
-            ).result_rows
+            raw = _q.publisher_lookup_by_name(ch, publisher_name)
+            if not raw:
+                return {"error": f"No publisher found matching '{publisher_name}'. Try a shorter name e.g. 'AT&T' or 'TXB'."}
+            pub_rows = [(r["id"], r["organization"], r["sdk_id"]) for r in raw]
 
         if not pub_rows:
             return {"error": f"No publisher found matching '{publisher_name}'. Try a shorter name e.g. 'AT&T' or 'TXB'."}
 
         # Pick the best row in a single pass — no extra ClickHouse roundtrips.
         # Priority: non-test/demo row whose id has the most recent impressions.
-        # We rank candidates by a single aggregate query instead of probing one-by-one.
         candidate_ids = [str(row[0]) for row in pub_rows]
-        id_list = ", ".join(f"'{i}'" for i in candidate_ids)
-        volume_rows = ch.query(f"""
-            SELECT pid, count() AS impressions
-            FROM default.adpx_impressions_details
-            PREWHERE pid IN ({id_list})
-            WHERE created_at >= today() - 7
-            GROUP BY pid
-            ORDER BY impressions DESC
-            LIMIT 10
-        """).result_rows
-        # Build a rank map: pid → impression count (0 if absent)
-        vol_map = {str(r[0]): int(r[1]) for r in volume_rows}
+        vol_map = _q.publisher_impression_volume(ch, candidate_ids, days=7)
 
         # Score each candidate: deprioritize test/demo, then rank by volume
         def _candidate_score(row) -> tuple:
@@ -2353,39 +2199,13 @@ def get_publisher_competitive_landscape(
         # pid in impressions table = numeric user id as string
         pub_pid = str(pub_id_int)
 
-        # Step 2 + Step 3 run in parallel — both depend only on pub_pid/pub_id_int
-        # Step 2: weekly impression volume on this publisher (last 4 weeks avg)
-        # Step 3: provisioned offers — what's assigned to this publisher account.
-        # from_airbyte_publisher_campaigns is the source of truth for "what's set up."
-        # Impressions tell us which of those are actively serving right now.
-        _vol_sql = f"""
-                SELECT
-                    toStartOfWeek(i.created_at) AS week,
-                    count() AS impressions
-                FROM default.adpx_impressions_details i
-                PREWHERE i.pid = '{pub_pid}'
-                WHERE i.created_at >= today() - 28
-                GROUP BY week
-                ORDER BY week DESC
-            """
-        _prov_sql = f"""
-                SELECT
-                    pc.campaign_id,
-                    c.adv_name,
-                    pc.payout
-                FROM default.from_airbyte_publisher_campaigns pc
-                JOIN default.from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id)
-                WHERE pc.user_id = {pub_id_int}
-                  AND pc.deleted_at IS NULL
-                  AND pc.is_active = true
-                  AND c.deleted_at IS NULL
-                ORDER BY pc.created_at DESC
-                LIMIT 50
-            """
-        vol_rows, prov_rows = [r.result_rows for r in _run_parallel([
-            lambda: ch.query(_vol_sql),
-            lambda: ch.query(_prov_sql),
-        ])]
+        # Step 2 + Step 3: weekly impression volume + provisioned campaigns (sequential)
+        # SQL lives in queries.py — parameterized, no f-strings
+        vol_data = _q.publisher_weekly_impressions(ch, pub_pid, days=28)
+        prov_data = _q.publisher_provisioned_campaigns(ch, pub_id_int)
+
+        vol_rows = [(d["week"], d["impressions"]) for d in vol_data]
+        prov_rows = [(d["campaign_id"], d["adv_name"], d["payout"]) for d in prov_data]
 
         weekly_impressions = int(sum(r[1] for r in vol_rows) / max(len(vol_rows), 1)) if vol_rows else 0
 
@@ -2393,51 +2213,13 @@ def get_publisher_competitive_landscape(
         serving_map: dict = {}  # campaign_id → impression count
         rpm_map: dict = {}      # campaign_id → RPM (only for serving campaigns)
 
-        if prov_rows:
-            prov_ids = [str(r[0]) for r in prov_rows]
-            id_list = ", ".join(f"'{cid}'" for cid in prov_ids)
-
-            serving_rows = ch.query(f"""
-                SELECT campaign_id, count() AS impressions
-                FROM default.adpx_impressions_details
-                PREWHERE pid = '{pub_pid}'
-                WHERE created_at >= today() - 14
-                  AND campaign_id IN ({id_list})
-                GROUP BY campaign_id
-            """).result_rows
-            serving_map = {str(r[0]): int(r[1]) for r in serving_rows}
+        if prov_data:
+            prov_ids = [d["campaign_id"] for d in prov_data]
+            serving_map = _q.publisher_serving_campaign_impressions(ch, pub_pid, prov_ids, days=14)
 
             if serving_map:
-                sids = list(serving_map.keys())
-                sids_str = ", ".join(f"'{cid}'" for cid in sids)
-                rpm_rows = ch.query(f"""
-                    SELECT
-                        imp.campaign_id,
-                        round(coalesce(cv.total_revenue, 0) / nullIf(imp.impressions, 0) * 1000, 2) AS rpm
-                    FROM (
-                        SELECT campaign_id, count() AS impressions
-                        FROM default.adpx_impressions_details
-                        PREWHERE pid = '{pub_pid}'
-                        WHERE created_at >= today() - 14
-                          AND campaign_id IN ({sids_str})
-                        GROUP BY campaign_id
-                    ) imp
-                    LEFT JOIN (
-                        SELECT cv.campaign_id,
-                               sum(toFloat64OrNull(cv.revenue)) AS total_revenue
-                        FROM default.adpx_conversionsdetails cv
-                        WHERE cv.session_id IN (
-                            SELECT session_id
-                            FROM default.adpx_impressions_details
-                            PREWHERE pid = '{pub_pid}'
-                            WHERE created_at >= today() - 14
-                              AND campaign_id IN ({sids_str})
-                        )
-                          AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - 28)
-                        GROUP BY cv.campaign_id
-                    ) cv ON toInt64(imp.campaign_id) = toInt64(cv.campaign_id)
-                """).result_rows
-                rpm_map = {str(r[0]): float(r[1] or 0) for r in rpm_rows}
+                serving_ids = list(serving_map.keys())
+                rpm_map = _q.publisher_campaign_rpms(ch, pub_pid, serving_ids, days=14)
 
         # Build unified list — serving first (by RPM), then provisioned-only (by payout desc).
         competitors = []
@@ -2930,42 +2712,24 @@ def get_publisher_health(
         pid = publisher_id
         pub_name = None
         if pid is None and publisher_name:
-            rows = ch.query(
-                "SELECT id, organization FROM from_airbyte_users WHERE organization ILIKE {name: String} LIMIT 10",
-                parameters={"name": f"%{publisher_name}%"},
-            ).result_rows
-            if not rows:
+            pub_results = _q.publisher_lookup_by_name(ch, publisher_name)
+            if not pub_results:
                 return {"error": f"No publisher found matching '{publisher_name}'"}
             # Disambiguate: pick the candidate with the most recent sessions.
             # Without this, accounts with the same name return in arbitrary order and
             # the wrong (inactive) account gets picked — e.g. TextNow 2527 vs 1952.
-            if len(rows) > 1:
-                candidate_ids = [str(int(r[0])) for r in rows]
-                id_csv = ", ".join(candidate_ids)
-                vol_rows = ch.query(
-                    f"""
-                    SELECT user_id, count() AS sessions
-                    FROM adpx_sdk_sessions
-                    PREWHERE user_id IN ({id_csv})
-                        AND toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-                    WHERE created_at >= today() - 7
-                    GROUP BY user_id
-                    ORDER BY sessions DESC
-                    LIMIT 1
-                    """
-                ).result_rows
-                best_id = int(vol_rows[0][0]) if vol_rows else int(rows[0][0])
-                best_row = next((r for r in rows if int(r[0]) == best_id), rows[0])
+            if len(pub_results) > 1:
+                candidate_pids = [str(r["id"]) for r in pub_results]
+                vol_map = _q.publisher_impression_volume(ch, candidate_pids, days=7)
+                best_pid_str = max(candidate_pids, key=lambda p: vol_map.get(p, 0))
+                best = next((r for r in pub_results if str(r["id"]) == best_pid_str), pub_results[0])
             else:
-                best_row = rows[0]
-            pid = int(best_row[0])
-            pub_name = best_row[1]
+                best = pub_results[0]
+            pid = int(best["id"])
+            pub_name = best["organization"]
         elif pid is not None:
-            rows = ch.query(
-                "SELECT id, organization FROM from_airbyte_users WHERE id = {pid: UInt64} LIMIT 1",
-                parameters={"pid": int(pid)},
-            ).result_rows
-            pub_name = rows[0][1] if rows else f"Partner {pid}"
+            pub_result = _q.publisher_lookup_by_id(ch, int(pid))
+            pub_name = pub_result["organization"] if pub_result else f"Partner {pid}"
 
         if pid is None:
             return {"error": "Must provide publisher_name or publisher_id"}
@@ -2977,137 +2741,40 @@ def get_publisher_health(
         partition = int(today.strftime("%Y%m")) - (1 if today.day <= days else 0)
         extended_partition = partition - 1  # extra month for downstream lag
 
-        # ── Queries 1–3 + placement names run in parallel (all depend only on pid/partition) ──
-        state_clause = "AND state ILIKE {geo_state: String}" if geo_state else ""
-        state_clause_inner = f"AND state ILIKE {{geo_state: String}}" if geo_state else ""
-
-        q1 = f"""
-        SELECT placement, os, count() AS sessions
-        FROM adpx_sdk_sessions
-        PREWHERE user_id = {{pid: UInt64}}
-            AND toYYYYMM(created_at) >= {{partition: UInt32}}
-        WHERE created_at >= today() - {{days: UInt32}}
-          {state_clause}
-        GROUP BY placement, os
-        ORDER BY sessions DESC
-        """
-        params1 = {"pid": int(pid), "partition": partition, "days": days}
-        if geo_state:
-            params1["geo_state"] = f"%{geo_state}%"
-
-        # ── Query 2: ad metrics by placement ─────────────────────────────────
-        # Scan impressions LEFT (filtered by pid+date), sessions RIGHT (hash table).
-        # Putting impressions on the right OOMs on large publishers (FillingRightJoinSide).
-        q2 = f"""
-        SELECT
-            s.placement,
-            count(DISTINCT i.id)                                    AS impressions,
-            count(DISTINCT cd.id)                                   AS conversions,
-            coalesce(sum(toFloat64OrNull(cd.revenue)), 0)           AS revenue,
-            coalesce(sum(toFloat64OrNull(cd.payout)), 0)            AS payout
-        FROM (
-            SELECT session_id, id, campaign_id
-            FROM adpx_impressions_details
-            PREWHERE pid = {{pid_str: String}}
-                AND toYYYYMM(created_at) >= {{partition: UInt32}}
-            WHERE created_at >= today() - {{days: UInt32}}
-        ) i
-        JOIN (
-            SELECT session_id, placement
-            FROM adpx_sdk_sessions
-            PREWHERE user_id = {{pid: UInt64}}
-                AND toYYYYMM(created_at) >= {{partition: UInt32}}
-            WHERE created_at >= today() - {{days: UInt32}}
-              {state_clause_inner}
-        ) s ON s.session_id = i.session_id
-        LEFT JOIN (
-            SELECT session_id, id, campaign_id, revenue, payout
-            FROM adpx_conversionsdetails
-            PREWHERE user_id = {{pid: UInt64}}
-                AND toYYYYMM(created_at) >= {{extended_partition: UInt32}}
-        ) cd ON cd.session_id = i.session_id AND cd.campaign_id = i.campaign_id
-        GROUP BY s.placement
-        """
-        params2 = {"pid": int(pid), "pid_str": str(pid), "partition": partition, "extended_partition": extended_partition, "days": days}
-        if geo_state:
-            params2["geo_state"] = f"%{geo_state}%"
-
-        # ── Query 3: click metrics by placement ───────────────────────────────
-        # Scan clicks LEFT (filtered by user_id+date), sessions RIGHT (hash table).
-        q3 = f"""
-        SELECT
-            s.placement,
-            count(tc.id)                            AS clicks,
-            countIf(tc.is_converted)               AS converted_clicks,
-            round(avg(tc.position), 1)             AS avg_position
-        FROM (
-            SELECT session_id, id, is_converted, position
-            FROM adpx_tracked_clicks
-            PREWHERE user_id = {{pid: UInt64}}
-                AND toYYYYMM(created_at) >= {{partition: UInt32}}
-            WHERE created_at >= today() - {{days: UInt32}}
-        ) tc
-        JOIN (
-            SELECT session_id, placement
-            FROM adpx_sdk_sessions
-            PREWHERE user_id = {{pid: UInt64}}
-                AND toYYYYMM(created_at) >= {{partition: UInt32}}
-            WHERE created_at >= today() - {{days: UInt32}}
-              {state_clause_inner}
-        ) s ON s.session_id = tc.session_id
-        GROUP BY s.placement
-        """
-        params3 = {"pid": int(pid), "partition": partition, "days": days}
-        if geo_state:
-            params3["geo_state"] = f"%{geo_state}%"
-
-        def _fetch_placement_names():
-            try:
-                rows = ch.query(
-                    "SELECT slug, display_name FROM from_airbyte_placements WHERE user_id = {pid: Int64}",
-                    parameters={"pid": int(pid)},
-                ).result_rows
-                return {slug: dn for slug, dn in rows if dn}
-            except Exception:
-                return {}  # non-fatal — use slugs as-is if table unavailable
-
-        # ── Fetch placement display names ─────────────────────────────────────
-        _p1, _p2, _p3 = params1, params2, params3
-        _q1, _q2, _q3 = q1, q2, q3
-        placement_names, q1_rows, q2_rows, q3_rows = _run_parallel([
-            _fetch_placement_names,
-            lambda: ch.query(_q1, parameters=_p1).result_rows,
-            lambda: ch.query(_q2, parameters=_p2).result_rows,
-            lambda: ch.query(_q3, parameters=_p3).result_rows,
-        ])
+        # ── Fetch all data via queries.py (sequential — CH client not thread-safe) ──
+        placement_names = _q.publisher_placement_names(ch, int(pid))
+        q1_data = _q.publisher_health_sessions(ch, int(pid), partition, days, geo_state)
+        q2_data = _q.publisher_health_ad_metrics(ch, int(pid), str(pid), partition, extended_partition, days, geo_state)
+        q3_data = _q.publisher_health_click_metrics(ch, int(pid), partition, days, geo_state)
 
         # ── Combine results ───────────────────────────────────────────────────
         # Build placement-keyed dicts
         sess_by_placement: dict = {}
         os_by_placement: dict = {}
-        for placement, os_val, sess in q1_rows:
-            p = placement or "unknown"
-            sess_by_placement[p] = sess_by_placement.get(p, 0) + sess
+        for row in q1_data:
+            p = row["placement"] or "unknown"
+            sess_by_placement[p] = sess_by_placement.get(p, 0) + row["sessions"]
             os_by_placement.setdefault(p, {})
-            os_by_placement[p][os_val or "unknown"] = os_by_placement[p].get(os_val or "unknown", 0) + sess
+            os_val = row["os"] or "unknown"
+            os_by_placement[p][os_val] = os_by_placement[p].get(os_val, 0) + row["sessions"]
 
         ad_metrics: dict = {}
-        for placement, impressions, conversions, revenue, payout in q2_rows:
-            p = placement or "unknown"
+        for row in q2_data:
+            p = row["placement"] or "unknown"
             ad_metrics[p] = {
-                "impressions": int(impressions),
-                "conversions": int(conversions),
-                "revenue": float(revenue),
-                "payout": float(payout),
+                "impressions": row["impressions"],
+                "conversions": row["conversions"],
+                "revenue":     row["revenue"],
+                "payout":      row["payout"],
             }
 
         click_metrics: dict = {}
-        for placement, clicks, converted_clicks, avg_position in q3_rows:
-            p = placement or "unknown"
+        for row in q3_data:
+            p = row["placement"] or "unknown"
             click_metrics[p] = {
-                "clicks": int(clicks),
-                "converted_clicks": int(converted_clicks),
-                "avg_position": float(avg_position) if avg_position else 0.0,
+                "clicks":           row["clicks"],
+                "converted_clicks": row["converted_clicks"],
+                "avg_position":     row["avg_position"],
             }
 
         # Aggregate OS split across all placements
@@ -3356,40 +3023,22 @@ def get_perkswall_engagement(
         pid = publisher_id
         pub_name = None
         if pid is None and publisher_name:
-            rows = ch.query(
-                "SELECT id, organization FROM from_airbyte_users WHERE organization ILIKE {name: String} LIMIT 10",
-                parameters={"name": f"%{publisher_name}%"},
-            ).result_rows
-            if not rows:
+            pub_results = _q.publisher_lookup_by_name(ch, publisher_name)
+            if not pub_results:
                 return {"error": f"No publisher found matching '{publisher_name}'"}
             # Disambiguate: pick the candidate with the most recent sessions.
-            if len(rows) > 1:
-                candidate_ids = [str(int(r[0])) for r in rows]
-                id_csv = ", ".join(candidate_ids)
-                vol_rows = ch.query(
-                    f"""
-                    SELECT user_id, count() AS sessions
-                    FROM adpx_sdk_sessions
-                    PREWHERE user_id IN ({id_csv})
-                        AND toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-                    WHERE created_at >= today() - 7
-                    GROUP BY user_id
-                    ORDER BY sessions DESC
-                    LIMIT 1
-                    """
-                ).result_rows
-                best_id = int(vol_rows[0][0]) if vol_rows else int(rows[0][0])
-                best_row = next((r for r in rows if int(r[0]) == best_id), rows[0])
+            if len(pub_results) > 1:
+                candidate_pids = [str(r["id"]) for r in pub_results]
+                vol_map = _q.publisher_impression_volume(ch, candidate_pids, days=7)
+                best_pid_str = max(candidate_pids, key=lambda p: vol_map.get(p, 0))
+                best = next((r for r in pub_results if str(r["id"]) == best_pid_str), pub_results[0])
             else:
-                best_row = rows[0]
-            pid = int(best_row[0])
-            pub_name = best_row[1]
+                best = pub_results[0]
+            pid = int(best["id"])
+            pub_name = best["organization"]
         elif pid is not None:
-            rows = ch.query(
-                "SELECT id, organization FROM from_airbyte_users WHERE id = {pid: UInt64} LIMIT 1",
-                parameters={"pid": int(pid)},
-            ).result_rows
-            pub_name = rows[0][1] if rows else f"Partner {pid}"
+            pub_result = _q.publisher_lookup_by_id(ch, int(pid))
+            pub_name = pub_result["organization"] if pub_result else f"Partner {pid}"
 
         if pid is None:
             return {"error": "Must provide publisher_name or publisher_id"}
@@ -3552,105 +3201,11 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
 
 def _query_ghost_campaigns(ch) -> list:
     """
-    Canonical ghost campaign query — single source of truth for both the agent
-    tool (get_ghost_campaigns) and the 8am Pulse signal (_run_pulse_signals).
-    Any threshold, filter, or window change belongs here. Never duplicate this SQL.
-
-    A campaign qualifies as a ghost if ALL of:
-    - status = 'Active', non-expired (not paused/ended)
-    - 5,000+ impressions in last 7 days (meaningful traffic volume)
-    - 2,000+ impressions in last 48h (actively burning inventory RIGHT NOW)
-    - 200+ clicks in 7 days (real engagement, not just display)
-    - Zero conversions in 7 days (broken tracking or non-converting offer)
-    - Campaign age > 7 days (excludes new launches still warming up)
-    - conversion_events configured (CPA/CPS only — excludes CPM/CPC by design)
-
-    Returns list of dicts. Raises on ClickHouse error (callers handle it).
+    Canonical ghost campaign detection — delegates to queries.ghost_campaigns().
+    SQL and thresholds live in queries.py. Any change belongs there.
+    This wrapper exists so scout_bot.py can continue to import from scout_agent.
     """
-    sql = """
-WITH imp_agg AS (
-    -- 7-day window: used for diagnosis (how long broken, total waste)
-    SELECT campaign_id, count() AS impressions_7d, min(created_at)::Date AS first_impression_date
-    FROM adpx_impressions_details
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-    WHERE created_at >= today() - 7
-    GROUP BY campaign_id
-    HAVING impressions_7d > 5000
-),
-recent_imp AS (
-    -- 2-day window: ground truth for "actively serving right now"
-    -- A true ghost must be burning inventory TODAY, not just last week
-    SELECT campaign_id, count() AS impressions_2d
-    FROM adpx_impressions_details
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 2)
-    WHERE created_at >= today() - 2
-    GROUP BY campaign_id
-    HAVING impressions_2d >= 2000
-),
-click_agg AS (
-    SELECT campaign_id, count() AS clicks_7d
-    FROM adpx_tracked_clicks
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-    WHERE created_at >= today() - 7
-    GROUP BY campaign_id
-    HAVING clicks_7d > 100
-),
-rev_agg AS (
-    SELECT campaign_id,
-           coalesce(sum(toFloat64OrNull(revenue)), 0) AS revenue_7d,
-           count()                                    AS conversion_count_7d
-    FROM adpx_conversionsdetails
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-    WHERE created_at >= today() - 7
-    GROUP BY campaign_id
-)
-SELECT
-    c.id                                          AS campaign_id,
-    c.adv_name,
-    c.title                                       AS campaign_title,
-    ia.impressions_7d,
-    ri.impressions_2d,
-    ca.clicks_7d,
-    coalesce(ra.revenue_7d, 0)                    AS revenue_7d,
-    toString(ia.first_impression_date)            AS first_impression_date,
-    groupArray(toInt64(pc.user_id))               AS publisher_ids,
-    groupArray(u.organization)                    AS publisher_names
-FROM imp_agg ia
-JOIN recent_imp ri ON toString(ri.campaign_id) = toString(ia.campaign_id)
-JOIN click_agg ca ON toString(ca.campaign_id) = toString(ia.campaign_id)
-JOIN from_airbyte_campaigns c ON toInt64(ia.campaign_id) = c.id
-    AND JSONLength(c.conversion_events) > 0
-    AND (c.is_test = false OR c.is_test IS NULL)
-    AND c.status = 'Active'
-    AND (c.end_date IS NULL OR c.end_date >= today())
-LEFT JOIN rev_agg ra ON toString(ra.campaign_id) = toString(ia.campaign_id)
-LEFT JOIN from_airbyte_publisher_campaigns pc
-    ON toString(pc.campaign_id) = toString(ia.campaign_id) AND pc.is_active = 1
-LEFT JOIN from_airbyte_users u ON pc.user_id = u.id
-WHERE coalesce(ra.conversion_count_7d, 0) = 0
-  AND ia.first_impression_date <= today() - 7
-  AND c.deleted_at IS NULL
-GROUP BY c.id, c.adv_name, c.title, ia.impressions_7d, ri.impressions_2d, ca.clicks_7d, revenue_7d, ia.first_impression_date
-HAVING impressions_7d > 5000 AND clicks_7d > 200
-ORDER BY impressions_7d DESC
-LIMIT 25
-"""
-    rows = ch.query(sql).result_rows
-    return [
-        {
-            "campaign_id":           r[0],
-            "adv_name":              r[1],
-            "campaign_title":        r[2],
-            "impressions_7d":        int(r[3]),
-            "impressions_2d":        int(r[4]),
-            "clicks_7d":             int(r[5]),
-            "revenue_7d":            round(float(r[6]), 2),
-            "first_impression_date": str(r[7])[:10] if r[7] else "unknown",
-            "publisher_ids":         list(r[8]),
-            "publisher_names":       list(r[9]),
-        }
-        for r in rows
-    ]
+    return _q.ghost_campaigns(ch)
 
 
 def get_ghost_campaigns() -> str:
@@ -3737,67 +3292,26 @@ def get_low_fill_publishers() -> str:
     Low fill on a checkout/receipt page = burned traffic with no monetization attempt.
     """
     ch = _get_ch_client()
-    placements_sql = ", ".join(_POST_TX_PLACEMENTS)
-    sql = f"""
-WITH sessions_agg AS (
-    SELECT
-        toInt64(user_id) AS publisher_id,
-        placement,
-        count() AS sessions_30d
-    FROM adpx_sdk_sessions
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-    WHERE created_at >= today() - 30
-      AND placement IN ({placements_sql})
-    GROUP BY user_id, placement
-    HAVING sessions_30d > 10000
-),
-imps_agg AS (
-    SELECT
-        toInt64(pid) AS publisher_id,
-        count(DISTINCT session_id) AS sessions_with_imps
-    FROM adpx_impressions_details
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-    WHERE created_at >= today() - 30
-    GROUP BY pid
-),
-rev_agg AS (
-    SELECT
-        toInt64(user_id) AS publisher_id,
-        coalesce(sum(toFloat64OrNull(revenue)), 0) AS revenue_30d,
-        count(DISTINCT session_id) AS converting_sessions
-    FROM adpx_conversionsdetails
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-    WHERE created_at >= today() - 30
-    GROUP BY user_id
-)
-SELECT
-    s.publisher_id,
-    u.organization AS publisher_name,
-    s.placement,
-    s.sessions_30d,
-    coalesce(i.sessions_with_imps, 0) AS sessions_with_imps,
-    round(100.0 * coalesce(i.sessions_with_imps, 0) / s.sessions_30d, 2) AS fill_rate_pct,
-    s.sessions_30d - coalesce(i.sessions_with_imps, 0)                    AS missed_sessions,
-    coalesce(r.revenue_30d, 0)                                             AS revenue_30d
-FROM sessions_agg s
-LEFT JOIN imps_agg i ON i.publisher_id = s.publisher_id
-LEFT JOIN rev_agg r  ON r.publisher_id = s.publisher_id
-LEFT JOIN from_airbyte_users u ON s.publisher_id = u.id
-WHERE coalesce(i.sessions_with_imps, 0) * 100.0 / s.sessions_30d < 15
-ORDER BY missed_sessions DESC
-LIMIT 15
-"""
     try:
-        rows = ch.query(sql).result_rows
+        # SQL and thresholds live in queries.low_fill_publishers() — any change belongs there.
+        # POST_TX_PLACEMENTS canonical list is also in queries.py.
+        data = _q.low_fill_publishers(ch, list(_q.POST_TX_PLACEMENTS))
     except Exception as e:
         return f"Fill rate query failed: {e}"
 
-    if not rows:
+    if not data:
         return (
             "*Publisher Fill Rate Report*\n\n"
             ":white_check_mark: All post-transaction publishers are filling at ≥15% — "
             "no low-fill anomalies detected."
         )
+
+    # Unpack into tuples for the formatting code below (preserves existing formatting logic)
+    rows = [
+        (d["publisher_id"], d["publisher_name"], d["placement"], d["sessions_30d"],
+         d["sessions_with_imps"], d["fill_rate_pct"], d["missed_sessions"], d["revenue_30d"])
+        for d in data
+    ]
 
     total_missed = sum(int(r[6]) for r in rows)
     # Rough RPM from revenue / sessions_with_imps across all low-fill pubs
@@ -3851,98 +3365,34 @@ def get_top_revenue_opportunities() -> str:
     in high-volume publishers (>100K sessions/30d). Ranked by estimated monthly revenue.
     """
     ch = _get_ch_client()
-    sql = """
-WITH adv_perf AS (
-    SELECT
-        c.adv_name,
-        count(DISTINCT cv.user_id)                               AS publisher_count,
-        round(sum(toFloat64OrNull(cv.revenue)), 2)               AS rev_30d,
-        round(sum(toFloat64OrNull(cv.revenue))
-              / nullIf(count(DISTINCT cv.user_id), 0), 2)        AS avg_rev_per_pub
-    FROM adpx_conversionsdetails cv
-    JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
-    WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
-      AND cv.created_at >= today() - 30
-    GROUP BY c.adv_name
-    HAVING publisher_count >= 2 AND rev_30d >= 10000
-),
-pub_volume AS (
-    SELECT
-        toInt64(user_id) AS publisher_id,
-        u.organization   AS publisher_name,
-        count()          AS sessions_30d
-    FROM adpx_sdk_sessions s
-    JOIN from_airbyte_users u ON toInt64(s.user_id) = u.id
-    WHERE toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
-      AND s.created_at >= today() - 30
-    GROUP BY publisher_id, publisher_name
-    HAVING sessions_30d > 100000
-),
-active_pairs AS (
-    SELECT DISTINCT
-        toInt64(pc.user_id) AS publisher_id,
-        lower(c.adv_name)   AS adv_name_lower
-    FROM from_airbyte_publisher_campaigns pc
-    JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
-    WHERE pc.is_active = 1 AND pc.deleted_at IS NULL
-),
-candidates AS (
-    SELECT
-        pv.publisher_name,
-        pv.publisher_id,
-        adv.adv_name,
-        lower(adv.adv_name) AS adv_name_lower,
-        adv.rev_30d         AS adv_total_rev_30d,
-        adv.avg_rev_per_pub AS est_monthly_rev,
-        adv.publisher_count AS adv_pub_count,
-        pv.sessions_30d
-    FROM pub_volume pv
-    CROSS JOIN adv_perf adv
-)
--- Fuzzy-match exclusion via direct LEFT JOIN anti-join.
--- Catches "Disney+" provisioned in PMC suppressing "Disney+ and Hulu" recommendation.
--- Uses position() substring check so adv_name variants don't escape the filter.
-SELECT
-    c.publisher_name,
-    c.publisher_id,
-    c.adv_name,
-    c.adv_total_rev_30d,
-    c.est_monthly_rev,
-    c.adv_pub_count,
-    c.sessions_30d
-FROM candidates c
-LEFT JOIN active_pairs ap
-    ON ap.publisher_id = c.publisher_id
-    AND (
-        ap.adv_name_lower = c.adv_name_lower
-        OR position(c.adv_name_lower, ap.adv_name_lower) > 0
-        OR position(ap.adv_name_lower, c.adv_name_lower) > 0
-    )
-WHERE ap.publisher_id IS NULL
-ORDER BY c.est_monthly_rev DESC, c.sessions_30d DESC
-LIMIT 20
-"""
     try:
-        rows = ch.query(sql).result_rows
+        data = _q.revenue_opportunities(ch)
     except Exception as e:
         return f"Revenue opportunities query failed: {e}"
 
-    if not rows:
+    if not data:
         return (
             "*Revenue Opportunity Report*\n\n"
             ":white_check_mark: No obvious cross-publisher gaps detected — "
             "all high-performing advertisers appear active in major publishers."
         )
 
-    total_est = sum(float(r[4]) for r in rows)
+    total_est = sum(row["est_monthly_rev"] for row in data)
     lines = [
-        f"*Revenue Opportunity Report — Cross-Publisher Gaps* ({len(rows)} opportunities)\n",
+        f"*Revenue Opportunity Report — Cross-Publisher Gaps* ({len(data)} opportunities)\n",
         f"Total estimated monthly revenue at risk: *${total_est / 1000:.0f}K/mo*\n",
         "_Advertisers already earning on 2+ publishers — the revenue pattern is proven, "
         "the distribution gap is the opportunity._\n",
     ]
 
-    for pub_name, pub_id, adv_name, adv_rev, est_rev, pub_count, sessions in rows:
+    for row in data:
+        pub_name  = row["publisher_name"]
+        pub_id    = row["publisher_id"]
+        adv_name  = row["adv_name"]
+        adv_rev   = row["adv_total_rev_30d"]
+        est_rev   = row["est_monthly_rev"]
+        pub_count = row["adv_pub_count"]
+        sessions  = row["sessions_30d"]
         sessions_str = f"{int(sessions) / 1_000_000:.1f}M" if sessions >= 1_000_000 else f"{int(sessions) / 1000:.0f}K"
         adv_rev_str  = f"${float(adv_rev) / 1000:.0f}K" if float(adv_rev) >= 1000 else f"${float(adv_rev):.0f}"
         est_rev_str  = f"${float(est_rev) / 1000:.0f}K" if float(est_rev) >= 1000 else f"${float(est_rev):.0f}"
@@ -4243,51 +3693,19 @@ def get_offers_for_publisher(publisher_name: str) -> str:
     ch = _get_ch_client()
 
     # Resolve publisher
-    pub_rows = ch.query(
-        "SELECT id, organization FROM from_airbyte_users "
-        "WHERE organization ILIKE %(pub)s LIMIT 5",
-        parameters={"pub": f"%{publisher_name}%"}
-    ).result_rows
-    if not pub_rows:
+    pub_results = _q.publisher_lookup_by_name(ch, publisher_name)
+    if not pub_results:
         return f"Publisher '{publisher_name}' not found in MomentScience."
-    pub_id, pub_org = pub_rows[0]
+    pub_id  = pub_results[0]["id"]
+    pub_org = pub_results[0]["organization"]
 
     # Pull top-converting categories for this publisher from ClickHouse.
     # Used downstream to re-rank offers by audience fit, not just RPM.
-    top_categories: list[str] = []
-    try:
-        cat_rows = ch.query(
-            """
-            SELECT
-                c.category,
-                count()          AS conversions,
-                sum(toFloat64OrNull(cv.revenue)) AS revenue
-            FROM default.adpx_conversionsdetails cv
-            JOIN default.mv_adpx_campaigns c ON cv.campaign_id = c.campaign_id
-            PREWHERE cv.user_id = %(uid)s
-              AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 6 MONTH)
-            WHERE cv.created_at >= today() - INTERVAL 6 MONTH
-              AND c.category != ''
-              AND c.category IS NOT NULL
-            GROUP BY c.category
-            ORDER BY revenue DESC NULLS LAST
-            LIMIT 5
-            """,
-            parameters={"uid": int(pub_id)}
-        ).result_rows
-        top_categories = [row[0] for row in cat_rows if row[0]]
-    except Exception:
-        pass  # Category signals are best-effort; fall back to RPM-only ranking
+    # Non-fatal — falls back to RPM-only ranking if query fails.
+    top_categories: list[str] = _q.publisher_top_categories(ch, pub_id)
 
-    # Existing advertiser set for this publisher (active campaigns only)
-    existing_rows = ch.query(
-        "SELECT DISTINCT c.adv_name "
-        "FROM from_airbyte_publisher_campaigns pc "
-        "JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id "
-        "WHERE toInt64(pc.user_id) = %(uid)s AND pc.is_active = 1 AND pc.deleted_at IS NULL",
-        parameters={"uid": int(pub_id)}
-    ).result_rows
-    existing_adv = {row[0].lower() for row in existing_rows}
+    # Existing advertiser set for this publisher (active campaigns only, lowercase)
+    existing_adv: set[str] = _q.publisher_existing_advertisers(ch, pub_id)
 
     # Filter to net-new advertisers (not already provisioned for this publisher)
     def _is_new(offer: dict) -> bool:
