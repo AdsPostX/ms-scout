@@ -102,6 +102,8 @@ When adding a new Scout capability, touch these files in this order:
 - **Import DAG**: `scout_handlers → scout_slack_ui, scout_notion, scout_state, scout_agent` — never imports from `scout_bot`
 - **Add `elif action_id == "..."` for each new button** in `_handle_block_action`; always thread-dispatch heavy operations
 - **`_update_brief_card_queued`** is defined here (NOT in scout_notion) — updates the Slack digest card after an offer is added to queue
+- **Routing rule**: Block Kit *builders* (functions that return `list[dict]` blocks) → `scout_slack_ui.py`. Functions that call `web.chat_postMessage` / `web.chat_update` → `scout_handlers.py`. If it builds blocks, it belongs in scout_slack_ui. If it sends them to Slack, it belongs here.
+- **Import prohibition**: `scout_slack_ui` and `scout_notion` must NOT import from `scout_handlers` — this would create a circular import. If you need shared state, pass it as a parameter.
 
 ### Cross-module button value contract
 `scout_slack_ui.py` builds button values; `scout_handlers.py` parses them.
