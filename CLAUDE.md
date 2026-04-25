@@ -94,7 +94,7 @@ When adding a new Scout capability, touch these files in this order:
 - **`_format_pulse_blocks()`**: imported from scout_slack_ui — rendering only, no SQL or business logic
 - **`pulse_state.json`** is written by the bot at runtime — don't put static facts here
 - **Client instances** (WebClient, ClickHouse) are created here in `main()` and passed as parameters to modules — never imported from scout_bot (circular import)
-- **`_BOT_USER_ID` and `_LAST_THREAD_PER_CHANNEL`** are injected into scout_handlers via `_set_bot_user_id()` and `_set_thread_state()` after auth — this is the circular-import workaround
+- **`_BOT_USER_ID`, `_LAST_THREAD_PER_CHANNEL`, and `_PULSE_RUNNER`** are injected into scout_handlers via `_set_bot_user_id()`, `_set_thread_state()`, and `_set_pulse_runner()` after auth — this is the circular-import workaround. Add new functions that scout_handlers needs from scout_bot here; never import scout_bot from scout_handlers.
 
 ### scout_handlers.py
 - **All `_handle_*` functions** live here: approve, reject, DM, block_action routing
@@ -104,6 +104,8 @@ When adding a new Scout capability, touch these files in this order:
 - **Routing rule**: Block Kit *builders* (functions that return `list[dict]` blocks) → `scout_slack_ui.py`. Functions that call `web.chat_postMessage` / `web.chat_update` → `scout_handlers.py`. If it builds blocks, it belongs in scout_slack_ui. If it sends them to Slack, it belongs here.
 - **Import prohibition**: `scout_slack_ui` and `scout_notion` must NOT import from `scout_handlers` — this would create a circular import. If you need shared state, pass it as a parameter.
 - **No bare variable references from `scout_bot`**: `scout_handlers.py` cannot reference `BOT_TOKEN`, `APP_TOKEN`, or any other module-level constant from `scout_bot.py`. Use `os.getenv("SLACK_BOT_TOKEN")` etc. directly. Bare references crash silently at runtime — the smoke test won't catch it because it bypasses `handle_event`.
+- **All stdlib imports required**: `os`, `re`, and any other stdlib module used inside `handle_event` or any handler function MUST be imported at the top of the file. The smoke test does not exercise handlers — missing imports crash silently at the first @mention.
+- **Functions from `scout_bot` needed in handlers**: use the `_set_*` injection pattern (see `_set_pulse_runner`). Never import from `scout_bot` directly — circular import.
 
 ### Cross-module button value contract
 `scout_slack_ui.py` builds button values; `scout_handlers.py` parses them.
