@@ -1922,7 +1922,7 @@ def _compute_health_status() -> dict:
     # 2. Required daemon threads alive
     live = {t.name for t in threading.enumerate()}
     required = {
-        "smoke-test", "scraper", "notion-watcher", "copy-coalescer",
+        "scraper", "notion-watcher", "copy-coalescer",
         "context-harvest", "stale-queue-checker", "perf-recap", "state-cleanup",
     }
     if _PULSE_ENABLED:
@@ -1989,9 +1989,9 @@ def _thread_watchdog(web: WebClient) -> None:
     """Check all named daemon threads are alive every 60s. Alert #scout-qa if any die."""
     import time as _time
 
-    # Core threads that must always run
+    # Core threads that must always run (smoke-test excluded — it's one-shot, not a daemon)
     REQUIRED = {
-        "smoke-test", "scraper", "notion-watcher", "copy-coalescer",
+        "scraper", "notion-watcher", "copy-coalescer",
         "context-harvest", "stale-queue-checker", "perf-recap", "state-cleanup",
     }
 
