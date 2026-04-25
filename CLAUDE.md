@@ -17,7 +17,7 @@ missed a 48h recency filter that was added to the agent tool, causing false alar
 | Signal | Shared function | Consumers | Notes |
 |---|---|---|---|
 | Ghost campaigns | `_query_ghost_campaigns(ch)` in `scout_agent.py` | `get_ghost_campaigns()` + Pulse `_run_pulse_signals()` | Pulse groups by adv_name; agent keeps per-campaign detail |
-| Revenue opportunities | **Not yet extracted** — see note below | `get_top_revenue_opportunities()` + `_build_opportunity_signal()` | Agent has fuzzy name-matching anti-join; Pulse does not. No confirmed user-visible bug yet. |
+| Revenue opportunities | `revenue_opportunities(ch)` in `queries.py` | `get_top_revenue_opportunities()` + Pulse `_pulse_signal_opportunities()` | Both callers use the same fuzzy anti-join SQL. Agent adds Python-level grouping; Pulse takes top 5. No drift. |
 | Fill rate | **Intentionally separate** | `get_low_fill_publishers()` (30d/10K threshold) + Pulse signal (7d/5K threshold) | Different thresholds on purpose: Pulse = early warning, Agent = stable analysis. Do not merge. |
 | Velocity shifts | Pulse-only | `_build_velocity_signal()` | No agent tool — no divergence risk |
 | Cap alerts | Pulse-only | `_build_cap_signal()` | No agent tool — no divergence risk |
@@ -34,13 +34,11 @@ missed a 48h recency filter that was added to the agent tool, causing false alar
 
 ---
 
-## Revenue Opportunities — Outstanding Work
+## Revenue Opportunities — Resolved Apr 2026
 
-`get_top_revenue_opportunities()` in `scout_agent.py` has fuzzy name-matching in its `active_pairs`
-anti-join (prevents recommending "Disney+ and Hulu" when a partner already runs "Disney+").
-`_build_opportunity_signal()` in `scout_bot.py` does not. No confirmed user-visible bug yet.
-
-When this causes a bad recommendation, extract `_query_revenue_opportunities(ch)` and wire both callers to it.
+Both callers now use `revenue_opportunities(ch)` in `queries.py`. The shared function uses a
+fuzzy position-match anti-join that suppresses name variants (e.g., "Disney+" is suppressed
+when a publisher already runs "Disney+ and Hulu"). No drift between Pulse and agent tool.
 
 ---
 
@@ -88,6 +86,7 @@ When adding a new Scout capability, touch these files in this order:
 - **TOOLS list**: every new tool needs 4 things — `name`, `description`, `input_schema`, and a TOOL_MAP entry + function. Missing any one silently breaks routing.
 - **SYSTEM_PROMPT**: add a numbered intent routing line for every new tool
 - **Shared functions**: prefix with `_query_` and accept `ch` (ClickHouse client) as first arg; return plain dicts, not formatted text
+- **DAG terminal**: `scout_agent.py` is the terminal node of the import DAG — no other module imports FROM it. `scout_handlers.py` calls its functions at runtime via `TOOL_MAP`, not via import. Any `import scout_agent` in another module creates a circular dependency.
 
 ### scout_bot.py
 - **Orchestrator only** — startup, daemon thread launch, SocketMode event routing, Pulse signal runner

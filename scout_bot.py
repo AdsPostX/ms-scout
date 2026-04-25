@@ -808,78 +808,30 @@ def _pulse_signal_fill_rate(ch) -> list:
 
 
 def _pulse_signal_opportunities(ch) -> list:
-    results = []
+    """
+    Revenue gap opportunities for the Pulse signal.
+
+    Uses queries.revenue_opportunities() — the same SQL + fuzzy name-match anti-join
+    as the agent tool (get_top_revenue_opportunities). Pulse takes the top 5 rows;
+    the agent shows the full 20-item detail view with additional Python-level grouping.
+
+    This ensures the Pulse and agent never recommend different things for the same
+    publisher × advertiser pair (fuzzy suppression: "Disney+" ⊂ "Disney+ and Hulu").
+    """
     try:
-        opp_rows = ch.query(
-            """
-            WITH adv_perf AS (
-                SELECT
-                    c.adv_name,
-                    count(DISTINCT cv.user_id)                   AS publisher_count,
-                    round(sum(toFloat64OrNull(cv.revenue)), 2)   AS rev_30d,
-                    round(sum(toFloat64OrNull(cv.revenue))
-                          / nullIf(count(DISTINCT cv.user_id), 0), 2) AS avg_rev_per_pub
-                FROM adpx_conversionsdetails cv
-                JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
-                WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
-                  AND cv.created_at >= today() - 30
-                GROUP BY c.adv_name
-                HAVING publisher_count >= 2 AND rev_30d >= 10000
-            ),
-            pub_volume AS (
-                SELECT
-                    toInt64(user_id) AS publisher_id,
-                    u.organization   AS publisher_name,
-                    count()          AS sessions_30d
-                FROM adpx_sdk_sessions s
-                JOIN from_airbyte_users u ON toInt64(s.user_id) = u.id
-                WHERE toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
-                  AND s.created_at >= today() - 30
-                GROUP BY publisher_id, publisher_name
-                HAVING sessions_30d > 100000
-            ),
-            active_pairs AS (
-                SELECT DISTINCT
-                    toInt64(pc.user_id) AS publisher_id,
-                    c.adv_name
-                FROM from_airbyte_publisher_campaigns pc
-                JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
-                WHERE pc.is_active = 1 AND pc.deleted_at IS NULL
-            ),
-            candidates AS (
-                SELECT
-                    pv.publisher_name,
-                    pv.publisher_id,
-                    ap.adv_name,
-                    ap.avg_rev_per_pub AS est_monthly_rev,
-                    pv.sessions_30d
-                FROM pub_volume pv
-                CROSS JOIN adv_perf ap
-            )
-            SELECT
-                c.publisher_name,
-                c.adv_name,
-                c.est_monthly_rev,
-                c.sessions_30d
-            FROM candidates c
-            LEFT JOIN active_pairs ap
-                ON ap.publisher_id = c.publisher_id
-               AND ap.adv_name = c.adv_name
-            WHERE ap.publisher_id IS NULL
-            ORDER BY c.est_monthly_rev DESC, c.sessions_30d DESC
-            LIMIT 5
-            """
-        ).result_rows
-        for pub_name, adv_name, est_rev, sessions in opp_rows:
-            results.append({
-                "publisher_name": pub_name or "Unknown Publisher",
-                "adv_name":       adv_name,
-                "est_monthly_rev": round(float(est_rev), 0),
-                "sessions_30d":   int(sessions),
-            })
+        rows = _q.revenue_opportunities(ch)
     except Exception as e:
         log.warning(f"Pulse opportunities signal failed: {e}")
-    return results
+        return []
+    return [
+        {
+            "publisher_name":  r["publisher_name"] or "Unknown Publisher",
+            "adv_name":        r["adv_name"],
+            "est_monthly_rev": r["est_monthly_rev"],
+            "sessions_30d":    r["sessions_30d"],
+        }
+        for r in rows[:5]
+    ]
 
 
 # ── Pulse signal orchestrator ─────────────────────────────────────────────────
