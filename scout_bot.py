@@ -90,7 +90,7 @@ def _load_briefs() -> dict:
         if _STATE_FILE.exists():
             return json.loads(_STATE_FILE.read_text())
     except Exception:
-        pass
+        log.debug("suppressed: _load_briefs JSON parse failed", exc_info=True)
     return {}
 
 
@@ -132,7 +132,7 @@ def _load_thread_contexts() -> dict:
         if _THREAD_CTX_FILE.exists():
             return json.loads(_THREAD_CTX_FILE.read_text())
     except Exception:
-        pass
+        log.debug("suppressed: _load_thread_contexts JSON parse failed", exc_info=True)
     return {}
 
 
@@ -388,7 +388,7 @@ def _rotating_status(
                     blocks=[*_gif, {"type": "section", "text": {"type": "mrkdwn", "text": update_text}}],
                 )
             except Exception:
-                pass
+                log.debug("suppressed: rotating status update failed", exc_info=True)
             idx[0] += 1
 
     threading.Thread(target=_run, daemon=True).start()
@@ -515,7 +515,7 @@ def _run_preflight_qa(  # replaces _check_url_async (removed — this is a stric
             else:
                 checks.append(":new: No prior MS data — first run for this advertiser")
         except Exception:
-            pass
+            log.debug("suppressed: pre-flight benchmark lookup failed", exc_info=True)
 
         if not checks:
             return
@@ -527,7 +527,7 @@ def _run_preflight_qa(  # replaces _check_url_async (removed — this is a stric
                 unfurl_links=False,
             )
         except Exception:
-            pass
+            log.warning("Failed to post pre-flight check to Slack")
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -1822,7 +1822,7 @@ def _load_launched_offers() -> dict:
         if _LAUNCHED_OFFERS_FILE.exists():
             return json.loads(_LAUNCHED_OFFERS_FILE.read_text())
     except Exception:
-        pass
+        log.debug("suppressed: _load_launched_offers JSON parse failed", exc_info=True)
     return {}
 
 
@@ -1841,7 +1841,7 @@ def _load_pulse_state() -> dict:
         if _PULSE_STATE_FILE.exists():
             return json.loads(_PULSE_STATE_FILE.read_text())
     except Exception:
-        pass
+        log.debug("suppressed: _load_pulse_state JSON parse failed", exc_info=True)
     return {}
 
 
@@ -1863,7 +1863,7 @@ def _load_watchdog_state() -> dict:
         if _WATCHDOG_STATE_PATH.exists():
             return json.loads(_WATCHDOG_STATE_PATH.read_text())
     except Exception:
-        pass
+        log.debug("suppressed: _load_watchdog_state JSON parse failed", exc_info=True)
     return {}
 
 
@@ -1878,7 +1878,7 @@ def _load_learnings() -> dict:
         if _LEARNINGS_FILE.exists():
             return json.loads(_LEARNINGS_FILE.read_text())
     except Exception:
-        pass
+        log.debug("suppressed: _load_learnings JSON parse failed", exc_info=True)
     return {"corrections": [], "positive_signals": []}
 
 
@@ -2044,7 +2044,7 @@ def _pulse_signal_velocity(ch) -> list:
                 ).result_rows
                 org_map = {str(r[0]): r[1] for r in name_rows}
             except Exception:
-                pass
+                log.debug("suppressed: publisher name enrichment query failed", exc_info=True)
 
         for user_id, rev_30d, rev_7d in vel_rows:
             rev_7d_ann = (rev_7d / 7) * 30 if rev_7d else 0
@@ -2262,7 +2262,7 @@ def _pulse_signal_overnight(ch) -> list:
                 od = _json.loads(old_data_str) if old_data_str else {}
                 adv_name = od.get("adv_name") or od.get("name") or ""
             except Exception:
-                pass
+                log.debug("suppressed: overnight event old_data JSON parse failed", exc_info=True)
             results.append({
                 "type":      ev_type,
                 "adv_name":  adv_name,
@@ -3742,7 +3742,7 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
             or user_id
         )
     except Exception:
-        pass  # fallback to raw user_id — better than crashing approval flow
+        log.debug("suppressed: Slack users_info lookup failed, using raw user_id", exc_info=True)
 
     # 4. Generate AI copy synchronously — page will be complete at creation time.
     # Slack already sent the ack, so there is no 3-second constraint here.
@@ -3831,7 +3831,7 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
                             is_clicked = True
                             break
                     except (json.JSONDecodeError, TypeError):
-                        pass
+                        log.debug("suppressed: block element value JSON parse failed", exc_info=True)
                 if is_clicked:
                     updated_blocks.append(confirm_block)
                     replaced = True
@@ -4015,7 +4015,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
                         {"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
             )
         except Exception:
-            pass
+            log.debug("suppressed: GIF inject chat_update failed (scout-guided)", exc_info=True)
     threading.Thread(target=_inject_gif_sg, daemon=True).start()
     stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, gif_block=_gif_block_sg)
 
@@ -4256,7 +4256,7 @@ def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
                 text=":white_check_mark: Got it — noted as accurate.",
             )
         except Exception:
-            pass
+            log.warning("Failed to post feedback acknowledgement (good) to Slack")
 
     elif action_id == "scout_feedback_bad":
         learnings.setdefault("negative_signals", []).append({
@@ -4272,7 +4272,7 @@ def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
                 text=":pencil: Got it — marked as off. Use :pencil2: *Correct this* to add the right answer so Scout remembers.",
             )
         except Exception:
-            pass
+            log.warning("Failed to post feedback acknowledgement (bad) to Slack")
 
     elif action_id == "scout_feedback_correct":
         # Store a pending correction keyed by msg_ts — _handle_event will capture the follow-up reply
@@ -4293,7 +4293,7 @@ def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
                 text=f"<@{user_id}> What's the correct answer? Reply here and I'll remember it. :memo:",
             )
         except Exception:
-            pass
+            log.warning("Failed to post correction prompt to Slack")
 
     log.info(f"Feedback recorded: {action_id} query={query_hash} user={user_id}")
 
@@ -4365,7 +4365,7 @@ def _build_home_queue_section() -> list:
                 days = (now - approved_dt).days
                 days_str = f" · {days}d waiting"
             except Exception:
-                pass
+                log.debug("suppressed: approved_at datetime parse failed", exc_info=True)
         notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
         blocks.append({
             "type": "section",
@@ -4486,7 +4486,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
                             {"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
                 )
             except Exception:
-                pass
+                log.debug("suppressed: GIF inject chat_update failed (ad-hoc)", exc_info=True)
         threading.Thread(target=_inject_gif_ah, daemon=True).start()
         stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, gif_block=_gif_block_ah)
 
@@ -4572,7 +4572,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                             days = (now - approved_dt).days
                             days_str = f" · {days}d"
                         except Exception:
-                            pass
+                            log.debug("suppressed: approved_at datetime parse failed (queue status)", exc_info=True)
                     lines.append(f"{badge} *{adv}* — {payout} · {network}{days_str}{notion_link}")
                 text = "\n".join(lines)
             web.chat_postEphemeral(channel=channel, user=user_id, text=text)
@@ -4756,7 +4756,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
             web.chat_postEphemeral(channel=channel, user=user_id,
                                    text=f":warning: Scout command failed: {e}")
         except Exception:
-            pass
+            log.warning("Failed to post slash command error to Slack")
 
 
 def handle_event(client: SocketModeClient, req: SocketModeRequest):
@@ -5170,7 +5170,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         try:
             web.reactions_add(channel=channel, timestamp=msg_ts, name="thinking_face")
         except Exception:
-            pass  # reactions:write scope may not be set yet — degrade gracefully
+            log.debug("suppressed: reactions_add thinking_face failed (DM)", exc_info=True)
 
         try:
             _t0 = time.monotonic()
@@ -5190,7 +5190,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             try:
                 web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
             except Exception:
-                pass
+                log.debug("suppressed: reactions_remove thinking_face failed (DM error path)", exc_info=True)
             web.chat_postMessage(channel=channel, text=f":warning: Something went wrong — `{e}`")
             return
         finally:
@@ -5198,7 +5198,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             try:
                 web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
             except Exception:
-                pass
+                log.debug("suppressed: reactions_remove thinking_face failed (DM finally)", exc_info=True)
 
         # Track active thread for follow-up context retention
         with _LAST_THREAD_LOCK:
@@ -5277,7 +5277,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                         {"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
             )
         except Exception:
-            pass
+            log.debug("suppressed: GIF inject chat_update failed (handle_event)", exc_info=True)
     threading.Thread(target=_inject_gif_he, daemon=True).start()
     stop_rotating = _rotating_status(web, channel, _placeholder_ts, gif_block=_gif_block_he)
 
@@ -5897,7 +5897,7 @@ def _run_startup_smoke_test(web: WebClient) -> None:
                 text=f":red_circle: *Scout startup smoke test crashed* — `{e}`\nCheck Render logs.",
             )
         except Exception:
-            pass
+            log.warning("Failed to post smoke test crash notification to Slack")
 
 
 # ── Notion → Slack status watcher ────────────────────────────────────────────
@@ -5908,7 +5908,7 @@ def _load_notion_notified() -> dict:
         if _NOTION_NOTIFIED_FILE.exists():
             return json.loads(_NOTION_NOTIFIED_FILE.read_text())
     except Exception:
-        pass
+        log.debug("suppressed: _load_notion_notified JSON parse failed", exc_info=True)
     return {}
 
 
@@ -6044,15 +6044,15 @@ def main():
     # Catches bad model names, broken imports, ClickHouse down, etc. before anyone @mentions Scout.
     threading.Thread(target=_run_startup_smoke_test, args=(web_client,), daemon=True, name="smoke-test").start()
     # Background: daily stale queue alerts (daemon thread dies cleanly on exit)
-    threading.Thread(target=_check_stale_queue, args=(web_client,), daemon=True).start()
+    threading.Thread(target=_check_stale_queue, args=(web_client,), daemon=True, name="stale-queue-checker").start()
     # Background: 14-day performance recap — compares Scout estimates to actual ClickHouse RPM
-    threading.Thread(target=_performance_recap, args=(web_client,), daemon=True).start()
+    threading.Thread(target=_performance_recap, args=(web_client,), daemon=True, name="perf-recap").start()
     # Background: nightly cleanup of state files to prevent unbounded growth
-    threading.Thread(target=_cleanup_state, daemon=True).start()
+    threading.Thread(target=_cleanup_state, daemon=True, name="state-cleanup").start()
     # Background: daily proactive pulse — cap alerts, velocity shifts, overnight events
     # PULSE_ENABLED=false on local (LaunchAgent) to avoid double-posting when Render is also live
     if _PULSE_ENABLED:
-        threading.Thread(target=_proactive_pulse, args=(web_client,), daemon=True).start()
+        threading.Thread(target=_proactive_pulse, args=(web_client,), daemon=True, name="proactive-pulse").start()
     else:
         log.info("[pulse] disabled via PULSE_ENABLED=false — skipping pulse thread")
     # Background: daily launch health watchdog — catches broken campaigns within hours

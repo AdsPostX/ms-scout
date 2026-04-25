@@ -13,6 +13,9 @@ Tests covered:
   4. Offer inventory — offers_latest.json present and non-empty
   5. ask("status") — end-to-end LLM + tool call round-trip
   6. ask("ghost campaigns") — tool-calling path (ClickHouse query)
+  7. State files — JSON validity of pulse_state/digest_state/image_cache + data/ writable
+  8. Slack token — auth.test confirms bot identity
+  9. Notion queue DB ID — NOTION_QUEUE_DB_ID env var is set
 """
 
 import argparse
@@ -149,6 +152,60 @@ def test_ask_tool_call():
         return True, f"Tool call returned in {elapsed:.1f}s — {preview}"
     except Exception as e:
         return False, str(e)
+
+
+# ── Test 7: State files ───────────────────────────────────────────────────────
+
+@test("State files — JSON valid + data/ writable")
+def test_state_files():
+    import tempfile
+    issues = []
+    for fname in ("pulse_state.json", "digest_state.json", "image_cache.json"):
+        path = _DATA / fname
+        if path.exists():
+            try:
+                json.loads(path.read_text())
+            except Exception as e:
+                issues.append(f"{fname} invalid JSON: {e}")
+        # Missing files are fine — they're created on first write
+    # Confirm data/ is writable
+    try:
+        with tempfile.NamedTemporaryFile(dir=_DATA, delete=True):
+            pass
+    except Exception as e:
+        issues.append(f"data/ not writable: {e}")
+    if issues:
+        return False, "; ".join(issues)
+    return True, "All present state files parse cleanly; data/ is writable"
+
+
+# ── Test 8: Slack token ───────────────────────────────────────────────────────
+
+@test("Slack token — auth.test")
+def test_slack_token():
+    token = os.getenv("SLACK_BOT_TOKEN")
+    if not token:
+        return False, "SLACK_BOT_TOKEN not set"
+    try:
+        from slack_sdk.web import WebClient
+        resp = WebClient(token=token).auth_test()
+        bot_name = resp.get("user", "unknown")
+        team = resp.get("team", "unknown")
+        return True, f"Authenticated as @{bot_name} in {team}"
+    except Exception as e:
+        return False, str(e)
+
+
+# ── Test 9: Notion queue DB ID ────────────────────────────────────────────────
+
+@test("Notion queue DB ID — env var set")
+def test_notion_queue_db_id():
+    db_id = os.getenv("NOTION_QUEUE_DB_ID")
+    if not db_id:
+        return False, "NOTION_QUEUE_DB_ID not set — queue watcher will not work"
+    if len(db_id) < 30:
+        return False, f"NOTION_QUEUE_DB_ID looks malformed (len={len(db_id)})"
+    return True, f"Set (prefix: {db_id[:8]}…)"
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
