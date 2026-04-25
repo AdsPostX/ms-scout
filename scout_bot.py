@@ -1901,6 +1901,122 @@ def _run_startup_smoke_test(web: WebClient) -> None:
 
 
 
+# ── Health check HTTP server ────────────────────────────────────────────────────
+
+def _compute_health_status() -> dict:
+    """Return a health dict. ok=True means Scout is fully operational."""
+    import pathlib as _pl
+    checks: dict[str, dict] = {}
+
+    # 1. Offer inventory freshness
+    snap = _pl.Path(__file__).parent / "data" / "offers_latest.json"
+    if not snap.exists():
+        checks["offer_inventory"] = {"ok": False, "detail": "offers_latest.json missing"}
+    else:
+        age_hours = (time.time() - snap.stat().st_mtime) / 3600
+        if age_hours > 30:
+            checks["offer_inventory"] = {"ok": False, "detail": f"Stale — {age_hours:.0f}h old"}
+        else:
+            checks["offer_inventory"] = {"ok": True, "detail": f"{age_hours:.0f}h old"}
+
+    # 2. Required daemon threads alive
+    live = {t.name for t in threading.enumerate()}
+    required = {
+        "smoke-test", "scraper", "notion-watcher", "copy-coalescer",
+        "context-harvest", "stale-queue-checker", "perf-recap", "state-cleanup",
+    }
+    if _PULSE_ENABLED:
+        required.add("proactive-pulse")
+    dead = required - live
+    if dead:
+        checks["daemon_threads"] = {"ok": False, "detail": f"Dead threads: {', '.join(sorted(dead))}"}
+    else:
+        checks["daemon_threads"] = {"ok": True, "detail": f"{len(required)} threads alive"}
+
+    # 3. NOTION_QUEUE_DB_ID — required for correct Pipeline links in Slack messages
+    queue_db_id = os.getenv("NOTION_QUEUE_DB_ID", "")
+    if not queue_db_id:
+        checks["notion_queue_url"] = {"ok": False, "detail": "NOTION_QUEUE_DB_ID not set — Pipeline links point to generic Notion homepage"}
+    else:
+        checks["notion_queue_url"] = {"ok": True, "detail": f"Pipeline DB configured ({queue_db_id[:8]}...)"}
+
+    # 4. Environment
+    for env_var in ("ANTHROPIC_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"):
+        val = os.getenv(env_var, "")
+        checks[env_var] = {"ok": bool(val), "detail": "set" if val else "missing"}
+
+    all_ok = all(v["ok"] for v in checks.values())
+    return {"ok": all_ok, "checks": checks}
+
+
+def _start_health_server(port: int = 10000) -> None:
+    """Start a minimal HTTP health check server on the given port."""
+    import http.server
+    import json as _json
+
+    class _HealthHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/health":
+                status = _compute_health_status()
+                code = 200 if status["ok"] else 503
+                body = _json.dumps(status).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass  # silence access logs — Render health checks fire every 30s
+
+    def _serve():
+        try:
+            server = http.server.HTTPServer(("0.0.0.0", port), _HealthHandler)
+            log.info(f"[health] HTTP server listening on :{port}/health")
+            server.serve_forever()
+        except Exception as e:
+            log.error(f"[health] server error: {e}")
+
+    threading.Thread(target=_serve, daemon=True, name="health-server").start()
+
+
+# ── Thread watchdog ─────────────────────────────────────────────────────────────
+
+def _thread_watchdog(web: WebClient) -> None:
+    """Check all named daemon threads are alive every 60s. Alert #scout-qa if any die."""
+    import time as _time
+
+    # Core threads that must always run
+    REQUIRED = {
+        "smoke-test", "scraper", "notion-watcher", "copy-coalescer",
+        "context-harvest", "stale-queue-checker", "perf-recap", "state-cleanup",
+    }
+
+    _time.sleep(120)  # Give all threads time to start before first check
+    while True:
+        try:
+            live = {t.name for t in threading.enumerate()}
+            # Conditional: proactive-pulse only if PULSE_ENABLED
+            required = REQUIRED | ({"proactive-pulse"} if _PULSE_ENABLED else set())
+            dead = required - live
+            if dead:
+                names = ", ".join(sorted(dead))
+                log.error(f"[watchdog] daemon thread(s) died: {names}")
+                try:
+                    web.chat_postMessage(
+                        channel=_SCOUT_HQ_CHANNEL,
+                        text=f":warning: Scout daemon thread(s) died: *{names}*. Render may need a restart.",
+                    )
+                except Exception as slack_err:
+                    log.warning(f"[watchdog] Slack alert failed: {slack_err}")
+        except Exception as e:
+            log.warning(f"[watchdog] check error: {e}")
+        _time.sleep(60)
+
+
 def main():
     global _BOT_USER_ID
     _check_singleton()
@@ -1941,12 +2057,29 @@ def main():
     threading.Thread(target=_notion_watcher_loop, args=(web_client,), daemon=True, name="notion-watcher").start()
     # Background: AI copy coalescer — batches enrichment requests with 10s window + 24h cache
     threading.Thread(target=_copy_coalescer_loop, daemon=True, name="copy-coalescer").start()
+    # Background: thread watchdog — alerts #scout-qa if any named daemon thread dies
+    threading.Thread(target=_thread_watchdog, args=(web_client,), daemon=True, name="thread-watchdog").start()
+
+    # Health check HTTP server — Render pings /health every 30s to verify Scout is alive
+    _start_health_server(port=int(os.getenv("PORT", "10000")))
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
 
-    import signal
-    signal.pause()
+    import signal as _signal
+
+    def _handle_sigterm(signum, frame):
+        log.info("SIGTERM received — shutting down cleanly")
+        try:
+            socket_client.close()
+        except Exception:
+            pass
+        time.sleep(3)  # allow in-flight Slack acks to flush
+        import sys as _sys
+        _sys.exit(0)
+
+    _signal.signal(_signal.SIGTERM, _handle_sigterm)
+    _signal.pause()
 
 
 if __name__ == "__main__":
