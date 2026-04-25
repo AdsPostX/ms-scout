@@ -1339,7 +1339,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     # Acknowledge immediately — Slack requires <3s ack
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
 
-    web = WebClient(token=BOT_TOKEN, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
+    web = WebClient(token=os.getenv("SLACK_BOT_TOKEN", ""), retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
 
     # ── Button clicks ─────────────────────────────────────────────────────────
     if req.type == "interactive":
