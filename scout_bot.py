@@ -41,7 +41,7 @@ from scout_state import (
     _update_benchmark_from_actuals,
 )
 from scout_handlers import (
-    _set_bot_user_id, _set_thread_state,
+    _set_bot_user_id, _set_thread_state, _set_pulse_runner,
     handle_event,
 )
 
@@ -1981,6 +1981,7 @@ def main():
     # Inject shared state into scout_handlers (avoids circular import — handlers don't import scout_bot)
     _set_bot_user_id(_BOT_USER_ID)
     _set_thread_state(_LAST_THREAD_PER_CHANNEL, _LAST_THREAD_LOCK)
+    _set_pulse_runner(_run_pulse_once)
     socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
 

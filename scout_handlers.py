@@ -10,6 +10,8 @@ Import DAG: scout_handlers → scout_slack_ui, scout_notion, scout_state, scout_
 
 import json
 import logging
+import os
+import re
 import threading
 import time
 
@@ -34,6 +36,7 @@ from scout_state import (
     _load_launched_offers, _save_launched_offers,
     _load_learnings, _save_learnings,
     _log_usage,
+    _DATA_DIR,
 )
 
 log = logging.getLogger("scout_handlers")
@@ -42,6 +45,7 @@ log = logging.getLogger("scout_handlers")
 _BOT_USER_ID: str = ""
 _LAST_THREAD_PER_CHANNEL: dict = {}
 _LAST_THREAD_LOCK = None  # threading.Lock, set by scout_bot
+_PULSE_RUNNER = None       # _run_pulse_once from scout_bot; injected to avoid circular import
 
 def _set_bot_user_id(uid: str) -> None:
     global _BOT_USER_ID
@@ -51,6 +55,10 @@ def _set_thread_state(per_channel: dict, lock) -> None:
     global _LAST_THREAD_PER_CHANNEL, _LAST_THREAD_LOCK
     _LAST_THREAD_PER_CHANNEL = per_channel
     _LAST_THREAD_LOCK = lock
+
+def _set_pulse_runner(fn) -> None:
+    global _PULSE_RUNNER
+    _PULSE_RUNNER = fn
 
 def _run_preflight_qa(  # replaces _check_url_async (removed — this is a strict superset)
     web: WebClient,
@@ -1465,7 +1473,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                              text=":hourglass_flowing_sand: Running pulse signals now — will post to #scout-qa...")
         def _run_force_pulse():
             try:
-                _run_pulse_once(web, force=True)
+                if _PULSE_RUNNER is None:
+                    web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                         text=":x: Force pulse unavailable — pulse runner not initialized.")
+                    return
+                _PULSE_RUNNER(web, force=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
                                      text=":white_check_mark: Force pulse complete — check #scout-qa.")
             except Exception as e:
