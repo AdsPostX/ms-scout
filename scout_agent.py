@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 import anthropic
+from scout_types import FormattedOffer, Brief  # type: ignore[import]  # noqa: F401
 from dotenv import load_dotenv
 
 load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
@@ -1781,7 +1782,7 @@ def get_offer_stats() -> dict:
     }
 
 
-def _format_offers(offers: list, benchmarks: dict) -> list:
+def _format_offers(offers: list, benchmarks: dict) -> list[FormattedOffer]:
     """Return a compact, readable version of each offer for the LLM, including Scout Score context."""
     by_offer = benchmarks.get("by_offer_impact_id", {})
     by_cat = benchmarks.get("by_category", {})
@@ -4214,7 +4215,7 @@ def record_entity_note(entity_name: str, entity_type: str, note: str,
     return "\n".join(lines)
 
 
-def get_offers_for_publisher(publisher_name: str) -> str:
+def get_offers_for_publisher(publisher_name: str) -> dict:  # returns dict since PR #18; old str annotation was stale
     """
     Return top affiliate offers (Impact/FlexOffers/MaxBounty inventory) that are
     a good fit for this publisher but not yet provisioned in their campaign set.
