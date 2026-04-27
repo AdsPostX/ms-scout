@@ -852,6 +852,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
             msg += f"\n{tags}"
         web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
+    response_text = response_text[:3000]  # cap for Slack text= limit
     content_blocks_sg = _text_to_blocks(response_text)
     suggestion_blocks = _build_suggestion_buttons(sugg)
     web.chat_update(
@@ -1080,6 +1081,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
             else:
                 response_text     = response if isinstance(response, str) else str(response)
                 suggestion_blocks = []
+            response_text = response_text[:3000]  # cap for Slack text= limit
             content_blocks = _text_to_blocks(response_text)
             web.chat_update(
                 channel=dm_channel, ts=_placeholder_ts_ah,
@@ -1809,7 +1811,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 unfurl_links=False,
             )
         else:
-            response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))
+            response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))[:3000]
             content_blocks    = _text_to_blocks(response_text)
             suggestion_blocks = _build_suggestion_buttons(suggestions)
             # No elapsed-time footer in DMs — the reaction disappearing IS the signal
@@ -1944,7 +1946,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
-        response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))
+        response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))[:3000]
         content_blocks    = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
         web.chat_update(

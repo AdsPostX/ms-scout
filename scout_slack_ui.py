@@ -1127,49 +1127,6 @@ def _format_pulse_blocks(
                 "style": "primary",
             }],
         })
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0{ghost_inline}"}],
-        })
-        blocks.append({
-            "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Get Ghost Brief", "emoji": True},
-                "action_id": "pulse_ghost_brief",
-                "style": "primary",
-            }],
-        })
-
-    # ── Low fill rate (P0 — burned post-transaction traffic) ─────────────────
-    if fill_rate:
-        blocks.append({"type": "divider"})
-        total_missed = sum(f["missed_sessions"] for f in fill_rate)
-        missed_str   = f"{total_missed / 1_000_000:.1f}M" if total_missed >= 1_000_000 else f"{total_missed / 1000:.0f}K"
-        fill_parts   = []
-        for f in fill_rate[:4]:
-            sess_str = f"{f['sessions_7d'] / 1_000_000:.1f}M" if f["sessions_7d"] >= 1_000_000 else f"{f['sessions_7d'] / 1000:.0f}K"
-            fill_parts.append(f"*{f['publisher_name']}* {f['fill_rate_pct']:.0f}% ({sess_str} sessions)")
-        fill_inline = "  ·  ".join(fill_parts)
-        if len(fill_rate) > 4:
-            fill_inline += f"  +{len(fill_rate) - 4} more"
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f":bar_chart:  *LOW FILL RATE*  ({len(fill_rate)} publisher{'s' if len(fill_rate) != 1 else ''} · {missed_str} sessions/7d with no offer shown)"},
-        })
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0{fill_inline}"}],
-        })
-        blocks.append({
-            "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Get Fill Rate Brief", "emoji": True},
-                "action_id": "pulse_fill_rate_brief",
-                "style": "primary",
-            }],
-        })
 
     # ── Revenue opportunities (weekly, Mondays only) ─
     if opportunities and today_d.weekday() == 0:
