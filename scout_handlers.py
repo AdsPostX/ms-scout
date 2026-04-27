@@ -44,9 +44,9 @@ from scout_state import (
     _strip_mention, _sanitize_slack, _slack_thread_url,
     _route_channel,
     _pick_loading_message,
-    _fetch_giphy_url,
     _rotating_status,
     _smart_history,
+    _post_error_update,
 )
 
 log = logging.getLogger("scout_handlers")
@@ -748,29 +748,14 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     if not query or not channel or not thread_ts:
         return
 
-    _msg_text, _giphy_tag = _pick_loading_message(query)
+    web.chat_typing(channel=channel)
+    _msg_text = _pick_loading_message(query)
     placeholder = web.chat_postMessage(
         channel=channel, thread_ts=thread_ts, text=_msg_text,
         blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
     _placeholder_ts_sg = placeholder["ts"]
-    _gif_block_sg: list = []
-
-    def _inject_gif_sg():
-        gif_url = _fetch_giphy_url(_giphy_tag)
-        if not gif_url:
-            return
-        _gif_block_sg.append({"type": "image", "image_url": gif_url, "alt_text": "Scout"})
-        try:
-            web.chat_update(
-                channel=channel, ts=_placeholder_ts_sg, text=_msg_text,
-                blocks=[{"type": "image", "image_url": gif_url, "alt_text": "Scout"},
-                        {"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
-            )
-        except Exception:
-            pass
-    threading.Thread(target=_inject_gif_sg, daemon=True).start()
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, gif_block=_gif_block_sg)
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg)
 
     # Build thread history (mirrors handle_event)
     history = []
@@ -1064,29 +1049,14 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
         )
         thread_ts = intro["ts"]
 
-        _msg_text, _giphy_tag = _pick_loading_message(query)
+        web.chat_typing(channel=dm_channel)
+        _msg_text = _pick_loading_message(query)
         placeholder = web.chat_postMessage(
             channel=dm_channel, thread_ts=thread_ts, text=_msg_text,
             blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
         )
         _placeholder_ts_ah = placeholder["ts"]
-        _gif_block_ah: list = []
-
-        def _inject_gif_ah():
-            gif_url = _fetch_giphy_url(_giphy_tag)
-            if not gif_url:
-                return
-            _gif_block_ah.append({"type": "image", "image_url": gif_url, "alt_text": "Scout"})
-            try:
-                web.chat_update(
-                    channel=dm_channel, ts=_placeholder_ts_ah, text=_msg_text,
-                    blocks=[{"type": "image", "image_url": gif_url, "alt_text": "Scout"},
-                            {"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
-                )
-            except Exception:
-                pass
-        threading.Thread(target=_inject_gif_ah, daemon=True).start()
-        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, gif_block=_gif_block_ah)
+        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah)
 
         try:
             _t0 = time.monotonic()
@@ -1854,30 +1824,14 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
 
-    # Post placeholder immediately — GIF injected async so there's no Giphy latency on first render
-    _msg_text, _giphy_tag = _pick_loading_message(query)
+    web.chat_typing(channel=channel)
+    _msg_text = _pick_loading_message(query)
     placeholder = web.chat_postMessage(
         channel=channel, thread_ts=thread_ts, text=_msg_text,
         blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
     _placeholder_ts = placeholder["ts"]
-    _gif_block_he: list = []
-
-    def _inject_gif_he():
-        gif_url = _fetch_giphy_url(_giphy_tag)
-        if not gif_url:
-            return
-        _gif_block_he.append({"type": "image", "image_url": gif_url, "alt_text": "Scout"})
-        try:
-            web.chat_update(
-                channel=channel, ts=_placeholder_ts, text=_msg_text,
-                blocks=[{"type": "image", "image_url": gif_url, "alt_text": "Scout"},
-                        {"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
-            )
-        except Exception:
-            pass
-    threading.Thread(target=_inject_gif_he, daemon=True).start()
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts, gif_block=_gif_block_he)
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts)
 
     try:
         _t0 = time.monotonic()

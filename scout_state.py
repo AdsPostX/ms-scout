@@ -354,8 +354,8 @@ _MESSAGE_POOLS = {
 }
 
 
-def _pick_loading_message(query: str = "") -> tuple[str, str]:
-    """Pick a context-aware loading message + Giphy tag based on query content and time of day."""
+def _pick_loading_message(query: str = "") -> str:
+    """Pick a context-aware loading message based on query content and time of day."""
     from datetime import datetime
     import pytz
 
@@ -369,24 +369,24 @@ def _pick_loading_message(query: str = "") -> tuple[str, str]:
     q = (query or "").lower()
 
     if any(w in q for w in ("brief", "campaign", "build a brief", "draft", "write")):
-        pool_key, giphy_tag = "pool_brief", "wolf of wall street working"
+        pool_key = "pool_brief"
     elif any(w in q for w in ("queue", "status", "pending", "live", "launch", "enter")):
-        pool_key, giphy_tag = "pool_ops", "mission impossible"
+        pool_key = "pool_ops"
     elif any(w in q for w in ("revenue", "projection", "cap", "budget", "forecast")):
-        pool_key, giphy_tag = "pool_data", "breaking bad i am the one who knocks"
+        pool_key = "pool_data"
     elif any(w in q for w in ("performance", "rpm", "cvr", "data", "benchmark", "report", "rank")):
-        pool_key, giphy_tag = "pool_data", "moneyball"
+        pool_key = "pool_data"
     elif any(w in q for w in ("publisher", "partner", "integration", "network")):
-        pool_key, giphy_tag = "pool_publisher", "succession"
+        pool_key = "pool_publisher"
     elif any(w in q for w in ("find", "opportunity", "gap", "search")):
-        pool_key, giphy_tag = "pool_generic", "indiana jones searching"
+        pool_key = "pool_generic"
     else:
-        pool_key, giphy_tag = "pool_generic", "sherlock holmes thinking"
+        pool_key = "pool_generic"
 
     pool = _MESSAGE_POOLS.get(pool_key, _MESSAGE_POOLS["pool_generic"])
     tone = "late" if is_late else "grind"
     candidates = [e for e in pool if e["tone"] == tone] or pool
-    return random.choice(candidates)["text"], giphy_tag
+    return random.choice(candidates)["text"]
 
 
 # ── Smart history truncation (from scout_bot for handler use) ────────
@@ -412,56 +412,33 @@ def _smart_history(history: list, max_full: int = 4) -> list:
     ] + recent
 
 
-_GIPHY_CACHE: dict[str, tuple[str, float]] = {}
-_GIPHY_CACHE_TTL = 3600
-
-
-def _fetch_giphy_url(giphy_tag: str) -> str | None:
-    """Fetch a Giphy URL for the given tag, using a simple cache."""
-    import time
-    import urllib.parse
-    import json
-
-    api_key = os.getenv("GIPHY_API_KEY")
-    if not api_key:
-        return None
-
-    if giphy_tag in _GIPHY_CACHE:
-        url, expires = _GIPHY_CACHE[giphy_tag]
-        if time.monotonic() - expires < _GIPHY_CACHE_TTL:
-            return url
-
-
-_LOADING_MESSAGES = [
-    "Thinking...", "One moment...", "Checking...",
-    "Loading...", "Asking...", "Computing...",
-]
-
-
 def _rotating_status(
     web,
     channel: str,
     ts: str,
-    gif_block=None,
-    interval: float = 4.0,
+    interval: float = 2.0,
 ):
-    """Simple rotating status - returns stop function."""
+    """Rotating status with typing indicator — returns stop function."""
     stop_event = threading.Event()
     start = time.monotonic()
-    msgs = _LOADING_MESSAGES[:]
+    pool = _MESSAGE_POOLS.get("pool_generic", [])
+    msgs = [e["text"] for e in pool] or ["Thinking..."]
     random.shuffle(msgs)
     idx = [0]
 
     def _run():
         while not stop_event.wait(interval):
+            try:
+                web.chat_typing(channel=channel)
+            except Exception:
+                pass
             elapsed = int(time.monotonic() - start)
             msg = msgs[idx[0] % len(msgs)]
             update_text = f"_{msg}_ · {elapsed}s"
             try:
-                blocks = gif_block if gif_block else []
                 web.chat_update(
                     channel=channel, ts=ts, text=update_text,
-                    blocks=[*blocks, {"type": "section", "text": {"type": "mrkdwn", "text": update_text}}],
+                    blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": update_text}}],
                 )
             except Exception:
                 pass
@@ -470,18 +447,29 @@ def _rotating_status(
     threading.Thread(target=_run, daemon=True).start()
     return stop_event.set
 
+
+def _post_error_update(web, channel: str, ts: str, err: Exception) -> None:
+    """Replace the loading placeholder with a clean error message block."""
+    import logging as _log
+    log = _log.getLogger("scout_state")
+    s = str(err)
+    if "429" in s or "rate_limit" in s:
+        msg = "Scout hit the rate limit — give it 60 seconds and try again."
+    elif "credit balance" in s.lower() or ("400" in s and "credit" in s.lower()):
+        msg = "Scout is out of Anthropic credits — ping Sidd to top up at console.anthropic.com."
+    elif "529" in s or "overloaded" in s:
+        msg = "Anthropic is slammed right now — try again in a minute."
+    elif "timeout" in s.lower() or "timed out" in s.lower():
+        msg = "Scout timed out — try a narrower question."
+    elif "connection" in s.lower() or "network" in s.lower():
+        msg = "Scout just restarted (deploy or crash) — please resend your message."
+    else:
+        msg = "Something broke — try again, or rephrase the question."
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f":warning: *Scout hit a snag* — {msg}"}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": "If this keeps happening, check Render logs."}]},
+    ]
     try:
-        url_encoded = urllib.parse.quote(giphy_tag)
-        resp = urllib.request.urlopen(
-            f"https://api.giphy.com/v1/gifs/search?api_key={api_key}&q={url_encoded}&limit=1&rating=pg-13",
-            timeout=5,
-        )
-        data = json.loads(resp.read())
-        results = data.get("data", [])
-        if results:
-            gif_url = results[0]["images"]["fixed_height"]["url"]
-            _GIPHY_CACHE[giphy_tag] = (gif_url, time.monotonic())
-            return gif_url
-    except Exception:
-        pass
-    return None
+        web.chat_update(channel=channel, ts=ts, text=msg, blocks=blocks)
+    except Exception as _e:
+        log.warning(f"_post_error_update: could not update {channel}:{ts}: {_e}")

@@ -243,7 +243,7 @@ def test_scout_state_runtime():
     """
     try:
         from scout_state import _pick_loading_message, _smart_history
-        msg, _ = _pick_loading_message("ghost campaigns")
+        msg = _pick_loading_message("ghost campaigns")
         if not msg:
             return False, "_pick_loading_message returned empty message"
         result = _smart_history([])
