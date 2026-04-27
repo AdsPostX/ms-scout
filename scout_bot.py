@@ -1734,8 +1734,11 @@ def _run_scraper_daemon() -> None:
             state = _load_state()
 
             # FIRST BOOT: no state file → run immediately regardless of hour.
-            # Prevents "offer inventory at 0" immediately after a Render deploy.
-            is_first_boot = not _SCRAPER_STATE.exists() or not state
+            # Also triggers when offers_latest.json is missing (e.g. fresh Render deploy
+            # mid-day after the scraper already ran on the previous container).
+            _OFFERS_FILE = _DATA_DIR / "offers_latest.json"
+            offers_missing = not _OFFERS_FILE.exists() or _OFFERS_FILE.stat().st_size < 100
+            is_first_boot = not _SCRAPER_STATE.exists() or not state or offers_missing
 
             # CHECK FIRST: past 6am and haven't run today → fire immediately.
             should_run = is_first_boot or (
@@ -1743,7 +1746,12 @@ def _run_scraper_daemon() -> None:
             )
 
             if should_run:
-                reason = "first boot" if is_first_boot else "daily run"
+                if not _SCRAPER_STATE.exists() or not state:
+                    reason = "first boot"
+                elif offers_missing:
+                    reason = "offers file missing"
+                else:
+                    reason = "daily run"
                 log.info(f"[scraper] running offer fetch ({reason})")
                 _SCRAPER_RUNNING.set()
                 try:
