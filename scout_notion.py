@@ -18,6 +18,12 @@ _SCOUT_ENV = os.getenv("SCOUT_ENV", "development")
 _SCOUT_HQ_CHANNEL = "C0AQEECF800"  # #scout-qa
 _SCOUT_DIGEST_CHANNEL = os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL)
 
+from scout_state import (
+    _DATA_DIR,
+    _load_notion_notified,
+    _save_notion_notified,
+)
+
 
 def _route_channel(purpose: str, force: bool = False) -> str:
     """Return the correct Slack channel for a given message purpose."""
