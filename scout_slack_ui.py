@@ -85,6 +85,165 @@ def _pitch_signal(score: float) -> str:
         return "⚠️ Low signal"
     return "🔍 Rate TBD"
 
+
+def _build_alert_block(severity: str, title: str, body: str = "") -> list[dict]:
+    """
+    Build an Alert block with severity levels for visual hierarchy.
+
+    severity: "danger" | "warning" | "info"
+    - danger: 🔴 Ghost campaigns, caps near limit, critical issues
+    - warning: 🟡 Fill rate, velocity drops, warnings
+    - info: ℹ️ General context, non-blocking info
+
+    Returns list of blocks for consistent stacking.
+    """
+    _SEVERITY_MAP = {
+        "danger": {"emoji": "🔴", "label": "CRITICAL"},
+        "warning": {"emoji": "🟡", "label": "WARNING"},
+        "info": {"emoji": "ℹ️", "label": "INFO"},
+    }
+    sev = _SEVERITY_MAP.get(severity, _SEVERITY_MAP["info"])
+    emoji = sev["emoji"]
+    label = sev["label"]
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{emoji} *{label}:* {title}",
+            },
+        },
+    ]
+    if body:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": body}],
+        })
+    return blocks
+
+
+def _build_card_with_image(
+    title: str,
+    subtitle: str,
+    hero_url: str = "",
+    body: str = "",
+    buttons: list[dict] = None,
+    fields: list[dict] = None,
+) -> list[dict]:
+    """
+    Build a visual card with hero image, title, subtitle, body text, and action buttons.
+
+    Layout:
+      [section] Title · Subtitle
+              [hero image accessory]
+      [section] Body text (if present)
+      [fields] Stats grid (if present)
+      [actions] Buttons (if present)
+    """
+    blocks = []
+
+    header_text = f"*{title}*"
+    if subtitle:
+        header_text += f"\n_{subtitle}_"
+
+    section: dict = {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": header_text},
+    }
+
+    if hero_url and hero_url.startswith("http"):
+        section["accessory"] = {
+            "type": "image",
+            "image_url": hero_url,
+            "alt_text": title,
+        }
+
+    blocks.append(section)
+
+    if body:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": body},
+        })
+
+    if fields:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ""},
+            "fields": [
+                {"type": "mrkdwn", "text": f"*{f['label']}|\n{f['value']}"}
+                for f in fields if f.get("label") and f.get("value")
+            ],
+        })
+
+    if buttons:
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": btn.get("text", "Action"), "emoji": True},
+                    "style": btn.get("style", "primary"),
+                    "action_id": btn.get("action_id", "action"),
+                    "value": btn.get("value", ""),
+                }
+                for btn in buttons
+            ],
+        })
+
+    return blocks
+
+
+def _build_data_table(headers: list[str], rows: list[list[str]]) -> list[dict]:
+    """
+    Build a structured data table for metrics display.
+
+    Uses section.fields for 2-column grid layout.
+    Headers should be ≤4 for readable display.
+    """
+    if not headers or not rows:
+        return []
+
+    if len(headers) > 4:
+        headers = headers[:4]
+
+    fields = [{"type": "mrkdwn", "text": f"*{h}*"} for h in headers]
+
+    for row in rows[:8]:
+        row_text = "  ·  ".join(str(cell) for cell in row[:len(headers)])
+        fields.append({"type": "mrkdwn", "text": row_text})
+
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": ""}, "fields": fields}]
+
+
+def _build_rich_text_list(items: list[str], ordered: bool = False, indent: int = 0) -> list[dict]:
+    """
+    Build a rich text bulleted or numbered list.
+
+    Uses native rich_text_list for proper Slack rendering.
+    """
+    if not items:
+        return []
+
+    return [{
+        "type": "rich_text",
+        "elements": [
+            {
+                "type": "rich_text_list",
+                "style": "ordered" if ordered else "bullet",
+                "indent": indent,
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [{"type": "text", "text": item}]
+                    }
+                    for item in items
+                ],
+            }
+        ],
+    }]
+
 def _queue_confirm_blocks(
     advertiser: str,
     network: str,
@@ -94,16 +253,24 @@ def _queue_confirm_blocks(
     notion_url: str | None,
 ) -> list[dict]:
     """
-    Block Kit card for queue confirmation — matches _post_offer_queue_card quality.
+    Block Kit card for queue confirmation — enhanced visual treatment.
 
     Layout:
-      [section]  ✅ *Advertiser* queued · Network · $2.50 CPA    [View Brief →]
-      [context]  Added by @user  ·  $3.40 RPM  ·  ✅ Pitch-ready
+      [header]  ✅ Advertiser Added to Queue
+      [section] Network · Payout · Status
+      [context] Added by @user  ·  $X RPM  ·  Pitch-ready
     """
     signal   = _pitch_signal(score)
     score_str = f"${score:.2f} RPM" if score else "Rate TBD"
-    section_text = f":white_check_mark: *{advertiser}* queued · {network} · {payout_display}"
 
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"✅ {advertiser} Queued"},
+        },
+    ]
+
+    section_text = f"{network} · {payout_display}"
     section_block: dict = {
         "type": "section",
         "text": {"type": "mrkdwn", "text": section_text},
@@ -114,18 +281,18 @@ def _queue_confirm_blocks(
             "text": {"type": "plain_text", "text": "View Brief →", "emoji": True},
             "url": notion_url,
         }
+    blocks.append(section_block)
 
-    return [
-        section_block,
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"Added by <@{user_id}>"},
-                {"type": "mrkdwn", "text": score_str},
-                {"type": "mrkdwn", "text": signal},
-            ],
-        },
-    ]
+    blocks.append({
+        "type": "context",
+        "elements": [
+            {"type": "mrkdwn", "text": f"Added by <@{user_id}>"},
+            {"type": "mrkdwn", "text": score_str},
+            {"type": "mrkdwn", "text": signal},
+        ],
+    })
+
+    return blocks
 
 def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:  # noqa: ARG001
     """Build a Slack Block Kit message for a campaign brief."""
@@ -209,12 +376,9 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
         }
     blocks.append(stats_block)
 
-    # Risk flag — surface before copy so it's not missed
+    # Risk flag — surface before copy using Alert block for visibility
     if risk_flag:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f":warning: *Fit note:* _{risk_flag}_"},
-        })
+        blocks.extend(_build_alert_block("warning", f"Fit note: {risk_flag}", ""))
 
     blocks.append({"type": "divider"})
 
@@ -349,13 +513,22 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
 
 def _build_opportunity_cards(offers: list, thread_ts: str = "") -> list:
     """
-    Render a list of formatted offer dicts as compact Slack cards.
-    Each card: one section block (advertiser · payout · category + perf note)
-    followed by an Add to Queue actions block when thread_ts is known.
-    Mirrors the digest card pattern but lighter — no AI copy, no icon.
+    Render a list of formatted offer dicts as visual Slack cards.
+    Enhanced version with Alert blocks for risk flags and richer formatting.
+
+    When 5+ offers, renders as a virtual Carousel (consecutive cards).
+    Each card: section with risk Alert block + action button.
     """
     blocks: list = []
-    for offer in offers[:5]:
+
+    if len(offers) >= 5:
+        blocks.append({
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"📋 Top Opportunities ({len(offers)})"},
+        })
+        blocks.append({"type": "divider"})
+
+    for offer in offers[:10]:
         advertiser = offer.get("advertiser", "Unknown")
         payout     = offer.get("payout", "Rate TBD")
         category   = offer.get("category", "")
@@ -365,33 +538,33 @@ def _build_opportunity_cards(offers: list, thread_ts: str = "") -> list:
         score      = offer.get("scout_score_rpm", 0)
         ms_status  = offer.get("ms_status", "")
 
-        header = f"*{advertiser}*"
         meta_parts = [p for p in [payout, category, geo] if p]
-        if meta_parts:
-            header += "  ·  " + "  ·  ".join(meta_parts)
+        meta_str = "  ·  ".join(meta_parts) if meta_parts else ""
 
         detail_parts = []
         if perf_note:
-            detail_parts.append(f"_{perf_note}_")
+            detail_parts.append(perf_note)
         if score:
-            detail_parts.append(f"Scout score: {score}")
+            detail_parts.append(f"Scout: ${score:.2f} RPM")
         if ms_status and ms_status != "Not in System":
-            detail_parts.append(f"Status: {ms_status}")
+            detail_parts.append(ms_status)
+        detail_str = "  ·  ".join(detail_parts) if detail_parts else ""
 
-        text = header
-        if detail_parts:
-            text += "\n" + "  ·  ".join(detail_parts)
+        text = f"*{advertiser}*"
+        if meta_str:
+            text += f"\n{meta_str}"
+        if detail_str:
+            text += f"\n_{detail_str}_"
 
-        risk_flag = offer.get("risk_flag", "")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
 
+        risk_flag = offer.get("risk_flag", "")
         if risk_flag:
-            blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f":warning: _{risk_flag}_"}],
-            })
+            blocks.extend(_build_alert_block("warning", risk_flag, ""))
 
-        if thread_ts and not risk_flag:
+        blocks.append({"type": "divider"})
+
+        if thread_ts:
             btn_val = json.dumps({
                 "advertiser": advertiser,
                 "offer_id":   offer.get("offer_id", ""),
@@ -895,23 +1068,62 @@ def _format_pulse_blocks(
         "text": {"type": "plain_text", "text": header_text},
     })
 
-    # ── Ghost campaigns (P0 — compact inline, all same cause, details on demand) ─
+# ── Ghost campaigns (P0 — use Alert block) ─
     if ghost_camps:
         blocks.append({"type": "divider"})
-        # Inline compact list: names + impression scale only — hypothesis is uniform
-        # so it's noise inline; available via @Scout ghost brief on demand.
         top_g    = ghost_camps[:5]
         remainder = len(ghost_camps) - len(top_g)
         g_parts  = []
         for g in top_g:
-            imp_str = f"{g['impressions_7d'] / 1000:.0f}K" if g["impressions_7d"] >= 1000 else str(g["impressions_7d"])
-            g_parts.append(f"*{g['adv_name']}* {imp_str}")
-        ghost_inline = "  ·  ".join(g_parts)
+            imp_str = f"{g['impressions_7d'] / 1000:.0f}K" if g['impressions_7d'] >= 1000 else str(g['impressions_7d'])
+            g_parts.append(f"*{g['adv_name']}* ({imp_str} impr)")
+        ghost_list = "  ·  ".join(g_parts)
         if remainder > 0:
-            ghost_inline += f"  +{remainder} more"
+            ghost_list += f"  +{remainder} more"
+
+        blocks.extend(_build_alert_block(
+            "danger",
+            f"DARK OFFERS — {len(ghost_camps)} active with high impressions but $0 revenue",
+            ghost_list
+        ))
+
         blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f":ghost:  *DARK OFFERS*  ({len(ghost_camps)} active · high impressions · $0 revenue)"},
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Get Ghost Brief", "emoji": True},
+                "action_id": "pulse_ghost_brief",
+                "style": "primary",
+            }],
+        })
+
+    # ── Low fill rate (P0 — use Alert block) ─
+    if fill_rate:
+        blocks.append({"type": "divider"})
+        total_missed = sum(f["missed_sessions"] for f in fill_rate)
+        missed_str   = f"{total_missed / 1_000_000:.1f}M" if total_missed >= 1_000_000 else f"{total_missed / 1000:.0f}K"
+        fill_parts   = []
+        for f in fill_rate[:4]:
+            sess_str = f"{f['sessions_7d'] / 1_000_000:.1f}M" if f['sessions_7d'] >= 1_000_000 else f"{f['sessions_7d'] / 1000:.0f}K"
+            fill_parts.append(f"*{f['publisher_name']}* {f['fill_rate_pct']:.0f}% ({sess_str} sessions)")
+        fill_list = "  ·  ".join(fill_parts)
+        if len(fill_rate) > 4:
+            fill_list += f"  +{len(fill_rate) - 4} more"
+
+        blocks.extend(_build_alert_block(
+            "warning",
+            f"LOW FILL RATE — {len(fill_rate)} publisher{'s' if len(fill_rate) != 1 else ''} with {missed_str} missed sessions/7d",
+            fill_list
+        ))
+
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Get Fill Rate Brief", "emoji": True},
+                "action_id": "pulse_fill_rate_brief",
+                "style": "primary",
+            }],
         })
         blocks.append({
             "type": "context",
@@ -957,29 +1169,25 @@ def _format_pulse_blocks(
             }],
         })
 
-    # ── Revenue opportunities (weekly, Mondays only) ──────────────────────────
-    # Proactive cross-publisher gap intelligence — not tied to any publisher being down.
-    # Reactive gaps (per down-publisher) are already embedded in velocity shifts.
-    if opportunities and today_d.weekday() == 0:  # Monday only
+    # ── Revenue opportunities (weekly, Mondays only) ─
+    if opportunities and today_d.weekday() == 0:
         blocks.append({"type": "divider"})
         total_est = sum(o["est_monthly_rev"] for o in opportunities)
         total_str = f"${total_est / 1000:.0f}K" if total_est >= 1000 else f"${total_est:.0f}"
         opp_parts = []
         for o in opportunities[:4]:
-            sess_str = f"{o['sessions_30d'] / 1_000_000:.1f}M" if o["sessions_30d"] >= 1_000_000 else f"{o['sessions_30d'] / 1000:.0f}K"
-            est_str  = f"${o['est_monthly_rev'] / 1000:.0f}K" if o["est_monthly_rev"] >= 1000 else f"${o['est_monthly_rev']:.0f}"
-            opp_parts.append(f"*{o['adv_name']}* → {o['publisher_name']} · {sess_str} sessions · est. {est_str}/mo")
+            sess_str = f"{o['sessions_30d'] / 1_000_000:.1f}M" if o['sessions_30d'] >= 1_000_000 else f"{o['sessions_30d'] / 1000:.0f}K"
+            est_str  = f"${o['est_monthly_rev'] / 1000:.0f}K" if o['est_monthly_rev'] >= 1000 else f"${o['est_monthly_rev']:.0f}"
+            opp_parts.append(f"*{o['adv_name']}* → {o['publisher_name']} · {sess_str} sessions · {est_str}/mo")
         if len(opportunities) > 4:
             opp_parts.append(f"+{len(opportunities) - 4} more")
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f":chart_with_upwards_trend:  *REVENUE OPPORTUNITIES*  ({len(opportunities)} gaps · est. {total_str}/mo combined)"},
-        })
-        for part in opp_parts:
-            blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0{part}"}],
-            })
+
+        blocks.extend(_build_alert_block(
+            "info",
+            f"REVENUE OPPORTUNITIES — {len(opportunities)} gaps, est. {total_str}/mo combined",
+            "  ·  ".join(opp_parts)
+        ))
+
         blocks.append({
             "type": "actions",
             "elements": [{
@@ -990,13 +1198,10 @@ def _format_pulse_blocks(
             }],
         })
 
-    # ── NEEDS ATTENTION (downs) ───────────────────────────────────────────────
+    # ── NEEDS ATTENTION (downs) ─
     if regular_downs or urgent_caps:
         blocks.append({"type": "divider"})
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": ":rotating_light:  *NEEDS ATTENTION*"},
-        })
+        blocks.extend(_build_alert_block("warning", "NEEDS ATTENTION", "Revenue down — action required"))
         for v, flag_count in regular_downs:
             attr      = _inline_attr(v)
             attr_part = f"   ·   {attr}" if attr else ""
@@ -1063,13 +1268,10 @@ def _format_pulse_blocks(
             "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0:speech_balloon:  {na_section_hint}"}],
         })
 
-    # ── MOMENTUM (ups) ────────────────────────────────────────────────────────
+    # ── MOMENTUM (ups) ─
     if ups:
         blocks.append({"type": "divider"})
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": ":chart_with_upwards_trend:  *MOMENTUM*"},
-        })
+        blocks.extend(_build_alert_block("info", "MOMENTUM", f"+{len(ups)} publishers up"))
         for v in ups[:3]:
             attr = _inline_attr(v)
             attr_part = f"   ·   {attr}" if attr else ""
