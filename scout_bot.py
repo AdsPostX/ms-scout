@@ -15,6 +15,7 @@ import time
 
 import requests
 
+import queries as _q
 from dotenv import load_dotenv
 from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest

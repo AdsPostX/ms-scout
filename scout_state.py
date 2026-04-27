@@ -275,3 +275,27 @@ def _update_benchmark_from_actuals(advertiser: str, actual_rpm: float, payout_ty
         log.info(f"Learned benchmark updated: {key} → avg RPM ${new_avg:.2f} (n={n_new})")
     except Exception as e:
         log.warning(f"_update_benchmark_from_actuals failed for {advertiser}: {e}")
+
+
+# ── Slack utilities (shared across Scout modules) ───────────────────────────
+
+def _strip_mention(text: str) -> str:
+    """Remove @mention tokens so the agent sees the clean query."""
+    import re
+    return re.sub(r"<@[A-Z0-9]+>", "", text).strip()
+
+
+def _sanitize_slack(text: str) -> str:
+    """Convert markdown to Slack-compatible formatting."""
+    import re as _re
+    text = _re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    text = _re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', r'<\2|\1>', text)
+    text = _re.sub(r'^#{1,3} (.+)$', r'*\1*', text, flags=_re.MULTILINE)
+    text = _re.sub(r'^---+$', '', text, flags=_re.MULTILINE)
+    return text
+
+
+def _slack_thread_url(channel: str, thread_ts: str) -> str:
+    """Build a direct link to a Slack thread message."""
+    ts_nodot = thread_ts.replace(".", "")
+    return f"https://momentscience.slack.com/archives/{channel}/p{ts_nodot}"

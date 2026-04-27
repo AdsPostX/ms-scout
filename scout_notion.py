@@ -17,6 +17,7 @@ import requests
 from scout_state import (
     _DATA_DIR, _load_notion_notified, _save_notion_notified,
 )
+from scout_bot import _route_channel
 
 log = logging.getLogger("scout_notion")
 
