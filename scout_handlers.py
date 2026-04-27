@@ -40,9 +40,9 @@ from scout_state import (
     _log_usage,
     _DATA_DIR,
     _strip_mention, _sanitize_slack, _slack_thread_url,
+    _route_channel,
 )
 from scout_bot import (
-    _route_channel,
     _pick_loading_message,
     _fetch_giphy_url,
     _rotating_status,

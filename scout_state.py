@@ -299,3 +299,17 @@ def _slack_thread_url(channel: str, thread_ts: str) -> str:
     """Build a direct link to a Slack thread message."""
     ts_nodot = thread_ts.replace(".", "")
     return f"https://momentscience.slack.com/archives/{channel}/p{ts_nodot}"
+
+
+# ── Environment-aware channel routing ─────────────────────────────────────────
+_SCOUT_ENV = os.getenv("SCOUT_ENV", "development")
+_SCOUT_HQ_CHANNEL = "C0AQEECF800"  # #scout-qa
+_PULSE_CHANNEL = os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL)
+_SCOUT_DIGEST_CHANNEL = os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL)
+
+
+def _route_channel(purpose: str, force: bool = False) -> str:
+    """Return the correct Slack channel for a given message purpose."""
+    if force or _SCOUT_ENV != "production":
+        return _SCOUT_HQ_CHANNEL
+    return _PULSE_CHANNEL if purpose in ("pulse", "watchdog") else (_SCOUT_DIGEST_CHANNEL if purpose == "offers" else _SCOUT_HQ_CHANNEL)
