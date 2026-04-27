@@ -44,6 +44,7 @@ from scout_state import (
     _pick_loading_message,
     _fetch_giphy_url,
     _rotating_status,
+    _smart_history,
 )
 
 log = logging.getLogger("scout_handlers")

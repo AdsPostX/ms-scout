@@ -383,6 +383,29 @@ def _pick_loading_message(query: str = "") -> tuple[str, str]:
     return random.choice(candidates)["text"], giphy_tag
 
 
+# ── Smart history truncation (from scout_bot for handler use) ────────
+
+def _smart_history(history: list, max_full: int = 4) -> list:
+    """Keep last max_full messages verbatim; summarize older ones as a single context line."""
+    if len(history) <= max_full:
+        return history
+    older, recent = history[:-max_full], history[-max_full:]
+    entities = set()
+    for msg in older:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            entities.update(re.findall(r'\b[A-Z][a-zA-Z+]{2,}\b', content))
+    summary = (
+        f"[Earlier context: {', '.join(list(entities)[:8])}]"
+        if entities
+        else "[Earlier messages truncated]"
+    )
+    return [
+        {"role": "user", "content": summary},
+        {"role": "assistant", "content": "Understood."},
+    ] + recent
+
+
 _GIPHY_CACHE: dict[str, tuple[str, float]] = {}
 _GIPHY_CACHE_TTL = 3600
 
