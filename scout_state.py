@@ -313,3 +313,149 @@ def _route_channel(purpose: str, force: bool = False) -> str:
     if force or _SCOUT_ENV != "production":
         return _SCOUT_HQ_CHANNEL
     return _PULSE_CHANNEL if purpose in ("pulse", "watchdog") else (_SCOUT_DIGEST_CHANNEL if purpose == "offers" else _SCOUT_HQ_CHANNEL)
+
+
+# ── Loading messages (from scout_bot for handler use) ──────────────────────────────
+
+_MESSAGE_POOLS = {
+    "pool_generic": [
+        {"text": "Checking the vault...", "tone": "grind"}, {"text": "Pulling signals...", "tone": "grind"},
+        {"text": "Running the numbers...", "tone": "grind"}, {"text": "Mining the data...", "tone": "grind"},
+        {"text": "Asking the oracle...", "tone": "grind"}, {"text": "Crunching the numbers...", "tone": "grind"},
+        {"text": "Consulting the archives...", "tone": "late"}, {"text": "Wake up, Neo...", "tone": "late"},
+        {"text": "Deep thought in progress...", "tone": "late"},
+    ],
+    "pool_ops": [
+        {"text": "Checking the queue...", "tone": "grind"}, {"text": "Scanning active campaigns...", "tone": "grind"},
+        {"text": "Loading pipeline...", "tone": "grind"}, {"text": "Syncing with Notion...", "tone": "grind"},
+        {"text": "Midnight oil...", "tone": "late"}, {"text": "Night watch...", "tone": "late"},
+    ],
+    "pool_data": [
+        {"text": "Computing revenue...", "tone": "grind"}, {"text": "Crunching performance...", "tone": "grind"},
+        {"text": "Benchmarking...", "tone": "grind"}, {"text": "Running regression...", "tone": "grind"},
+        {"text": "Data mine running...", "tone": "late"}, {"text": "Calculating...", "tone": "late"},
+    ],
+    "pool_brief": [
+        {"text": "Drafting brief...", "tone": "grind"}, {"text": "Building campaign...", "tone": "grind"},
+        {"text": "Writing copy...", "tone": "grind"}, {"text": "Loading creative...", "tone": "grind"},
+        {"text": "Late night drafting...", "tone": "late"}, {"text": "Burning the midnight oil...", "tone": "late"},
+    ],
+    "pool_publisher": [
+        {"text": "Checking integrations...", "tone": "grind"}, {"text": "Loading partners...", "tone": "grind"},
+        {"text": "Verifying connections...", "tone": "grind"}, {"text": "Mapping the network...", "tone": "grind"},
+        {"text": "Late night debugging...", "tone": "late"}, {"text": "Syncing...", "tone": "late"},
+    ],
+}
+
+
+def _pick_loading_message(query: str = "") -> tuple[str, str]:
+    """Pick a context-aware loading message + Giphy tag based on query content and time of day."""
+    from datetime import datetime
+    import pytz
+
+    try:
+        chicago = pytz.timezone("America/Chicago")
+        hour = datetime.now(chicago).hour
+        is_late = hour >= 21 or hour < 6
+    except Exception:
+        is_late = False
+
+    q = (query or "").lower()
+
+    if any(w in q for w in ("brief", "campaign", "build a brief", "draft", "write")):
+        pool_key, giphy_tag = "pool_brief", "wolf of wall street working"
+    elif any(w in q for w in ("queue", "status", "pending", "live", "launch", "enter")):
+        pool_key, giphy_tag = "pool_ops", "mission impossible"
+    elif any(w in q for w in ("revenue", "projection", "cap", "budget", "forecast")):
+        pool_key, giphy_tag = "pool_data", "breaking bad i am the one who knocks"
+    elif any(w in q for w in ("performance", "rpm", "cvr", "data", "benchmark", "report", "rank")):
+        pool_key, giphy_tag = "pool_data", "moneyball"
+    elif any(w in q for w in ("publisher", "partner", "integration", "network")):
+        pool_key, giphy_tag = "pool_publisher", "succession"
+    elif any(w in q for w in ("find", "opportunity", "gap", "search")):
+        pool_key, giphy_tag = "pool_generic", "indiana jones searching"
+    else:
+        pool_key, giphy_tag = "pool_generic", "sherlock holmes thinking"
+
+    pool = _MESSAGE_POOLS.get(pool_key, _MESSAGE_POOLS["pool_generic"])
+    tone = "late" if is_late else "grind"
+    candidates = [e for e in pool if e["tone"] == tone] or pool
+    return random.choice(candidates)["text"], giphy_tag
+
+
+_GIPHY_CACHE: dict[str, tuple[str, float]] = {}
+_GIPHY_CACHE_TTL = 3600
+
+
+def _fetch_giphy_url(giphy_tag: str) -> str | None:
+    """Fetch a Giphy URL for the given tag, using a simple cache."""
+    import time
+    import urllib.parse
+    import json
+
+    api_key = os.getenv("GIPHY_API_KEY")
+    if not api_key:
+        return None
+
+    if giphy_tag in _GIPHY_CACHE:
+        url, expires = _GIPHY_CACHE[giphy_tag]
+        if time.monotonic() - expires < _GIPHY_CACHE_TTL:
+            return url
+
+
+_LOADING_MESSAGES = [
+    "Thinking...", "One moment...", "Checking...",
+    "Loading...", "Asking...", "Computing...",
+]
+
+
+def _rotating_status(
+    web,
+    channel: str,
+    ts: str,
+    gif_block=None,
+    interval: float = 4.0,
+):
+    """Simple rotating status - returns stop function."""
+    import time
+    import random
+
+    stop_event = threading.Event()
+    start = time.monotonic()
+    msgs = _LOADING_MESSAGES[:]
+    random.shuffle(msgs)
+    idx = [0]
+
+    def _run():
+        while not stop_event.wait(interval):
+            elapsed = int(time.monotonic() - start)
+            msg = msgs[idx[0] % len(msgs)]
+            update_text = f"_{msg}_ · {elapsed}s"
+            try:
+                blocks = gif_block if gif_block else []
+                web.chat_update(
+                    channel=channel, ts=ts, text=update_text,
+                    blocks=[*blocks, {"type": "section", "text": {"type": "mrkdwn", "text": update_text}}],
+                )
+            except Exception:
+                pass
+            idx[0] += 1
+
+    threading.Thread(target=_run, daemon=True).start()
+    return stop_event.set
+
+    try:
+        url_encoded = urllib.parse.quote(giphy_tag)
+        resp = urllib.request.urlopen(
+            f"https://api.giphy.com/v1/gifs/search?api_key={api_key}&q={url_encoded}&limit=1&rating=pg-13",
+            timeout=5,
+        )
+        data = json.loads(resp.read())
+        results = data.get("data", [])
+        if results:
+            gif_url = results[0]["images"]["fixed_height"]["url"]
+            _GIPHY_CACHE[giphy_tag] = (gif_url, time.monotonic())
+            return gif_url
+    except Exception:
+        pass
+    return None
