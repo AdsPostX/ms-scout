@@ -6,6 +6,8 @@ scout_notion.py — All Notion API interactions for Scout.
 - _patch_notion_copy is a live async fallback — do NOT delete
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

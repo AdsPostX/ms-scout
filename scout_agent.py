@@ -5,6 +5,8 @@ Data source: data/offers_latest.json (written by offer_scraper.py after each dai
 Performance benchmarks: queried from ClickHouse at startup, cached in memory.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

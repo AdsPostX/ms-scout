@@ -4,6 +4,8 @@ Listens for @Scout mentions and responds with offer intelligence.
 Run as a persistent background process: python scout_bot.py
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

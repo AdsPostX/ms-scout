@@ -14,6 +14,8 @@ Button value contract:
   Changing key names in one file REQUIRES updating the other — no type enforcement.
 """
 
+from __future__ import annotations
+
 import random
 import re
 

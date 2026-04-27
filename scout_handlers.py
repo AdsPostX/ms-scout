@@ -8,6 +8,8 @@ Import DAG: scout_handlers → scout_slack_ui, scout_notion, scout_state, scout_
             scout_handlers does NOT import from scout_bot
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

@@ -9,6 +9,8 @@ Pattern: _load_*() returns a dict/list; _save_*() writes atomically.
 Atomic writes: write to .tmp → os.replace() to prevent partial writes on crash.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

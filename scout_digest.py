@@ -8,6 +8,9 @@ approve/reject buttons that feed directly into the Demand Queue workflow.
 
 Usage:
   python scout_digest.py              # post this week's digest
+"""
+
+from __future__ import annotations
   python scout_digest.py --dry-run    # print blocks without posting
 """
 
