@@ -748,10 +748,6 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     if not query or not channel or not thread_ts:
         return
 
-    try:
-        web.chat_typing(channel=channel)
-    except Exception:
-        pass
     _msg_text = _pick_loading_message(query)
     placeholder = web.chat_postMessage(
         channel=channel, thread_ts=thread_ts, text=_msg_text,
@@ -1052,10 +1048,6 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
         )
         thread_ts = intro["ts"]
 
-        try:
-            web.chat_typing(channel=dm_channel)
-        except Exception:
-            pass
         _msg_text = _pick_loading_message(query)
         placeholder = web.chat_postMessage(
             channel=dm_channel, thread_ts=thread_ts, text=_msg_text,
@@ -1830,10 +1822,6 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
 
-    try:
-        web.chat_typing(channel=channel)
-    except Exception:
-        pass
     _msg_text = _pick_loading_message(query)
     placeholder = web.chat_postMessage(
         channel=channel, thread_ts=thread_ts, text=_msg_text,

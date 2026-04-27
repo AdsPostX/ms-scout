@@ -428,10 +428,6 @@ def _rotating_status(
 
     def _run():
         while not stop_event.wait(interval):
-            try:
-                web.chat_typing(channel=channel)
-            except Exception:
-                pass
             elapsed = int(time.monotonic() - start)
             msg = msgs[idx[0] % len(msgs)]
             update_text = f"_{msg}_ · {elapsed}s"
