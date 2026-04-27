@@ -15,6 +15,10 @@ import json
 import logging
 import os
 import pathlib
+import random
+import re
+import threading
+import time
 
 log = logging.getLogger("scout_state")
 
@@ -442,9 +446,6 @@ def _rotating_status(
     interval: float = 4.0,
 ):
     """Simple rotating status - returns stop function."""
-    import time
-    import random
-
     stop_event = threading.Event()
     start = time.monotonic()
     msgs = _LOADING_MESSAGES[:]

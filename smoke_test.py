@@ -16,6 +16,8 @@ Tests covered:
   7. State files — JSON validity of pulse_state/digest_state/image_cache + data/ writable
   8. Slack token — auth.test confirms bot identity
   9. Notion queue DB ID — NOTION_QUEUE_DB_ID env var is set
+ 10. Handler symbols — SocketModeResponse and RateLimitErrorRetryHandler importable
+ 11. scout_state runtime — _pick_loading_message and _smart_history callable
 """
 
 import argparse
@@ -227,6 +229,33 @@ def test_handler_imports():
     except ImportError as e:
         return False, f"scout_handlers import failed (all @mentions will be silent): {e}"
     return True, "SocketModeResponse ✓  RateLimitErrorRetryHandler ✓  scout_handlers ✓"
+
+
+# ── Test 11: scout_state runtime functions ────────────────────────────────────
+
+@test("scout_state runtime — _pick_loading_message and _smart_history callable")
+def test_scout_state_runtime():
+    """
+    Verify that functions in scout_state.py are importable AND callable at runtime.
+    Test 10 catches missing module-level imports; this test catches missing stdlib
+    imports used only inside function bodies — the same class of bug that caused
+    Scout to be silent on every @mention (random/re/threading not imported).
+    """
+    try:
+        from scout_state import _pick_loading_message, _smart_history
+        msg, _ = _pick_loading_message("ghost campaigns")
+        if not msg:
+            return False, "_pick_loading_message returned empty message"
+        result = _smart_history([])
+        if result != []:
+            return False, f"_smart_history([]) should return [] but got: {result}"
+        long_history = [{"role": "user", "content": f"msg {i}"} for i in range(6)]
+        trimmed = _smart_history(long_history)
+        if len(trimmed) > 6:
+            return False, f"_smart_history didn't truncate: got {len(trimmed)} messages"
+        return True, f"_pick_loading_message ✓  _smart_history ✓  (msg='{msg[:30]}…')"
+    except Exception as e:
+        return False, f"scout_state runtime function failed: {e}"
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
