@@ -287,17 +287,15 @@ def _update_benchmark_from_actuals(advertiser: str, actual_rpm: float, payout_ty
 
 def _strip_mention(text: str) -> str:
     """Remove @mention tokens so the agent sees the clean query."""
-    import re
     return re.sub(r"<@[A-Z0-9]+>", "", text).strip()
 
 
 def _sanitize_slack(text: str) -> str:
     """Convert markdown to Slack-compatible formatting."""
-    import re as _re
-    text = _re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
-    text = _re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', r'<\2|\1>', text)
-    text = _re.sub(r'^#{1,3} (.+)$', r'*\1*', text, flags=_re.MULTILINE)
-    text = _re.sub(r'^---+$', '', text, flags=_re.MULTILINE)
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    text = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', r'<\2|\1>', text)
+    text = re.sub(r'^#{1,3} (.+)$', r'*\1*', text, flags=re.MULTILINE)
+    text = re.sub(r'^---+$', '', text, flags=re.MULTILINE)
     return text
 
 
@@ -446,8 +444,6 @@ def _rotating_status(
 
 def _post_error_update(web, channel: str, ts: str, err: Exception) -> None:
     """Replace the loading placeholder with a clean error message block."""
-    import logging as _log
-    log = _log.getLogger("scout_state")
     s = str(err)
     if "429" in s or "rate_limit" in s:
         msg = "Scout hit the rate limit — give it 60 seconds and try again."
