@@ -8,11 +8,10 @@ approve/reject buttons that feed directly into the Demand Queue workflow.
 
 Usage:
   python scout_digest.py              # post this week's digest
+  python scout_digest.py --dry-run    # print blocks without posting
 """
 
 from __future__ import annotations
-  python scout_digest.py --dry-run    # print blocks without posting
-"""
 
 import argparse
 import concurrent.futures
@@ -41,6 +40,13 @@ STATE_FILE   = DATA_DIR / "digest_state.json"
 _SCOUT_QA_CHANNEL    = "C0AQEECF800"  # #scout-qa — always used in dev/force
 _SCOUT_ENV           = os.getenv("SCOUT_ENV", "development")
 _PROD_OFFERS_CHANNEL = os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_QA_CHANNEL)  # #scout-offers
+
+if _SCOUT_ENV != "production":
+    log.warning(
+        "[digest] SCOUT_ENV=%r — all digests routing to #scout-qa. "
+        "Set SCOUT_ENV=production and SCOUT_DIGEST_CHANNEL=<channel_id> on Render "
+        "to send digests to #scout-offers.", _SCOUT_ENV
+    )
 
 def _digest_channel(force: bool = False) -> str:
     """Return the correct Slack channel for the offer digest.

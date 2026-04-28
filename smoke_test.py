@@ -18,6 +18,9 @@ Tests covered:
   9. Notion queue DB ID — NOTION_QUEUE_DB_ID env var is set
  10. Handler symbols — SocketModeResponse and RateLimitErrorRetryHandler importable
  11. scout_state runtime — _pick_loading_message and _smart_history callable
+ 12. _build_advertiser_rpm_context_blocks — pure function, no DB
+ 13. get_scout_status() — digest_env + digest_routing fields present
+ 14. get_scout_status() — available_networks is a list when offers exist
 """
 
 import argparse
@@ -288,6 +291,41 @@ def test_rpm_context_blocks():
         return True, f"has_history=False → [] ✓  has_history=True → context block ✓"
     except Exception as e:
         return False, f"_build_advertiser_rpm_context_blocks failed: {e}"
+
+
+@test("get_scout_status() — digest_env + digest_routing fields present")
+def test_scout_status_digest_fields():
+    try:
+        from scout_agent import get_scout_status
+        status = get_scout_status()
+        if "digest_env" not in status:
+            return False, "digest_env missing from status dict"
+        if "digest_routing" not in status:
+            return False, "digest_routing missing from status dict"
+        routing = status["digest_routing"]
+        if not isinstance(routing, str) or not routing:
+            return False, f"digest_routing should be non-empty string, got: {routing!r}"
+        return True, f"digest_env={status['digest_env']!r} routing={routing[:50]}"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("get_scout_status() — available_networks list present when offers exist")
+def test_scout_status_available_networks():
+    try:
+        from scout_agent import get_scout_status
+        status = get_scout_status()
+        offer_count = status.get("offer_inventory", 0)
+        if offer_count == 0:
+            return True, "offer_inventory=0 — available_networks not expected (no offers loaded)"
+        if "available_networks" not in status:
+            return False, f"available_networks missing from status dict (offer_inventory={offer_count})"
+        nets = status["available_networks"]
+        if not isinstance(nets, list) or not nets:
+            return False, f"available_networks should be non-empty list, got: {nets!r}"
+        return True, f"available_networks={nets} ({len(nets)} networks)"
+    except Exception as e:
+        return False, str(e)
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
