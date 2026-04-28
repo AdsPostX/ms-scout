@@ -296,6 +296,50 @@ def _queue_confirm_blocks(
 
     return blocks
 
+def _build_advertiser_rpm_context_blocks(ctx: dict, scout_estimate: float = 0) -> list[dict]:
+    """
+    Return a context block showing the advertiser's 30-day platform RPM history.
+
+    Only called when ctx["has_history"] is True — caller is responsible for the check.
+    Shows campaign count, impressions, revenue, and RPM range vs Scout's estimate.
+
+    Labels RPM as "platform RPM" (pre-publisher multiplier) so the team has the right frame.
+    """
+    if not ctx.get("has_history"):
+        return []
+
+    active    = ctx["active_campaigns"]
+    imps      = ctx["impressions_30d"]
+    rev       = ctx["revenue_30d"]
+    rpm_min   = ctx["rpm_min"]
+    rpm_max   = ctx["rpm_max"]
+    rpm_avg   = ctx["rpm_avg"]
+
+    campaign_str = f"{active} active campaign{'s' if active != 1 else ''}"
+    imps_str     = f"{imps / 1_000_000:.1f}M" if imps >= 1_000_000 else f"{imps / 1000:.0f}K"
+    rev_str      = f"${rev / 1000:.0f}K" if rev >= 1000 else f"${rev:.0f}"
+
+    if rpm_min == rpm_max or active == 1:
+        rpm_str = f"${rpm_avg:.0f} platform RPM"
+    else:
+        rpm_str = f"${rpm_min:.0f}–${rpm_max:.0f} platform RPM range"
+
+    estimate_str = f"Scout estimate: ${scout_estimate:.0f} RPM" if scout_estimate else ""
+
+    parts = [f"{campaign_str} · {imps_str} impressions", f"{rev_str} revenue · {rpm_str}"]
+    if estimate_str:
+        parts.append(estimate_str)
+
+    return [
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f":bar_chart:  *{' · '.join(parts[:2])}*"},
+            ] + ([{"type": "mrkdwn", "text": estimate_str}] if estimate_str else []),
+        }
+    ]
+
+
 def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:  # noqa: ARG001
     """Build a Slack Block Kit message for a campaign brief."""
     advertiser   = brief_data.get("advertiser", "Offer")

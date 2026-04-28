@@ -19,6 +19,7 @@ missed a 48h recency filter that was added to the agent tool, causing false alar
 | Ghost campaigns | `_query_ghost_campaigns(ch)` in `scout_agent.py` | `get_ghost_campaigns()` + Pulse `_run_pulse_signals()` | Pulse groups by adv_name; agent keeps per-campaign detail |
 | Revenue opportunities | `revenue_opportunities(ch)` in `queries.py` | `get_top_revenue_opportunities()` + Pulse `_pulse_signal_opportunities()` | Both callers use the same fuzzy anti-join SQL. Agent adds Python-level grouping; Pulse takes top 5. No drift. |
 | Fill rate | **Intentionally separate** | `get_low_fill_publishers()` (30d/10K threshold) + Pulse signal (7d/5K threshold) | Different thresholds on purpose: Pulse = early warning, Agent = stable analysis. Do not merge. |
+| Advertiser RPM context | `_query_advertiser_rpm_context(ch, adv_name)` in `scout_agent.py` | `_handle_approve()` in `scout_handlers.py` | At approval time only — not a Pulse signal. Fuzzy ILIKE match on adv_name; uses `trim(status) = 'active'`. Fails safe (returns has_history=False on any error). |
 | Velocity shifts | Pulse-only | `_build_velocity_signal()` | No agent tool — no divergence risk |
 | Cap alerts | Pulse-only | `_build_cap_signal()` | No agent tool — no divergence risk |
 | Overnight events | Pulse-only | `_build_overnight_signal()` | No agent tool — no divergence risk |

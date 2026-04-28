@@ -4350,6 +4350,74 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
     )
 
 
+def _query_advertiser_rpm_context(ch, adv_name: str) -> dict:
+    """
+    Return 30-day platform RPM history for an advertiser across all active campaigns.
+
+    Used at offer approval time to give the team context on how this advertiser
+    performs on the MS platform before committing to a queue slot.
+
+    Returns dict with keys:
+        has_history (bool)     — False if no campaigns found or query fails
+        active_campaigns (int) — number of campaigns with >= 100 impressions in 30d
+        impressions_30d (int)  — total impressions across all campaigns
+        revenue_30d (float)    — total revenue ($) across all campaigns
+        rpm_min (float)        — lowest per-campaign RPM
+        rpm_max (float)        — highest per-campaign RPM
+        rpm_avg (float)        — blended RPM (total revenue / total impressions * 1000)
+    """
+    if not adv_name or not adv_name.strip():
+        return {"has_history": False}
+    try:
+        q = """
+        WITH
+        imp_agg AS (
+            SELECT campaign_id, count() AS impressions_30d
+            FROM adpx_impressions_details
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM(now() - INTERVAL 30 DAY)
+            WHERE created_at >= now() - INTERVAL 30 DAY
+            GROUP BY campaign_id
+        ),
+        conv_agg AS (
+            SELECT campaign_id,
+                   round(sum(toFloat64OrNull(revenue)), 2) AS revenue_30d
+            FROM adpx_conversionsdetails
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM(now() - INTERVAL 30 DAY)
+            WHERE created_at >= now() - INTERVAL 30 DAY
+            GROUP BY campaign_id
+        )
+        SELECT
+            count()                                                                              AS active_campaigns,
+            sum(imp.impressions_30d)                                                             AS impressions_30d,
+            sum(coalesce(conv.revenue_30d, 0))                                                   AS revenue_30d,
+            min(round(coalesce(conv.revenue_30d, 0) / nullIf(imp.impressions_30d, 0) * 1000, 1)) AS rpm_min,
+            max(round(coalesce(conv.revenue_30d, 0) / nullIf(imp.impressions_30d, 0) * 1000, 1)) AS rpm_max,
+            round(sum(coalesce(conv.revenue_30d, 0)) / nullIf(sum(imp.impressions_30d), 0) * 1000, 1) AS rpm_avg
+        FROM imp_agg imp
+        LEFT JOIN conv_agg conv ON conv.campaign_id = imp.campaign_id
+        JOIN from_airbyte_campaigns fc ON toUInt64(fc.id) = imp.campaign_id
+        WHERE imp.impressions_30d >= 100
+          AND trim(fc.status) = 'active'
+          AND fc.adv_name ILIKE {adv_pattern:String}
+        """
+        rows = ch.query(q, parameters={"adv_pattern": f"%{adv_name}%"}).result_rows
+        if not rows or rows[0][0] == 0:
+            return {"has_history": False}
+        active, imps, rev, rpm_min, rpm_max, rpm_avg = rows[0]
+        return {
+            "has_history":      True,
+            "active_campaigns": int(active or 0),
+            "impressions_30d":  int(imps or 0),
+            "revenue_30d":      float(rev or 0),
+            "rpm_min":          float(rpm_min or 0),
+            "rpm_max":          float(rpm_max or 0),
+            "rpm_avg":          float(rpm_avg or 0),
+        }
+    except Exception as e:
+        log.warning(f"_query_advertiser_rpm_context failed for {adv_name!r}: {e}")
+        return {"has_history": False}
+
+
 # ── CLI test ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
