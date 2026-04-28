@@ -1177,23 +1177,62 @@ def _check_stale_queue(web: WebClient) -> None:
             log.error(f"[stale_queue] cycle failed, will retry in 24h: {e}", exc_info=True)
 
 
+def _find_campaign_for_offer(ch, adv_name: str, approved_at: str) -> list:
+    """
+    Find campaign IDs in from_airbyte_campaigns that started within 30 days after
+    an offer was approved for this advertiser.
+
+    AdOps creates the campaign in the MS platform AFTER approval — so campaigns
+    won't exist at approval time. Using start_date in [approved_at, approved_at+30d]
+    targets the specific campaign launched for this offer, not pre-existing ones.
+
+    Returns list of int campaign_id. Empty list means fall back to fuzzy name match.
+    """
+    if not adv_name or not adv_name.strip() or not approved_at:
+        return []
+    try:
+        q = """
+        SELECT toUInt64(id) AS campaign_id
+        FROM from_airbyte_campaigns
+        WHERE adv_name ILIKE {adv_pattern:String}
+          AND trim(status) = 'active'
+          AND start_date >= toDate({approved_at:String})
+          AND start_date <= toDate({approved_at:String}) + INTERVAL 30 DAY
+        ORDER BY start_date ASC
+        LIMIT 10
+        """
+        rows = ch.query(q, parameters={
+            "adv_pattern": f"%{adv_name}%",
+            "approved_at": approved_at[:10],  # YYYY-MM-DD
+        }).result_rows
+        return [int(r[0]) for r in rows if r[0]]
+    except Exception as e:
+        log.warning(f"_find_campaign_for_offer failed for {adv_name!r}: {e}")
+        return []
+
+
 def _performance_recap(web: WebClient) -> None:
     """
-    14-day post-launch performance recap daemon.
+    7-day post-launch performance recap daemon.
 
     Runs daily. For every queued/live offer where:
-      - approved_at is 14+ days ago
+      - approved_at is 7+ days ago
       - performance_recap_sent is False
 
     Pulls actual RPM from ClickHouse, compares to Scout's estimate at approval time,
     posts a 3-line recap in the original approval thread, marks recap as sent.
+
+    Campaign matching uses a timing-based approach: find campaigns where start_date
+    falls in [approved_at, approved_at+30d] — this targets the campaign AdOps created
+    for this specific offer rather than pre-existing campaigns for the same advertiser.
+    Falls back to all-time fuzzy adv_name match if no timing match found.
 
     This is the feedback loop that makes the model legible:
       Scout estimated $X → actual came in at $Y (+/-Z%)
     The ClickHouse benchmarks already self-improve as offers accumulate data.
     This thread post makes that improvement visible and builds team trust.
     """
-    RECAP_DAYS = 14
+    RECAP_DAYS = 7
 
     while True:
         try:
@@ -1203,6 +1242,9 @@ def _performance_recap(web: WebClient) -> None:
             state   = _load_launched_offers()
             now     = datetime.now(timezone.utc)
             updated = False
+
+            # Single ClickHouse connection for the full cycle — avoids N+1 per offer
+            ch = _get_ch_client()
 
             for advertiser, entry in list(state.items()):
                 if entry.get("performance_recap_sent"):
@@ -1218,28 +1260,43 @@ def _performance_recap(web: WebClient) -> None:
                     continue
 
                 thread_url = entry.get("thread_url", "")
-                import re as _re
-                m = _re.search(r'/archives/([A-Z0-9]+)/p(\d+)', thread_url)
+                m = re.search(r'/archives/([A-Z0-9]+)/p(\d+)', thread_url)
                 if not m:
                     continue
                 channel   = m.group(1)
                 ts_raw    = m.group(2)
                 thread_ts = f"{ts_raw[:10]}.{ts_raw[10:]}"
 
-                # Pull actual impressions + revenue since approval date
+                # Pull actual impressions + revenue since approval date.
+                # Timing-based match: find campaigns AdOps created for this offer
+                # (start_date window). Fallback to fuzzy name if no match found.
                 try:
-                    ch = _get_ch_client()
-                    q  = """
-                    SELECT
-                        count()                          AS impressions,
-                        sum(toFloat64OrNull(revenue))    AS total_revenue
-                    FROM default.adpx_conversionsdetails conv
-                    JOIN default.mv_adpx_campaigns c
-                      ON toInt64(conv.campaign_id) = toInt64(c.id)
-                    WHERE c.adv_name ILIKE {adv_pattern:String}
-                      AND conv.created_at >= toDateTime({approved_at_str:String})
-                      AND toYYYYMM(conv.created_at) >= toYYYYMM(toDate({approved_at_date:String}))
-                    """
+                    campaign_ids = _find_campaign_for_offer(ch, advertiser, approved_at_str)
+                    if campaign_ids:
+                        id_list = ", ".join(str(i) for i in campaign_ids)
+                        q = f"""
+                        SELECT
+                            count()                          AS impressions,
+                            sum(toFloat64OrNull(revenue))    AS total_revenue
+                        FROM default.adpx_conversionsdetails conv
+                        WHERE conv.campaign_id IN ({id_list})
+                          AND conv.created_at >= toDateTime({{approved_at_str:String}})
+                          AND toYYYYMM(conv.created_at) >= toYYYYMM(toDate({{approved_at_date:String}}))
+                        """
+                        log.info(f"[recap] Timing-anchored match for {advertiser}: campaign_ids={campaign_ids}")
+                    else:
+                        q = """
+                        SELECT
+                            count()                          AS impressions,
+                            sum(toFloat64OrNull(revenue))    AS total_revenue
+                        FROM default.adpx_conversionsdetails conv
+                        JOIN default.mv_adpx_campaigns c
+                          ON toInt64(conv.campaign_id) = toInt64(c.id)
+                        WHERE c.adv_name ILIKE {adv_pattern:String}
+                          AND conv.created_at >= toDateTime({approved_at_str:String})
+                          AND toYYYYMM(conv.created_at) >= toYYYYMM(toDate({approved_at_date:String}))
+                        """
+                        log.info(f"[recap] No timing match for {advertiser} — using fuzzy name fallback")
                     rows = ch.query(q, parameters={
                         "adv_pattern":      f"%{advertiser}%",
                         "approved_at_str":  approved_at_str,
@@ -1258,7 +1315,7 @@ def _performance_recap(web: WebClient) -> None:
 
                 if impressions < 100:
                     # Not enough data yet — skip, will catch next cycle
-                    log.info(f"Recap skipped for {advertiser}: only {impressions} impressions at 14d")
+                    log.info(f"Recap skipped for {advertiser}: only {impressions} impressions at 7d")
                     continue
 
                 actual_rpm = round(total_revenue / impressions * 1000, 0) if impressions else 0
@@ -1269,24 +1326,24 @@ def _performance_recap(web: WebClient) -> None:
                     accuracy  = "on the money" if abs(delta_pct) <= 15 else ("above estimate" if delta_pct > 0 else "below estimate")
                     score_line = f"Scout estimated *${estimated:,.0f} RPM* → actual *${actual_rpm:,.0f} RPM* ({direction}, {accuracy})"
                 elif actual_rpm:
-                    score_line = f"Actual RPM at 14 days: *${actual_rpm:,.0f}* ({impressions:,} impressions)"
+                    score_line = f"Actual RPM at 7 days: *${actual_rpm:,.0f}* ({impressions:,} impressions)"
                 else:
-                    score_line = f"No conversions detected at 14 days ({impressions:,} impressions)"
+                    score_line = f"No conversions detected at 7 days ({impressions:,} impressions)"
 
                 msg = (
-                    f":bar_chart: *{advertiser}* — 14-day performance recap\n"
+                    f":bar_chart: *{advertiser}* — 7-day performance recap\n"
                     f"{score_line}\n"
                     f"_{payout} · {network} · {impressions:,} impressions_"
                 )
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
-                # Also DM the approver — they won't be watching a 2-week-old thread
+                # Also DM the approver — they won't be watching a week-old thread
                 approved_by = entry.get("approved_by", "")
                 if approved_by:
                     try:
                         dm_ch = web.conversations_open(users=[approved_by])["channel"]["id"]
                         dm_body = (
-                            f":bar_chart: *{advertiser}* — 14-day recap\n"
+                            f":bar_chart: *{advertiser}* — 7-day recap\n"
                             f"{score_line}\n"
                             f"_{payout} · {network} · {impressions:,} impressions_"
                         )
@@ -1298,10 +1355,10 @@ def _performance_recap(web: WebClient) -> None:
 
                 # Mark sent — won't re-post
                 state[advertiser]["performance_recap_sent"] = True
-                state[advertiser]["actual_rpm_14d"]         = actual_rpm
-                state[advertiser]["impressions_14d"]        = impressions
+                state[advertiser]["actual_rpm_7d"]          = actual_rpm
+                state[advertiser]["impressions_7d"]         = impressions
                 updated = True
-                log.info(f"14-day recap sent for {advertiser}: est=${estimated} actual=${actual_rpm}")
+                log.info(f"7-day recap sent for {advertiser}: est=${estimated} actual=${actual_rpm}")
 
                 # Feed actuals back into learned benchmarks
                 if actual_rpm > 0:
