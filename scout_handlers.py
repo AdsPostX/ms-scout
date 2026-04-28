@@ -430,7 +430,18 @@ def _try_add_to_demand_queue(
     Returns the Notion page URL on success, None otherwise.
     State is persisted to launched_offers.json by the caller (_record_queued_offer).
     """
-    notion_url = _write_to_notion_queue(brief_data, copy_data or {}, user_id, thread_url)
+    user_display = user_id
+    try:
+        _uinfo = web.users_info(user=user_id)
+        _profile = (_uinfo.get("user") or {}).get("profile", {})
+        user_display = (
+            _profile.get("real_name")
+            or _profile.get("display_name")
+            or user_id
+        )
+    except Exception as e:
+        log.debug(f"[brief_queue] user_display lookup failed for {user_id}: {e}")
+    notion_url = _write_to_notion_queue(brief_data, copy_data or {}, user_id, thread_url, user_display=user_display)
 
     if brief_channel and brief_ts:
         _update_brief_card_queued(
@@ -494,12 +505,12 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
         _uinfo = web.users_info(user=user_id)
         _profile = (_uinfo.get("user") or {}).get("profile", {})
         user_display = (
-            _profile.get("display_name")
-            or _profile.get("real_name")
+            _profile.get("real_name")       # "Full name" — almost always set
+            or _profile.get("display_name") # @handle — often empty string
             or user_id
         )
-    except Exception:
-        pass  # fallback to raw user_id — better than crashing approval flow
+    except Exception as e:
+        log.debug(f"[approve] user_display lookup failed for {user_id}: {e}")
 
     # 4. Generate AI copy synchronously — page will be complete at creation time.
     # Slack already sent the ack, so there is no 3-second constraint here.
