@@ -129,6 +129,27 @@ If the contract drifts, approved offers keep showing active buttons — no error
 - **Conditional rendering based on caller-provided data is OK** — showing a warning when `risk_flag` is non-empty, hiding a button when a field is absent. What's NOT OK: making threshold comparisons, writing SQL, or deciding what action to take. The caller decides what's true; `scout_slack_ui.py` decides how to display it.
 - **Constants**: `_HELP_TRIGGERS`, `_EMOJI_ALIASES`, `_INLINE_RE`, `_HOME_EXAMPLES` live here
 
+### Block Kit Rendering Contract (PR 14 — Apr 2026)
+
+Every Pulse signal group and per-item card MUST use the canonical primitives. Inline `{"type": "section", ...}` construction in `_format_pulse_blocks()` is prohibited — it drifts on the next edit.
+
+| Use case | Canonical primitive | Notes |
+|---|---|---|
+| Signal group header (ghost, fill, opps, NA, momentum) | `_build_signal_header(emoji, title, context="")` | Returns 1 block (no context) or 2 blocks (section + context). No "WARNING:"/"CRITICAL:" label. |
+| Per-item card (publisher, campaign, opportunity) | `_build_item_card(name, left_body, right_body="", context="", action_button=None)` | Uses `section.fields` when `right_body` is set; plain `section.text` when empty. ONE call per item — never join multiple items on one line. |
+| Publisher velocity card (NEEDS ATTENTION, MOMENTUM) | `_build_publisher_card(name, delta_pct, ...)` | Thin wrapper over `_build_item_card`. Includes `float(delta_pct)` type guard. Use `*Top Advertiser*` label (not "Driven by"). |
+| Actions row (buttons) | `_build_action_row(buttons)` | Pass pre-built button element dicts. |
+
+**Prohibited patterns** — do NOT use in `_format_pulse_blocks()`:
+- NBSP padding (` `, `\xa0`) in any mrkdwn text — renders as garbage on mobile
+- Joining multiple items on one line with `·` separators (e.g. `pub1 · pub2 · pub3`)
+- `section.fields` with an empty right column (`"*Label*\n—"`) — use plain `text` section instead
+- `_build_alert_block()` for Pulse signal headers — that function is for `_build_brief_blocks()` risk flags only
+
+**Block count hard limit**: Slack silently drops messages over 50 blocks. `_format_pulse_blocks()` logs the count via `log.debug("[pulse] block count: %d", len(blocks))` and gates the standing section using `_ALWAYS_TAIL = 4` to stay under the limit.
+
+**`_today` test-injection seam**: `_format_pulse_blocks()` accepts `_today=None`. When `None`, it calls `_date.today()` at runtime. Tests pass `_today=date(2026, 4, 27)` (a known Monday) to exercise the opportunities code path without mocking. **Do NOT remove this parameter** — Test 16 in `smoke_test.py` depends on it. No production caller passes it.
+
 ### scout_notion.py
 - **All Notion API calls** live here: `_write_to_notion_queue`, `_patch_notion_copy`, `_notion_watcher_loop`
 - **Zero Slack calls** — fire-and-forget; callers don't wait on it
