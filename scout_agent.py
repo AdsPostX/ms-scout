@@ -76,6 +76,7 @@ class _LoggingCHClient:
 
 
 SNAPSHOT_PATH = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
+_PULSE_STATE_PATH = pathlib.Path(__file__).parent / "data" / "pulse_state.json"
 
 # ── Performance benchmark cache (refreshed hourly) ───────────────────────────
 # Maps: category → {cvr_pct, rpm, sample_size}
@@ -692,7 +693,8 @@ INTENTS — resolve every query to one, then act immediately.
     budget cap seasonality, attribution issues, pre-purchase SDK behaviors.
     Publishers: set exclude_from_fill_rate=True when high session count + low fill is expected behavior (pre-purchase SDKs).
     Advertisers: capture budget patterns, cap seasonality, attribution issues — context that explains revenue signals.
-    Write immediately. Show exactly what was stored. Invite correction in the same message.
+    Write immediately. Confirm with exactly one line: "Logged: [entity] — [what you captured]. Reply to correct."
+    Never omit this confirmation line — it is the only signal the team has to catch a mis-logged fact.
     Do NOT wait for "log this" — if they're explaining entity behavior to Scout in a way that should change signal interpretation, that IS a record request.
 
 32. SELF-QA / SELF-TEST — "QA yourself", "self test", "run QA", "test yourself", "run the QA suite", "scout QA", "run self-qa", "check yourself"
@@ -704,6 +706,18 @@ INTENTS — resolve every query to one, then act immediately.
     - Group: Core Health · Offer Intelligence · Revenue & Publisher · Data Boundaries
     - End with :zap: Action if any failures, or ":zap: All systems nominal." if all pass.
     Never show raw JSON. Always format as a readable Slack message.
+
+33. PULSE RECALL — "what did the Pulse say", "what did Scout flag this morning", "what happened in the 8am brief", "morning signal", "did anything get flagged", "what was in the Pulse", "Pulse recap", "morning briefing recap", "what signals came up today"
+    → get_pulse_summary().
+    If has_pulse=False: ":large_yellow_circle: No scheduled Pulse has fired yet today. The morning briefing runs at 8am CT."
+    If has_pulse=True and had_content=False: ":large_green_circle: This morning's Pulse was clean — no signals flagged."
+    If has_pulse=True and had_content=True: summarize each non-zero signal. Name specific publishers from cap_alerts_preview and velocity_down_publishers. Format:
+      :red_circle: *[N] cap alert[s]* — [publisher names from preview] near cap
+      :large_yellow_circle: *[N] velocity drop[s]* — [publisher names]
+      :red_circle: *[N] ghost campaign[s]* flagged
+      :large_yellow_circle: *[N] fill rate alert[s]*
+      :bar_chart: *[N] revenue opportunit[ies]* surfaced
+    Omit any signal with count=0. No suggestions after Pulse recall — the morning blocks gave the context.
 
 DEFAULT: Unclear intent → Intent 17. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
@@ -1496,6 +1510,24 @@ TOOLS = [
             "Each question is evaluated for pass/fail by checking expected content signals. "
             "Use when the user says: 'QA yourself', 'self test', 'run QA', 'test yourself', "
             "'run the QA suite', 'scout QA', 'run self-qa', 'check yourself'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_pulse_summary",
+        "description": (
+            "Return a recall summary of what the most recent scheduled Pulse morning briefing flagged — "
+            "cap alerts (with publisher names), velocity shifts, ghost campaigns, fill rate alerts, "
+            "and revenue opportunities counts. "
+            "Use when the team asks: 'what did the Pulse say', 'what did Scout flag this morning', "
+            "'what happened in the 8am brief', 'morning signal', 'did anything get flagged', "
+            "'what was in the Pulse', 'Pulse recap', 'morning briefing recap'. "
+            "Returns has_pulse=False with a message when no scheduled Pulse has fired yet today. "
+            "Force-pulse runs (admin test runs) do NOT update this — it always reflects the canonical 8am briefing."
         ),
         "input_schema": {
             "type": "object",
@@ -2391,6 +2423,41 @@ def _load_launched_offers_state() -> dict:
     except Exception:
         pass
     return {}
+
+
+def _load_pulse_state_local() -> dict:
+    """Read pulse_state.json directly. Scout-agent local copy — avoids importing scout_state."""
+    try:
+        if _PULSE_STATE_PATH.exists():
+            return json.loads(_PULSE_STATE_PATH.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def get_pulse_summary() -> dict:
+    """
+    Return the last scheduled Pulse signal summary from pulse_state.json.
+    Covers: cap alerts, velocity shifts, ghost campaigns, fill rate, opportunities.
+    Returns has_pulse=False when no Pulse has fired yet (e.g., before 8am CT or fresh deploy).
+    Force-pulse runs intentionally do NOT update this state, so has_pulse always reflects
+    the canonical morning briefing, not an admin test run.
+    """
+    try:
+        state = _load_pulse_state_local()
+        summary = state.get("last_signals_summary")
+        if not summary:
+            return {
+                "has_pulse": False,
+                "message": "No scheduled Pulse has fired yet today. The morning briefing runs at 8am CT.",
+            }
+        return {
+            "has_pulse": True,
+            **summary,
+        }
+    except Exception as e:
+        log.warning(f"get_pulse_summary failed: {e}")
+        return {"has_pulse": False, "message": f"Could not read pulse state: {e}"}
 
 
 def get_demand_queue_status() -> dict:
@@ -3885,6 +3952,7 @@ TOOL_MAP = {
     "get_usage_report": get_usage_report,
     "record_entity_note": record_entity_note,
     "get_offers_for_publisher": get_offers_for_publisher,
+    "get_pulse_summary": get_pulse_summary,
     "run_self_qa": None,  # registered below after function definition
 }
 

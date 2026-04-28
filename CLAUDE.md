@@ -23,6 +23,7 @@ missed a 48h recency filter that was added to the agent tool, causing false alar
 | Velocity shifts | Pulse-only | `_build_velocity_signal()` | No agent tool — no divergence risk |
 | Cap alerts | Pulse-only | `_build_cap_signal()` | No agent tool — no divergence risk |
 | Overnight events | Pulse-only | `_build_overnight_signal()` | No agent tool — no divergence risk |
+| Pulse recall | `get_pulse_summary()` in `scout_agent.py` reads `last_signals_summary` from `pulse_state.json` | Agent tool only — Pulse writes summary, agent reads it | Written by `_run_once_pulse()` (non-force runs only). Force runs intentionally excluded to preserve canonical 8am state. |
 
 ---
 

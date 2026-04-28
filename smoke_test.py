@@ -21,6 +21,7 @@ Tests covered:
  12. _build_advertiser_rpm_context_blocks — pure function, no DB
  13. get_scout_status() — digest_env + digest_routing fields present
  14. get_scout_status() — available_networks is a list when offers exist
+ 15. get_pulse_summary() — has_pulse key present, handles no-pulse case gracefully
 """
 
 import argparse
@@ -324,6 +325,31 @@ def test_scout_status_available_networks():
         if not isinstance(nets, list) or not nets:
             return False, f"available_networks should be non-empty list, got: {nets!r}"
         return True, f"available_networks={nets} ({len(nets)} networks)"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("get_pulse_summary() — has_pulse key present, handles no-pulse gracefully")
+def test_pulse_summary_shape():
+    try:
+        from scout_agent import get_pulse_summary
+        result = get_pulse_summary()
+        if "has_pulse" not in result:
+            return False, "has_pulse key missing from get_pulse_summary() result"
+        if result["has_pulse"]:
+            required = ["had_content", "cap_alerts_count", "ghost_campaigns_count", "opportunities_count"]
+            missing = [k for k in required if k not in result]
+            if missing:
+                return False, f"has_pulse=True but missing keys: {missing}"
+            return True, (
+                f"has_pulse=True — cap_alerts={result.get('cap_alerts_count')}, "
+                f"ghosts={result.get('ghost_campaigns_count')}, "
+                f"opportunities={result.get('opportunities_count')}"
+            )
+        else:
+            if "message" not in result:
+                return False, "has_pulse=False but no message field"
+            return True, f"has_pulse=False — {result['message'][:60]}"
     except Exception as e:
         return False, str(e)
 
