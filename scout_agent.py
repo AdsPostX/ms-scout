@@ -539,7 +539,7 @@ INTENTS — resolve every query to one, then act immediately.
    → get_scout_status(). Compact health card, one line per signal. Flag stale (benchmarks > 2h) or degraded.
    IMPORTANT: Benchmarks (ClickHouse CVR/RPM) and Offer Inventory (offers_latest.json) are TWO SEPARATE THINGS.
    Benchmarks = real CVR/RPM from MS's own ClickHouse data — always available when CH is up, scraper NOT required.
-   Offer Inventory = affiliate offers from Impact, FlexOffers, MaxBounty, CJ, and others — populated by scraper (runs 6am CT daily).
+   Offer Inventory = affiliate offers from multiple affiliate networks — populated by scraper (runs 6am CT daily). Run get_scout_status() to see available_networks for the current inventory.
    When inventory is 0: say ":red_circle: Offer Inventory — 0 offers. Run `@Scout refresh offers` to fetch now (~2 min)."
    Never imply benchmarks depend on the scraper. They come from ClickHouse.
 
@@ -1043,7 +1043,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search term — advertiser name or keyword. Use '' to browse all offers."},
-                "network": {"type": "string", "description": "impact, flexoffers, maxbounty, cj, shareasale, rakuten, awin, tune, everflow"},
+                "network": {"type": "string", "description": "Optional network filter — pass whatever network name the user mentioned (e.g. 'cj', 'impact'). Fuzzy matching handles normalization. Check available_networks in get_scout_status() to see what's in inventory."},
                 "category": {"type": "string", "description": "e.g. Finance, Health & Wellness, Retail"},
                 "min_payout": {"type": "number", "description": "Minimum payout amount (floor)"},
                 "max_payout": {"type": "number", "description": "Maximum payout amount (ceiling), e.g. 0.05 for ≤$0.05"},
@@ -1163,7 +1163,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "advertiser": {"type": "string", "description": "Advertiser name (partial match OK)"},
-                "network": {"type": "string", "description": "Optional: impact, flexoffers, maxbounty, cj, shareasale, rakuten, awin, tune, everflow"},
+                "network": {"type": "string", "description": "Optional network filter — pass whatever network name the user mentioned (e.g. 'cj', 'impact'). Fuzzy matching handles normalization."},
             },
             "required": ["advertiser"],
         },
@@ -3453,6 +3453,7 @@ def get_scout_status() -> dict:
             n = (o.get("network") or "unknown").lower()
             networks[n] = networks.get(n, 0) + 1
         status["by_network"] = networks
+        status["available_networks"] = sorted(networks.keys())
 
     # Demand queue
     state = _load_launched_offers_state()
