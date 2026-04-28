@@ -258,6 +258,38 @@ def test_scout_state_runtime():
         return False, f"scout_state runtime function failed: {e}"
 
 
+@test("_build_advertiser_rpm_context_blocks — pure function, no DB")
+def test_rpm_context_blocks():
+    """
+    Verify _build_advertiser_rpm_context_blocks is importable and returns correct
+    Block Kit structure for both has_history=True and has_history=False cases.
+    """
+    try:
+        from scout_slack_ui import _build_advertiser_rpm_context_blocks
+        # has_history=False → empty list
+        empty = _build_advertiser_rpm_context_blocks({"has_history": False}, scout_estimate=50)
+        if empty != []:
+            return False, f"has_history=False should return [] but got: {empty}"
+        # has_history=True → one context block
+        ctx = {
+            "has_history":      True,
+            "active_campaigns": 3,
+            "impressions_30d":  500_000,
+            "revenue_30d":      25_000.0,
+            "rpm_min":          42.0,
+            "rpm_max":          120.0,
+            "rpm_avg":          50.0,
+        }
+        blocks = _build_advertiser_rpm_context_blocks(ctx, scout_estimate=60)
+        if not isinstance(blocks, list) or len(blocks) == 0:
+            return False, f"has_history=True should return non-empty list, got: {blocks}"
+        if blocks[0].get("type") != "context":
+            return False, f"first block should be type=context, got: {blocks[0].get('type')}"
+        return True, f"has_history=False → [] ✓  has_history=True → context block ✓"
+    except Exception as e:
+        return False, f"_build_advertiser_rpm_context_blocks failed: {e}"
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

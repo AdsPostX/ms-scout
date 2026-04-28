@@ -33,6 +33,7 @@ from scout_slack_ui import (
     _build_brief_blocks, _queue_confirm_blocks, _build_opportunity_cards,
     _build_suggestion_buttons, _build_help_blocks, _build_feedback_buttons,
     _build_home_view, _text_to_blocks, _is_help_query,
+    _build_advertiser_rpm_context_blocks,
 )
 from scout_state import (
     _store_brief, _get_brief, _delete_brief,
@@ -554,15 +555,25 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
         notion_url=notion_url or "", copy_data=copy_data,
     )
 
+    # 7.5. Fetch advertiser RPM context from ClickHouse — non-blocking, fail safe
+    _rpm_ctx = {"has_history": False}
+    try:
+        from scout_agent import _get_ch_client, _query_advertiser_rpm_context
+        _ch = _get_ch_client()
+        _rpm_ctx = _query_advertiser_rpm_context(_ch, advertiser)
+    except Exception as e:
+        log.warning(f"[approve] RPM context fetch failed for {advertiser!r}: {e}")
+
     # 8. Block Kit confirmation card to #scout-offers — canonical pipeline entry
     _network     = (brief_data.get("network") or "").title()
     _payout      = brief_data.get("payout", "")
     _payout_type = (brief_data.get("payout_type") or "").upper()
     _payout_disp = " · ".join(filter(None, [_payout, _payout_type])) or "Rate TBD"
+    _rpm_blocks  = _build_advertiser_rpm_context_blocks(_rpm_ctx, score)
     web.chat_postMessage(
         channel=_route_channel("offers"),
         text=f"✅ {advertiser} added to Pipeline",
-        blocks=_queue_confirm_blocks(advertiser, _network, _payout_disp, user_id, score, notion_url),
+        blocks=_queue_confirm_blocks(advertiser, _network, _payout_disp, user_id, score, notion_url) + _rpm_blocks,
         unfurl_links=False,
     )
 
