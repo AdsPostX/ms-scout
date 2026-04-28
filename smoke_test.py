@@ -354,6 +354,126 @@ def test_pulse_summary_shape():
         return False, str(e)
 
 
+@test("_format_pulse_blocks() — synthetic signals, block count ≤ 50, Monday path exercised")
+def test_pulse_block_count():
+    try:
+        from datetime import date
+        from scout_slack_ui import _format_pulse_blocks
+        signals = {
+            "ghost_campaigns": [{"adv_name": f"Ghost{i}", "impressions_7d": 2000, "revenue_7d": 0} for i in range(5)],
+            "fill_rate": [{"publisher_name": f"Pub{i}", "fill_rate_pct": 35, "sessions_7d": 10000,
+                           "missed_sessions": 3500, "revenue_at_risk": 0} for i in range(4)],
+            "opportunities": [{"adv_name": f"Opp{i}", "publisher_name": f"Pub{i}",
+                               "sessions_30d": 100000, "est_monthly_rev": 5000} for i in range(4)],
+            "velocity_shifts": [
+                {"publisher_name": "TextNow", "direction": "down", "pct_delta": -50, "revenue_7d_ann": 20000,
+                 "revenue_30d": 35000, "top_advertisers": [{"adv_name": "Capital One", "delta_ann": -5000, "rev_7d": 1000}],
+                 "hypothesis": "TextNow paused", "gaps": [("Capital One", 2.50)]},
+                {"publisher_name": "WBMason", "direction": "up", "pct_delta": 23, "revenue_7d_ann": 45000,
+                 "revenue_30d": 32000, "top_advertisers": [], "hypothesis": None, "gaps": []},
+            ],
+            "cap_alerts": [{"adv_name": "CapOne", "cap_pct": 93, "days_to_cap": 2, "days_remaining": 10}],
+            "overnight_events": [],
+        }
+        monday = date(2026, 4, 27)  # known Monday — exercises opportunities code path
+        fallback, blocks = _format_pulse_blocks(signals, is_weekend=False, _today=monday)
+        if len(blocks) > 50:
+            return False, f"Block count {len(blocks)} exceeds Slack's 50-block limit"
+        if not fallback:
+            return False, "fallback text is empty"
+        block_types = [b["type"] for b in blocks]
+        if "section" not in block_types:
+            return False, "no section blocks found"
+        if "context" not in block_types:
+            return False, "no context blocks found"
+        return True, f"block count={len(blocks)}/50, Monday path exercised, all block types present"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_build_signal_header() — correct block structure with and without context")
+def test_build_signal_header():
+    try:
+        from scout_slack_ui import _build_signal_header
+        # With context — should return 2 blocks
+        blocks = _build_signal_header("🔴", "DARK OFFERS — 3 active", "6K impressions burning")
+        if len(blocks) != 2:
+            return False, f"expected 2 blocks with context, got {len(blocks)}"
+        if blocks[0]["type"] != "section":
+            return False, f"first block should be section, got {blocks[0]['type']}"
+        if "DARK OFFERS" not in blocks[0]["text"]["text"]:
+            return False, "title not in first block text"
+        if blocks[1]["type"] != "context":
+            return False, f"second block should be context, got {blocks[1]['type']}"
+        # Without context — should return 1 block
+        single = _build_signal_header("💡", "OPPORTUNITIES")
+        if len(single) != 1:
+            return False, f"expected 1 block without context, got {len(single)}"
+        return True, "2-block (with context) and 1-block (without) both correct"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_build_item_card() — fields layout when right_body set, plain text when empty")
+def test_build_item_card():
+    try:
+        from scout_slack_ui import _build_item_card
+        # With right_body → section.fields
+        blocks = _build_item_card("TextNow", "*-50%*  ·  $20K/mo", "*Top Advertiser*\nCapital One", "TextNow paused")
+        if blocks[0]["type"] != "section":
+            return False, f"first block should be section, got {blocks[0]['type']}"
+        if "fields" not in blocks[0]:
+            return False, "section.fields missing when right_body provided"
+        if len(blocks[0]["fields"]) != 2:
+            return False, f"expected 2 fields, got {len(blocks[0]['fields'])}"
+        if blocks[1]["type"] != "context":
+            return False, f"second block should be context, got {blocks[1]['type']}"
+        # Without right_body → plain section text
+        plain = _build_item_card("TextNow", "*-50%*  ·  $20K/mo")
+        if plain[0]["type"] != "section":
+            return False, "plain card should be section"
+        if "text" not in plain[0]:
+            return False, "plain card missing text field"
+        if "fields" in plain[0]:
+            return False, "plain card should NOT have fields"
+        if len(plain) != 1:
+            return False, f"plain card with no context should be 1 block, got {len(plain)}"
+        return True, "fields layout and plain text layout both correct"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_build_publisher_card() — type guard, attribution branch, context join")
+def test_build_publisher_card():
+    try:
+        from scout_slack_ui import _build_publisher_card
+        # With attribution — should use section.fields
+        blocks = _build_publisher_card("TextNow", "-50", "$20K", attribution="Capital One",
+                                        hypothesis="TextNow paused", gaps=[("Capital One", 2.50)])
+        if blocks[0]["type"] != "section":
+            return False, "first block should be section"
+        if "fields" not in blocks[0]:
+            return False, "should use section.fields when attribution provided"
+        if blocks[1]["type"] != "context":
+            return False, "context block should follow card"
+        ctx_text = blocks[1]["elements"][0]["text"]
+        if "TextNow paused" not in ctx_text:
+            return False, "hypothesis missing from context"
+        if "Capital One" not in ctx_text:
+            return False, "gap missing from context"
+        # Without attribution — plain section
+        plain = _build_publisher_card("WBMason", 23, "$45K")
+        if "fields" in plain[0]:
+            return False, "should NOT use section.fields when no attribution"
+        # pct_delta as string (type guard test)
+        guarded = _build_publisher_card("Test", "23", "$10K")
+        if not guarded:
+            return False, "float guard failed on string pct_delta"
+        return True, "fields/plain branch, context join, and type guard all correct"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:
