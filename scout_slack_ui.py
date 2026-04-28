@@ -17,10 +17,13 @@ Button value contract:
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 
 from scout_state import _load_launched_offers
+
+log = logging.getLogger("scout_slack_ui")
 
 log_ref = None  # populated at import time by scout_bot
 
@@ -974,11 +977,97 @@ def _build_feedback_buttons(query_hash: str) -> list:
         }
     ]
 
+# ── RENDERING CONTRACT ────────────────────────────────────────────────────────
+# All Pulse signal rendering MUST use these primitives. Never inline Block Kit
+# construction for signal headers or per-item cards — wrong patterns become
+# harder than right patterns when the interface doesn't permit them.
+#
+# Primitives:
+#   _build_signal_header(emoji, title, context="") → list[dict]
+#   _build_item_card(name, left_body, right_body="", context="") → list[dict]
+#   _build_action_row(buttons) → dict
+#
+# Prohibited patterns:
+#   ❌  "  ·  ".join([items])          — use one card per item
+#   ❌  "  •   *Name*"       — use _build_item_card
+#   ❌  _build_alert_block() for Pulse — use _build_signal_header
+#   ❌  Separate context blocks per field — merge into one context string
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_signal_header(emoji: str, title: str, context: str = "") -> list[dict]:
+    """Canonical Pulse signal group header. 1 section + optional context.
+    No 'WARNING:'/'CRITICAL:' label — emoji communicates severity.
+    RENDERING CONTRACT: all new Pulse signals MUST use this for headers."""
+    blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": f"{emoji}  *{title}*"}}]
+    if context:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": context}]})
+    return blocks
+
+
+def _build_item_card(
+    name: str,
+    left_body: str,
+    right_body: str = "",
+    context: str = "",
+    action_button: dict | None = None,
+) -> list[dict]:
+    """Canonical per-item card. section.fields when right_body is set; plain section otherwise.
+    RENDERING CONTRACT: one call per item — never join multiple items on one line.
+    For per-item action buttons, pass a pre-built button element dict via action_button."""
+    if right_body:
+        card: dict = {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*{name}*\n{left_body}"},
+                {"type": "mrkdwn", "text": right_body},
+            ],
+        }
+    else:
+        card = {"type": "section", "text": {"type": "mrkdwn", "text": f"*{name}*\n{left_body}"}}
+    blocks: list[dict] = [card]
+    if context:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": context}]})
+    if action_button:
+        blocks.append({"type": "actions", "elements": [action_button]})
+    return blocks
+
+
+def _build_action_row(buttons: list[dict]) -> dict:
+    """Canonical actions block. Pass pre-built button element dicts."""
+    return {"type": "actions", "elements": buttons}
+
+
+def _build_publisher_card(
+    name: str,
+    delta_pct: float | int | str,
+    revenue_str: str,
+    attribution: str = "",
+    hypothesis: str = "",
+    gaps: list | None = None,
+    flag_count: int = 0,
+) -> list[dict]:
+    """Canonical publisher card: 2-col fields + combined context.
+    Used by _format_pulse_blocks (NEEDS ATTENTION, MOMENTUM) and agent tool responses."""
+    pct = float(delta_pct)   # guard: pipeline may return int or string
+    left = f"*{pct:+.0f}%*  ·  {revenue_str}/mo"
+    right = f"*Top Advertiser*\n{attribution}" if attribution else ""
+    context_parts: list[str] = []
+    if hypothesis:
+        context_parts.append(hypothesis)
+    if gaps:
+        gap_strs = [f"{adv} (${rpm:.2f} RPM)" for adv, rpm in gaps]
+        context_parts.append(f"↳ Missing: {', '.join(gap_strs)}")
+    if flag_count >= 4:
+        context_parts.append(f"_flagged {flag_count}d_")
+    return _build_item_card(name, left, right, "  \n".join(context_parts))
+
+
 def _format_pulse_blocks(
     signals: dict,
     is_weekend: bool = False,
     flagged_history: dict | None = None,
     chronic: list | None = None,
+    _today=None,  # Change H: test-injection seam for Monday path — do NOT remove
 ) -> tuple[str, list]:
     """
     Format pulse signals into a Slack Block Kit message.
@@ -1052,7 +1141,7 @@ def _format_pulse_blocks(
                 parts.append(f"{a['adv_name']} {sign}{_fmt_k(abs(delta))}")
         return "  ·  ".join(parts)
 
-    today_d      = _date.today()
+    today_d      = _today if _today is not None else _date.today()
     today_label  = today_d.strftime("%B %-d, %Y")
     cap_alerts   = signals.get("cap_alerts", [])
     vel_shifts   = signals.get("velocity_shifts", [])
@@ -1114,26 +1203,32 @@ def _format_pulse_blocks(
         "type": "header",
         "text": {"type": "plain_text", "text": header_text},
     })
+    # Change M: weekend context banner
+    if is_weekend:
+        blocks.append({"type": "context", "elements": [
+            {"type": "mrkdwn", "text": ":calendar:  Weekend mode — showing high-magnitude moves only"}
+        ]})
 
-# ── Ghost campaigns (P0 — use Alert block) ─
+    # ── Ghost campaigns ──────────────────────────────────────────────────────
+    # ── Ghost campaigns (Change A header + Change C per-item) ───────────────
     if ghost_camps:
         blocks.append({"type": "divider"})
-        top_g    = ghost_camps[:5]
-        remainder = len(ghost_camps) - len(top_g)
-        g_parts  = []
-        for g in top_g:
-            imp_str = f"{g['impressions_7d'] / 1000:.0f}K" if g['impressions_7d'] >= 1000 else str(g['impressions_7d'])
-            g_parts.append(f"*{g['adv_name']}* ({imp_str} impr)")
-        ghost_list = "  ·  ".join(g_parts)
-        if remainder > 0:
-            ghost_list += f"  +{remainder} more"
-
-        blocks.extend(_build_alert_block(
-            "danger",
-            f"DARK OFFERS — {len(ghost_camps)} active with high impressions but $0 revenue",
-            ghost_list
+        impr_total = sum(g["impressions_7d"] for g in ghost_camps)
+        impr_str = f"{impr_total / 1000:.0f}K" if impr_total >= 1000 else str(impr_total)
+        blocks.extend(_build_signal_header(
+            "🔴",
+            f"DARK OFFERS — {len(ghost_camps)} active with $0 revenue",
+            f"{impr_str} impressions burning, zero conversion",
         ))
-
+        for g in ghost_camps[:5]:
+            imp_str = f"{g['impressions_7d'] / 1000:.0f}K" if g["impressions_7d"] >= 1000 else str(g["impressions_7d"])
+            rev_str = f"${g['revenue_7d']:,.0f}" if g.get("revenue_7d", 0) > 0 else "$0"
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*{g['adv_name']}*  ·  {imp_str} impressions/7d  ·  {rev_str} revenue"},
+            })
+        if len(ghost_camps) > 5:
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"+{len(ghost_camps) - 5} more"}]})
         blocks.append({
             "type": "actions",
             "elements": [{
@@ -1144,25 +1239,26 @@ def _format_pulse_blocks(
             }],
         })
 
-    # ── Low fill rate (P0 — use Alert block) ─
+    # ── Low fill rate (Change A header + Change B per-publisher) ─────────────────────
     if fill_rate:
         blocks.append({"type": "divider"})
         total_missed = sum(f["missed_sessions"] for f in fill_rate)
-        missed_str   = f"{total_missed / 1_000_000:.1f}M" if total_missed >= 1_000_000 else f"{total_missed / 1000:.0f}K"
-        fill_parts   = []
-        for f in fill_rate[:4]:
-            sess_str = f"{f['sessions_7d'] / 1_000_000:.1f}M" if f['sessions_7d'] >= 1_000_000 else f"{f['sessions_7d'] / 1000:.0f}K"
-            fill_parts.append(f"*{f['publisher_name']}* {f['fill_rate_pct']:.0f}% ({sess_str} sessions)")
-        fill_list = "  ·  ".join(fill_parts)
-        if len(fill_rate) > 4:
-            fill_list += f"  +{len(fill_rate) - 4} more"
-
-        blocks.extend(_build_alert_block(
-            "warning",
-            f"LOW FILL RATE — {len(fill_rate)} publisher{'s' if len(fill_rate) != 1 else ''} with {missed_str} missed sessions/7d",
-            fill_list
+        missed_str = f"{total_missed / 1_000_000:.1f}M" if total_missed >= 1_000_000 else f"{total_missed / 1000:.0f}K"
+        blocks.extend(_build_signal_header(
+            "🟡",
+            f"LOW FILL RATE — {len(fill_rate)} publisher{'s' if len(fill_rate) != 1 else ''}",
+            f"{missed_str} missed sessions/7d",
         ))
-
+        for f in fill_rate[:4]:
+            sess_str = f"{f['sessions_7d'] / 1_000_000:.1f}M" if f["sessions_7d"] >= 1_000_000 else f"{f['sessions_7d'] / 1000:.0f}K"
+            rev_at_risk = f.get("revenue_at_risk", 0)
+            risk_str = f"  ·  ~{_fmt_k(rev_at_risk)}/wk at risk" if rev_at_risk else ""
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*{f['publisher_name']}*  ·  {f['fill_rate_pct']:.0f}% fill  ·  {sess_str} sessions/7d{risk_str}"},
+            })
+        if len(fill_rate) > 4:
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"+{len(fill_rate) - 4} more publishers"}]})
         blocks.append({
             "type": "actions",
             "elements": [{
@@ -1173,25 +1269,24 @@ def _format_pulse_blocks(
             }],
         })
 
-    # ── Revenue opportunities (weekly, Mondays only) ─
+    # ── Revenue opportunities (Change A header + Change F per-opp, Mondays only) ─
     if opportunities and today_d.weekday() == 0:
         blocks.append({"type": "divider"})
         total_est = sum(o["est_monthly_rev"] for o in opportunities)
         total_str = f"${total_est / 1000:.0f}K" if total_est >= 1000 else f"${total_est:.0f}"
-        opp_parts = []
-        for o in opportunities[:4]:
-            sess_str = f"{o['sessions_30d'] / 1_000_000:.1f}M" if o['sessions_30d'] >= 1_000_000 else f"{o['sessions_30d'] / 1000:.0f}K"
-            est_str  = f"${o['est_monthly_rev'] / 1000:.0f}K" if o['est_monthly_rev'] >= 1000 else f"${o['est_monthly_rev']:.0f}"
-            opp_parts.append(f"*{o['adv_name']}* → {o['publisher_name']} · {sess_str} sessions · {est_str}/mo")
-        if len(opportunities) > 4:
-            opp_parts.append(f"+{len(opportunities) - 4} more")
-
-        blocks.extend(_build_alert_block(
-            "info",
-            f"REVENUE OPPORTUNITIES — {len(opportunities)} gaps, est. {total_str}/mo combined",
-            "  ·  ".join(opp_parts)
+        blocks.extend(_build_signal_header(
+            "💡",
+            f"REVENUE OPPORTUNITIES — {len(opportunities)} gaps, est. {total_str}/mo",
         ))
-
+        for o in opportunities[:3]:
+            sess_str = f"{o['sessions_30d'] / 1_000_000:.1f}M" if o["sessions_30d"] >= 1_000_000 else f"{o['sessions_30d'] / 1000:.0f}K"
+            est_str  = f"${o['est_monthly_rev'] / 1000:.0f}K" if o["est_monthly_rev"] >= 1000 else f"${o['est_monthly_rev']:.0f}"
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*{o['adv_name']}*  →  {o['publisher_name']}\n{sess_str} sessions  ·  {est_str}/mo est."},
+            })
+        if len(opportunities) > 3:
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"+{len(opportunities) - 3} more opportunities"}]})
         blocks.append({
             "type": "actions",
             "elements": [{
@@ -1202,40 +1297,52 @@ def _format_pulse_blocks(
             }],
         })
 
-    # ── NEEDS ATTENTION (downs) ─
+    # ── Change I: zero-signal all-clear ──────────────────────────────────
+    _has_signals = bool(
+        ghost_camps or fill_rate or regular_downs or urgent_caps or ups
+        or (opportunities and today_d.weekday() == 0)
+    )
+    if not _has_signals:
+        blocks.append({"type": "context", "elements": [
+            {"type": "mrkdwn", "text": ":white_check_mark:  All clear — no signals above threshold today"}
+        ]})
+
+    # ── NEEDS ATTENTION (Change A header + Change D fields + G1 caps + G3 hint) ─
     if regular_downs or urgent_caps:
         blocks.append({"type": "divider"})
-        blocks.extend(_build_alert_block("warning", "NEEDS ATTENTION", "Revenue down — action required"))
+        blocks.extend(_build_signal_header("⬇️", "NEEDS ATTENTION", "Revenue down — action required"))
         for v, flag_count in regular_downs:
-            attr      = _inline_attr(v)
-            attr_part = f"   ·   {attr}" if attr else ""
-            flag_note = f"   ·   _(flagged {flag_count}d)_" if flag_count >= 4 else ""
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"\u00a0\u00a0\u00a0\u00a0•   *{v['publisher_name']}*   "
-                        f"*{v['pct_delta']:.0f}%*   "
-                        f"{_fmt_k(v['revenue_7d_ann'])}/mo"
-                        f"{attr_part}{flag_note}"
-                    ),
-                },
-            })
-            # Causal hypothesis: why this is happening
+            attr = _inline_attr(v)
+            pct  = float(v.get("pct_delta", 0))
+            left = f"*{pct:+.0f}%*  ·  {_fmt_k(v['revenue_7d_ann'])}/mo"
+            # Change J: fall back to plain section when no attribution
+            if attr:
+                card: dict = {
+                    "type": "section",
+                    "fields": [
+                        {"type": "mrkdwn", "text": f"*{v['publisher_name']}*\n{left}"},
+                        {"type": "mrkdwn", "text": f"*Top Advertiser*\n{attr}"},
+                    ],
+                }
+            else:
+                card = {"type": "section", "text": {"type": "mrkdwn", "text": f"*{v['publisher_name']}*\n{left}"}}
+            blocks.append(card)
+
+            # Change D + K: combined context, \n separator
+            ctx_parts: list[str] = []
             if v.get("hypothesis"):
-                blocks.append({
-                    "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0{v['hypothesis']}"}],
-                })
-            # Gap opportunities: top earners not yet provisioned here
+                ctx_parts.append(v["hypothesis"])
             if v.get("gaps"):
                 gap_parts = [f"{adv} (${rpm:.2f} RPM)" for adv, rpm in v["gaps"]]
+                ctx_parts.append(f"↳ Missing: {', '.join(gap_parts)}")
+            if flag_count >= 4:
+                ctx_parts.append(f"_(flagged {flag_count}d)_")
+            if ctx_parts:
                 blocks.append({
                     "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0↳ *Missing:* {',  '.join(gap_parts)}"}],
+                    "elements": [{"type": "mrkdwn", "text": "  \n".join(ctx_parts)}],
                 })
-            # Offer recommendation CTA — closes the urgency-to-action loop
+
             pub_name = v["publisher_name"]
             blocks.append({
                 "type": "actions",
@@ -1256,50 +1363,52 @@ def _format_pulse_blocks(
                 ],
             })
 
+        # Change G1: urgent caps — no NBSP padding
         for a in urgent_caps[:3]:
             hit_note = f"~{a['days_to_cap']:.0f}d to cap"
             blocks.append({
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"\u00a0\u00a0\u00a0\u00a0•   *{a['adv_name']}*   *{a['cap_pct']}% of cap*   {hit_note}",
-                },
+                "text": {"type": "mrkdwn", "text": f"*{a['adv_name']}*  ·  *{a['cap_pct']}% of cap*  ·  {hit_note}"},
             })
 
-        # Rotating action nudge — bottom of NEEDS ATTENTION section
+        # Change G3: NA hint — no NBSP
         blocks.append({
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"\u00a0\u00a0\u00a0\u00a0:speech_balloon:  {na_section_hint}"}],
+            "elements": [{"type": "mrkdwn", "text": f":speech_balloon:  {na_section_hint}"}],
         })
 
-    # ── MOMENTUM (ups) ─
+    # ── MOMENTUM (Change A header + Change E fields + Change J empty attr) ──────
     if ups:
         blocks.append({"type": "divider"})
-        blocks.extend(_build_alert_block("info", "MOMENTUM", f"+{len(ups)} publishers up"))
+        blocks.extend(_build_signal_header(
+            "⬆️",
+            f"MOMENTUM — {len(ups)} publisher{'s' if len(ups) != 1 else ''} up",
+        ))
         for v in ups[:3]:
             attr = _inline_attr(v)
-            attr_part = f"   ·   {attr}" if attr else ""
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"\u00a0\u00a0\u00a0\u00a0•   *{v['publisher_name']}*   "
-                        f"*+{v['pct_delta']:.0f}%*   "
-                        f"{_fmt_k(v['revenue_7d_ann'])}/mo"
-                        f"{attr_part}"
-                    ),
-                },
-            })
+            pct  = float(v.get("pct_delta", 0))
+            left = f"*{pct:+.0f}%*  ·  {_fmt_k(v['revenue_7d_ann'])}/mo"
+            # Change J: fall back to plain section when no attribution
+            if attr:
+                m_card: dict = {
+                    "type": "section",
+                    "fields": [
+                        {"type": "mrkdwn", "text": f"*{v['publisher_name']}*\n{left}"},
+                        {"type": "mrkdwn", "text": f"*Top Advertiser*\n{attr}"},
+                    ],
+                }
+            else:
+                m_card = {"type": "section", "text": {"type": "mrkdwn", "text": f"*{v['publisher_name']}*\n{left}"}}
+            blocks.append(m_card)
 
     # ── Standing checks: routine caps + overnight + persistent down partners ───
     standing: list = []
 
-    # Persistent down partners (7+ days flagged) — demoted here with escalation note
+    # Change G2: persistent down partners — no leading NBSP
     for v, flag_count in persistent_downs:
         standing.append(
-            f"⚠️  *{v['publisher_name']}* {v['pct_delta']:.0f}%   {_fmt_k(v['revenue_7d_ann'])}/mo"
-            f"   _(flagged {flag_count}d — persistent, escalate or investigate)_"
+            f"⚠️  *{v['publisher_name']}*  {v['pct_delta']:.0f}%  ·  {_fmt_k(v['revenue_7d_ann'])}/mo"
+            f"  ·  _flagged {flag_count}d — escalate or investigate_"
         )
 
     if routine_caps:
@@ -1329,15 +1438,21 @@ def _format_pulse_blocks(
         action = "paused" if e["type"] == "pause" else "resumed"
         standing.append(f"{icon}  *{name}* {action} {ts}")
 
+    # Block count guard (precise formula) — _ALWAYS_TAIL = chronic(2) + footer(2)
+    _ALWAYS_TAIL = 4
     if standing:
-        blocks.append({"type": "divider"})
-        for line in standing:
-            blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": line}],
-            })
+        if len(blocks) + 1 + len(standing) + _ALWAYS_TAIL <= 50:
+            blocks.append({"type": "divider"})
+            for line in standing:
+                blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": line}]})
+        else:
+            log.warning(
+                "[pulse] standing section suppressed — %d base + %d standing + %d tail = %d > 50",
+                len(blocks), 1 + len(standing), _ALWAYS_TAIL,
+                len(blocks) + 1 + len(standing) + _ALWAYS_TAIL,
+            )
 
-    # ── Chronic issues (P9-2) ────────────────────────────────────────────────
+    # ── Chronic issues (P9-2) ────────────────────────────────────────────
     if chronic_set:
         chronic_names = ", ".join(sorted(chronic_set))
         blocks.append({"type": "divider"})
@@ -1346,7 +1461,7 @@ def _format_pulse_blocks(
             "elements": [{"type": "mrkdwn", "text": f":rotating_light:  *Chronic Issues*   {chronic_names} — ongoing structural issues, tracked."}],
         })
 
-    # ── Footer ────────────────────────────────────────────────────────────────
+    # ── Footer ────────────────────────────────────────────────────────────
     blocks.append({"type": "divider"})
     blocks.append({
         "type": "context",
@@ -1356,6 +1471,7 @@ def _format_pulse_blocks(
         }],
     })
 
+    log.debug("[pulse] block count: %d", len(blocks))
     fallback = f"{'Weekend Watchdog' if is_weekend else 'Pulse'} — {today_label}: {len(ghost_camps)} ghost, {len(downs)} need attention, {len(ups)} in momentum."
     return fallback, blocks
 
