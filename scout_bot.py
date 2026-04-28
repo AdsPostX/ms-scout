@@ -946,6 +946,26 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
     # Only update state for scheduled (non-force) runs
     if not force:
         state["last_pulse_date"] = today_str
+        # Persist signal summary so get_pulse_summary() can recall it later.
+        # Force runs are intentionally excluded — they route to #scout-qa and should not
+        # overwrite the canonical "what did you flag this morning?" state.
+        state["last_signals_summary"] = {
+            "posted_at": now_chi.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "had_content": bool(has_content),
+            "cap_alerts_count": len(signals.get("cap_alerts") or []),
+            "cap_alerts_preview": [
+                a.get("publisher_name", "") for a in (signals.get("cap_alerts") or [])[:3]
+            ],
+            "velocity_down_publishers": [
+                v["publisher_name"]
+                for v in (signals.get("velocity_shifts") or [])
+                if v.get("direction") == "down"
+            ][:3],
+            "ghost_campaigns_count": len(signals.get("ghost_campaigns") or []),
+            "fill_rate_count": len(signals.get("fill_rate") or []),
+            "opportunities_count": len(signals.get("opportunities") or []),
+            "overnight_events_count": len(signals.get("overnight_events") or []),
+        }
         _save_pulse_state(state)
 
 
