@@ -239,6 +239,31 @@ def _patch_notion_copy(notion_url: str, ai_copy: dict) -> None:
         *(_copy_callout(goal_title,    "🎯", "Goal Title · 128 chars",   128) if goal_title else []),
     ]
 
+    # Delete the "(AI copy generating" placeholder callout before appending real copy
+    try:
+        get_resp = _req.get(
+            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            headers={"Authorization": f"Bearer {notion_token}", "Notion-Version": "2022-06-28"},
+            timeout=10,
+        )
+        if get_resp.status_code == 200:
+            for block in get_resp.json().get("results", []):
+                if block.get("type") == "callout":
+                    rt = block.get("callout", {}).get("rich_text", [])
+                    text = rt[0].get("text", {}).get("content", "") if rt else ""
+                    if text.startswith("(AI copy generating"):
+                        del_resp = _req.delete(
+                            f"https://api.notion.com/v1/blocks/{block['id']}",
+                            headers={"Authorization": f"Bearer {notion_token}", "Notion-Version": "2022-06-28"},
+                            timeout=10,
+                        )
+                        if del_resp.status_code == 200:
+                            log.info(f"Deleted stale placeholder block {block['id']} from {page_id}")
+                        else:
+                            log.warning(f"_patch_notion_copy: placeholder delete failed {del_resp.status_code}")
+    except Exception as e:
+        log.warning(f"_patch_notion_copy: placeholder cleanup failed for {page_id}: {e}")
+
     try:
         resp = _req.patch(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
@@ -482,7 +507,7 @@ def _write_to_notion_queue(
         "Payout Type":    {"select": {"name": payout_type}},
         "Scout Score RPM": {"number": rpm} if rpm else {},
         "Date Approved":  {"date": {"start": now_iso}},
-        "Approved By":    {"rich_text": [{"text": {"content": user_id}}]},
+        "Approved By":    {"rich_text": [{"text": {"content": user_display or user_id}}]},
         "Brief Link":     {"url": thread_url} if thread_url else {},
     }
     # Remove empty property blocks (Notion rejects empty select/number/url)
@@ -556,10 +581,6 @@ def _write_to_notion_queue(
     adv_name_len  = len(advertiser[:28])
 
     children = [
-        _heading("Platform Entry Checklist", 2),
-        _rt_muted("Copy and paste into the MS platform. Page 1: Campaign Config + Copy. Page 2: Platform Settings."),
-        _divider(),
-
         # ── Campaign Config ───────────────────────────────────────────────────
         _heading("Campaign Config", 3),
         _rt(f"Internal Offer Name:   {internal_name[:100]}"),
