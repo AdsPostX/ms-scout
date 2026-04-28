@@ -539,7 +539,7 @@ INTENTS — resolve every query to one, then act immediately.
    → get_scout_status(). Compact health card, one line per signal. Flag stale (benchmarks > 2h) or degraded.
    IMPORTANT: Benchmarks (ClickHouse CVR/RPM) and Offer Inventory (offers_latest.json) are TWO SEPARATE THINGS.
    Benchmarks = real CVR/RPM from MS's own ClickHouse data — always available when CH is up, scraper NOT required.
-   Offer Inventory = affiliate offers from Impact/FlexOffers/MaxBounty — populated by scraper (runs 6am CT daily).
+   Offer Inventory = affiliate offers from Impact, FlexOffers, MaxBounty, CJ, and others — populated by scraper (runs 6am CT daily).
    When inventory is 0: say ":red_circle: Offer Inventory — 0 offers. Run `@Scout refresh offers` to fetch now (~2 min)."
    Never imply benchmarks depend on the scraper. They come from ClickHouse.
 
@@ -1043,7 +1043,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search term — advertiser name or keyword. Use '' to browse all offers."},
-                "network": {"type": "string", "description": "impact, flexoffers, or maxbounty"},
+                "network": {"type": "string", "description": "impact, flexoffers, maxbounty, cj, shareasale, rakuten, awin, tune, everflow"},
                 "category": {"type": "string", "description": "e.g. Finance, Health & Wellness, Retail"},
                 "min_payout": {"type": "number", "description": "Minimum payout amount (floor)"},
                 "max_payout": {"type": "number", "description": "Maximum payout amount (ceiling), e.g. 0.05 for ≤$0.05"},
@@ -1163,7 +1163,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "advertiser": {"type": "string", "description": "Advertiser name (partial match OK)"},
-                "network": {"type": "string", "description": "Optional: impact, flexoffers, or maxbounty"},
+                "network": {"type": "string", "description": "Optional: impact, flexoffers, maxbounty, cj, shareasale, rakuten, awin, tune, everflow"},
             },
             "required": ["advertiser"],
         },
@@ -1383,7 +1383,7 @@ TOOLS = [
         "name": "run_offer_scraper",
         "description": (
             "Trigger an immediate offer inventory refresh from affiliate networks "
-            "(Impact, FlexOffers, MaxBounty). Takes ~2 minutes. Run when offer inventory "
+            "(Impact, FlexOffers, MaxBounty, CJ, ShareASale, Rakuten, AWIN, Tune, Everflow). Takes ~2 minutes. Run when offer inventory "
             "is empty or stale. Updates offers_latest.json and posts the Scout Signal digest. "
             "Use for: 'refresh offers', 'run scraper', 'update offer inventory', "
             "'load benchmarks', 'inventory is empty', 'reload offers', 'fetch latest offers'."
@@ -1465,7 +1465,7 @@ TOOLS = [
     {
         "name": "get_offers_for_publisher",
         "description": (
-            "Return top affiliate offers (from Impact, FlexOffers, MaxBounty inventory) that are "
+            "Return top affiliate offers (from Impact, FlexOffers, MaxBounty, CJ, and other network inventory) that are "
             "a good fit for a specific publisher but not yet provisioned in their campaign set. "
             "Scored by estimated RPM using real MS conversion benchmarks. "
             "DIFFERENT from get_supply_demand_gaps — this surfaces net-new affiliate inventory, "
@@ -3483,13 +3483,27 @@ def get_scout_status() -> dict:
         status["warnings"] = warnings
 
     status["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        import scout_digest as _sd
+        status["digest_env"] = _sd._SCOUT_ENV
+        if _sd._SCOUT_ENV != "production":
+            status["digest_routing"] = f"#scout-qa (SCOUT_ENV={_sd._SCOUT_ENV!r} — not production)"
+        else:
+            status["digest_routing"] = f"#scout-offers ({_sd._digest_channel()})"
+    except Exception as _e:
+        log.warning(f"[status] scout_digest unavailable: {_e}")
+        status["digest_env"]     = "unavailable"
+        status["digest_routing"] = "unavailable"
+
     return status
 
 
 def run_offer_scraper() -> str:
     """
     Trigger an immediate offer inventory refresh from affiliate networks
-    (Impact, FlexOffers, MaxBounty). Run when offer inventory is empty or stale.
+    (Impact, FlexOffers, MaxBounty, CJ, ShareASale, Rakuten, AWIN, Tune, Everflow).
+    Run when offer inventory is empty or stale.
     Takes ~2 minutes. Writes data/offers_latest.json and posts digest.
     """
     import scout_bot as _sb
@@ -3505,11 +3519,25 @@ def run_offer_scraper() -> str:
         # Report results
         if SNAPSHOT_PATH.exists():
             import json as _json
+            from collections import Counter
             offers = _json.loads(SNAPSHOT_PATH.read_text())
             active = sum(1 for o in offers if o.get("status") == "Active")
+            networks = Counter((o.get("network") or "unknown").lower() for o in offers)
+            net_str = "  ·  ".join(f"{k}: {v}" for k, v in sorted(networks.items(), key=lambda x: -x[1]))
+
+            try:
+                import scout_digest as _sd
+                if _sd._SCOUT_ENV != "production":
+                    digest_note = f"\n:warning: Digest routing to #scout-qa (SCOUT_ENV={_sd._SCOUT_ENV!r} — set SCOUT_ENV=production on Render)"
+                else:
+                    digest_note = f"\n:newspaper: Digest posts to #scout-offers if new offers detected."
+            except Exception as _e:
+                log.warning(f"[scraper] scout_digest unavailable for digest routing note: {_e}")
+                digest_note = ""
+
             return (
                 f":white_check_mark: Offer inventory refreshed — {len(offers)} total offers, "
-                f"{active} active. Scout Score rankings and prospecting are now fully operational."
+                f"{active} active.\n{net_str}{digest_note}"
             )
         return (
             ":white_check_mark: Scraper ran. No offers_latest.json found — "
@@ -3669,7 +3697,7 @@ def record_entity_note(entity_name: str, entity_type: str, note: str,
 
 def get_offers_for_publisher(publisher_name: str) -> dict:  # returns dict since PR #18; old str annotation was stale
     """
-    Return top affiliate offers (Impact/FlexOffers/MaxBounty inventory) that are
+    Return top affiliate offers (Impact, FlexOffers, MaxBounty, CJ, and other network inventory) that are
     a good fit for this publisher but not yet provisioned in their campaign set.
     Scored by estimated RPM using real MS conversion benchmarks (_scout_score).
     Different from get_supply_demand_gaps — surfaces NET-NEW affiliate inventory,
