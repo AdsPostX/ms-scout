@@ -93,13 +93,52 @@ _PAYOUT_TYPE_NORM: dict[str, str] = {
     "app_install":  "APP_INSTALL",
 }
 
-# Canonical 9-network list — single source for digest iteration.
-# Order: Big 4 in priority (Impact best historically), then alphabetical.
-# When the scraper adds a 10th network, update this tuple AND the labels/emoji below.
-_DIGEST_NETWORKS: tuple[str, ...] = (
+# Network priority (Big 4 first; established team mental model — Impact at top).
+# Anything not in this tuple is appended alphabetically at module load time
+# from the offers_latest.json keyset, so a 10th network requires no code change.
+_PRIORITY_NETWORKS: tuple[str, ...] = ("impact", "maxbounty", "flexoffers", "cj")
+
+# Cold-start fallback (offers_latest.json missing or empty on fresh deploy).
+_DIGEST_NETWORKS_FALLBACK: tuple[str, ...] = (
     "impact", "maxbounty", "flexoffers", "cj",
     "awin", "everflow", "rakuten", "shareasale", "tune",
 )
+
+
+def _get_active_networks() -> tuple[str, ...]:
+    """
+    Derive the network iteration order from offers_latest.json at module load.
+
+    Returns Big 4 in priority order (only those actually present in inventory),
+    followed by any other live networks alphabetically. New networks added to
+    the scraper appear here automatically on next Render restart — no PR required.
+
+    Returns _DIGEST_NETWORKS_FALLBACK on cold start (file missing) or any error.
+    """
+    try:
+        if not OFFERS_FILE.exists():
+            return _DIGEST_NETWORKS_FALLBACK
+        offers = json.loads(OFFERS_FILE.read_text())
+        if not offers:
+            return _DIGEST_NETWORKS_FALLBACK
+        live: set[str] = set()
+        for o in offers:
+            net = (o.get("network") or "").lower().strip()
+            if net:
+                live.add(net)
+        if not live:
+            return _DIGEST_NETWORKS_FALLBACK
+        priority = tuple(n for n in _PRIORITY_NETWORKS if n in live)
+        rest = tuple(sorted(live - set(_PRIORITY_NETWORKS)))
+        return priority + rest
+    except Exception as e:
+        log.warning(f"[digest] _get_active_networks() failed, using fallback: {e}")
+        return _DIGEST_NETWORKS_FALLBACK
+
+
+# Module-load-once: scraper refreshes won't change this until next Render restart.
+# Acceptable because new networks ship rarely and Render restarts daily on deploy.
+_DIGEST_NETWORKS: tuple[str, ...] = _get_active_networks()
 
 _NETWORK_LABEL: dict[str, str] = {
     "impact":     "Impact",
@@ -606,11 +645,16 @@ def build_digest_blocks(
     benchmarks:        dict,
     run_date:          str,
     offer_images:      dict | None = None,
+    sel_meta:          dict | None = None,
 ) -> list:
     all_offers = _load_offers()
     total_screened = len(all_offers)
     total_selected = sum(len(v) for v in offers_by_network.values())
     networks_active = len(offers_by_network)
+
+    # PR 16c: surface dedup count when select_offers suppressed cross-network duplicates
+    deduped = (sel_meta or {}).get("advertisers_deduped", 0)
+    dedup_note = f" {deduped} duplicate advertiser{'s' if deduped != 1 else ''} filtered." if deduped else ""
 
     blocks: list = [
         {
@@ -626,7 +670,7 @@ def build_digest_blocks(
                     f"worth a look this week* — evaluated {len(_DIGEST_NETWORKS)} networks, "
                     f"{total_screened} offers scored, "
                     f"{networks_active} network{'s' if networks_active != 1 else ''} with qualifying results. "
-                    f"Filtered existing inventory and zero-payout campaigns."
+                    f"Filtered existing inventory and zero-payout campaigns.{dedup_note}"
                 ),
             },
         },
@@ -877,6 +921,8 @@ def select_offers(
         "skipped_no_score": skipped_no_score,
         "total_selected": total_selected,
         "total_offers": len(offers),
+        # PR 16c: surface dedup count to the digest footer so the team can see it
+        "advertisers_deduped": advertisers_deduped,
     }
     log.info(
         f"Selection: {meta['candidates']} candidates across "
@@ -951,7 +997,7 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
     log.info(f"Images found: {found}/{len(all_scored)}")
 
     run_date = now.strftime("%b %-d")
-    blocks   = build_digest_blocks(offers_by_network, payout_cache, ms_campaigns, benchmarks, run_date, offer_images=offer_images)
+    blocks   = build_digest_blocks(offers_by_network, payout_cache, ms_campaigns, benchmarks, run_date, offer_images=offer_images, sel_meta=sel_meta)
 
     # Prepend NEW THIS WEEK section
     new_block: list = []
