@@ -609,6 +609,61 @@ def test_pulse_block_count_with_pr15b():
         return False, str(e)
 
 
+# ── PR 15c: health status shape + heartbeat module-level state ───────────────
+
+@test("PR 15c — _compute_health_status() shape + health-heartbeat in required set")
+def test_compute_health_status_shape():
+    """
+    PR 15c invariants:
+      1. _compute_health_status() returns {'ok': bool, 'checks': dict}
+      2. 'health-heartbeat' is in BOTH required-thread sets (compute + watchdog)
+      3. Module-level state for heartbeat exists
+      4. No ClickHouse call inside _compute_health_status() — CH lives in heartbeat only
+    """
+    try:
+        import scout_bot
+        # Shape assertions
+        status = scout_bot._compute_health_status()
+        if not isinstance(status, dict):
+            return False, f"expected dict, got {type(status).__name__}"
+        if "ok" not in status or "checks" not in status:
+            return False, f"missing ok/checks; got keys: {sorted(status.keys())}"
+        if not isinstance(status["ok"], bool):
+            return False, f"ok should be bool, got {type(status['ok']).__name__}"
+        if not isinstance(status["checks"], dict):
+            return False, f"checks should be dict, got {type(status['checks']).__name__}"
+
+        for name, check in status["checks"].items():
+            if "ok" not in check or "detail" not in check:
+                return False, f"check '{name}' missing ok/detail: {check}"
+
+        # health-heartbeat must be tracked in BOTH required sets (PR 15c gap fix)
+        import pathlib
+        src = (pathlib.Path(__file__).parent / "scout_bot.py").read_text()
+        if '"health-heartbeat"' not in src:
+            return False, "health-heartbeat not referenced in scout_bot.py"
+        compute_section = src.split("def _compute_health_status")[1].split("\ndef ")[0]
+        watchdog_section = src.split("def _thread_watchdog")[1].split("\ndef ")[0]
+        if "health-heartbeat" not in compute_section:
+            return False, "health-heartbeat missing from _compute_health_status() required set"
+        if "health-heartbeat" not in watchdog_section:
+            return False, "health-heartbeat missing from _thread_watchdog REQUIRED (silent death risk)"
+
+        # Module-level constants
+        for name in ("_HEALTH_HEARTBEAT_WARMUP_SECS", "_HEALTH_CONSECUTIVE_THRESHOLD",
+                     "_HEALTH_STATUS_LOCK", "_LAST_HEALTH_STATUS"):
+            if not hasattr(scout_bot, name):
+                return False, f"module-level state missing: {name}"
+
+        # No CH call in _compute_health_status — CH lives only in _run_health_heartbeat
+        if "_get_ch_client" in compute_section or "ch.query" in compute_section:
+            return False, "ClickHouse call detected in _compute_health_status — would cause Render restarts"
+
+        return True, f"shape OK; {len(status['checks'])} checks; heartbeat tracked in both required sets"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

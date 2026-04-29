@@ -152,6 +152,20 @@ def _slack_thread_url(channel: str, thread_ts: str) -> str:
 _PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # kept for backwards compat
 _PULSE_ENABLED               = os.getenv("PULSE_ENABLED", "true").lower() == "true"
 
+# ── Live health heartbeat (PR 15c) ────────────────────────────────────────────
+# The HTTP /health endpoint (Render probe, every 30s) checks file-based + thread state
+# only. ClickHouse outages are NOT checked there — a CH ping in /health would cause
+# Render to restart the container on transient CH downtime.
+#
+# This heartbeat runs separately every 30 minutes, includes a CH ping, and posts a
+# single Slack alert on first transition to degraded. It does NOT affect the HTTP
+# probe or container restart behavior.
+_HEALTH_STATUS_LOCK            = threading.Lock()
+_LAST_HEALTH_STATUS: dict | None = None  # last status seen by the heartbeat (used for transition detection)
+_HEALTH_HEARTBEAT_WARMUP_SECS  = 300   # wait 5 min after startup before first heartbeat (let daemons settle)
+_HEALTH_CONSECUTIVE_THRESHOLD  = 2     # require 2 consecutive bad checks before alerting (suppresses transients)
+_HEALTH_HEARTBEAT_INTERVAL_SECS = 1800  # 30 min between heartbeat checks
+
 # ── Environment-aware channel routing ─────────────────────────────────────────
 # SCOUT_ENV=production → messages go to production channels (set in launchd plist)
 # Anything else (unset, "development") → everything goes to #scout-qa
@@ -1678,7 +1692,12 @@ def _run_startup_smoke_test(web: WebClient) -> None:
     Non-blocking — runs in a background thread so it doesn't delay bot startup.
     Catches the class of bug that just burned us: bad model name, broken import,
     ClickHouse down, etc. — all invisible until someone @mentions Scout.
+
+    Also seeds _LAST_HEALTH_STATUS so the heartbeat (PR 15c) starts with a baseline.
+    Without this, the first heartbeat tick fires a Slack alert for the OK→OK transition
+    on every restart.
     """
+    global _LAST_HEALTH_STATUS
     try:
         import smoke_test as _st
         results, pass_count = _st.run_tests(quiet=True)
@@ -1686,6 +1705,14 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         blocks, fallback = _st.format_slack_blocks(results, pass_count)
         web.chat_postMessage(channel=_SCOUT_HQ_CHANNEL, text=fallback, blocks=blocks, unfurl_links=False)
         log.info(f"[smoke] {pass_count}/{total} checks passed — posted to #scout-qa")
+        # PR 15c: seed health baseline AFTER smoke posts so the heartbeat doesn't double-alert
+        try:
+            initial_status = _compute_health_status()
+            with _HEALTH_STATUS_LOCK:
+                _LAST_HEALTH_STATUS = initial_status
+            log.info(f"[health] heartbeat baseline seeded: ok={initial_status['ok']}")
+        except Exception as seed_err:
+            log.warning(f"[health] failed to seed heartbeat baseline: {seed_err}")
     except Exception as e:
         log.warning(f"[smoke] startup smoke test failed to run: {e}")
         try:
@@ -1695,6 +1722,92 @@ def _run_startup_smoke_test(web: WebClient) -> None:
             )
         except Exception:
             log.warning("Failed to post smoke test crash notification to Slack")
+
+
+def _run_health_heartbeat(web: WebClient) -> None:
+    """
+    Live health heartbeat (PR 15c).
+
+    Runs every 30 min after a 5-min warmup. Checks _compute_health_status() PLUS a
+    standalone ClickHouse ping (SELECT 1). The CH ping result affects this heartbeat
+    only — NOT the HTTP /health endpoint that Render uses for container restarts.
+    Critical: a CH outage must not restart the bot.
+
+    Posts a single Slack alert on the first transition to degraded after
+    _HEALTH_CONSECUTIVE_THRESHOLD consecutive bad checks. Transitions back to OK
+    also post once. No spam during sustained degradation.
+    """
+    import time as _time
+    global _LAST_HEALTH_STATUS
+
+    _time.sleep(_HEALTH_HEARTBEAT_WARMUP_SECS)  # let daemons settle and smoke test post
+    consecutive_bad = 0
+
+    while True:
+        try:
+            status = _compute_health_status()
+
+            # Standalone CH ping — affects HEARTBEAT only, never the HTTP probe
+            ch_ok = True
+            ch_detail = "ok"
+            try:
+                from scout_agent import _get_ch_client
+                ch = _get_ch_client()
+                ch.query("SELECT 1")
+            except Exception as ch_err:
+                ch_ok = False
+                ch_detail = f"CH ping failed: {ch_err}"
+
+            # Combine — if CH is bad, the heartbeat is bad even if HTTP /health is fine
+            heartbeat_ok = bool(status["ok"]) and ch_ok
+            status_with_ch = dict(status)
+            status_with_ch["checks"] = dict(status["checks"])
+            status_with_ch["checks"]["clickhouse_heartbeat"] = {"ok": ch_ok, "detail": ch_detail}
+            status_with_ch["ok"] = heartbeat_ok
+
+            with _HEALTH_STATUS_LOCK:
+                last = _LAST_HEALTH_STATUS
+                last_ok = bool(last and last.get("ok"))
+
+            if not heartbeat_ok:
+                consecutive_bad += 1
+                if consecutive_bad >= _HEALTH_CONSECUTIVE_THRESHOLD and last_ok:
+                    # Transition OK → BAD: alert once
+                    bad_checks = [k for k, v in status_with_ch["checks"].items() if not v["ok"]]
+                    detail_lines = "\n".join(
+                        f"  • *{k}*: {status_with_ch['checks'][k]['detail']}" for k in bad_checks
+                    )
+                    try:
+                        web.chat_postMessage(
+                            channel=_SCOUT_HQ_CHANNEL,
+                            text=(
+                                f":red_circle: *Scout heartbeat: degraded* "
+                                f"({consecutive_bad} consecutive checks failed)\n{detail_lines}"
+                            ),
+                        )
+                    except Exception as slack_err:
+                        log.warning(f"[heartbeat] Slack alert failed: {slack_err}")
+                    log.error(f"[heartbeat] degraded — failing checks: {bad_checks}")
+            else:
+                if not last_ok and last is not None:
+                    # Transition BAD → OK: confirm recovery once
+                    try:
+                        web.chat_postMessage(
+                            channel=_SCOUT_HQ_CHANNEL,
+                            text=":large_green_circle: *Scout heartbeat: recovered* — all checks passing",
+                        )
+                    except Exception as slack_err:
+                        log.warning(f"[heartbeat] recovery alert failed: {slack_err}")
+                    log.info("[heartbeat] recovered to ok")
+                consecutive_bad = 0
+
+            with _HEALTH_STATUS_LOCK:
+                _LAST_HEALTH_STATUS = status_with_ch
+
+        except Exception as e:
+            log.warning(f"[heartbeat] check loop error: {e}")
+
+        _time.sleep(_HEALTH_HEARTBEAT_INTERVAL_SECS)
 
 
 # ── Notion → Slack status watcher ────────────────────────────────────────────
@@ -1726,6 +1839,7 @@ def _compute_health_status() -> dict:
     required = {
         "scraper", "notion-watcher", "copy-coalescer",
         "context-harvest", "stale-queue-checker", "perf-recap", "state-cleanup",
+        "health-heartbeat",  # PR 15c — live CH + status heartbeat
     }
     if _PULSE_ENABLED:
         required.add("proactive-pulse")
@@ -1795,6 +1909,7 @@ def _thread_watchdog(web: WebClient) -> None:
     REQUIRED = {
         "scraper", "notion-watcher", "copy-coalescer",
         "context-harvest", "stale-queue-checker", "perf-recap", "state-cleanup",
+        "health-heartbeat",  # PR 15c — live CH + status heartbeat. Watchdog must alert if it dies.
     }
 
     _time.sleep(120)  # Give all threads time to start before first check
@@ -1862,6 +1977,14 @@ def main():
     threading.Thread(target=_copy_coalescer_loop, daemon=True, name="copy-coalescer").start()
     # Background: thread watchdog — alerts #scout-qa if any named daemon thread dies
     threading.Thread(target=_thread_watchdog, args=(web_client,), daemon=True, name="thread-watchdog").start()
+    # Background: live health heartbeat (PR 15c) — every 30 min, includes standalone CH ping.
+    # CH check here only — NOT in _compute_health_status() which Render polls every 30s.
+    # Posts a single Slack alert on transition to degraded; recovery alert on return to ok.
+    threading.Thread(
+        target=lambda: _run_health_heartbeat(web_client),
+        daemon=True,
+        name="health-heartbeat",
+    ).start()
 
     # Health check HTTP server — Render pings /health every 30s to verify Scout is alive
     _start_health_server(port=int(os.getenv("PORT", "10000")))
