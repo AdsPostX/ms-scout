@@ -1,5 +1,18 @@
 # Scout — Architecture Invariants
 
+## Session Start Protocol
+
+At the start of any Scout session where code changes are expected:
+1. Read `## Known Debt` (bottom of this file) and surface items relevant to the current task
+2. If the current task resolves a Known Debt item, remove it from the list as part of the PR
+3. New deferred items go into `## Known Debt` — not into gstack plan files (those are not auto-loaded into sessions; this file is)
+
+Why: ms-scout has no project management system. Linear, Notion, and gstack TODO files
+are not auto-loaded by Claude. CLAUDE.md is. If a deferred item isn't here, nobody sees it
+until something breaks.
+
+---
+
 ## The Core Rule: One Function Per Signal
 
 Scout computes signals in two places:
@@ -24,6 +37,7 @@ missed a 48h recency filter that was added to the agent tool, causing false alar
 | Cap alerts | Pulse-only | `_build_cap_signal()` | No agent tool — no divergence risk |
 | Overnight events | Pulse-only | `_build_overnight_signal()` | No agent tool — no divergence risk |
 | Pulse recall | `get_pulse_summary()` in `scout_agent.py` reads `last_signals_summary` from `pulse_state.json` | Agent tool only — Pulse writes summary, agent reads it | Written by `_run_once_pulse()` (non-force runs only). Force runs intentionally excluded to preserve canonical 8am state. |
+| Health heartbeat (PR 15c) | `_run_health_heartbeat()` in `scout_bot.py` | Background daemon every 30 min | Calls `_compute_health_status()` + standalone CH ping. CH ping affects HEARTBEAT only — never the HTTP `/health` probe (Render must not restart on CH outage). Posts one Slack alert on transition to degraded after `_HEALTH_CONSECUTIVE_THRESHOLD` consecutive bad checks; one recovery alert on return to ok. |
 
 ---
 
@@ -185,3 +199,27 @@ Always return plain Python dicts — let the caller decide how to format for Sla
 - **Verified**: Apr 23 2026 — 1,388 impressions in last 30 days, active publisher
 - **Fix needed**: Platform ops — update organization name in the MS platform for publisher 927 to "Major Rocket" (flag for Vamsee)
 - **Do not**: Edit pulse_state.json to rename this — the name comes directly from ClickHouse and will revert next Pulse run
+
+---
+
+## Known Debt
+
+Items deferred from review pipelines (PR 15 reviews + ps-lens hardcoding audit, Apr 2026).
+Surfaced automatically at session start via the Session Start Protocol above.
+
+When you start a Scout task, scan this list for items the task touches. If you ship a fix,
+remove the item in the same PR. New deferred items go here, not into gstack files.
+
+**[PR16] 35-minute CH startup blind spot** — if ClickHouse goes down during `_HEALTH_HEARTBEAT_WARMUP_SECS` (300s), first detection fires at minute 35. Fix: add startup-time CH check in `_run_startup_smoke_test()` that posts immediately to #scout-qa on failure. `scout_bot.py → _run_startup_smoke_test()`
+
+**[PR16] Dedup suppression count invisible** — `select_offers()` (PR 15a) logs suppression via `log.debug()` but the digest post has no team-visible count. Fix: expose `meta['advertisers_deduped'] = N`; digest footer notes "X duplicate advertisers filtered." `scout_digest.py → select_offers()`
+
+**[PR16] `_DIGEST_NETWORKS` still hardcoded** — when a 10th network is added to `offer_scraper.py`, another PR is required to update the tuple. Fix: derive from `offers_latest.json` keyset at module load with `_DIGEST_NETWORKS_FALLBACK` for the cold-start case. `scout_digest.py` module level.
+
+**[PR16] `required` thread set manually maintained in TWO places** — `_compute_health_status()` (line ~1727) AND `_thread_watchdog` REQUIRED (line ~1795) both have hardcoded thread name sets. Every new daemon requires edits in both. Fix: module-level `_REQUIRED_DAEMONS: set[str] = set()` populated via `.add()` at each daemon start site in `main()`; both checks read from it. `scout_bot.py → main()` + both check sites.
+
+**[PR17] Scoring thresholds scattered + invisible** — `$20 RPM floor`, `n_per_network=3`, `2-per-category`, `2-per-payout-type` in `scout_digest.py`; fill rate 5K/7d, ghost 48h, velocity ±40/20%, cap 90% in `scout_bot.py`. Team cannot audit thresholds without reading source. Fix: `config/scout_thresholds.json` (loaded at startup) + `@Scout config` agent tool that returns current values.
+
+**[PR17] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. `scout_agent.py` SYSTEM_PROMPT lines ~820-900.
+
+**[PR17] Network lists in 4+ locations in `scout_agent.py`** — `browse_offers` description (line ~1041), `find_offer_replacements` (line ~1161), `run_offer_scraper` description (line ~1381), SYSTEM_PROMPT line 542. Drift risk is permanent. Fix: single `SUPPORTED_NETWORKS` constant at top of `scout_agent.py` referenced from tool description strings and docstrings. SYSTEM_PROMPT body left untouched (f-string conversion is too risky on a 4300-line prompt).
