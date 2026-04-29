@@ -1767,6 +1767,39 @@ def _run_startup_smoke_test(web: WebClient) -> None:
                 )
             except Exception as slack_err:
                 log.warning(f"[smoke] startup CH alert failed: {slack_err}")
+        # PR 19: schema-deps validation. Validates the columns Scout reads against
+        # system.columns and (where flagged must_have_data=True) confirms the column
+        # has at least 100 non-null rows. Catches the categories-NULL class of
+        # silent failure that bit us when Scout was reading a column with no data.
+        try:
+            from scout_agent import _validate_schema_deps, _get_ch_client as _gcc
+            ch = _gcc()
+            schema_result = _validate_schema_deps(ch)
+            if schema_result["ok"]:
+                log.info(
+                    f"[smoke] schema deps OK — {schema_result['checked']} columns validated"
+                )
+            else:
+                bullets = "\n".join(f"  • {v}" for v in schema_result["violations"])
+                log.error(
+                    f"[smoke] schema deps violations:\n{bullets}"
+                )
+                try:
+                    web.chat_postMessage(
+                        channel=_SCOUT_HQ_CHANNEL,
+                        text=(
+                            f":warning: *Scout schema-deps validation: {len(schema_result['violations'])} violation(s)*\n"
+                            f"{bullets}\n"
+                            f"_Scout may be reading columns that no longer have data. "
+                            f"Update scout_agent._SCHEMA_DEPS or fix the upstream column._"
+                        ),
+                    )
+                except Exception as slack_err:
+                    log.warning(f"[smoke] schema-deps alert failed: {slack_err}")
+            for warning_msg in schema_result.get("warnings", []):
+                log.warning(f"[smoke] schema-deps warning: {warning_msg}")
+        except Exception as schema_err:
+            log.warning(f"[smoke] schema-deps validation crashed: {schema_err}")
     except Exception as e:
         log.warning(f"[smoke] startup smoke test failed to run: {e}")
         try:

@@ -967,36 +967,60 @@ def performance_benchmarks_raw(ch) -> list[tuple]:
     Returns raw tuples — caller is responsible for building the tiered lookup dict.
     Tuple columns: (id, adv_name, impact_id, category, impression_count, cvr_pct, rpm)
     Raises on ClickHouse error — callers must catch and return empty benchmarks.
+
+    PR 19: `c.categories` column is NULL for all rows in production. Real category
+    data lives in `c.tags` as a JSON array; we filter out `internal-*` system tags
+    (network/channel metadata) and arrayJoin to fan out one row per category.
+    Multi-category campaigns contribute to each category's benchmark — the consumer
+    in scout_agent._load_performance_benchmarks() accumulates by category.
+
+    The arrayJoin runs in the OUTER select (after the joins are done in the CTE)
+    so the impression/conversion JOINs operate on per-campaign cardinality, not
+    per-(campaign × tag). Avoids unnecessary cartesian work.
     """
     rows = ch.query(
         """
+        WITH joined AS (
+            SELECT
+                c.id,
+                c.adv_name,
+                c.tags,
+                trim(c.internal_network_name)                                          AS impact_id,
+                imp.impression_count                                                   AS impression_count,
+                round(conv.conversion_count / nullIf(imp.impression_count, 0) * 100, 4) AS cvr_pct,
+                round(conv.total_revenue    / nullIf(imp.impression_count, 0) * 1000, 2) AS rpm
+            FROM default.from_airbyte_campaigns c
+            JOIN (
+                SELECT campaign_id,
+                       count()                           AS conversion_count,
+                       sum(toFloat64OrNull(revenue))      AS total_revenue
+                FROM default.adpx_conversionsdetails
+                WHERE toYYYYMM(created_at) >= 202501
+                GROUP BY campaign_id
+            ) conv ON toInt64(c.id) = toInt64(conv.campaign_id)
+            JOIN (
+                SELECT campaign_id,
+                       count() AS impression_count
+                FROM default.adpx_impressions_details
+                WHERE toYYYYMM(created_at) >= 202501
+                GROUP BY campaign_id
+            ) imp ON toInt64(c.id) = toInt64(imp.campaign_id)
+            WHERE c.deleted_at IS NULL
+              AND imp.impression_count > 500
+        )
         SELECT
-            c.id,
-            c.adv_name,
-            trim(c.internal_network_name)        AS impact_id,
-            coalesce(c.categories, '')            AS category,
-            imp.impression_count,
-            round(conv.conversion_count / nullIf(imp.impression_count, 0) * 100, 4) AS cvr_pct,
-            round(conv.total_revenue    / nullIf(imp.impression_count, 0) * 1000, 2) AS rpm
-        FROM default.from_airbyte_campaigns c
-        JOIN (
-            SELECT campaign_id,
-                   count()                           AS conversion_count,
-                   sum(toFloat64OrNull(revenue))      AS total_revenue
-            FROM default.adpx_conversionsdetails
-            WHERE toYYYYMM(created_at) >= 202501
-            GROUP BY campaign_id
-        ) conv ON toInt64(c.id) = toInt64(conv.campaign_id)
-        JOIN (
-            SELECT campaign_id,
-                   count() AS impression_count
-            FROM default.adpx_impressions_details
-            WHERE toYYYYMM(created_at) >= 202501
-            GROUP BY campaign_id
-        ) imp ON toInt64(c.id) = toInt64(imp.campaign_id)
-        WHERE c.deleted_at IS NULL
-          AND imp.impression_count > 500
-        ORDER BY imp.impression_count DESC
+            id,
+            adv_name,
+            impact_id,
+            arrayJoin(arrayFilter(
+                t -> NOT startsWith(lower(t), 'internal-'),
+                JSONExtract(coalesce(tags, '[]'), 'Array(String)')
+            )) AS category,
+            impression_count,
+            cvr_pct,
+            rpm
+        FROM joined
+        ORDER BY impression_count DESC
         """
     ).result_rows
     return rows
@@ -1013,22 +1037,40 @@ def publisher_top_categories(ch, pub_id: int) -> list[str]:
     Non-fatal if query fails — callers fall back to RPM-only ranking.
 
     Returns: list of category name strings (empty list on error or no data)
+
+    PR 19: previously joined against mv_adpx_campaigns.category which doesn't exist
+    (mv_adpx_campaigns has only id/internal_name/is_test). The query has been
+    silently returning [] for some time, swallowed by the except handler.
+    Now joins directly against from_airbyte_campaigns and uses tags-parsing
+    (same fix as performance_benchmarks_raw above).
     """
     try:
         rows = ch.query(
             """
+            WITH joined AS (
+                SELECT
+                    c.tags,
+                    cv.revenue
+                FROM default.adpx_conversionsdetails cv
+                JOIN default.from_airbyte_campaigns c
+                  ON toInt64(cv.campaign_id) = toInt64(c.id)
+                PREWHERE cv.user_id = {uid: Int64}
+                  AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 6 MONTH)
+                WHERE cv.created_at >= today() - INTERVAL 6 MONTH
+                  AND c.deleted_at IS NULL
+                  AND c.tags IS NOT NULL
+                  AND c.tags != '[]'
+            )
             SELECT
-                c.category,
-                count()          AS conversions,
-                sum(toFloat64OrNull(cv.revenue)) AS revenue
-            FROM default.adpx_conversionsdetails cv
-            JOIN default.mv_adpx_campaigns c ON cv.campaign_id = c.campaign_id
-            PREWHERE cv.user_id = {uid: Int64}
-              AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 6 MONTH)
-            WHERE cv.created_at >= today() - INTERVAL 6 MONTH
-              AND c.category != ''
-              AND c.category IS NOT NULL
-            GROUP BY c.category
+                arrayJoin(arrayFilter(
+                    t -> NOT startsWith(t, 'internal-'),
+                    JSONExtract(coalesce(tags, '[]'), 'Array(String)')
+                )) AS category,
+                count() AS conversions,
+                sum(toFloat64OrNull(revenue)) AS revenue
+            FROM joined
+            GROUP BY category
+            HAVING category != ''
             ORDER BY revenue DESC NULLS LAST
             LIMIT 5
             """,

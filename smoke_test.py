@@ -932,6 +932,156 @@ def test_supported_networks_trimmed():
         return False, str(e)
 
 
+# ── PR 19: categories via tags + slim schema-deps validation ────────────────
+
+# Pure-unit tests for the tags-parsing helper (no CH, no LLM)
+
+@test("_extract_real_categories filters internal-* prefix tags (case-insensitive)")
+def test_extract_categories_filters_internal():
+    try:
+        from scout_agent import _extract_real_categories
+        # JSON string input — production case
+        result = _extract_real_categories(
+            '["internal-network-impact","internal-email","rewards","technology"]'
+        )
+        if result != ["rewards", "technology"]:
+            return False, f"expected [rewards,technology], got {result}"
+        # Capital-I variant should also be filtered (case-insensitive)
+        result_caps = _extract_real_categories(
+            '["Internal-Email","Internal-Network-Foo","pets"]'
+        )
+        if result_caps != ["pets"]:
+            return False, f"case-insensitive filter failed: got {result_caps}"
+        return True, "internal-* prefix filtered (case-insensitive); real categories preserved in order"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_extract_real_categories handles missing/empty/null/invalid inputs")
+def test_extract_categories_edge_cases():
+    try:
+        from scout_agent import _extract_real_categories
+        cases = [
+            (None,             [],  "None"),
+            ("",               [],  "empty string"),
+            ("[]",             [],  "empty array"),
+            ("not-json",       [],  "invalid JSON"),
+            ('"not-an-array"', [],  "JSON scalar (not array)"),
+            ('[null,1,"x"]',   ["x"], "mixed types — keep only strings"),
+        ]
+        for inp, expected, label in cases:
+            got = _extract_real_categories(inp)
+            if got != expected:
+                return False, f"{label}: expected {expected}, got {got}"
+        # List input (Python-side, not JSON)
+        if _extract_real_categories(["rewards", "internal-x", "tech"]) != ["rewards", "tech"]:
+            return False, "list input handling failed"
+        return True, "handles None, empty, invalid JSON, mixed types, list input"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_extract_real_categories preserves tag order")
+def test_extract_categories_preserves_order():
+    try:
+        from scout_agent import _extract_real_categories
+        result = _extract_real_categories(
+            '["technology","internal-x","rewards","pets","internal-y","financial"]'
+        )
+        if result != ["technology", "rewards", "pets", "financial"]:
+            return False, f"order broken: got {result}"
+        return True, "order preserved across filter"
+    except Exception as e:
+        return False, str(e)
+
+
+# Schema-deps validation tests (mock the CH client — pure unit)
+
+@test("_validate_schema_deps detects missing column")
+def test_schema_deps_missing_column():
+    try:
+        from scout_agent import _validate_schema_deps, _SCHEMA_DEPS
+        # Mock CH client: returns columns matching all _SCHEMA_DEPS EXCEPT one
+        # (simulate a column that was renamed/dropped upstream)
+        target = ("from_airbyte_campaigns", "tags", True)
+        missing_table, missing_col, _ = target
+
+        class _FakeRows:
+            def __init__(self, rows): self.result_rows = rows
+
+        class _FakeCH:
+            def query(self, sql, parameters=None):
+                if "system.columns" in sql:
+                    # Return all dep columns EXCEPT the missing one
+                    rows = [(t, c) for t, c, _ in _SCHEMA_DEPS if not (t == missing_table and c == missing_col)]
+                    return _FakeRows(rows)
+                # countIf query — return high count so other deps don't fire
+                return _FakeRows([(99999,)])
+
+        result = _validate_schema_deps(_FakeCH())
+        if result["ok"]:
+            return False, f"expected ok=False, got {result}"
+        if not any("tags MISSING" in v for v in result["violations"]):
+            return False, f"violation list missing 'tags MISSING': {result['violations']}"
+        return True, f"caught missing column: {result['violations'][0][:80]}"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_validate_schema_deps detects empty must-have-data column")
+def test_schema_deps_empty_column():
+    try:
+        from scout_agent import _validate_schema_deps, _SCHEMA_DEPS, _SCHEMA_DEPS_MIN_ROWS
+
+        class _FakeRows:
+            def __init__(self, rows): self.result_rows = rows
+
+        # First call returns all columns present; subsequent count queries return
+        # high counts EXCEPT for tags which returns 0 (simulating empty column).
+        class _FakeCH:
+            def query(self, sql, parameters=None):
+                if "system.columns" in sql:
+                    return _FakeRows([(t, c) for t, c, _ in _SCHEMA_DEPS])
+                if "from_airbyte_campaigns" in sql and "tags" in sql:
+                    return _FakeRows([(0,)])  # empty
+                return _FakeRows([(99999,)])
+
+        result = _validate_schema_deps(_FakeCH())
+        if result["ok"]:
+            return False, f"expected ok=False, got {result}"
+        if not any("tags has only 0 non-null rows" in v for v in result["violations"]):
+            return False, f"violation list missing tags-empty: {result['violations']}"
+        return True, f"caught empty column with threshold {_SCHEMA_DEPS_MIN_ROWS}: {result['violations'][0][:80]}"
+    except Exception as e:
+        return False, str(e)
+
+
+# CH-gated regression test — proves the categories fix actually worked
+
+@test("Tier 3 benchmarks populated after categories fix (regression)")
+def test_tier3_benchmarks_populated():
+    """
+    PR 19 regression test. Calls _load_performance_benchmarks() against live CH;
+    asserts the by_category dict has > 5 categories. Before the fix this dict was
+    always empty (categories column NULL). After the fix it should have ~25
+    categories from tags JSON parsing. If this test fails on Render, scoring is
+    back to Tier 4 fallback — investigate queries.performance_benchmarks_raw().
+    """
+    try:
+        from scout_agent import _load_performance_benchmarks
+        result = _load_performance_benchmarks()
+        n_cats = len(result.get("by_category", {}))
+        if n_cats < 5:
+            return False, (
+                f"only {n_cats} categories in by_category — fix did not work. "
+                f"Check queries.performance_benchmarks_raw() CTE + tags-parsing."
+            )
+        sample = sorted(result["by_category"].keys())[:5]
+        return True, f"{n_cats} categories populated; sample: {sample}"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

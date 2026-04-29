@@ -86,6 +86,16 @@ TESTS = [
         "which publishers have perkswall enabled?",
         "run_sql_query",
     ),
+    (
+        # PR 19: ad-hoc category questions used to fail silently because the LLM
+        # generated SQL against `c.categories` (always NULL). The DATA DICTIONARY
+        # update directs the LLM to use `c.tags` with the arrayFilter pattern.
+        # If this test fails, check the SYSTEM_PROMPT DATA DICTIONARY entry for
+        # from_airbyte_campaigns and the CATEGORY GROUPING SQL pattern.
+        "Biggest categories by offer count",
+        "what are our biggest offer categories by number of offers?",
+        "run_sql_query",
+    ),
     # --- Should route to stored tools (not run_sql_query) ---
     (
         "Ghost campaigns (stored)",
