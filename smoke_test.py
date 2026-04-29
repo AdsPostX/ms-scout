@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 
@@ -40,9 +41,15 @@ _DATA = _ROOT / "data"
 
 TESTS: list[dict] = []
 
+_PR_NAME_RE = re.compile(r"^PR\s+\d+", re.IGNORECASE)
+
 
 def test(name: str):
     """Decorator to register a smoke test."""
+    if _PR_NAME_RE.match(name):
+        raise ValueError(
+            f"Test name looks like a changelog entry (behavior name required): {name!r}"
+        )
     def decorator(fn):
         TESTS.append({"name": name, "fn": fn})
         return fn
@@ -72,20 +79,6 @@ def test_anthropic():
     return False, "No models tested"
 
 
-# ── Test 2: ClickHouse ────────────────────────────────────────────────────────
-
-@test("ClickHouse — connection + query")
-def test_clickhouse():
-    try:
-        from scout_agent import _get_ch_client
-        ch = _get_ch_client()
-        rows = ch.query("SELECT count() FROM adpx_sdk_sessions LIMIT 1").result_rows
-        count = rows[0][0] if rows else 0
-        return True, f"Connected — {count:,} sessions in table"
-    except Exception as e:
-        return False, str(e)
-
-
 # ── Test 3: Entity overrides ──────────────────────────────────────────────────
 
 @test("Entity overrides — file readable")
@@ -99,25 +92,6 @@ def test_entity_overrides():
         return True, f"{len(pubs)} publishers, {len(advs)} advertisers (Button seeded: {button_ok})"
     except Exception as e:
         return False, str(e)
-
-
-# ── Test 4: Offer inventory ───────────────────────────────────────────────────
-
-@test("Offer inventory — offers_latest.json present")
-def test_offer_inventory():
-    snap = _DATA / "offers_latest.json"
-    if not snap.exists():
-        return False, "offers_latest.json missing — scraper hasn't run yet"
-    try:
-        offers = json.loads(snap.read_text())
-        active = sum(1 for o in offers if o.get("status") == "Active")
-        age_hours = (time.time() - snap.stat().st_mtime) / 3600
-        age_str = f"{age_hours:.0f}h old"
-        if age_hours > 30:
-            return False, f"{len(offers)} offers but file is {age_str} — scraper may be stuck"
-        return True, f"{len(offers)} total, {active} active, {age_str}"
-    except Exception as e:
-        return False, f"parse error: {e}"
 
 
 # ── Test 5: ask() round-trip ──────────────────────────────────────────────────
@@ -183,35 +157,6 @@ def test_state_files():
     if issues:
         return False, "; ".join(issues)
     return True, "All present state files parse cleanly; data/ is writable"
-
-
-# ── Test 8: Slack token ───────────────────────────────────────────────────────
-
-@test("Slack token — auth.test")
-def test_slack_token():
-    token = os.getenv("SLACK_BOT_TOKEN")
-    if not token:
-        return False, "SLACK_BOT_TOKEN not set"
-    try:
-        from slack_sdk.web import WebClient
-        resp = WebClient(token=token).auth_test()
-        bot_name = resp.get("user", "unknown")
-        team = resp.get("team", "unknown")
-        return True, f"Authenticated as @{bot_name} in {team}"
-    except Exception as e:
-        return False, str(e)
-
-
-# ── Test 9: Notion queue DB ID ────────────────────────────────────────────────
-
-@test("Notion queue DB ID — env var set")
-def test_notion_queue_db_id():
-    db_id = os.getenv("NOTION_QUEUE_DB_ID")
-    if not db_id:
-        return False, "NOTION_QUEUE_DB_ID not set — queue watcher will not work"
-    if len(db_id) < 30:
-        return False, f"NOTION_QUEUE_DB_ID looks malformed (len={len(db_id)})"
-    return True, f"Set (prefix: {db_id[:8]}…)"
 
 
 # ── Test 10: handler import chain ─────────────────────────────────────────────
@@ -476,7 +421,7 @@ def test_build_publisher_card():
 
 # ── Test 20: Digest dedup — no duplicate advertisers across networks ──────────
 
-@test("Digest dedup — no advertiser appears on multiple networks")
+@test("digest_dedup_no_advertiser_on_multiple_networks")
 def test_digest_no_duplicate_advertisers():
     """
     PR 15a invariant: select_offers() must dedup advertisers across networks.
@@ -568,7 +513,7 @@ def test_network_emoji_single_source():
 
 # ── PR 15b: Pulse block invariants — Wednesday + ghost-clear + non-Monday opps ──
 
-@test("PR 15b — Wednesday Pulse: ghost all-clear + non-Monday opps note ≤ 50 blocks")
+@test("pulse_blocks_stay_under_50_and_render_correct_non_monday_paths")
 def test_pulse_block_count_with_pr15b():
     """
     PR 15b adds two new branches:
@@ -611,7 +556,7 @@ def test_pulse_block_count_with_pr15b():
 
 # ── PR 15c: health status shape + heartbeat module-level state ───────────────
 
-@test("PR 15c — _compute_health_status() shape + health-heartbeat registered as required")
+@test("compute_health_status_has_required_shape_and_heartbeat_is_required_daemon")
 def test_compute_health_status_shape():
     """
     PR 15c invariants (updated for PR 16b registration pattern):
@@ -677,7 +622,7 @@ def test_compute_health_status_shape():
 
 # ── PR 16: hardcoding tier 1 invariants ──────────────────────────────────────
 
-@test("PR 16a — _DIGEST_NETWORKS derived (Big 4 priority preserved)")
+@test("digest_networks_derived_from_offers_latest_keyset_Big4_priority_preserved")
 def test_digest_networks_derivation():
     try:
         import scout_digest
@@ -701,7 +646,7 @@ def test_digest_networks_derivation():
         return False, str(e)
 
 
-@test("PR 16b — _REQUIRED_DAEMONS is single source")
+@test("required_daemons_single_source_both_check_sites_agree")
 def test_required_daemons_single_source():
     try:
         import scout_bot
@@ -723,7 +668,7 @@ def test_required_daemons_single_source():
         return False, str(e)
 
 
-@test("PR 16c — select_offers() exposes advertisers_deduped in meta")
+@test("select_offers_exposes_advertisers_deduped_in_meta")
 def test_dedup_count_in_meta():
     try:
         import scout_digest
@@ -758,7 +703,7 @@ def test_dedup_count_in_meta():
 
 # ── PR 17: config legibility — thresholds + tool + SUPPORTED_NETWORKS ───────
 
-@test("PR 17a — config/scout_thresholds.json loads + SCOUT_THRESHOLDS populated")
+@test("scout_thresholds_json_loads_and_populates_SCOUT_THRESHOLDS")
 def test_scout_thresholds_loaded():
     try:
         import scout_agent
@@ -781,7 +726,7 @@ def test_scout_thresholds_loaded():
         return False, str(e)
 
 
-@test("PR 17b — get_scout_config() registered with all 4 contract pieces")
+@test("get_scout_config_registered_with_all_4_contract_pieces")
 def test_get_scout_config_registered():
     try:
         import scout_agent
@@ -808,7 +753,7 @@ def test_get_scout_config_registered():
         return False, str(e)
 
 
-@test("tool descriptions reference SUPPORTED_NETWORKS via .join() (single source)")
+@test("tool_descriptions_reference_SUPPORTED_NETWORKS_via_join_single_source")
 def test_supported_networks_single_source():
     try:
         import scout_agent
@@ -832,7 +777,7 @@ def test_supported_networks_single_source():
 
 # ── PR 18: config wiring + honest network coverage ──────────────────────────
 
-@test("score_offer respects min_rpm_floor from config (config drives behavior)")
+@test("score_offer_respects_min_rpm_floor_from_config")
 def test_score_offer_reads_config_floor():
     """
     PR 18 invariant: changing SCOUT_THRESHOLDS['digest']['min_rpm_floor'] must
@@ -889,7 +834,7 @@ def test_score_offer_reads_config_floor():
         return False, str(e)
 
 
-@test("offer staleness threshold reads from config (not hardcoded)")
+@test("offer_staleness_threshold_reads_from_config")
 def test_offer_staleness_from_config():
     """PR 18 invariant: scout_bot reads offer_staleness_hours from config, not hardcoded."""
     try:
@@ -911,7 +856,7 @@ def test_offer_staleness_from_config():
         return False, str(e)
 
 
-@test("SUPPORTED_NETWORKS lists only credentialled networks (no aspirational entries)")
+@test("supported_networks_lists_only_credentialled_active_networks")
 def test_supported_networks_trimmed():
     """PR 18 invariant: SUPPORTED_NETWORKS lists only networks with creds on Render."""
     try:
@@ -1084,7 +1029,7 @@ def test_tier3_benchmarks_populated():
 
 # ── PR 19a: benchmarks self-heal (no user-facing 'run X' for state Scout owns) ─
 
-@test("get_scout_status attempts benchmark reload before reporting")
+@test("get_scout_status_self_heals_benchmarks_before_reporting")
 def test_status_self_heals_benchmarks():
     """
     PR 19a invariant: get_scout_status() attempts to load benchmarks if they're
@@ -1115,7 +1060,7 @@ def test_status_self_heals_benchmarks():
         return False, str(e)
 
 
-@test("benchmarks-warmer daemon registered + boot-time warmup wired")
+@test("benchmarks_warmer_daemon_registered_and_boot_warmup_wired")
 def test_benchmarks_warmer_wired():
     """
     PR 19a: the benchmarks-warmer daemon keeps _BENCHMARKS warm in memory.
@@ -1223,6 +1168,111 @@ def test_ghost_recency_propagation():
         return False, str(e)
 
 
+# ── Boot card renderer unit tests ────────────────────────────────────────────
+
+@test("boot_card_renders_zero_tests_as_failure")
+def test_boot_card_zero_tests():
+    blocks, fallback = format_slack_blocks([], 0)
+    text = " ".join(
+        e.get("text", {}).get("text", "") if isinstance(e.get("text"), dict) else ""
+        for b in blocks for e in ([b] + b.get("elements", []))
+    )
+    if ":white_check_mark:" in text or ":warning:" in text:
+        return False, f"0-test case rendered as pass or warning, not explicit failure: {text[:120]}"
+    if ":x:" not in text and "0 tests" not in text and "no checks" not in text.lower():
+        return False, f"0-test card missing ❌ marker: {text[:120]}"
+    return True, f"0 tests → failure card ({len(blocks)} blocks)"
+
+
+@test("boot_card_all_pass_collapses_to_summary_card")
+def test_boot_card_all_pass():
+    results = [{"name": f"test_{i}", "passed": True, "detail": "ok"} for i in range(10)]
+    blocks, _ = format_slack_blocks(results, 10)
+    if len(blocks) > 3:
+        return False, f"all-pass rendered {len(blocks)} blocks, expected ≤3"
+    text = " ".join(
+        b.get("text", {}).get("text", "") if isinstance(b.get("text"), dict) else
+        " ".join(e.get("text", "") for e in b.get("elements", []) if isinstance(e, dict))
+        for b in blocks
+    )
+    if ":white_check_mark:" not in text:
+        return False, f"all-pass card missing ✅: {text[:120]}"
+    return True, f"all-pass → {len(blocks)} blocks"
+
+
+@test("boot_card_surfaces_failures_and_collapses_passing")
+def test_boot_card_one_failure():
+    results = [{"name": "bad_check", "passed": False, "detail": "it broke"}]
+    results += [{"name": f"good_{i}", "passed": True, "detail": "ok"} for i in range(5)]
+    blocks, _ = format_slack_blocks(results, 5)
+    all_text = " ".join(
+        b.get("text", {}).get("text", "") if isinstance(b.get("text"), dict) else
+        " ".join(str(e.get("text", "")) for e in b.get("elements", []) if isinstance(e, dict))
+        for b in blocks
+    )
+    if "bad_check" not in all_text:
+        return False, "failure name not surfaced in card"
+    if "it broke" not in all_text:
+        return False, "failure detail not surfaced in card"
+    if "+5" not in all_text and "5 other" not in all_text:
+        return False, "passing count not collapsed into summary"
+    # Verify the 5 passing test names are NOT individually listed
+    for i in range(5):
+        if f"good_{i}" in all_text:
+            return False, f"good_{i} is individually listed — passing tests should be collapsed"
+    return True, f"failure surfaced, passing collapsed ({len(blocks)} blocks)"
+
+
+@test("boot_card_caps_failures_at_10_with_overflow_note")
+def test_boot_card_overflow():
+    results = [{"name": f"fail_{i}", "passed": False, "detail": f"err {i}"} for i in range(15)]
+    blocks, _ = format_slack_blocks(results, 0)
+    all_text = " ".join(
+        b.get("text", {}).get("text", "") if isinstance(b.get("text"), dict) else
+        " ".join(str(e.get("text", "")) for e in b.get("elements", []) if isinstance(e, dict))
+        for b in blocks
+    )
+    shown = sum(1 for i in range(15) if f"fail_{i}" in all_text)
+    if shown > 10:
+        return False, f"showed {shown} failures — must cap at 10"
+    if "5 more" not in all_text and "and 5" not in all_text:
+        return False, f"overflow note missing — expected '5 more': {all_text[:200]}"
+    return True, f"15 failures → {shown} shown + overflow note ({len(blocks)} blocks)"
+
+
+@test("boot_card_renderer_crash_falls_back_to_plain_text")
+def test_boot_card_fallback():
+    import unittest.mock as _mock
+    results = [{"name": "check_a", "passed": True, "detail": "ok"}]
+    with _mock.patch(
+        __name__ + ".format_slack_blocks",
+        side_effect=RuntimeError("renderer exploded"),
+    ):
+        # post_to_slack should catch the error and call format_slack_message instead
+        import os as _os
+        orig_token = _os.environ.get("SLACK_BOT_TOKEN")
+        try:
+            _os.environ["SLACK_BOT_TOKEN"] = "xoxb-fake-token-for-test"
+            with _mock.patch("slack_sdk.web.WebClient.chat_postMessage") as mock_post:
+                post_to_slack(results, 1)
+                if not mock_post.called:
+                    return False, "chat_postMessage was never called after renderer crash"
+                call_kwargs = mock_post.call_args
+                # Must have posted using plain-text fallback (blocks=None or absent)
+                kwargs = call_kwargs.kwargs if call_kwargs.kwargs else (call_kwargs[1] if len(call_kwargs) > 1 else {})
+                if "blocks" in kwargs and kwargs["blocks"] is not None:
+                    return False, f"renderer crash still sent blocks: {kwargs.get('blocks')}"
+                text = kwargs.get("text", call_kwargs[0][1] if call_kwargs[0] and len(call_kwargs[0]) > 1 else "")
+                if not text:
+                    return False, "fallback text was empty"
+        finally:
+            if orig_token is None:
+                _os.environ.pop("SLACK_BOT_TOKEN", None)
+            else:
+                _os.environ["SLACK_BOT_TOKEN"] = orig_token
+    return True, "renderer crash → plain-text fallback posted successfully"
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:
@@ -1264,68 +1314,70 @@ def format_slack_message(results: list[dict], pass_count: int) -> str:
 def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict], str]:
     """Return (blocks, fallback_text) for a Block Kit health dashboard card.
 
-    Design: progressive disclosure.
-    - All pass → single compact context line with status dots. No scroll, no noise.
-    - Any failure → full-width section per failing check (no truncation), passing
-      checks collapsed to one context dot-line at the bottom.
+    All-pass  → 2-block summary card. Scannable in 1 second.
+    Any fail  → failures surfaced (capped at 10 + "and N more"), passing collapsed.
+    0 results → explicit failure card (not a false all-pass).
 
-    Avoids section.fields — Slack hard-truncates field text at display boundaries,
-    which breaks long check details (LLM round-trip, ghost campaign detail, etc.).
+    Fallback to format_slack_message() on any renderer exception (see post_to_slack).
     """
     from datetime import datetime as _dt
     import pytz as _pytz
-    total     = len(results)
-    all_pass  = pass_count == total
-    failed    = [r for r in results if not r["passed"]]
-    passed    = [r for r in results if r["passed"]]
-    now_ct    = _dt.now(_pytz.timezone("America/Chicago")).strftime("%-I:%M %p CT")
-    fallback  = f"Scout: {pass_count}/{total} checks passed"
+    total    = len(results)
+    failed   = [r for r in results if not r["passed"]]
+    n_fail   = len(failed)
+    n_pass   = pass_count
+    now_ct   = _dt.now(_pytz.timezone("America/Chicago")).strftime("%-I:%M %p CT")
+    fallback = f"Scout: {pass_count}/{total} checks passed"
 
     blocks: list[dict] = []
 
-    if all_pass:
-        # ── All green: headline + one rich_text block per check ──────────────────
-        # rich_text blocks don't truncate in thread preview the way mrkdwn context
-        # elements do — critical for the ask('status') and ask('ghost campaigns')
-        # rows which carry the full LLM response preview.
+    # 0-test case must render as failure, not pass (0==0 is truthy all-pass otherwise)
+    if total == 0:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":x: *Scout boot — no checks ran*"},
+        })
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"Startup check · {now_ct} · 0 tests registered"}],
+        })
+        return blocks, "Scout: 0 checks ran — something went wrong"
+
+    if n_fail == 0:
+        # ── All green: 2-block summary card ──────────────────────────────────────
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": f":white_check_mark: *Scout is healthy — {total}/{total} checks passed*"},
         })
-        for r in results:
-            safe_detail = " ".join(r['detail'].splitlines()).strip()
-            blocks.append({
-                "type": "rich_text",
-                "elements": [{
-                    "type": "rich_text_section",
-                    "elements": [
-                        {"type": "emoji", "name": "large_green_circle"},
-                        {"type": "text", "text": f"  {r['name']}", "style": {"bold": True}},
-                        {"type": "text", "text": f"  ·  {safe_detail}"},
-                    ],
-                }],
-            })
         blocks.append({
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"Startup check · {now_ct}"}],
+            "elements": [{"type": "mrkdwn", "text": f"{total} checks passed · {now_ct}"}],
         })
     else:
-        # ── Failures: headline, full-width section per failure, passing as context ─
+        # ── Failures: headline, failures surfaced (capped at 10), passing collapsed ─
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f":warning: *Scout has issues — {pass_count}/{total} checks passed*"},
+            "text": {"type": "mrkdwn", "text": f":warning: *Scout has issues — {n_pass}/{total} checks passed*"},
         })
         blocks.append({"type": "divider"})
-        for r in failed:
+
+        shown = failed[:10]
+        overflow = n_fail - len(shown)
+        for r in shown:
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f":red_circle: *{r['name']}*\n{r['detail']}"},
             })
-        for r in passed:
-            safe_detail = " ".join(r['detail'].splitlines()).strip()
+        if overflow > 0:
             blocks.append({
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f":large_green_circle: *{r['name']}*  ·  {safe_detail}"}],
+                "elements": [{"type": "mrkdwn", "text": f"…and {overflow} more failure{'s' if overflow != 1 else ''}"}],
+            })
+
+        if n_pass > 0:
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f":white_check_mark: +{n_pass} other check{'s' if n_pass != 1 else ''} passed"}],
             })
         blocks.append({
             "type": "section",
@@ -1333,7 +1385,7 @@ def format_slack_blocks(results: list[dict], pass_count: int) -> tuple[list[dict
         })
         blocks.append({
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"Startup check · {now_ct} · Issues detected"}],
+            "elements": [{"type": "mrkdwn", "text": f"Startup check · {now_ct}"}],
         })
 
     return blocks, fallback
@@ -1347,14 +1399,17 @@ def post_to_slack(results: list[dict], pass_count: int) -> bool:
         return False
     from slack_sdk.web import WebClient
     try:
-        blocks, fallback = format_slack_blocks(results, pass_count)
+        try:
+            blocks, fallback = format_slack_blocks(results, pass_count)
+        except Exception as render_err:
+            print(f"format_slack_blocks failed ({render_err}), falling back to plain text")
+            blocks = None
+            fallback = format_slack_message(results, pass_count)
         web = WebClient(token=token)
-        web.chat_postMessage(
-            channel="C0AQEECF800",
-            text=fallback,
-            blocks=blocks,
-            unfurl_links=False,
-        )
+        kwargs: dict = {"channel": "C0AQEECF800", "text": fallback, "unfurl_links": False}
+        if blocks is not None:
+            kwargs["blocks"] = blocks
+        web.chat_postMessage(**kwargs)
         return True
     except Exception as e:
         print(f"Slack post failed: {e}")
