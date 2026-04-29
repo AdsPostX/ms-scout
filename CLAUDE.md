@@ -3,9 +3,10 @@
 ## Session Start Protocol
 
 At the start of any Scout session where code changes are expected:
-1. Read `## Known Debt` (bottom of this file) and surface items relevant to the current task
-2. If the current task resolves a Known Debt item, remove it from the list as part of the PR
-3. New deferred items go into `## Known Debt` — not into gstack plan files (those are not auto-loaded into sessions; this file is)
+1. **Verify you are working in `tools/offer-scraper/`** — if the current directory is `tools/ms-scout-pr14/` or any other path, stop. That directory is a stale worktree. This CLAUDE.md is only current on the `main` branch of `tools/offer-scraper/`.
+2. Read `## Known Debt` (bottom of this file) and surface items relevant to the current task
+3. If the current task resolves a Known Debt item, remove it from the list as part of the PR
+4. New deferred items go into `## Known Debt` — not into gstack plan files (those are not auto-loaded into sessions; this file is)
 
 Why: ms-scout has no project management system. Linear, Notion, and gstack TODO files
 are not auto-loaded by Claude. CLAUDE.md is. If a deferred item isn't here, nobody sees it
@@ -22,6 +23,54 @@ Scout computes signals in two places:
 When the same business logic exists in BOTH, they MUST call a shared `_query_*()` function.
 Duplicate SQL guarantees drift. This happened with ghost detection in Apr 2026 — the Pulse
 missed a 48h recency filter that was added to the agent tool, causing false alarms.
+
+---
+
+## Engineering Principles
+
+Five principles derived from Scout's actual incident history. Read before planning any change.
+
+**P1 — Validate at the boundary.**
+- Module boundaries: all stdlib imports at file top, not inside functions — a missing `import os` inside a handler crashes silently at the first @mention
+- API boundaries: every Slack/Anthropic/ClickHouse/Notion call wrapped in `try/except` with a safe fallback — uncaught exceptions drop the entire handler, not just the signal
+- Config boundaries: every configurable threshold read from `config/scout_thresholds.json` or env vars at module load, not hardcoded mid-function — hardcoded values are silently ignored when config changes
+- Data boundaries: never assume upstream columns are populated; use NULL-safe SQL (`coalesce`, `nullIf`, `arrayFilter`); validate schema at boot via `_SCHEMA_DEPS` before querying
+
+**P2 — One source of truth per concept.**
+- One function per signal: shared `_query_*()` functions called by both Agent tools and Pulse — duplicate SQL guarantees filter drift (ghost campaigns, Apr 2026)
+- One config store: `config/team_corrections.json` for static platform facts, `data/entity_overrides.json` for entity facts — not inline constants in SQL strings or `pulse_state.json`
+- One network list: `SUPPORTED_NETWORKS` in `scout_agent.py` is the single source — `_DIGEST_NETWORKS_FALLBACK` in `scout_digest.py` derives from the live offers file, not a parallel hardcoded list
+
+**P3 — Read before building.**
+- Before planning any new Scout capability: read `scout_agent.py` SYSTEM_PROMPT, TOOLS, TOOL_MAP — the feature may already exist
+- Before adding a new shared function: check if a `_query_*()` equivalent already exists in `scout_agent.py`
+- Before adding a new daemon: check what daemons already exist in `scout_bot.py` and how they register via `_start_daemon()`
+- Proposing code that duplicates existing functionality is a defect, not a feature
+
+**P4 — Tests describe behaviors, not incidents.**
+See `### Tests-as-behaviors rule` under File-Editing Rules for `scout_slack_ui.py`.
+
+**P5 — Self-heal, don't report chores.**
+See `## User-Facing Action Rule` above.
+
+---
+
+## PR Definition of Done
+
+Before marking any Scout PR complete, verify ALL of the following:
+
+- [ ] `python3 smoke_test.py` passes — paste the output line ("PASSED N/N" or "FAILED M/N") into the PR description
+- [ ] No new test names contain PR numbers, fix labels, or dates — test names describe behavior only
+- [ ] No new live API calls added to `smoke_test.py` — health probes belong in `_compute_health_status()`, not the smoke suite
+- [ ] Every new `_query_*()` shared function has a corresponding smoke test
+- [ ] Every new config-driven threshold has a test proving behavior changes when the config value changes (monkey-patch pattern) — note: signal config keys in `scout_thresholds.json` are not yet wired to their queries; adding a test for those before wiring will pass for the wrong reason
+- [ ] Import DAG unchanged: `grep -rn "from scout_bot import" scout_handlers.py` must return empty
+- [ ] Block Kit canonical primitives used in any new Pulse blocks (no naked `section.fields`, no NBSP padding `\xa0`, no `·` separators between items)
+- [ ] No "Action: run X" or "Action required" messages added to user-facing Slack output unless the action requires genuine human judgment
+- [ ] Signal Map updated if a new signal was added or an existing one changed
+- [ ] Known Debt updated: resolved items removed, new deferred items added
+
+**Enforcement:** `smoke_test.py` is not wired to CI. Until it is, running it and pasting the output is the gate. "It's a small change" is how the last 3 production breaks happened.
 
 ---
 
