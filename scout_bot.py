@@ -166,6 +166,24 @@ _HEALTH_HEARTBEAT_WARMUP_SECS  = 300   # wait 5 min after startup before first h
 _HEALTH_CONSECUTIVE_THRESHOLD  = 2     # require 2 consecutive bad checks before alerting (suppresses transients)
 _HEALTH_HEARTBEAT_INTERVAL_SECS = 1800  # 30 min between heartbeat checks
 
+# PR 16b: Single source of truth for "which daemons must be alive."
+# Daemons register themselves here at startup via _start_daemon() instead of
+# being hardcoded in two places (the health check AND the watchdog).
+# When a new daemon ships, _start_daemon() handles registration automatically.
+_REQUIRED_DAEMONS: set[str] = set()
+
+
+def _start_daemon(target, name: str, args: tuple = ()) -> None:
+    """
+    Start a daemon thread AND register its name in _REQUIRED_DAEMONS.
+
+    PR 16b: replaces the dual hardcoded sets in _compute_health_status() and
+    _thread_watchdog. Adding a new daemon now requires only the call site —
+    health checks and the watchdog see it automatically.
+    """
+    threading.Thread(target=target, args=args, daemon=True, name=name).start()
+    _REQUIRED_DAEMONS.add(name)
+
 # ── Environment-aware channel routing ─────────────────────────────────────────
 # SCOUT_ENV=production → messages go to production channels (set in launchd plist)
 # Anything else (unset, "development") → everything goes to #scout-qa
@@ -1713,6 +1731,27 @@ def _run_startup_smoke_test(web: WebClient) -> None:
             log.info(f"[health] heartbeat baseline seeded: ok={initial_status['ok']}")
         except Exception as seed_err:
             log.warning(f"[health] failed to seed heartbeat baseline: {seed_err}")
+        # PR 16c: close the 35-min CH startup blind spot. The heartbeat doesn't
+        # tick until WARMUP+INTERVAL = ~35 min after startup. Without this check,
+        # a CH outage at deploy time stays invisible for that window. Run a
+        # standalone CH ping NOW and post an immediate alert on failure.
+        try:
+            from scout_agent import _get_ch_client
+            ch = _get_ch_client()
+            ch.query("SELECT 1")
+            log.info("[smoke] startup CH ping ok")
+        except Exception as ch_err:
+            log.error(f"[smoke] startup CH ping failed: {ch_err}")
+            try:
+                web.chat_postMessage(
+                    channel=_SCOUT_HQ_CHANNEL,
+                    text=(
+                        f":red_circle: *Scout startup: ClickHouse unreachable* — `{ch_err}`\n"
+                        f"Heartbeat won't catch this for ~35 min. Investigate now."
+                    ),
+                )
+            except Exception as slack_err:
+                log.warning(f"[smoke] startup CH alert failed: {slack_err}")
     except Exception as e:
         log.warning(f"[smoke] startup smoke test failed to run: {e}")
         try:
@@ -1835,14 +1874,10 @@ def _compute_health_status() -> dict:
             checks["offer_inventory"] = {"ok": True, "detail": f"{age_hours:.0f}h old"}
 
     # 2. Required daemon threads alive
+    # PR 16b: read from _REQUIRED_DAEMONS (populated at startup via _start_daemon)
+    # instead of a hardcoded set. New daemons no longer need an edit here.
     live = {t.name for t in threading.enumerate()}
-    required = {
-        "scraper", "notion-watcher", "copy-coalescer",
-        "context-harvest", "stale-queue-checker", "perf-recap", "state-cleanup",
-        "health-heartbeat",  # PR 15c — live CH + status heartbeat
-    }
-    if _PULSE_ENABLED:
-        required.add("proactive-pulse")
+    required = set(_REQUIRED_DAEMONS)
     dead = required - live
     if dead:
         checks["daemon_threads"] = {"ok": False, "detail": f"Dead threads: {', '.join(sorted(dead))}"}
@@ -1905,19 +1940,13 @@ def _thread_watchdog(web: WebClient) -> None:
     """Check all named daemon threads are alive every 60s. Alert #scout-qa if any die."""
     import time as _time
 
-    # Core threads that must always run (smoke-test excluded — it's one-shot, not a daemon)
-    REQUIRED = {
-        "scraper", "notion-watcher", "copy-coalescer",
-        "context-harvest", "stale-queue-checker", "perf-recap", "state-cleanup",
-        "health-heartbeat",  # PR 15c — live CH + status heartbeat. Watchdog must alert if it dies.
-    }
-
+    # PR 16b: read from _REQUIRED_DAEMONS (populated at startup via _start_daemon)
+    # instead of a hardcoded set. Same source of truth as _compute_health_status().
     _time.sleep(120)  # Give all threads time to start before first check
     while True:
         try:
             live = {t.name for t in threading.enumerate()}
-            # Conditional: proactive-pulse only if PULSE_ENABLED
-            required = REQUIRED | ({"proactive-pulse"} if _PULSE_ENABLED else set())
+            required = set(_REQUIRED_DAEMONS)
             dead = required - live
             if dead:
                 names = ", ".join(sorted(dead))
@@ -1950,41 +1979,33 @@ def main():
     socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
 
-    # Startup: smoke test — runs immediately in background, posts pass/fail to #scout-qa.
-    # Catches bad model names, broken imports, ClickHouse down, etc. before anyone @mentions Scout.
+    # PR 16b: required daemons go through _start_daemon() — auto-registered in
+    # _REQUIRED_DAEMONS so health check + watchdog see them without manual edits.
+    # One-shot or self-monitoring threads (smoke-test, watchdogs, HTTP server) keep
+    # the raw threading.Thread call so they don't appear in the required set.
+
+    # Startup smoke test — one-shot, NOT a long-running daemon
     threading.Thread(target=_run_startup_smoke_test, args=(web_client,), daemon=True, name="smoke-test").start()
-    # Background: daily stale queue alerts (daemon thread dies cleanly on exit)
-    threading.Thread(target=_check_stale_queue, args=(web_client,), daemon=True, name="stale-queue-checker").start()
-    # Background: 14-day performance recap — compares Scout estimates to actual ClickHouse RPM
-    threading.Thread(target=_performance_recap, args=(web_client,), daemon=True, name="perf-recap").start()
-    # Background: nightly cleanup of state files to prevent unbounded growth
-    threading.Thread(target=_cleanup_state, daemon=True, name="state-cleanup").start()
-    # Background: daily proactive pulse — cap alerts, velocity shifts, overnight events
-    # PULSE_ENABLED=false on local (LaunchAgent) to avoid double-posting when Render is also live
+
+    # Required long-running daemons (registered via _start_daemon)
+    _start_daemon(_check_stale_queue,     name="stale-queue-checker", args=(web_client,))
+    _start_daemon(_performance_recap,     name="perf-recap",          args=(web_client,))
+    _start_daemon(_cleanup_state,         name="state-cleanup")
     if _PULSE_ENABLED:
-        threading.Thread(target=_proactive_pulse, args=(web_client,), daemon=True, name="proactive-pulse").start()
+        _start_daemon(_proactive_pulse,   name="proactive-pulse",     args=(web_client,))
     else:
         log.info("[pulse] disabled via PULSE_ENABLED=false — skipping pulse thread")
-    # Background: daily launch health watchdog — catches broken campaigns within hours
+    _start_daemon(_nightly_harvest,       name="context-harvest")
+    _start_daemon(_run_scraper_daemon,    name="scraper")
+    _start_daemon(_notion_watcher_loop,   name="notion-watcher",      args=(web_client,))
+    _start_daemon(_copy_coalescer_loop,   name="copy-coalescer")
+    # PR 15c — live health heartbeat (CH ping every 30 min, NOT in HTTP /health)
+    _start_daemon(lambda: _run_health_heartbeat(web_client), name="health-heartbeat")
+
+    # Background: daily launch health watchdog (no register — campaign-level, not infrastructure)
     threading.Thread(target=_launch_watchdog, args=(web_client,), daemon=True, name="launch-watchdog").start()
-    # Background: nightly channel context harvest — reads Slack channels, compresses to notes
-    threading.Thread(target=_nightly_harvest, daemon=True, name="context-harvest").start()
-    # Background: daily offer scraper — keeps offers_latest.json fresh (6am CT, or immediately on first boot)
-    threading.Thread(target=_run_scraper_daemon, daemon=True, name="scraper").start()
-    # Background: Notion → Slack watcher — posts when queue page Status changes from "Awaiting Entry"
-    threading.Thread(target=_notion_watcher_loop, args=(web_client,), daemon=True, name="notion-watcher").start()
-    # Background: AI copy coalescer — batches enrichment requests with 10s window + 24h cache
-    threading.Thread(target=_copy_coalescer_loop, daemon=True, name="copy-coalescer").start()
-    # Background: thread watchdog — alerts #scout-qa if any named daemon thread dies
+    # Background: thread watchdog — must NOT register itself (would alert if it died, but it's the alerter)
     threading.Thread(target=_thread_watchdog, args=(web_client,), daemon=True, name="thread-watchdog").start()
-    # Background: live health heartbeat (PR 15c) — every 30 min, includes standalone CH ping.
-    # CH check here only — NOT in _compute_health_status() which Render polls every 30s.
-    # Posts a single Slack alert on transition to degraded; recovery alert on return to ok.
-    threading.Thread(
-        target=lambda: _run_health_heartbeat(web_client),
-        daemon=True,
-        name="health-heartbeat",
-    ).start()
 
     # Health check HTTP server — Render pings /health every 30s to verify Scout is alive
     _start_health_server(port=int(os.getenv("PORT", "10000")))

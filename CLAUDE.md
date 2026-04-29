@@ -37,7 +37,7 @@ missed a 48h recency filter that was added to the agent tool, causing false alar
 | Cap alerts | Pulse-only | `_build_cap_signal()` | No agent tool — no divergence risk |
 | Overnight events | Pulse-only | `_build_overnight_signal()` | No agent tool — no divergence risk |
 | Pulse recall | `get_pulse_summary()` in `scout_agent.py` reads `last_signals_summary` from `pulse_state.json` | Agent tool only — Pulse writes summary, agent reads it | Written by `_run_once_pulse()` (non-force runs only). Force runs intentionally excluded to preserve canonical 8am state. |
-| Health heartbeat (PR 15c) | `_run_health_heartbeat()` in `scout_bot.py` | Background daemon every 30 min | Calls `_compute_health_status()` + standalone CH ping. CH ping affects HEARTBEAT only — never the HTTP `/health` probe (Render must not restart on CH outage). Posts one Slack alert on transition to degraded after `_HEALTH_CONSECUTIVE_THRESHOLD` consecutive bad checks; one recovery alert on return to ok. |
+| Health heartbeat (PR 15c) | `_run_health_heartbeat()` in `scout_bot.py` | Background daemon every 30 min | Calls `_compute_health_status()` + standalone CH ping. CH ping affects HEARTBEAT only — never the HTTP `/health` probe (Render must not restart on CH outage). Posts one Slack alert on transition to degraded after `_HEALTH_CONSECUTIVE_THRESHOLD` consecutive bad checks; one recovery alert on return to ok. PR 16c: `_run_startup_smoke_test()` also fires a one-shot CH ping right after smoke posts so the 35-min warmup window is no longer a blind spot. |
 
 ---
 
@@ -111,6 +111,7 @@ When adding a new Scout capability, touch these files in this order:
 - **`pulse_state.json`** is written by the bot at runtime — don't put static facts here
 - **Client instances** (WebClient, ClickHouse) are created here in `main()` and passed as parameters to modules — never imported from scout_bot (circular import)
 - **`_BOT_USER_ID`, `_LAST_THREAD_PER_CHANNEL`, and `_PULSE_RUNNER`** are injected into scout_handlers via `_set_bot_user_id()`, `_set_thread_state()`, and `_set_pulse_runner()` after auth — this is the circular-import workaround. Add new functions that scout_handlers needs from scout_bot here; never import scout_bot from scout_handlers.
+- **Daemon registration (PR 16b)**: long-running daemons that must be alive for Scout to be healthy go through `_start_daemon(target, name=, args=())` instead of raw `threading.Thread(...).start()`. This auto-registers them in `_REQUIRED_DAEMONS`, which both `_compute_health_status()` and `_thread_watchdog` read from. Use raw `threading.Thread()` only for one-shot threads (smoke-test) or self-monitoring threads (`thread-watchdog`, `launch-watchdog`, `health-server`).
 
 ### scout_handlers.py
 - **All `_handle_*` functions** live here: approve, reject, DM, block_action routing
@@ -209,14 +210,6 @@ Surfaced automatically at session start via the Session Start Protocol above.
 
 When you start a Scout task, scan this list for items the task touches. If you ship a fix,
 remove the item in the same PR. New deferred items go here, not into gstack files.
-
-**[PR16] 35-minute CH startup blind spot** — if ClickHouse goes down during `_HEALTH_HEARTBEAT_WARMUP_SECS` (300s), first detection fires at minute 35. Fix: add startup-time CH check in `_run_startup_smoke_test()` that posts immediately to #scout-qa on failure. `scout_bot.py → _run_startup_smoke_test()`
-
-**[PR16] Dedup suppression count invisible** — `select_offers()` (PR 15a) logs suppression via `log.debug()` but the digest post has no team-visible count. Fix: expose `meta['advertisers_deduped'] = N`; digest footer notes "X duplicate advertisers filtered." `scout_digest.py → select_offers()`
-
-**[PR16] `_DIGEST_NETWORKS` still hardcoded** — when a 10th network is added to `offer_scraper.py`, another PR is required to update the tuple. Fix: derive from `offers_latest.json` keyset at module load with `_DIGEST_NETWORKS_FALLBACK` for the cold-start case. `scout_digest.py` module level.
-
-**[PR16] `required` thread set manually maintained in TWO places** — `_compute_health_status()` (line ~1727) AND `_thread_watchdog` REQUIRED (line ~1795) both have hardcoded thread name sets. Every new daemon requires edits in both. Fix: module-level `_REQUIRED_DAEMONS: set[str] = set()` populated via `.add()` at each daemon start site in `main()`; both checks read from it. `scout_bot.py → main()` + both check sites.
 
 **[PR17] Scoring thresholds scattered + invisible** — `$20 RPM floor`, `n_per_network=3`, `2-per-category`, `2-per-payout-type` in `scout_digest.py`; fill rate 5K/7d, ghost 48h, velocity ±40/20%, cap 90% in `scout_bot.py`. Team cannot audit thresholds without reading source. Fix: `config/scout_thresholds.json` (loaded at startup) + `@Scout config` agent tool that returns current values.
 

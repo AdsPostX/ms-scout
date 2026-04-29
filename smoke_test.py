@@ -664,6 +664,87 @@ def test_compute_health_status_shape():
         return False, str(e)
 
 
+# ── PR 16: hardcoding tier 1 invariants ──────────────────────────────────────
+
+@test("PR 16a — _DIGEST_NETWORKS derived (Big 4 priority preserved)")
+def test_digest_networks_derivation():
+    try:
+        import scout_digest
+        for name in ("_get_active_networks", "_PRIORITY_NETWORKS",
+                     "_DIGEST_NETWORKS_FALLBACK", "_DIGEST_NETWORKS"):
+            if not hasattr(scout_digest, name):
+                return False, f"missing module-level: {name}"
+        if scout_digest._PRIORITY_NETWORKS != ("impact", "maxbounty", "flexoffers", "cj"):
+            return False, f"priority order changed: {scout_digest._PRIORITY_NETWORKS}"
+        result = scout_digest._get_active_networks()
+        priority_set = set(scout_digest._PRIORITY_NETWORKS)
+        priority_seen = [n for n in result if n in priority_set]
+        priority_expected = [n for n in scout_digest._PRIORITY_NETWORKS if n in priority_seen]
+        if priority_seen != priority_expected:
+            return False, f"Big 4 ordering broken — got {priority_seen}, expected {priority_expected}"
+        rest = [n for n in result if n not in priority_set]
+        if rest != sorted(rest):
+            return False, f"non-priority networks not alphabetical: {rest}"
+        return True, f"derivation OK; order = {result}"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("PR 16b — _REQUIRED_DAEMONS is single source")
+def test_required_daemons_single_source():
+    try:
+        import scout_bot
+        if not hasattr(scout_bot, "_REQUIRED_DAEMONS"):
+            return False, "_REQUIRED_DAEMONS missing"
+        if not hasattr(scout_bot, "_start_daemon") or not callable(scout_bot._start_daemon):
+            return False, "_start_daemon missing or not callable"
+        import pathlib
+        src = (pathlib.Path(__file__).parent / "scout_bot.py").read_text()
+        compute_section = src.split("def _compute_health_status")[1].split("\ndef ")[0]
+        watchdog_section = src.split("def _thread_watchdog")[1].split("\ndef ")[0]
+        for section_name, section in (("compute", compute_section), ("watchdog", watchdog_section)):
+            if '"scraper", "notion-watcher"' in section:
+                return False, f"hardcoded thread set still present in {section_name}"
+            if "_REQUIRED_DAEMONS" not in section:
+                return False, f"{section_name} section doesn't reference _REQUIRED_DAEMONS"
+        return True, "single source confirmed; both check sites read from _REQUIRED_DAEMONS"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("PR 16c — select_offers() exposes advertisers_deduped in meta")
+def test_dedup_count_in_meta():
+    try:
+        import scout_digest
+        synthetic = [
+            {"offer_id": "1", "advertiser": "DupCo", "network": "impact",
+             "category": "Retail", "_payout_type_norm": "CPL", "tracking_url": "x"},
+            {"offer_id": "2", "advertiser": "DupCo", "network": "maxbounty",
+             "category": "Retail", "_payout_type_norm": "CPL", "tracking_url": "x"},
+        ]
+        orig_load = scout_digest._load_offers
+        orig_score = scout_digest.score_offer
+        orig_in_ms = scout_digest.is_already_in_ms
+        try:
+            scout_digest._load_offers = lambda: synthetic
+            scout_digest.score_offer = lambda offer, *a, **kw: 100.0
+            scout_digest.is_already_in_ms = lambda offer, ms: False
+            _result, meta = scout_digest.select_offers(
+                n_per_network=5, ms_campaigns=[], benchmarks={"avg_rpm": 0, "avg_cvr": 0}, force=True,
+            )
+        finally:
+            scout_digest._load_offers = orig_load
+            scout_digest.score_offer = orig_score
+            scout_digest.is_already_in_ms = orig_in_ms
+        if "advertisers_deduped" not in meta:
+            return False, f"meta missing advertisers_deduped; got {sorted(meta.keys())}"
+        if meta["advertisers_deduped"] != 1:
+            return False, f"expected 1 dedup, got {meta['advertisers_deduped']}"
+        return True, f"meta exposes advertisers_deduped={meta['advertisers_deduped']}"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:
