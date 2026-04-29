@@ -181,6 +181,23 @@ _HEALTH_CONSECUTIVE_THRESHOLD   = int(_HEALTH_CFG.get("heartbeat_consecutive_thr
 _HEALTH_HEARTBEAT_INTERVAL_SECS = int(_HEALTH_CFG.get("heartbeat_interval_minutes", 30)) * 60
 _OFFER_STALENESS_HOURS          = int(_HEALTH_CFG.get("offer_staleness_hours", 30))
 
+
+def _load_signal_cfg() -> dict:
+    """Load the signals section of scout_thresholds.json. Returns {} on any error."""
+    try:
+        from scout_agent import SCOUT_THRESHOLDS
+        return SCOUT_THRESHOLDS.get("signals", {})
+    except Exception as e:
+        log.warning(f"[signals] could not load thresholds, using fallback defaults: {e}")
+        return {}
+
+_SIGNAL_CFG                  = _load_signal_cfg()
+_FILL_RATE_MIN_SESSIONS_7D   = int(_SIGNAL_CFG.get("fill_rate_min_sessions_7d", 5000))
+_GHOST_RECENCY_HOURS         = int(_SIGNAL_CFG.get("ghost_recency_hours", 48))
+_VELOCITY_DOWN_THRESHOLD_PCT = float(_SIGNAL_CFG.get("velocity_down_threshold_pct", -40))
+_VELOCITY_UP_THRESHOLD_PCT   = float(_SIGNAL_CFG.get("velocity_up_threshold_pct", 20))
+_CAP_ALERT_PCT               = float(_SIGNAL_CFG.get("cap_alert_pct", 90))
+
 # PR 16b: Single source of truth for "which daemons must be alive."
 # Daemons register themselves here at startup via _start_daemon() instead of
 # being hardcoded in two places (the health check AND the watchdog).
@@ -263,7 +280,7 @@ def _pulse_signal_cap(ch) -> list:
             if mb <= 0:
                 continue
             cap_pct = revenue_mtd / mb
-            if cap_pct < 0.70:
+            if cap_pct < _CAP_ALERT_PCT / 100:
                 continue
             daily_run_rate = revenue_mtd / max(today_d.day, 1)
             days_to_cap    = (mb - revenue_mtd) / daily_run_rate if daily_run_rate > 0 else 999
@@ -318,7 +335,7 @@ def _pulse_signal_velocity(ch) -> list:
             if rev_30d <= 0:
                 continue
             pct_delta = (rev_7d_ann - rev_30d) / rev_30d * 100
-            if abs(pct_delta) < 40:
+            if pct_delta > _VELOCITY_DOWN_THRESHOLD_PCT and pct_delta < _VELOCITY_UP_THRESHOLD_PCT:
                 continue
             results.append({
                 "publisher_name":  org_map.get(str(user_id), f"Partner {user_id}"),
@@ -574,7 +591,7 @@ def _pulse_signal_fill_rate(ch) -> list:
                 WHERE created_at >= today() - 7
                   AND placement IN ({placements_sql})
                 GROUP BY user_id
-                HAVING sessions_7d > 5000
+                HAVING sessions_7d > {_FILL_RATE_MIN_SESSIONS_7D}
             ),
             imps_agg AS (
                 SELECT

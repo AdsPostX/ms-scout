@@ -3562,7 +3562,8 @@ def _query_ghost_campaigns(ch) -> list:
     SQL and thresholds live in queries.py. Any change belongs there.
     This wrapper exists so scout_bot.py can continue to import from scout_agent.
     """
-    return _q.ghost_campaigns(ch)
+    recency_hours = int(SCOUT_THRESHOLDS.get("signals", {}).get("ghost_recency_hours", 48))
+    return _q.ghost_campaigns(ch, recency_hours=recency_hours)
 
 
 def get_ghost_campaigns() -> str:
