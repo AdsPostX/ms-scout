@@ -78,6 +78,7 @@ campaign_builder.py     — PARKED: Playwright automation (pending Vamsee sign-o
 - `data/entity_overrides.json` — publisher/advertiser facts Scout has learned from the team
 - `data/pulse_state.json` — runtime Pulse state; never manually edit publisher names without verifying in ClickHouse
 - `config/team_corrections.json` — static platform-wide facts (git-tracked), not for entity facts
+- `config/scout_thresholds.json` — Scout's tunable thresholds (PR 17a; loaded by `scout_agent._load_thresholds()` at startup). The `@Scout config` tool surfaces current values so the team can audit without reading source.
 
 ---
 
@@ -211,8 +212,6 @@ Surfaced automatically at session start via the Session Start Protocol above.
 When you start a Scout task, scan this list for items the task touches. If you ship a fix,
 remove the item in the same PR. New deferred items go here, not into gstack files.
 
-**[PR17] Scoring thresholds scattered + invisible** — `$20 RPM floor`, `n_per_network=3`, `2-per-category`, `2-per-payout-type` in `scout_digest.py`; fill rate 5K/7d, ghost 48h, velocity ±40/20%, cap 90% in `scout_bot.py`. Team cannot audit thresholds without reading source. Fix: `config/scout_thresholds.json` (loaded at startup) + `@Scout config` agent tool that returns current values.
+**[Future] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. `scout_agent.py` SYSTEM_PROMPT lines ~820-900.
 
-**[PR17] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. `scout_agent.py` SYSTEM_PROMPT lines ~820-900.
-
-**[PR17] Network lists in 4+ locations in `scout_agent.py`** — `browse_offers` description (line ~1041), `find_offer_replacements` (line ~1161), `run_offer_scraper` description (line ~1381), SYSTEM_PROMPT line 542. Drift risk is permanent. Fix: single `SUPPORTED_NETWORKS` constant at top of `scout_agent.py` referenced from tool description strings and docstrings. SYSTEM_PROMPT body left untouched (f-string conversion is too risky on a 4300-line prompt).
+**[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. SYSTEM_PROMPT line ~430 ("CJ, MaxBounty, Impact, FlexOffers, and other networks") still requires a manual edit when a 10th network ships. This was intentional — converting the 4300-line SYSTEM_PROMPT to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
