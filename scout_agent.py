@@ -317,6 +317,115 @@ def _merge_learned_benchmarks() -> None:
     except Exception as e:
         log.warning(f"_merge_learned_benchmarks failed: {e}")
 
+
+# ── PR 19: tags-as-categories helper + schema-deps validation ────────────────
+
+def _extract_real_categories(tags_value) -> list[str]:
+    """
+    Parse the from_airbyte_campaigns.tags JSON array string and return the
+    real category tags (filter out `internal-*` system tags used for network
+    and channel metadata).
+
+    Pure function, no I/O. Used by tests and (where useful) by ad-hoc Python
+    consumers; the production scoring path does the same filter in SQL via
+    queries.performance_benchmarks_raw().
+
+    Examples:
+      '["internal-network-impact", "internal-email", "rewards", "technology"]'
+        → ['rewards', 'technology']
+      '["pets", "non-profit"]'        → ['pets', 'non-profit']
+      '[]' or None or '' or 'invalid' → []
+    """
+    if not tags_value:
+        return []
+    try:
+        parsed = json.loads(tags_value) if isinstance(tags_value, str) else tags_value
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    # Case-insensitive filter — production has both "internal-email" and "Internal-Email"
+    # variants from differently-typed platform entries.
+    return [t for t in parsed if isinstance(t, str) and not t.lower().startswith("internal-")]
+
+
+# Columns Scout depends on. (table, column, must_have_data).
+# must_have_data=True means the column must have at least 100 non-null rows;
+# below that threshold _validate_schema_deps fires loud at boot. Catches the
+# categories-NULL class of silent failure (PR 19 root cause).
+_SCHEMA_DEPS: list[tuple[str, str, bool]] = [
+    # from_airbyte_campaigns — driver of benchmarks + scoring
+    ("from_airbyte_campaigns",      "id",                    False),
+    ("from_airbyte_campaigns",      "adv_name",              True),
+    ("from_airbyte_campaigns",      "tags",                  True),   # PR 19: source of category data
+    ("from_airbyte_campaigns",      "internal_network_name", True),
+    ("from_airbyte_campaigns",      "deleted_at",            False),
+    ("from_airbyte_campaigns",      "categories",            False),  # known empty (use tags)
+    # Activity tables — driver of CVR/RPM
+    ("adpx_sdk_sessions",           "user_id",               True),
+    ("adpx_sdk_sessions",           "placement",             True),
+    ("adpx_impressions_details",    "campaign_id",           True),
+    ("adpx_impressions_details",    "pid",                   True),
+    ("adpx_conversionsdetails",     "campaign_id",           True),
+    ("adpx_conversionsdetails",     "revenue",               True),
+    ("adpx_tracked_clicks",         "campaign_id",           True),
+    # Publisher resolution
+    ("from_airbyte_users",          "id",                    True),
+    ("from_airbyte_users",          "organization",          True),
+]
+
+_SCHEMA_DEPS_MIN_ROWS = 100  # threshold for must_have_data; below this fires alert
+
+
+def _validate_schema_deps(ch) -> dict:
+    """
+    Boot-time check (PR 19): for each column Scout depends on, confirm it exists
+    in system.columns and (where flagged) has at least _SCHEMA_DEPS_MIN_ROWS non-null
+    rows. Returns {"ok": bool, "violations": [str], "warnings": [str], "checked": int}.
+
+    Does NOT block boot. Caller logs and posts to #scout-qa via _run_startup_smoke_test.
+    Catches the "Scout reads a column that's NULL/missing/renamed" class of silent
+    failure that bit us with categories (PR 19 root cause).
+    """
+    violations: list[str] = []
+    warnings: list[str] = []
+    try:
+        tables = sorted({t for t, _, _ in _SCHEMA_DEPS})
+        # Single batched query for all tables we care about
+        col_rows = ch.query(
+            "SELECT table, name FROM system.columns "
+            "WHERE database = 'default' AND table IN {tables: Array(String)}",
+            parameters={"tables": tables},
+        ).result_rows
+        live = {(t, c) for t, c in col_rows}
+        for table, col, must_have_data in _SCHEMA_DEPS:
+            if (table, col) not in live:
+                violations.append(f"{table}.{col} MISSING from system.columns")
+                continue
+            if must_have_data:
+                try:
+                    n = ch.query(
+                        f"SELECT countIf({col} IS NOT NULL) FROM default.{table}"
+                    ).result_rows[0][0]
+                except Exception as e:
+                    warnings.append(f"{table}.{col} count check failed: {e}")
+                    continue
+                if n < _SCHEMA_DEPS_MIN_ROWS:
+                    violations.append(
+                        f"{table}.{col} has only {n} non-null rows "
+                        f"(need ≥{_SCHEMA_DEPS_MIN_ROWS}). "
+                        f"Scout may silently fail to use this data."
+                    )
+    except Exception as e:
+        warnings.append(f"schema validation crashed: {e}")
+    return {
+        "ok": not violations,
+        "violations": violations,
+        "warnings": warnings,
+        "checked": len(_SCHEMA_DEPS),
+    }
+
+
 def _load_performance_benchmarks() -> dict:
     """
     Query ClickHouse for real CVR + RPM benchmarks grounded in actual MS conversion data.
@@ -384,9 +493,10 @@ def _load_performance_benchmarks() -> dict:
 
         if not category_benchmarks:
             log.warning(
-                "Tier 3 benchmarks disabled: 'categories' column appears to be NULL for all "
-                f"{len(rows)} campaigns in from_airbyte_campaigns. "
-                "If category data is populated in the MS platform, re-check the column name."
+                f"Tier 3 benchmarks empty across {len(rows)} campaigns. "
+                "Expected ~25 categories from tags JSON parsing in "
+                "queries.performance_benchmarks_raw() — check the SQL CTE there. "
+                "Verified Apr 2026: data lives in `tags`, not `categories`."
             )
 
         result = {
@@ -900,7 +1010,8 @@ adpx_system_activity_logs [115K] — audit trail for dashboard changes
 
 from_airbyte_campaigns [4.75K] — master campaign table
   JOIN: toInt64(campaign_id) = c.id
-  COLS: id, adv_name, title, status, categories, start_date, end_date,
+  COLS: id, adv_name, title, status, tags (JSON array — see CATEGORY DATA below),
+    start_date, end_date,
     capping_config (JSON: {"month":{"budget":N}} — monthly revenue cap),
     pacing_config, schedule_days, geo_whitelist, geo_blacklist, platforms, os, browsers,
     is_offerwall_only, offerwall_enabled, perkswallet_enabled, network_id,
@@ -909,15 +1020,28 @@ from_airbyte_campaigns [4.75K] — master campaign table
     is_direct_sold, is_citrusad, is_rich_media, landing_url, useraction_url, useraction_cta,
     adv_description, offer_description, mini_description, terms_and_conditions,
     internal_notes, owner_id, advertiser_id, partner_id, deleted_at (NULL=active)
+  CATEGORY DATA: column `categories` is always NULL (not synced from upstream).
+    Real category data lives in `tags` as a JSON array. Each campaign has 1-N tags;
+    some are system tags prefixed `internal-*` (network/channel metadata, e.g.
+    `internal-network-impact`, `internal-email`) — filter these out. The remaining
+    tags are real categories (technology, rewards, pets, travel, financial, etc).
+    SQL pattern (PR 19):
+      arrayFilter(t -> NOT startsWith(lower(t), 'internal-'),
+        JSONExtract(coalesce(c.tags, '[]'), 'Array(String)')) AS real_categories
+    Use arrayJoin(real_categories) to fan out one row per category, or
+    real_categories[1] for the primary category. NEVER reference c.categories.
 
 from_airbyte_publisher_campaigns [96K] — publisher×campaign pairings (operational)
   COLS: id, campaign_id, user_id (publisher), is_active (Bool — currently serving),
     payout (Int64 cents — publisher override; NULL=campaign default), priority (higher=more impressions),
     multiplier (Decimal), force_priority, max_impressions, max_positive_cta,
     capping_config, pacing_config, schedule_days, geo_whitelist, geo_blacklist,
-    platforms, os, browsers, categories, goals, conversion_events, is_offerwall_only,
+    platforms, os, browsers, goals, conversion_events, is_offerwall_only,
     stats_by_position (JSON — pre-computed stats by slot), useraction_cta, useraction_url,
     deleted_at, updated_at
+  NOTE: this table's `categories` is always NULL and `tags` is sparse (~44 rows of 57K).
+    For category-by-publisher queries, JOIN to from_airbyte_campaigns and parse c.tags
+    using the pattern above (PR 19 verified).
 
 from_airbyte_users [5.45K] — publisher registry
   COLS: id (UInt64 publisher_id), organization (name), is_test
@@ -998,6 +1122,39 @@ Publisher placements         → from_airbyte_placements WHERE user_id = X
 Offerwall-only flag          → from_airbyte_campaigns.is_offerwall_only
 Day-of-week schedule         → from_airbyte_publisher_campaigns.schedule_days (JSON)
 Campaigns in serving group   → from_airbyte_campaign_serving_groups + from_airbyte_grouped_campaign_specs
+
+── COMMON SQL PATTERNS ───────────────────────────────────────────────────────────────────────────
+
+CATEGORY GROUPING (since `categories` is empty — use `tags` instead, PR 19):
+  SELECT category, count(DISTINCT id) AS n_offers
+  FROM (
+    SELECT
+      c.id,
+      arrayJoin(arrayFilter(
+        t -> NOT startsWith(lower(t), 'internal-'),
+        JSONExtract(coalesce(c.tags, '[]'), 'Array(String)')
+      )) AS category
+    FROM default.from_airbyte_campaigns c
+    WHERE c.deleted_at IS NULL
+  )
+  GROUP BY category ORDER BY n_offers DESC
+
+CATEGORY × REVENUE (joins to conversions, fan-out happens AFTER aggregation):
+  WITH agg AS (
+    SELECT cv.campaign_id, count() AS conv, sum(toFloat64OrNull(cv.revenue)) AS rev
+    FROM default.adpx_conversionsdetails cv
+    WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 6 MONTH)
+    GROUP BY cv.campaign_id
+  )
+  SELECT
+    arrayJoin(arrayFilter(
+      t -> NOT startsWith(t, 'internal-'),
+      JSONExtract(coalesce(c.tags, '[]'), 'Array(String)')
+    )) AS category,
+    sum(agg.rev) AS revenue
+  FROM agg
+  JOIN default.from_airbyte_campaigns c ON toInt64(c.id) = toInt64(agg.campaign_id)
+  GROUP BY category ORDER BY revenue DESC LIMIT 10
 """
 
 
