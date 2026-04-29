@@ -745,6 +745,81 @@ def test_dedup_count_in_meta():
         return False, str(e)
 
 
+# ── PR 17: config legibility — thresholds + tool + SUPPORTED_NETWORKS ───────
+
+@test("PR 17a — config/scout_thresholds.json loads + SCOUT_THRESHOLDS populated")
+def test_scout_thresholds_loaded():
+    try:
+        import scout_agent
+        if not hasattr(scout_agent, "SCOUT_THRESHOLDS"):
+            return False, "SCOUT_THRESHOLDS missing"
+        cfg = scout_agent.SCOUT_THRESHOLDS
+        for section in ("digest", "signals", "health"):
+            if section not in cfg:
+                return False, f"section missing: {section}"
+        if cfg["digest"]["min_rpm_floor"] != 20:
+            return False, f"digest.min_rpm_floor expected 20, got {cfg['digest']['min_rpm_floor']}"
+        if cfg["signals"]["fill_rate_min_sessions_7d"] != 5000:
+            return False, f"signals.fill_rate_min_sessions_7d expected 5000, got {cfg['signals']['fill_rate_min_sessions_7d']}"
+        # Confirm fallback path works
+        fallback = scout_agent._SCOUT_THRESHOLDS_FALLBACK
+        if "digest" not in fallback or "signals" not in fallback or "health" not in fallback:
+            return False, "_SCOUT_THRESHOLDS_FALLBACK missing required sections"
+        return True, f"loaded {len(cfg)} sections; min_rpm_floor={cfg['digest']['min_rpm_floor']}"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("PR 17b — get_scout_config() registered with all 4 contract pieces")
+def test_get_scout_config_registered():
+    try:
+        import scout_agent
+        # 1. Function exists
+        if not hasattr(scout_agent, "get_scout_config"):
+            return False, "get_scout_config function missing"
+        # 2. TOOL_MAP entry
+        if scout_agent.TOOL_MAP.get("get_scout_config") is not scout_agent.get_scout_config:
+            return False, "TOOL_MAP['get_scout_config'] not bound to function"
+        # 3. TOOLS list entry
+        names = {t["name"] for t in scout_agent.TOOLS}
+        if "get_scout_config" not in names:
+            return False, f"TOOLS list missing get_scout_config; have: {sorted(names)}"
+        # 4. SYSTEM_PROMPT intent
+        if "get_scout_config()" not in scout_agent.SYSTEM_PROMPT:
+            return False, "SYSTEM_PROMPT missing get_scout_config() intent routing"
+        # Functional: returns expected shape
+        result = scout_agent.get_scout_config()
+        for key in ("thresholds", "supported_networks", "pulse", "config_file"):
+            if key not in result:
+                return False, f"get_scout_config() output missing '{key}'"
+        return True, f"all 4 contract pieces present; output has {len(result)} keys"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("PR 17c — SUPPORTED_NETWORKS exists + tool descriptions reference it")
+def test_supported_networks_single_source():
+    try:
+        import scout_agent
+        if not hasattr(scout_agent, "SUPPORTED_NETWORKS"):
+            return False, "SUPPORTED_NETWORKS constant missing"
+        if len(scout_agent.SUPPORTED_NETWORKS) != 9:
+            return False, f"expected 9 networks, got {len(scout_agent.SUPPORTED_NETWORKS)}"
+        # Tool descriptions must use the constant via .join(), not hardcoded literal
+        descriptions = [t["description"] for t in scout_agent.TOOLS]
+        joined = ", ".join(scout_agent.SUPPORTED_NETWORKS)
+        # At least one tool description must contain the joined string (proves the constant is wired in)
+        if not any(joined in desc for desc in descriptions):
+            return False, "no tool description references SUPPORTED_NETWORKS via .join()"
+        # Confirm we did NOT touch SYSTEM_PROMPT body for f-string conversion
+        # (SYSTEM_PROMPT contains the literal network names but should not be an f-string)
+        if "{', '.join(SUPPORTED_NETWORKS)}" in scout_agent.SYSTEM_PROMPT:
+            return False, "SYSTEM_PROMPT body f-string conversion detected — too risky per plan A5"
+        return True, f"SUPPORTED_NETWORKS = {len(scout_agent.SUPPORTED_NETWORKS)} networks; tool descriptions wired"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

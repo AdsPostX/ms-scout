@@ -29,6 +29,73 @@ load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 log = logging.getLogger("scout_agent")
 
 
+# ── PR 17c: SUPPORTED_NETWORKS — single source ───────────────────────────────
+# Used in tool description strings and function docstrings ONLY (not the
+# SYSTEM_PROMPT body — converting that to an f-string would require escaping
+# every {} in the SQL/JSON examples and risks silent format breakage).
+# When a 10th network ships, edit this tuple. SYSTEM_PROMPT line 430 still
+# needs a one-line manual edit; tool schemas update automatically via the
+# ", ".join(SUPPORTED_NETWORKS) references below.
+SUPPORTED_NETWORKS: tuple[str, ...] = (
+    "Impact", "FlexOffers", "MaxBounty", "CJ",
+    "ShareASale", "Rakuten", "AWIN", "Tune", "Everflow",
+)
+
+
+# ── PR 17a: Scout thresholds — loaded once at module import ──────────────────
+# Edit config/scout_thresholds.json + redeploy on Render to change live values.
+# The @Scout config tool reads SCOUT_THRESHOLDS at runtime so the team can audit
+# what's currently active without reading source.
+_SCOUT_THRESHOLDS_FILE = pathlib.Path(__file__).parent / "config" / "scout_thresholds.json"
+
+_SCOUT_THRESHOLDS_FALLBACK: dict = {
+    "digest": {
+        "min_rpm_floor": 20,
+        "offers_per_network": 3,
+        "max_per_category": 2,
+        "max_per_payout_type": 2,
+    },
+    "signals": {
+        "fill_rate_min_sessions_7d": 5000,
+        "ghost_recency_hours": 48,
+        "velocity_down_threshold_pct": -40,
+        "velocity_up_threshold_pct": 20,
+        "cap_alert_pct": 90,
+    },
+    "health": {
+        "offer_staleness_hours": 30,
+        "heartbeat_interval_minutes": 30,
+        "heartbeat_warmup_seconds": 300,
+        "heartbeat_consecutive_threshold": 2,
+    },
+}
+
+
+def _load_thresholds() -> dict:
+    """Load Scout thresholds from config/scout_thresholds.json. Falls back on any error."""
+    try:
+        if not _SCOUT_THRESHOLDS_FILE.exists():
+            log.warning(f"[config] {_SCOUT_THRESHOLDS_FILE} missing — using fallback thresholds")
+            return _SCOUT_THRESHOLDS_FALLBACK
+        loaded = json.loads(_SCOUT_THRESHOLDS_FILE.read_text())
+        # Drop the _doc key if present
+        loaded.pop("_doc", None)
+        # Merge with fallback so missing keys get sane defaults
+        merged = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
+        for section, values in loaded.items():
+            if section in merged and isinstance(values, dict):
+                merged[section].update(values)
+            else:
+                merged[section] = values
+        return merged
+    except Exception as e:
+        log.warning(f"[config] _load_thresholds() failed, using fallback: {e}")
+        return _SCOUT_THRESHOLDS_FALLBACK
+
+
+SCOUT_THRESHOLDS: dict = _load_thresholds()
+
+
 def _run_parallel(fns: list):
     """Run a list of zero-argument callables sequentially.
     Previously used ThreadPoolExecutor, but clickhouse_connect clients are not thread-safe —
@@ -699,6 +766,16 @@ INTENTS — resolve every query to one, then act immediately.
       :large_yellow_circle: *[N] fill rate alert[s]*
       :bar_chart: *[N] revenue opportunit[ies]* surfaced
     Omit any signal with count=0. No suggestions after Pulse recall — the morning blocks gave the context.
+
+30. CONFIG / THRESHOLDS — "what are Scout's thresholds", "what's the fill rate cutoff", "how does Scout decide", "what's the RPM floor", "what networks does Scout support", "show me Scout's config", "what are the velocity thresholds", "when does the pulse run", "health check settings"
+    → get_scout_config().
+    Format the response as a compact :gear: card grouped by section:
+      :gear: *Scout Configuration — current active settings*
+      • *Digest:* {len(supported_networks)} networks · {digest.offers_per_network} offers/network · ${digest.min_rpm_floor} RPM floor · {digest.max_per_category}-per-category cap
+      • *Signals:* fill rate < {signals.fill_rate_min_sessions_7d/1000:.0f}K sessions/7d · ghost < {signals.ghost_recency_hours}h revenue · velocity {signals.velocity_down_threshold_pct}%/+{signals.velocity_up_threshold_pct}% · cap alert at {signals.cap_alert_pct}%
+      • *Pulse:* {pulse.schedule} · {pulse.opportunities_displayed}
+      • *Health:* inventory staleness > {health.offer_staleness_hours}h · heartbeat every {health.heartbeat_interval_minutes}m · {health.heartbeat_consecutive_threshold}-check hysteresis
+      _Source: {config_file} — edit + redeploy on Render to change._
 
 DEFAULT: Unclear intent → Intent 13. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
@@ -1378,7 +1455,7 @@ TOOLS = [
         "name": "run_offer_scraper",
         "description": (
             "Trigger an immediate offer inventory refresh from affiliate networks "
-            "(Impact, FlexOffers, MaxBounty, CJ, ShareASale, Rakuten, AWIN, Tune, Everflow). Takes ~2 minutes. Run when offer inventory "
+            f"({', '.join(SUPPORTED_NETWORKS)}). Takes ~2 minutes. Run when offer inventory "
             "is empty or stale. Updates offers_latest.json and posts the Scout Signal digest. "
             "Use for: 'refresh offers', 'run scraper', 'update offer inventory', "
             "'load benchmarks', 'inventory is empty', 'reload offers', 'fetch latest offers'."
@@ -1460,7 +1537,7 @@ TOOLS = [
     {
         "name": "get_offers_for_publisher",
         "description": (
-            "Return top affiliate offers (from Impact, FlexOffers, MaxBounty, CJ, and other network inventory) that are "
+            f"Return top affiliate offers (from {', '.join(SUPPORTED_NETWORKS)} inventory) that are "
             "a good fit for a specific publisher but not yet provisioned in their campaign set. "
             "Scored by estimated RPM using real MS conversion benchmarks. "
             "DIFFERENT from get_supply_demand_gaps — this surfaces net-new affiliate inventory, "
@@ -1509,6 +1586,24 @@ TOOLS = [
             "'what was in the Pulse', 'Pulse recap', 'morning briefing recap'. "
             "Returns has_pulse=False with a message when no scheduled Pulse has fired yet today. "
             "Force-pulse runs (admin test runs) do NOT update this — it always reflects the canonical 8am briefing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_scout_config",
+        "description": (
+            "Return Scout's current active configuration: scoring thresholds, signal thresholds, "
+            "health-check intervals, supported networks, and Pulse schedule. "
+            "Use when the team asks: 'what are Scout's thresholds', 'what's the fill rate cutoff', "
+            "'how does Scout decide which offers to surface', 'what's the RPM floor', "
+            "'what networks does Scout support', 'show me Scout's config', 'what are the velocity "
+            "thresholds', 'when does the pulse run', 'health check settings'. "
+            "Reads from config/scout_thresholds.json — always reflects current production values, "
+            "no need to dig through source code."
         ),
         "input_schema": {
             "type": "object",
@@ -2439,6 +2534,44 @@ def get_pulse_summary() -> dict:
     except Exception as e:
         log.warning(f"get_pulse_summary failed: {e}")
         return {"has_pulse": False, "message": f"Could not read pulse state: {e}"}
+
+
+def get_scout_config() -> dict:
+    """
+    Return Scout's current active configuration (PR 17b).
+
+    Sources:
+      - SCOUT_THRESHOLDS — loaded from config/scout_thresholds.json at module import
+      - SUPPORTED_NETWORKS — single source of supported affiliate networks
+      - Pulse schedule — read from env (PULSE_ENABLED) + the canonical 8am CT slot
+      - Live network list — derived from offers_latest.json keyset (PR 16a)
+
+    Returns a flat dict the agent renders into a Slack-friendly summary card.
+    Caller is the Claude agent — it formats the response per SYSTEM_PROMPT rules.
+    """
+    try:
+        # Live network keyset from current inventory
+        try:
+            from scout_digest import _DIGEST_NETWORKS as _live_networks  # type: ignore
+            live_networks = list(_live_networks)
+        except Exception:
+            live_networks = []
+
+        return {
+            "thresholds": SCOUT_THRESHOLDS,
+            "supported_networks": list(SUPPORTED_NETWORKS),
+            "active_networks_in_inventory": live_networks,
+            "pulse": {
+                "enabled": os.getenv("PULSE_ENABLED", "true").lower() == "true",
+                "schedule": "8am CT daily",
+                "opportunities_displayed": "Mondays only (computed daily)",
+            },
+            "config_file": str(_SCOUT_THRESHOLDS_FILE.relative_to(pathlib.Path(__file__).parent)),
+            "data_quality": _data_quality_tier(days_of_data=999),  # config is static — N/A applies
+        }
+    except Exception as e:
+        log.warning(f"get_scout_config failed: {e}")
+        return {"error": str(e), "thresholds": _SCOUT_THRESHOLDS_FALLBACK}
 
 
 def get_demand_queue_status() -> dict:
@@ -3551,7 +3684,7 @@ def get_scout_status() -> dict:
 def run_offer_scraper() -> str:
     """
     Trigger an immediate offer inventory refresh from affiliate networks
-    (Impact, FlexOffers, MaxBounty, CJ, ShareASale, Rakuten, AWIN, Tune, Everflow).
+    (see SUPPORTED_NETWORKS at top of scout_agent.py for the canonical list).
     Run when offer inventory is empty or stale.
     Takes ~2 minutes. Writes data/offers_latest.json and posts digest.
     """
@@ -3746,7 +3879,7 @@ def record_entity_note(entity_name: str, entity_type: str, note: str,
 
 def get_offers_for_publisher(publisher_name: str) -> dict:  # returns dict since PR #18; old str annotation was stale
     """
-    Return top affiliate offers (Impact, FlexOffers, MaxBounty, CJ, and other network inventory) that are
+    Return top affiliate offers (from SUPPORTED_NETWORKS inventory) that are
     a good fit for this publisher but not yet provisioned in their campaign set.
     Scored by estimated RPM using real MS conversion benchmarks (_scout_score).
     Different from get_supply_demand_gaps — surfaces NET-NEW affiliate inventory,
@@ -3934,6 +4067,7 @@ TOOL_MAP = {
     "record_entity_note": record_entity_note,
     "get_offers_for_publisher": get_offers_for_publisher,
     "get_pulse_summary": get_pulse_summary,
+    "get_scout_config": None,   # registered below after function definition
     "run_self_qa": None,  # registered below after function definition
 }
 
@@ -4074,6 +4208,7 @@ def run_self_qa() -> dict:
 
 
 TOOL_MAP["run_self_qa"] = run_self_qa
+TOOL_MAP["get_scout_config"] = get_scout_config
 
 
 def _run_tool(name: str, inputs: dict, _caller_user_id: str = ""):

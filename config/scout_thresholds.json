@@ -1,0 +1,22 @@
+{
+  "_doc": "Scout's tunable thresholds. Edit + redeploy on Render to change live values. The @Scout config tool reads from here at runtime so the team can audit what's currently active without reading source.",
+  "digest": {
+    "min_rpm_floor": 20,
+    "offers_per_network": 3,
+    "max_per_category": 2,
+    "max_per_payout_type": 2
+  },
+  "signals": {
+    "fill_rate_min_sessions_7d": 5000,
+    "ghost_recency_hours": 48,
+    "velocity_down_threshold_pct": -40,
+    "velocity_up_threshold_pct": 20,
+    "cap_alert_pct": 90
+  },
+  "health": {
+    "offer_staleness_hours": 30,
+    "heartbeat_interval_minutes": 30,
+    "heartbeat_warmup_seconds": 300,
+    "heartbeat_consecutive_threshold": 2
+  }
+}
