@@ -611,12 +611,14 @@ def test_pulse_block_count_with_pr15b():
 
 # ── PR 15c: health status shape + heartbeat module-level state ───────────────
 
-@test("PR 15c — _compute_health_status() shape + health-heartbeat in required set")
+@test("PR 15c — _compute_health_status() shape + health-heartbeat registered as required")
 def test_compute_health_status_shape():
     """
-    PR 15c invariants:
+    PR 15c invariants (updated for PR 16b registration pattern):
       1. _compute_health_status() returns {'ok': bool, 'checks': dict}
-      2. 'health-heartbeat' is in BOTH required-thread sets (compute + watchdog)
+      2. 'health-heartbeat' is registered in _REQUIRED_DAEMONS via _start_daemon()
+         (PR 16b moved required-thread tracking from hardcoded literals into the
+         shared _REQUIRED_DAEMONS set; both compute and watchdog read from it)
       3. Module-level state for heartbeat exists
       4. No ClickHouse call inside _compute_health_status() — CH lives in heartbeat only
     """
@@ -637,17 +639,26 @@ def test_compute_health_status_shape():
             if "ok" not in check or "detail" not in check:
                 return False, f"check '{name}' missing ok/detail: {check}"
 
-        # health-heartbeat must be tracked in BOTH required sets (PR 15c gap fix)
+        # PR 16b: health-heartbeat must be wired through _start_daemon() in main()
+        # so it lands in _REQUIRED_DAEMONS — which BOTH compute and watchdog read.
         import pathlib
         src = (pathlib.Path(__file__).parent / "scout_bot.py").read_text()
-        if '"health-heartbeat"' not in src:
-            return False, "health-heartbeat not referenced in scout_bot.py"
+        if "_REQUIRED_DAEMONS" not in src:
+            return False, "_REQUIRED_DAEMONS pattern missing — PR 16b regression"
+        # main() must call _start_daemon for health-heartbeat (case-insensitive search
+        # since the lambda wrapper makes the call line a bit unusual)
+        main_section = src.split("def main()")[1].split("\ndef ")[0]
+        if 'name="health-heartbeat"' not in main_section:
+            return False, "health-heartbeat not started in main() — won't be in _REQUIRED_DAEMONS"
+        if "_start_daemon" not in main_section:
+            return False, "main() doesn't use _start_daemon — _REQUIRED_DAEMONS will be empty"
+        # Both check sites must read from _REQUIRED_DAEMONS
         compute_section = src.split("def _compute_health_status")[1].split("\ndef ")[0]
         watchdog_section = src.split("def _thread_watchdog")[1].split("\ndef ")[0]
-        if "health-heartbeat" not in compute_section:
-            return False, "health-heartbeat missing from _compute_health_status() required set"
-        if "health-heartbeat" not in watchdog_section:
-            return False, "health-heartbeat missing from _thread_watchdog REQUIRED (silent death risk)"
+        if "_REQUIRED_DAEMONS" not in compute_section:
+            return False, "_compute_health_status() doesn't read from _REQUIRED_DAEMONS"
+        if "_REQUIRED_DAEMONS" not in watchdog_section:
+            return False, "_thread_watchdog doesn't read from _REQUIRED_DAEMONS (silent death risk)"
 
         # Module-level constants
         for name in ("_HEALTH_HEARTBEAT_WARMUP_SECS", "_HEALTH_CONSECUTIVE_THRESHOLD",
