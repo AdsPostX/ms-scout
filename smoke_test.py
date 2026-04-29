@@ -1139,6 +1139,90 @@ def test_benchmarks_warmer_wired():
         return False, str(e)
 
 
+# ── PR 21: signal thresholds wired to config (not hardcoded) ─────────────────
+
+@test("signal_thresholds_loaded_from_config_not_hardcoded")
+def test_signal_thresholds_from_config():
+    """
+    scout_bot._SIGNAL_CFG constants must match scout_agent.SCOUT_THRESHOLDS['signals'].
+    Catches any future re-hardcoding of these values.
+    """
+    try:
+        import scout_bot
+        import scout_agent
+        sig = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+        checks = [
+            ("_FILL_RATE_MIN_SESSIONS_7D",   scout_bot._FILL_RATE_MIN_SESSIONS_7D,   int(sig.get("fill_rate_min_sessions_7d", 5000))),
+            ("_GHOST_RECENCY_HOURS",          scout_bot._GHOST_RECENCY_HOURS,          int(sig.get("ghost_recency_hours", 48))),
+            ("_VELOCITY_DOWN_THRESHOLD_PCT",  scout_bot._VELOCITY_DOWN_THRESHOLD_PCT,  float(sig.get("velocity_down_threshold_pct", -40))),
+            ("_VELOCITY_UP_THRESHOLD_PCT",    scout_bot._VELOCITY_UP_THRESHOLD_PCT,    float(sig.get("velocity_up_threshold_pct", 20))),
+            ("_CAP_ALERT_PCT",               scout_bot._CAP_ALERT_PCT,               float(sig.get("cap_alert_pct", 90))),
+        ]
+        mismatches = [f"{name}: bot={bot_val} config={cfg_val}" for name, bot_val, cfg_val in checks if bot_val != cfg_val]
+        if mismatches:
+            return False, "constants diverge from config: " + "; ".join(mismatches)
+        return True, f"all 5 signal constants match config ({len(checks)} checks)"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("ghost_campaigns_accepts_recency_hours_parameter")
+def test_ghost_recency_param():
+    """
+    queries.ghost_campaigns must accept recency_hours with default 48.
+    Catches accidental removal of the parameter.
+    """
+    try:
+        import inspect
+        import queries
+        sig = inspect.signature(queries.ghost_campaigns)
+        params = sig.parameters
+        if "recency_hours" not in params:
+            return False, "recency_hours parameter missing from queries.ghost_campaigns"
+        default = params["recency_hours"].default
+        if default != 48:
+            return False, f"default should be 48, got {default!r}"
+        return True, "recency_hours param present with default=48"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("ghost_recency_config_propagates_through_query_ghost_campaigns")
+def test_ghost_recency_propagation():
+    """
+    _query_ghost_campaigns must pass ghost_recency_hours from SCOUT_THRESHOLDS
+    to queries.ghost_campaigns. Changing the config value changes the call arg.
+    """
+    try:
+        import scout_agent
+        import queries as _queries
+        calls = []
+        original = _queries.ghost_campaigns
+        def _spy(ch, recency_hours=48):
+            calls.append(recency_hours)
+            return []
+        _queries.ghost_campaigns = _spy
+        try:
+            original_val = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("ghost_recency_hours", 48)
+            scout_agent._query_ghost_campaigns(None)
+            if not calls:
+                return False, "queries.ghost_campaigns was never called"
+            if calls[0] != original_val:
+                return False, f"called with recency_hours={calls[0]}, expected {original_val}"
+            # Monkey-patch config and verify propagation
+            scout_agent.SCOUT_THRESHOLDS.setdefault("signals", {})["ghost_recency_hours"] = 72
+            calls.clear()
+            scout_agent._query_ghost_campaigns(None)
+            if not calls or calls[0] != 72:
+                return False, f"config change not propagated: got {calls}"
+            return True, f"config value propagated correctly (default={original_val}, patched=72)"
+        finally:
+            _queries.ghost_campaigns = original
+            scout_agent.SCOUT_THRESHOLDS.setdefault("signals", {})["ghost_recency_hours"] = original_val
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

@@ -41,7 +41,7 @@ POST_TX_PLACEMENTS: tuple[str, ...] = (
 # Ghost campaigns
 # ===========================================================================
 
-def ghost_campaigns(ch) -> list[dict]:
+def ghost_campaigns(ch, recency_hours: int = 48) -> list[dict]:
     """
     Canonical ghost campaign detection — single source of truth for both the
     agent tool (get_ghost_campaigns) and the 8am Pulse signal (_run_pulse_signals).
@@ -49,11 +49,14 @@ def ghost_campaigns(ch) -> list[dict]:
     A campaign qualifies as a ghost if ALL of:
     - status = 'Active', non-expired
     - 5,000+ impressions in last 7 days (meaningful traffic volume)
-    - 2,000+ impressions in last 48h (actively burning inventory RIGHT NOW)
+    - 2,000+ impressions in last recency_hours (actively burning inventory RIGHT NOW)
     - 200+ clicks in 7 days (real engagement, not just display)
     - Zero conversions in 7 days (broken tracking or non-converting offer)
     - Campaign age > 7 days (excludes new launches still warming up)
     - conversion_events configured (CPA/CPS only — excludes CPM/CPC by design)
+
+    recency_hours: rolling window for "actively burning right now" check. Default 48.
+    Configured via signals.ghost_recency_hours in config/scout_thresholds.json.
 
     Returns: list of dicts with keys:
         campaign_id, adv_name, campaign_title,
@@ -73,8 +76,8 @@ WITH imp_agg AS (
 recent_imp AS (
     SELECT campaign_id, count() AS impressions_2d
     FROM adpx_impressions_details
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 2)
-    WHERE created_at >= today() - 2
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(subtractHours(now(), {recency_hours:UInt32}))
+    WHERE created_at >= subtractHours(now(), {recency_hours:UInt32})
     GROUP BY campaign_id
     HAVING impressions_2d >= 2000
 ),
@@ -126,7 +129,7 @@ HAVING impressions_7d > 5000 AND clicks_7d > 200
 ORDER BY impressions_7d DESC
 LIMIT 25
 """
-    rows = ch.query(sql).result_rows
+    rows = ch.query(sql, parameters={"recency_hours": recency_hours}).result_rows
     return [
         {
             "campaign_id":           r[0],
