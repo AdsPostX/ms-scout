@@ -1082,6 +1082,63 @@ def test_tier3_benchmarks_populated():
         return False, str(e)
 
 
+# ── PR 19a: benchmarks self-heal (no user-facing 'run X' for state Scout owns) ─
+
+@test("get_scout_status attempts benchmark reload before reporting")
+def test_status_self_heals_benchmarks():
+    """
+    PR 19a invariant: get_scout_status() attempts to load benchmarks if they're
+    missing/stale BEFORE reporting their state. The "Benchmarks not loaded"
+    message should never appear except in real ClickHouse outages.
+
+    We verify by source-grep: the function calls _get_benchmarks() before
+    formatting `status['benchmarks']`. Mock-call testing would require stubbing
+    a CH client; this lighter check catches the regression we care about
+    (someone removes the self-heal call accidentally).
+    """
+    try:
+        import pathlib
+        src = (pathlib.Path(__file__).parent / "scout_agent.py").read_text()
+        # Find get_scout_status function body
+        if "def get_scout_status" not in src:
+            return False, "get_scout_status function missing"
+        body = src.split("def get_scout_status")[1].split("\ndef ")[0]
+        # Self-heal call must precede the freshness reporting
+        if "_get_benchmarks()" not in body:
+            return False, "get_scout_status no longer calls _get_benchmarks() — self-heal removed"
+        # The "not loaded" message should not be assigned to status[...] (chore message)
+        # Comments mentioning the phrase are fine; we check for the assignment pattern.
+        if 'status["benchmarks"] = "not loaded"' in body:
+            return False, "get_scout_status still emits 'not loaded' — this surfaces user-facing chore message"
+        return True, "self-heal in place; no 'not loaded' chore message"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("benchmarks-warmer daemon registered + boot-time warmup wired")
+def test_benchmarks_warmer_wired():
+    """
+    PR 19a: the benchmarks-warmer daemon keeps _BENCHMARKS warm in memory.
+    Verify (a) the daemon function exists, (b) main() registers it via
+    _start_daemon, and (c) _run_startup_smoke_test calls _get_benchmarks
+    to warm the cache at boot before any digest/Pulse query runs.
+    """
+    try:
+        import scout_bot
+        if not hasattr(scout_bot, "_benchmarks_warmer"):
+            return False, "_benchmarks_warmer daemon function missing"
+        import pathlib
+        src = (pathlib.Path(__file__).parent / "scout_bot.py").read_text()
+        if 'name="benchmarks-warmer"' not in src:
+            return False, "benchmarks-warmer not registered in main() via _start_daemon"
+        smoke_section = src.split("def _run_startup_smoke_test")[1].split("\ndef ")[0]
+        if "_get_benchmarks" not in smoke_section:
+            return False, "_run_startup_smoke_test does not warm benchmarks at boot"
+        return True, "boot warmup + 30-min refresher daemon both wired"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

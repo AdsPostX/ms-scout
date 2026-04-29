@@ -38,6 +38,7 @@ missed a 48h recency filter that was added to the agent tool, causing false alar
 | Overnight events | Pulse-only | `_build_overnight_signal()` | No agent tool — no divergence risk |
 | Pulse recall | `get_pulse_summary()` in `scout_agent.py` reads `last_signals_summary` from `pulse_state.json` | Agent tool only — Pulse writes summary, agent reads it | Written by `_run_once_pulse()` (non-force runs only). Force runs intentionally excluded to preserve canonical 8am state. |
 | Health heartbeat (PR 15c) | `_run_health_heartbeat()` in `scout_bot.py` | Background daemon every 30 min | Calls `_compute_health_status()` + standalone CH ping. CH ping affects HEARTBEAT only — never the HTTP `/health` probe (Render must not restart on CH outage). Posts one Slack alert on transition to degraded after `_HEALTH_CONSECUTIVE_THRESHOLD` consecutive bad checks; one recovery alert on return to ok. PR 16c: `_run_startup_smoke_test()` also fires a one-shot CH ping right after smoke posts so the 35-min warmup window is no longer a blind spot. |
+| Benchmarks warmer (PR 19a) | `_benchmarks_warmer()` in `scout_bot.py` | Background daemon every 30 min | Keeps `_BENCHMARKS` populated in memory by calling `_get_benchmarks()` on a schedule. Boot-time warm happens in `_run_startup_smoke_test()`. `get_scout_status()` self-heals stale/missing benchmarks before reporting. Result: status check never reports "not loaded" except in real CH outage scenarios. |
 
 ---
 
@@ -47,6 +48,35 @@ missed a 48h recency filter that was added to the agent tool, causing false alar
 2. **Adding a field** → add to the shared function SELECT, then consume in both callers
 3. **New Pulse signal** → check if an agent tool already computes the same thing; if yes, extract shared function first
 4. **New agent tool** → check if the Pulse already computes the same thing; if yes, use or create a shared function
+
+---
+
+## User-Facing Action Rule (PR 19a)
+
+**"Action: run X" messages in Scout's user-facing output are red flags.** Every one
+of those should be eliminated unless the user genuinely must do something.
+
+The test: when Scout tells the team "Run @Scout X", ask "could Scout do X itself?"
+- If yes (state Scout owns): fix it. Add a daemon, add a self-heal in the read path,
+  load on boot. Whatever it takes. Never make Sidd press a button to refresh a cache.
+- If no (real human judgment required, like "approve this offer" or "decide between
+  two strategies"): keep the action. But verify the action is actually about judgment,
+  not chore work.
+
+PR 19a fixed the first instance: "Benchmarks not loaded → Run @Scout refresh offers"
+was a chore message. Solution: warm benchmarks at boot, refresh every 30 min via the
+benchmarks-warmer daemon, self-heal in `get_scout_status()`. The team only sees
+benchmark state when ClickHouse itself is down — at which point it's a real escalation,
+not a chore.
+
+When you find yourself adding an "Action: run X" line to user-facing output (Pulse,
+digest footer, status response, error response), STOP and ask:
+1. Is this state Scout owns? (cache, derived data, refresh of something Scout reads)
+   → fix it in code. Don't ask the user to do it.
+2. Is this state Scout doesn't own but could attempt? (CH reachable but query failed
+   for transient reason) → retry with backoff, alert only after N failures.
+3. Is this state truly external? (env var missing, credentials revoked, queue empty)
+   → action message is appropriate. Make it specific and explain WHY.
 
 ---
 
