@@ -212,6 +212,19 @@ Surfaced automatically at session start via the Session Start Protocol above.
 When you start a Scout task, scan this list for items the task touches. If you ship a fix,
 remove the item in the same PR. New deferred items go here, not into gstack files.
 
+**[Action — Vamsee] 5 affiliate networks need API credentials on Render to actually fetch offers** — Scout has scraper code for ShareASale, Rakuten, AWIN, Tune (HasOffers), and Everflow but they all silently `return []` when their env vars aren't set. PR 18 trimmed `SUPPORTED_NETWORKS` and `_DIGEST_NETWORKS_FALLBACK` from 9 → 4 to be honest about coverage. To re-enable each network: set the env vars on Render, then add the network back to `SUPPORTED_NETWORKS` (`scout_agent.py`) and `_DIGEST_NETWORKS_FALLBACK` (`scout_digest.py`). `_NETWORK_LABEL` and `_NETWORK_EMOJI` already have all 9 entries — no edit needed there.
+
+Env var checklist:
+- ShareASale: `SHAREASALE_API_TOKEN`, `SHAREASALE_API_SECRET` (affiliate ID 3279349 defaulted)
+- Rakuten: `RAKUTEN_API_TOKEN` (publisher ID 3948979 defaulted)
+- AWIN: `AWIN_API_KEY`, `AWIN_PUBLISHER_ID`
+- Tune (per-instance for KASHKICK/BROWNBOOTS/ADACTION/REVOFFERS/ADBLOOM/SUCCESSFUL_MEDIA): `TUNE_<NAME>_NETWORK_ID` + `TUNE_<NAME>_API_KEY`
+- Everflow (per-instance for GIDDYUP/ACCIOADS/KLAYMEDIA/CREDITCOM/MWKCONSULTING/PAWZITIVITY/ARAGONPREMIUM): `EVERFLOW_<NAME>_API_KEY` + `EVERFLOW_<NAME>_BASE_URL`
+
+**[Action — platform] `from_airbyte_campaigns.categories` is NULL for all 648 campaigns** — degrades Tier 2 benchmark scoring; offers fall to weakest payout-type baseline; $20 RPM floor over-filters. Logs say "Tier 3 benchmarks disabled". This is upstream of Scout — fix is in the MS platform / Airbyte sync. Once populated, the digest will surface meaningfully more offers without changing thresholds.
+
+**[Future] Signal thresholds in `scout_bot.py` SQL queries are still decorative** — PR 18 wired the `digest` and `health` sections of `config/scout_thresholds.json` to actually drive behavior. The `signals` section (fill_rate_min_sessions_7d, ghost_recency_hours, velocity ±%, cap_alert_pct) is surfaced by `@Scout config` but the SQL queries that use them in `_run_pulse_signals()` and `_query_*` functions still hardcode the literal numbers (e.g. `HAVING sessions_7d > 5000`, `> 48 HOUR`). Editing the JSON for those keys is a no-op until each query is parameterised. Wire them via ClickHouse parameter binding when next touching those queries.
+
 **[Future] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. `scout_agent.py` SYSTEM_PROMPT lines ~820-900.
 
-**[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. SYSTEM_PROMPT line ~430 ("CJ, MaxBounty, Impact, FlexOffers, and other networks") still requires a manual edit when a 10th network ships. This was intentional — converting the 4300-line SYSTEM_PROMPT to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
+**[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. SYSTEM_PROMPT line ~430 still requires a manual edit when a network is added or removed. This was intentional — converting the 4300-line SYSTEM_PROMPT to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.

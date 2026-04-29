@@ -29,16 +29,21 @@ load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 log = logging.getLogger("scout_agent")
 
 
-# ── PR 17c: SUPPORTED_NETWORKS — single source ───────────────────────────────
+# ── PR 17c / PR 18: SUPPORTED_NETWORKS — single source ───────────────────────
+# ACTIVE networks only (creds present on Render → scraper actually returns offers).
+# PR 18 trimmed this from 9 → 4: ShareASale, Rakuten, AWIN, Tune, Everflow all
+# silently no-op when their API credentials aren't set on Render. Listing them as
+# "supported" was misleading because the digest header showed them but the scraper
+# returned []. See Known Debt in CLAUDE.md for the credential checklist.
+#
+# When credentials are added on Render, append the network name here AND to
+# _DIGEST_NETWORKS_FALLBACK in scout_digest.py.
+#
 # Used in tool description strings and function docstrings ONLY (not the
 # SYSTEM_PROMPT body — converting that to an f-string would require escaping
 # every {} in the SQL/JSON examples and risks silent format breakage).
-# When a 10th network ships, edit this tuple. SYSTEM_PROMPT line 430 still
-# needs a one-line manual edit; tool schemas update automatically via the
-# ", ".join(SUPPORTED_NETWORKS) references below.
 SUPPORTED_NETWORKS: tuple[str, ...] = (
     "Impact", "FlexOffers", "MaxBounty", "CJ",
-    "ShareASale", "Rakuten", "AWIN", "Tune", "Everflow",
 )
 
 

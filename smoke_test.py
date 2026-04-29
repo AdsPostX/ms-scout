@@ -808,14 +808,14 @@ def test_get_scout_config_registered():
         return False, str(e)
 
 
-@test("PR 17c — SUPPORTED_NETWORKS exists + tool descriptions reference it")
+@test("tool descriptions reference SUPPORTED_NETWORKS via .join() (single source)")
 def test_supported_networks_single_source():
     try:
         import scout_agent
         if not hasattr(scout_agent, "SUPPORTED_NETWORKS"):
             return False, "SUPPORTED_NETWORKS constant missing"
-        if len(scout_agent.SUPPORTED_NETWORKS) != 9:
-            return False, f"expected 9 networks, got {len(scout_agent.SUPPORTED_NETWORKS)}"
+        if len(scout_agent.SUPPORTED_NETWORKS) < 1:
+            return False, "SUPPORTED_NETWORKS is empty"
         # Tool descriptions must use the constant via .join(), not hardcoded literal
         descriptions = [t["description"] for t in scout_agent.TOOLS]
         joined = ", ".join(scout_agent.SUPPORTED_NETWORKS)
@@ -823,10 +823,111 @@ def test_supported_networks_single_source():
         if not any(joined in desc for desc in descriptions):
             return False, "no tool description references SUPPORTED_NETWORKS via .join()"
         # Confirm we did NOT touch SYSTEM_PROMPT body for f-string conversion
-        # (SYSTEM_PROMPT contains the literal network names but should not be an f-string)
         if "{', '.join(SUPPORTED_NETWORKS)}" in scout_agent.SYSTEM_PROMPT:
-            return False, "SYSTEM_PROMPT body f-string conversion detected — too risky per plan A5"
+            return False, "SYSTEM_PROMPT body f-string conversion detected — risks format breakage"
         return True, f"SUPPORTED_NETWORKS = {len(scout_agent.SUPPORTED_NETWORKS)} networks; tool descriptions wired"
+    except Exception as e:
+        return False, str(e)
+
+
+# ── PR 18: config wiring + honest network coverage ──────────────────────────
+
+@test("score_offer respects min_rpm_floor from config (config drives behavior)")
+def test_score_offer_reads_config_floor():
+    """
+    PR 18 invariant: changing SCOUT_THRESHOLDS['digest']['min_rpm_floor'] must
+    actually change score_offer's filter behavior. Before PR 18 the floor was
+    hardcoded `_MIN_RPM = 20.0` and the config was decorative.
+
+    Test: monkey-patch SCOUT_THRESHOLDS to floor=$5 and floor=$50, call
+    score_offer with the same offer, and confirm the floor change flips the
+    pass/fail outcome.
+    """
+    try:
+        import scout_agent
+        import scout_digest
+
+        # An offer that scores around ~$25 RPM (typical CPL with avg CVR)
+        offer = {
+            "offer_id": "test-floor-1",
+            "advertiser": "TestCo",
+            "network": "impact",
+            "category": "Retail",
+            "_payout_type_norm": "CPL",
+            "_payout_num": 5.0,
+            "tracking_url": "x",
+        }
+        # Stub _scout_score so this test doesn't depend on benchmarks
+        orig_scout_score = None
+        try:
+            import scout_agent as _sa
+            orig_scout_score = _sa._scout_score
+            _sa._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
+        except Exception:
+            pass
+
+        original = scout_agent.SCOUT_THRESHOLDS
+        try:
+            # Floor = $5 → 25.0 RPM passes (returns a score)
+            scout_agent.SCOUT_THRESHOLDS = {**original, "digest": {**original["digest"], "min_rpm_floor": 5}}
+            low_floor = scout_digest.score_offer(offer, {}, {"approved": {}, "rejected": {}}, {}, force=True)
+            if low_floor is None:
+                return False, f"floor=$5 should let 25.0 RPM through, got None"
+
+            # Floor = $50 → 25.0 RPM filtered (returns None)
+            scout_agent.SCOUT_THRESHOLDS = {**original, "digest": {**original["digest"], "min_rpm_floor": 50}}
+            high_floor = scout_digest.score_offer(offer, {}, {"approved": {}, "rejected": {}}, {}, force=True)
+            if high_floor is not None:
+                return False, f"floor=$50 should reject 25.0 RPM, got {high_floor}"
+        finally:
+            scout_agent.SCOUT_THRESHOLDS = original
+            if orig_scout_score is not None:
+                scout_agent._scout_score = orig_scout_score
+
+        return True, f"config drives behavior; low_floor={low_floor}, high_floor={high_floor}"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("offer staleness threshold reads from config (not hardcoded)")
+def test_offer_staleness_from_config():
+    """PR 18 invariant: scout_bot reads offer_staleness_hours from config, not hardcoded."""
+    try:
+        import scout_bot
+        if not hasattr(scout_bot, "_OFFER_STALENESS_HOURS"):
+            return False, "_OFFER_STALENESS_HOURS module-level missing"
+        if not hasattr(scout_bot, "_HEALTH_CFG"):
+            return False, "_HEALTH_CFG module-level missing (lazy loader didn't run)"
+        # Verify the source no longer has the hardcoded `age_hours > 30`
+        import pathlib
+        src = (pathlib.Path(__file__).parent / "scout_bot.py").read_text()
+        compute = src.split("def _compute_health_status")[1].split("\ndef ")[0]
+        if "age_hours > 30" in compute and "_OFFER_STALENESS_HOURS" not in compute:
+            return False, "hardcoded age_hours > 30 still in _compute_health_status"
+        if "_OFFER_STALENESS_HOURS" not in compute:
+            return False, "_compute_health_status doesn't reference _OFFER_STALENESS_HOURS"
+        return True, f"staleness driven by config; current value = {scout_bot._OFFER_STALENESS_HOURS}h"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("SUPPORTED_NETWORKS lists only credentialled networks (no aspirational entries)")
+def test_supported_networks_trimmed():
+    """PR 18 invariant: SUPPORTED_NETWORKS lists only networks with creds on Render."""
+    try:
+        import scout_agent, scout_digest
+        active = set(n.lower() for n in scout_agent.SUPPORTED_NETWORKS)
+        expected_active = {"impact", "flexoffers", "maxbounty", "cj"}
+        if active != expected_active:
+            return False, f"SUPPORTED_NETWORKS expected {expected_active}, got {active}"
+        fallback = set(scout_digest._DIGEST_NETWORKS_FALLBACK)
+        if fallback != expected_active:
+            return False, f"_DIGEST_NETWORKS_FALLBACK expected {expected_active}, got {fallback}"
+        # Labels and emoji should KEEP all 9 entries so re-enabling is one-line
+        label_keys = set(scout_digest._NETWORK_LABEL.keys())
+        if not {"awin", "everflow", "rakuten", "shareasale", "tune"}.issubset(label_keys):
+            return False, "label/emoji maps lost their entries for the 5 disabled networks; re-enable would be harder than necessary"
+        return True, f"4 active networks; 9 label entries kept for fast re-enable"
     except Exception as e:
         return False, str(e)
 
