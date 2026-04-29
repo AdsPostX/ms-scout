@@ -162,9 +162,24 @@ _PULSE_ENABLED               = os.getenv("PULSE_ENABLED", "true").lower() == "tr
 # probe or container restart behavior.
 _HEALTH_STATUS_LOCK            = threading.Lock()
 _LAST_HEALTH_STATUS: dict | None = None  # last status seen by the heartbeat (used for transition detection)
-_HEALTH_HEARTBEAT_WARMUP_SECS  = 300   # wait 5 min after startup before first heartbeat (let daemons settle)
-_HEALTH_CONSECUTIVE_THRESHOLD  = 2     # require 2 consecutive bad checks before alerting (suppresses transients)
-_HEALTH_HEARTBEAT_INTERVAL_SECS = 1800  # 30 min between heartbeat checks
+
+# PR 18: health knobs now read from config/scout_thresholds.json so the team can
+# tune without a code change. `@Scout config` shows the live values. Lazy import
+# from scout_agent because scout_bot is normally imported first by smoke tests.
+def _load_health_cfg() -> dict:
+    """Load the health section of scout_thresholds.json. Returns {} on any error."""
+    try:
+        from scout_agent import SCOUT_THRESHOLDS
+        return SCOUT_THRESHOLDS.get("health", {})
+    except Exception as e:
+        log.warning(f"[health] could not load thresholds, using fallback defaults: {e}")
+        return {}
+
+_HEALTH_CFG                     = _load_health_cfg()
+_HEALTH_HEARTBEAT_WARMUP_SECS   = int(_HEALTH_CFG.get("heartbeat_warmup_seconds", 300))
+_HEALTH_CONSECUTIVE_THRESHOLD   = int(_HEALTH_CFG.get("heartbeat_consecutive_threshold", 2))
+_HEALTH_HEARTBEAT_INTERVAL_SECS = int(_HEALTH_CFG.get("heartbeat_interval_minutes", 30)) * 60
+_OFFER_STALENESS_HOURS          = int(_HEALTH_CFG.get("offer_staleness_hours", 30))
 
 # PR 16b: Single source of truth for "which daemons must be alive."
 # Daemons register themselves here at startup via _start_daemon() instead of
@@ -1868,8 +1883,9 @@ def _compute_health_status() -> dict:
         checks["offer_inventory"] = {"ok": False, "detail": "offers_latest.json missing"}
     else:
         age_hours = (time.time() - snap.stat().st_mtime) / 3600
-        if age_hours > 30:
-            checks["offer_inventory"] = {"ok": False, "detail": f"Stale — {age_hours:.0f}h old"}
+        # PR 18: staleness threshold from config/scout_thresholds.json (was hardcoded 30h)
+        if age_hours > _OFFER_STALENESS_HOURS:
+            checks["offer_inventory"] = {"ok": False, "detail": f"Stale — {age_hours:.0f}h old (limit {_OFFER_STALENESS_HOURS}h)"}
         else:
             checks["offer_inventory"] = {"ok": True, "detail": f"{age_hours:.0f}h old"}
 

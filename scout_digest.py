@@ -99,9 +99,13 @@ _PAYOUT_TYPE_NORM: dict[str, str] = {
 _PRIORITY_NETWORKS: tuple[str, ...] = ("impact", "maxbounty", "flexoffers", "cj")
 
 # Cold-start fallback (offers_latest.json missing or empty on fresh deploy).
+# PR 18: trimmed from 9 → 4 active networks (ShareASale, Rakuten, AWIN, Tune,
+# Everflow currently no-op without API credentials on Render). When creds land,
+# append here AND to SUPPORTED_NETWORKS at the top of scout_agent.py.
+# The _NETWORK_LABEL and _NETWORK_EMOJI maps below intentionally KEEP all 9
+# entries so re-enabling a network is a one-line change.
 _DIGEST_NETWORKS_FALLBACK: tuple[str, ...] = (
     "impact", "maxbounty", "flexoffers", "cj",
-    "awin", "everflow", "rakuten", "shareasale", "tune",
 )
 
 
@@ -431,7 +435,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
 
     force=True bypasses approved/rejected state so test runs always surface real cards.
     """
-    from scout_agent import _scout_score
+    from scout_agent import _scout_score, SCOUT_THRESHOLDS
 
     offer_id = str(offer.get("offer_id", ""))
 
@@ -490,10 +494,11 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
         return None
 
     # Minimum quality floor: offers scoring below this estimated RPM aren't worth
-    # surfacing regardless of network inventory size. $20 effective score filters
-    # weak long-tail offers (e.g. $12 CPA meal kits, $15 trading platforms) that
-    # only appear because a network has thin inventory.
-    _MIN_RPM = 20.0
+    # surfacing regardless of network inventory size. Default $20 effective score
+    # filters weak long-tail offers (e.g. $12 CPA meal kits, $15 trading platforms).
+    # PR 18: read from config/scout_thresholds.json so the team can tune without
+    # a code change. Falls back to 20.0 if config or key is missing.
+    _MIN_RPM = float(SCOUT_THRESHOLDS.get("digest", {}).get("min_rpm_floor", 20.0))
     if rpm < _MIN_RPM:
         return None
 
@@ -835,7 +840,7 @@ def select_offers(
     ms_campaigns and benchmarks can be passed in to avoid redundant external calls.
     force=True bypasses the is_already_in_ms filter so testing always surfaces real offers.
     """
-    from scout_agent import _get_benchmarks
+    from scout_agent import _get_benchmarks, SCOUT_THRESHOLDS
 
     state         = load_state()
     offers        = _load_offers()
@@ -844,6 +849,12 @@ def select_offers(
         ms_campaigns = get_active_ms_campaigns()
     if benchmarks is None:
         benchmarks = _get_benchmarks()
+
+    # PR 18: diversity caps now come from config/scout_thresholds.json so the team
+    # can tune without a code change. Defaults match prior hardcoded behavior.
+    _digest_cfg = SCOUT_THRESHOLDS.get("digest", {})
+    _max_per_category = int(_digest_cfg.get("max_per_category", 2))
+    _max_per_payout_type = int(_digest_cfg.get("max_per_payout_type", 2))
 
     # Score all offers across all networks
     by_network: dict[str, list] = {}
@@ -893,13 +904,13 @@ def select_offers(
                 continue
 
             cat = (offer.get("category") or "").strip()
-            if cat not in _UNCAPPED and category_counts.get(cat, 0) >= 2:
+            if cat not in _UNCAPPED and category_counts.get(cat, 0) >= _max_per_category:
                 continue
-            # Payout-type cap: avoid surfacing 3× CPS with no CPL in the same section.
-            # Cap at 2 per type — if a CPL exists it will break through, even if ranked lower.
+            # Payout-type cap: avoid surfacing N× CPS with no CPL in the same section.
+            # Default cap of 2 — if a CPL exists it will break through even if ranked lower.
             raw_ptype = offer.get("_payout_type_norm", "")
             ptype = _normalize_payout_type(raw_ptype)
-            if ptype and ptype_counts.get(ptype, 0) >= 2:
+            if ptype and ptype_counts.get(ptype, 0) >= _max_per_payout_type:
                 continue
             selected.append((score, offer))
             if adv_key:
@@ -948,13 +959,15 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
     is_monday = now.weekday() == 0  # Monday = 0
 
     # ── Load all external data once — no redundant calls ─────────────────────
-    from scout_agent import _get_benchmarks
+    from scout_agent import _get_benchmarks, SCOUT_THRESHOLDS
 
     payout_cache     = json.loads(PAYOUT_CACHE.read_text()) if PAYOUT_CACHE.exists() else {}
     ms_campaigns     = get_active_ms_campaigns()
     benchmarks       = _get_benchmarks()
+    # PR 18: offers_per_network now from config so the team can tune without code change.
+    _offers_per_network = int(SCOUT_THRESHOLDS.get("digest", {}).get("offers_per_network", 3))
     offers_by_network, sel_meta = select_offers(
-        n_per_network=3, ms_campaigns=ms_campaigns, benchmarks=benchmarks, force=is_force
+        n_per_network=_offers_per_network, ms_campaigns=ms_campaigns, benchmarks=benchmarks, force=is_force
     )
 
     total_selected = sel_meta["total_selected"]
