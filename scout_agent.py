@@ -724,7 +724,18 @@ INTENTS — resolve every query to one, then act immediately.
    IMPORTANT: Benchmarks (ClickHouse CVR/RPM) and Offer Inventory are TWO SEPARATE THINGS.
    Benchmarks = CVR/RPM from MS's own ClickHouse data — always available when CH is up, scraper NOT required.
    Offer Inventory = affiliate offers from multiple affiliate networks — populated by scraper (runs 6am CT daily). Run get_scout_status() to see available_networks for the current inventory.
-   When inventory is 0: say ":red_circle: Offer Inventory — 0 offers. Run `@Scout refresh offers` to fetch now (~2 min)."
+
+   USER-FACING ACTIONS RULE (PR 19a): only suggest a `@Scout X` command when the
+   user MUST do something. Never suggest commands for state Scout can fix itself.
+   - Benchmarks are warmed at boot + every 30 min by the benchmarks-warmer daemon.
+     Status output will already self-heal stale/missing benchmarks before reporting.
+     If `status["benchmarks"]` says "load failed (ClickHouse issue ...)" → that's a
+     CH outage; the heartbeat already alerted. Say ":red_circle: ClickHouse
+     unreachable — heartbeat is monitoring." Do NOT recommend `@Scout refresh offers`
+     (that's for inventory, not benchmarks; it would trigger a 2-min scrape that
+     doesn't fix CH outages).
+   - Inventory is 0: say ":red_circle: Offer Inventory — 0 offers. Run
+     `@Scout refresh offers` to fetch now (~2 min)." (Real user action: scraper run.)
    Never imply benchmarks depend on the scraper. They come from ClickHouse.
 
 5. OFFER LOOKUP — "tell me about X", "look up X", "do we have X", "is X live", "is X in the platform"
@@ -3765,16 +3776,27 @@ def get_scout_status() -> dict:
 
     status: dict = {}
 
-    # Benchmark freshness
+    # PR 19a: self-heal — if benchmarks haven't loaded in this process yet OR
+    # are stale, trigger a reload BEFORE reporting status. _get_benchmarks()
+    # respects its TTL and will only hit CH if needed. This means status check
+    # never reports "not loaded" except in real CH outage scenarios.
+    if not _BENCHMARKS_LOADED_AT or (_time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL:
+        try:
+            _get_benchmarks()  # populates _BENCHMARKS + _BENCHMARKS_LOADED_AT
+        except Exception as e:
+            log.warning(f"[status] benchmark self-heal failed: {e}")
+
+    # Benchmark freshness (post self-heal attempt)
     age_secs = _time.time() - _BENCHMARKS_LOADED_AT if _BENCHMARKS_LOADED_AT else None
     if age_secs is None:
-        status["benchmarks"] = "not loaded"
+        # Self-heal failed → real ClickHouse problem (heartbeat already alerts)
+        status["benchmarks"] = "load failed (ClickHouse issue — heartbeat will alert)"
     elif age_secs < 120:
         status["benchmarks"] = f"{int(age_secs)}s ago"
     elif age_secs < 3600:
         status["benchmarks"] = f"{int(age_secs / 60)}m ago"
     else:
-        status["benchmarks"] = f"{age_secs / 3600:.1f}h ago (stale — will refresh on next query)"
+        status["benchmarks"] = f"{age_secs / 3600:.1f}h ago"
 
     # Benchmark coverage
     bench = _BENCHMARKS or {}

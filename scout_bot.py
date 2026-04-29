@@ -1800,6 +1800,23 @@ def _run_startup_smoke_test(web: WebClient) -> None:
                 log.warning(f"[smoke] schema-deps warning: {warning_msg}")
         except Exception as schema_err:
             log.warning(f"[smoke] schema-deps validation crashed: {schema_err}")
+        # PR 19a: warm the benchmarks cache at boot. Before this, _get_benchmarks()
+        # was lazy-loaded — first call (digest, Pulse, scoring) would populate it.
+        # Result: a fresh deploy + immediate `@Scout status` showed "Benchmarks
+        # not loaded" → the LLM recommended `@Scout refresh offers` → user had
+        # to run a 2-minute scrape to fix a 2-second cache warmup. Stop that.
+        try:
+            from scout_agent import _get_benchmarks
+            t0 = time.time()
+            bm = _get_benchmarks()
+            n_cats = len(bm.get("by_category", {})) if bm else 0
+            n_advs = len(bm.get("by_adv_name", {})) if bm else 0
+            log.info(
+                f"[smoke] benchmarks warmed in {time.time()-t0:.1f}s — "
+                f"{n_advs} advertisers, {n_cats} categories"
+            )
+        except Exception as bm_err:
+            log.warning(f"[smoke] benchmark warmup failed: {bm_err}")
     except Exception as e:
         log.warning(f"[smoke] startup smoke test failed to run: {e}")
         try:
@@ -1985,6 +2002,37 @@ def _start_health_server(port: int = 10000) -> None:
 
 # ── Thread watchdog ─────────────────────────────────────────────────────────────
 
+def _benchmarks_warmer() -> None:
+    """
+    PR 19a: keep CVR/RPM benchmarks warm in memory by triggering a refresh
+    every 30 min. _get_benchmarks() respects its own TTL (1h) and will reload
+    from ClickHouse when stale. Calling it on a schedule means the cache is
+    always fresh BEFORE a digest/Pulse/status query asks for it.
+
+    Before this daemon: benchmarks were lazy-loaded. A `@Scout status` immediately
+    after deploy showed "Benchmarks not loaded" because nothing had triggered a
+    load yet. The recommended action ("Run @Scout refresh offers") was a
+    sledgehammer — re-scrape 4 networks for 2 min to fix a 2-second cache.
+    Now: benchmarks warm at boot (in _run_startup_smoke_test) and stay warm
+    via this daemon. Status check no longer surfaces "not loaded" except in
+    actual ClickHouse outage scenarios (which the heartbeat already alerts on).
+    """
+    import time as _time
+    from scout_agent import _get_benchmarks
+    _time.sleep(60)  # let boot-time warm finish first
+    while True:
+        try:
+            t0 = _time.time()
+            bm = _get_benchmarks()
+            n_cats = len(bm.get("by_category", {})) if bm else 0
+            log.debug(
+                f"[benchmarks-warmer] refreshed in {_time.time()-t0:.1f}s — {n_cats} categories"
+            )
+        except Exception as e:
+            log.warning(f"[benchmarks-warmer] refresh failed: {e}")
+        _time.sleep(1800)  # 30 min — same cadence as health-heartbeat
+
+
 def _thread_watchdog(web: WebClient) -> None:
     """Check all named daemon threads are alive every 60s. Alert #scout-qa if any die."""
     import time as _time
@@ -2050,6 +2098,9 @@ def main():
     _start_daemon(_copy_coalescer_loop,   name="copy-coalescer")
     # PR 15c — live health heartbeat (CH ping every 30 min, NOT in HTTP /health)
     _start_daemon(lambda: _run_health_heartbeat(web_client), name="health-heartbeat")
+    # PR 19a — benchmark warmer: keep CVR/RPM benchmarks warm so `@Scout status`
+    # never surfaces "Benchmarks not loaded" except in actual CH outage scenarios
+    _start_daemon(_benchmarks_warmer,     name="benchmarks-warmer")
 
     # Background: daily launch health watchdog (no register — campaign-level, not infrastructure)
     threading.Thread(target=_launch_watchdog, args=(web_client,), daemon=True, name="launch-watchdog").start()
