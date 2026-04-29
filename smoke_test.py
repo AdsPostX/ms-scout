@@ -474,6 +474,98 @@ def test_build_publisher_card():
         return False, str(e)
 
 
+# ── Test 20: Digest dedup — no duplicate advertisers across networks ──────────
+
+@test("Digest dedup — no advertiser appears on multiple networks")
+def test_digest_no_duplicate_advertisers():
+    """
+    PR 15a invariant: select_offers() must dedup advertisers across networks.
+    Build a synthetic offer set where the same advertiser exists on Impact and
+    MaxBounty; assert it surfaces only on Impact (higher priority).
+    """
+    try:
+        import scout_digest
+        # Stub the offer loader and the agent benchmark fetch to avoid CH calls
+        synthetic = [
+            {"offer_id": "1", "advertiser": "DupCo", "network": "impact",
+             "category": "Retail", "_payout_type_norm": "CPL", "tracking_url": "x"},
+            {"offer_id": "2", "advertiser": "DupCo", "network": "maxbounty",
+             "category": "Retail", "_payout_type_norm": "CPL", "tracking_url": "x"},
+            {"offer_id": "3", "advertiser": "UniqueA", "network": "impact",
+             "category": "Retail", "_payout_type_norm": "CPL", "tracking_url": "x"},
+            {"offer_id": "4", "advertiser": "UniqueB", "network": "maxbounty",
+             "category": "Finance", "_payout_type_norm": "CPS", "tracking_url": "x"},
+        ]
+        orig_load = scout_digest._load_offers
+        orig_score = scout_digest.score_offer
+        orig_in_ms = scout_digest.is_already_in_ms
+        try:
+            scout_digest._load_offers = lambda: synthetic  # type: ignore
+            scout_digest.score_offer = lambda offer, *a, **kw: 100.0  # type: ignore
+            scout_digest.is_already_in_ms = lambda offer, ms: False  # type: ignore
+            result, _meta = scout_digest.select_offers(
+                n_per_network=5,
+                ms_campaigns=[],
+                benchmarks={"avg_rpm": 0, "avg_cvr": 0},
+                force=True,
+            )
+        finally:
+            scout_digest._load_offers = orig_load
+            scout_digest.score_offer = orig_score
+            scout_digest.is_already_in_ms = orig_in_ms
+
+        all_advertisers: list[str] = []
+        for net, scored in result.items():
+            for _s, offer in scored:
+                all_advertisers.append((offer.get("advertiser") or "").lower())
+
+        if all_advertisers.count("dupco") > 1:
+            return False, f"DupCo surfaced {all_advertisers.count('dupco')} times across networks"
+
+        # Verify dedup picked the higher-priority network (impact, listed first)
+        impact_advs = [(o.get("advertiser") or "").lower() for _, o in result.get("impact", [])]
+        maxbounty_advs = [(o.get("advertiser") or "").lower() for _, o in result.get("maxbounty", [])]
+        if "dupco" not in impact_advs:
+            return False, "DupCo missing from impact (priority network)"
+        if "dupco" in maxbounty_advs:
+            return False, "DupCo leaked into maxbounty after dedup"
+        return True, f"dedup OK; surfaced {len(all_advertisers)} unique advertisers"
+    except Exception as e:
+        return False, str(e)
+
+
+# ── Test 21: Module-level _NETWORK_EMOJI is the only one ──────────────────────
+
+@test("scout_digest — _NETWORK_EMOJI is module-level only (no shadow)")
+def test_network_emoji_single_source():
+    """
+    PR 15a invariant: _NETWORK_EMOJI must be defined ONCE at module level.
+    The local dict at line 610 inside _build_digest_blocks() shadowed it for
+    months — this test guards against regression by checking source.
+    """
+    try:
+        import pathlib
+        src = pathlib.Path(__file__).parent / "scout_digest.py"
+        text = src.read_text()
+        # Must have module-level _NETWORK_EMOJI (no leading whitespace)
+        if "\n_NETWORK_EMOJI" not in text:
+            return False, "module-level _NETWORK_EMOJI not found"
+        # Must NOT have an indented (local) _NETWORK_EMOJI assignment
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("_NETWORK_EMOJI") and stripped != line:
+                return False, f"local _NETWORK_EMOJI shadow found: '{line.strip()[:80]}'"
+        # Must cover all 9 networks
+        import scout_digest
+        expected = set(scout_digest._DIGEST_NETWORKS)
+        actual = set(scout_digest._NETWORK_EMOJI.keys())
+        if not expected.issubset(actual):
+            return False, f"missing emoji for networks: {expected - actual}"
+        return True, f"single-source _NETWORK_EMOJI covers {len(actual)} networks"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

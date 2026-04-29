@@ -93,11 +93,37 @@ _PAYOUT_TYPE_NORM: dict[str, str] = {
     "app_install":  "APP_INSTALL",
 }
 
+# Canonical 9-network list — single source for digest iteration.
+# Order: Big 4 in priority (Impact best historically), then alphabetical.
+# When the scraper adds a 10th network, update this tuple AND the labels/emoji below.
+_DIGEST_NETWORKS: tuple[str, ...] = (
+    "impact", "maxbounty", "flexoffers", "cj",
+    "awin", "everflow", "rakuten", "shareasale", "tune",
+)
+
 _NETWORK_LABEL: dict[str, str] = {
     "impact":     "Impact",
     "maxbounty":  "MaxBounty",
     "flexoffers": "FlexOffers",
     "cj":         "Commission Junction",
+    "awin":       "Awin",
+    "everflow":   "Everflow",
+    "rakuten":    "Rakuten",
+    "shareasale": "ShareASale",
+    "tune":       "Tune",
+}
+
+# Module-level emoji map — never shadow inside _build_digest_blocks().
+_NETWORK_EMOJI: dict[str, str] = {
+    "impact":     "⚡",
+    "maxbounty":  "💰",
+    "flexoffers": "🔗",
+    "cj":         "🌐",
+    "awin":       "🟦",
+    "everflow":   "🌊",
+    "rakuten":    "🔴",
+    "shareasale": "🤝",
+    "tune":       "🎯",
 }
 
 # Human-readable display labels for payout types shown in the card right column
@@ -597,17 +623,15 @@ def build_digest_blocks(
                 "type": "mrkdwn",
                 "text": (
                     f"*{total_selected} offer{'s' if total_selected != 1 else ''} "
-                    f"worth a look this week* — screened {total_screened} offers across "
-                    f"{networks_active} network{'s' if networks_active != 1 else ''}, "
-                    f"filtered existing inventory and zero-payout campaigns."
+                    f"worth a look this week* — evaluated {len(_DIGEST_NETWORKS)} networks, "
+                    f"{total_screened} offers scored, "
+                    f"{networks_active} network{'s' if networks_active != 1 else ''} with qualifying results. "
+                    f"Filtered existing inventory and zero-payout campaigns."
                 ),
             },
         },
         {"type": "divider"},
     ]
-
-    # Emoji per network for fast visual scanning
-    _NETWORK_EMOJI = {"impact": "⚡", "maxbounty": "💰", "flexoffers": "🔗", "cj": "🌐"}
 
     # Count total screened per network for the subheader
     network_totals = {}
@@ -615,8 +639,9 @@ def build_digest_blocks(
         net = o.get("network", "")
         network_totals[net] = network_totals.get(net, 0) + 1
 
-    # Render each network as its own section with a proper header block
-    for network in ("impact", "maxbounty", "flexoffers", "cj"):
+    # Render each network as its own section with a proper header block.
+    # Uses module-level _DIGEST_NETWORKS — single source for the 9-network list.
+    for network in _DIGEST_NETWORKS:
         scored_offers = offers_by_network.get(network, [])
         if not scored_offers:
             continue
@@ -801,13 +826,28 @@ def select_offers(
     result: dict[str, list[tuple[float, dict]]] = {}
     total_selected = 0
 
-    for network in ("impact", "maxbounty", "flexoffers", "cj"):
+    # Cross-network dedup: if the same advertiser appears on multiple networks,
+    # keep only the first (highest priority network wins). Iteration order is
+    # _DIGEST_NETWORKS — Big 4 first, alphabetical remainder.
+    seen_advertisers: set[str] = set()
+    advertisers_deduped = 0
+
+    for network in _DIGEST_NETWORKS:
         candidates = sorted(by_network.get(network, []), key=lambda x: x[0], reverse=True)
         selected: list[tuple[float, dict]] = []
         category_counts: dict[str, int] = {}
         ptype_counts: dict[str, int] = {}  # max 2 per payout type — forces CPL/CPS variety
 
         for score, offer in candidates:
+            adv_key = (offer.get("advertiser") or "").strip().lower()
+            if adv_key and adv_key in seen_advertisers:
+                advertisers_deduped += 1
+                log.debug(
+                    "[digest] dedup: skipping advertiser '%s' on %s (already surfaced on earlier network)",
+                    offer.get("advertiser"), network,
+                )
+                continue
+
             cat = (offer.get("category") or "").strip()
             if cat not in _UNCAPPED and category_counts.get(cat, 0) >= 2:
                 continue
@@ -818,6 +858,8 @@ def select_offers(
             if ptype and ptype_counts.get(ptype, 0) >= 2:
                 continue
             selected.append((score, offer))
+            if adv_key:
+                seen_advertisers.add(adv_key)
             if cat not in _UNCAPPED:
                 category_counts[cat] = category_counts.get(cat, 0) + 1
             if ptype:
