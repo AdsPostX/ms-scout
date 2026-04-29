@@ -177,6 +177,76 @@ Always return plain Python dicts — let the caller decide how to format for Sla
 
 ---
 
+## Engineering Principles (read this first)
+
+Five principles prevent the recurring failure modes in Scout's history:
+
+**P1 — Validate at the boundary.**
+- Module boundaries: all stdlib imports at file top (not inside functions) — `import json` inside a function crashes silently at runtime
+- API boundaries: every Slack/Anthropic/ClickHouse/Notion call wrapped in `try/except` with a safe fallback — uncaught exceptions drop the entire handler
+- Config boundaries: every configurable threshold read from `config/team_corrections.json` or env vars at module load, not hardcoded mid-function — hardcoded values are ignored when config changes
+- Data boundaries: never assume upstream columns are populated; use `NULL`-safe SQL (`coalesce`, `nullIf`, `arrayFilter`); validate schema at boot before querying
+
+**P2 — One source of truth per concept.**
+- One function per signal: shared `_query_*()` functions called by both Agent tools and Pulse — duplicate SQL guarantees filter drift (this happened with ghost campaigns, Apr 2026)
+- One daemon name set: currently defined in two places in `scout_bot.py` — unify before adding a third; divergence causes missed health alerts
+- One network list: `_scraper_networks()` in `offer_scraper.py` — not a hardcoded list in `scout_digest.py`
+- One config store: `config/team_corrections.json` for static platform facts, `data/entity_overrides.json` for entity facts — not inline constants in SQL strings
+
+**P3 — Read before building.**
+- Before planning any new Scout capability: read `scout_agent.py` SYSTEM_PROMPT, TOOLS, TOOL_MAP — the feature may already exist (this happened with the custom query tool, Apr 2026)
+- Before adding a new query: check if a `_query_*()` equivalent already exists in `scout_agent.py`
+- Before adding a new daemon: check what daemons already exist in `scout_bot.py`
+- Corollary: proposing code that duplicates existing functionality is a defect, not a feature
+
+**P4 — Tests describe behaviors, not incidents.**
+- Test names describe what the code does, never which PR added it or when it broke
+- No test calls a live external API (ClickHouse live, Slack live, Anthropic live) — live calls are health probes, not smoke tests; CI can't control external availability
+- Every new `_query_*()` function: one test. Every new daemon: one test. Every new config key: one test proving behavior changes when config changes.
+- "It's a small change" is the most common rationalization for skipping tests. It is never correct.
+
+**P5 — Self-heal, don't report chores.**
+- **Any Slack message to the user that says "run X" or "Action required" is a defect.** Scout should detect staleness and refresh automatically.
+- Failures must degrade gracefully: return empty state with `has_error=True`, not crash the entire handler
+- Health transitions (healthy → degraded) alert once, not every Pulse cycle — repeated identical alerts train users to ignore them
+- Boot-time warmup + background refresh daemon + read-path self-heal: this is the pattern for any cached data (benchmarks, offers, entity overrides)
+
+---
+
+## Scout PR Definition of Done
+
+Before marking any Scout PR complete, verify ALL of the following:
+
+- [ ] `python smoke_test.py` passes with 0 failures, 0 errors — paste the output count into the PR description
+- [ ] No new test names contain PR numbers, fix labels, or dates — test names describe behavior only
+- [ ] No new live API calls in `smoke_test.py` — health probes belong in `_compute_health_status()`, not the test suite
+- [ ] Every new `_query_*()` function has a corresponding smoke test
+- [ ] Every new config-driven threshold has a test proving the behavior changes when the config value changes (monkey-patch pattern)
+- [ ] Import DAG unchanged: run `grep -rn "from scout_bot import" scout_handlers.py` — must return empty
+- [ ] Block Kit canonical primitives used (no naked `section.fields`, no NBSP padding `\xa0`, no `·` separators)
+- [ ] No "Action: run X" or "Action required" messages added to user-facing Slack output
+- [ ] Signal Map updated if a new signal was added or an existing one was changed
+- [ ] Known Debt table updated if any item was resolved or a new one discovered
+
+**Enforcement note**: `smoke_test.py` is not wired to CI yet. Until it is, running it manually and pasting the output is the gate. Skipping it because "it's a small change" is how the last 3 production breaks happened.
+
+---
+
+## Known Debt (prioritized)
+
+| Priority | Item | Effort | Risk if deferred |
+|---|---|---|---|
+| P0 | Rename PR-numbered test names to behavior descriptions | 1h | CI output misleads on what failed |
+| P0 | Move live API calls (Anthropic credential check, ClickHouse ping) out of `smoke_test.py` into `_compute_health_status()` | 2h | CI fails on network unavailability, not on code regressions |
+| P1 | Block Kit 50-block hard limit: add an assertion in `smoke_test.py` that `_format_pulse_blocks()` never exceeds 50 blocks | 2h | Slack silently drops messages with no error |
+| P1 | Unify the daemon name set: create one canonical set in `scout_bot.py` used by both `_compute_health_status()` and `_thread_watchdog()` | 3h | New daemons added to one place go unmonitored by the other |
+| P2 | SYSTEM_PROMPT DATA DICTIONARY schema drift: add a boot-time check that verifies ClickHouse columns referenced in the DATA DICTIONARY still exist | 4h | Schema changes make Intent 21 queries silently wrong |
+| P2 | Button value contract validation: add a test that key names in `scout_slack_ui.py` match the parser in `scout_handlers.py` | 3h | Key renaming breaks approved offers with no error |
+
+**Owner**: Sidd reviews priority; Chris (SE) executes P0/P1 items. P2 items are architectural — flag to Sidd before starting.
+
+---
+
 ## Known Data Quality Issues
 
 ### "Major Rocket Real Real" publisher name
