@@ -566,6 +566,49 @@ def test_network_emoji_single_source():
         return False, str(e)
 
 
+# ── PR 15b: Pulse block invariants — Wednesday + ghost-clear + non-Monday opps ──
+
+@test("PR 15b — Wednesday Pulse: ghost all-clear + non-Monday opps note ≤ 50 blocks")
+def test_pulse_block_count_with_pr15b():
+    """
+    PR 15b adds two new branches:
+      1. Ghost all-clear (else: branch when no ghost campaigns)
+      2. Non-Monday opportunities note (elif: branch on weekdays != Monday)
+    Verify both render correctly on a Wednesday with NO ghosts and WITH opps,
+    and stay under Slack's 50-block hard limit.
+    """
+    try:
+        from datetime import date
+        from scout_slack_ui import _format_pulse_blocks
+        signals = {
+            "ghost_campaigns": [],  # triggers all-clear else branch
+            "fill_rate": [{"publisher_name": f"Pub{i}", "fill_rate_pct": 35, "sessions_7d": 10000,
+                           "missed_sessions": 3500, "revenue_at_risk": 0} for i in range(2)],
+            "opportunities": [{"adv_name": f"Opp{i}", "publisher_name": f"Pub{i}",
+                               "sessions_30d": 100000, "est_monthly_rev": 5000} for i in range(3)],
+            "velocity_shifts": [],
+            "cap_alerts": [],
+            "overnight_events": [],
+        }
+        wednesday = date(2026, 4, 29)  # known Wednesday
+        fallback, blocks = _format_pulse_blocks(signals, is_weekend=False, _today=wednesday)
+        if len(blocks) > 50:
+            return False, f"block count {len(blocks)} exceeds 50-block limit"
+
+        # Render to text and confirm BOTH branches fired.
+        # Use ensure_ascii=False so em-dash matches literal em-dash.
+        all_text = json.dumps(blocks, ensure_ascii=False)
+        if "DARK OFFERS — none active" not in all_text:
+            return False, "ghost all-clear header missing on no-ghosts run"
+        if "shown in detail on Monday" not in all_text:
+            return False, "non-Monday opportunities note missing"
+        if "queued" not in all_text:
+            return False, "opportunities count not surfaced in non-Monday note"
+        return True, f"both PR 15b branches rendered correctly; {len(blocks)} blocks"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

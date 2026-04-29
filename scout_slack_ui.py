@@ -1238,6 +1238,16 @@ def _format_pulse_blocks(
                 "style": "primary",
             }],
         })
+    else:
+        # PR 15b: explicit all-clear for ghost so silence isn't ambiguous.
+        # Without this, the team can't tell if "no ghost section" means
+        # "Pulse ran and found none" vs "ghost detection failed silently."
+        blocks.append({"type": "divider"})
+        blocks.extend(_build_signal_header(
+            "✅",
+            "DARK OFFERS — none active",
+            "All campaigns with impressions are converting",
+        ))
 
     # ── Low fill rate (Change A header + Change B per-publisher) ─────────────────────
     if fill_rate:
@@ -1296,6 +1306,21 @@ def _format_pulse_blocks(
                 "style": "primary",
             }],
         })
+    elif opportunities and today_d.weekday() != 0:
+        # PR 15b: opportunities are computed daily but only displayed on Mondays
+        # (canonical 8am Pulse). Tell the team WHEN they'll see it next so the
+        # absence isn't confused with "Scout stopped finding opportunities."
+        days_to_monday = (7 - today_d.weekday()) % 7 or 7
+        next_monday = today_d + _td(days=days_to_monday)
+        blocks.append({"type": "context", "elements": [{
+            "type": "mrkdwn",
+            "text": (
+                f":bulb:  *{len(opportunities)} revenue opportunit"
+                f"{'ies' if len(opportunities) != 1 else 'y'} queued* — "
+                f"shown in detail on Monday {next_monday.strftime('%b %-d')}. "
+                f"Ask `@Scout opportunities` for the current list."
+            ),
+        }]})
 
     # ── Change I: zero-signal all-clear ──────────────────────────────────
     _has_signals = bool(
