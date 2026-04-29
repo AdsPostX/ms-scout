@@ -209,6 +209,30 @@ Every Pulse signal group and per-item card MUST use the canonical primitives. In
 - **All reads/writes are atomic** (write to `.tmp`, then `os.replace`) — prevents partial writes on crash
 - **Pattern**: `_load_*()` returns dict/list; `_save_*()` writes atomically
 
+### Tests-as-behaviors rule (PR 19b)
+
+Test names describe behavior, never history. Never `PR XYZ —`, `Test N`, or `fix #123`. The git log is the changelog. The test name is the contract.
+
+When a test's behavior evolves, rename it; the old name was a snapshot, not a permanent identity. When you're tempted to write `test_pr_X_invariant_Y`, stop and ask: "what behavior is this asserting?" That IS the test name.
+
+Why: 14 of 40 current smoke tests are PR-numbered. Each release adds 1-3 more. The accumulation makes the morning #scout-qa post a museum of past work instead of a status signal. The git log already records when each test shipped — putting that in the test name is duplicate, lossy, and noise.
+
+This rule is honored on NEW tests. Existing PR-numbered tests stay until someone has a concrete reason to touch `smoke_test.py`; they don't merit a dedicated cleanup PR. The cleanup is captured in `## Known Debt` below.
+
+### Smoke-vs-runtime-vs-config separation rule (PR 19b)
+
+Three different things should NOT share a Slack post:
+
+1. **Code behavior tests** (`smoke_test.py`) — deterministic; run at deploy time; failures point at code regressions. Belong in #scout-qa as a SIGNAL.
+2. **Runtime state probes** — non-deterministic; depend on external systems (ClickHouse, Anthropic API, Slack auth). Belong in heartbeat / `_compute_health_status`; alert on TRANSITIONS only (OK→degraded, degraded→OK). Never a recurring boot post.
+3. **Boot config checks** — required env vars, persistent disk present, etc. Belong in startup logs OR fail-fast at boot. Don't add to the smoke Slack post.
+
+When you find yourself adding a "smoke test" that probes external state (CH up, API valid, file fresh, env var set), STOP — that test belongs in #2 or #3, not #1.
+
+Why: the current `smoke_test.py` mixes all three. The post grows linearly with PRs because every concern lands in the same bucket. This rule stops the next conflated test from being added.
+
+This rule is honored on NEW tests. The 5 existing runtime probes in `smoke_test.py` (Anthropic API auth, ClickHouse query, Offer inventory present, Slack auth.test, Notion queue DB ID) stay until there's a concrete reason to migrate them. The migration is captured in `## Known Debt` below.
+
 ### Shared function contract
 ```python
 def _query_ghost_campaigns(ch) -> list[dict]:
@@ -254,6 +278,16 @@ Env var checklist:
 **[Resolved by PR 19] `from_airbyte_campaigns.categories` is NULL — but data is in `c.tags`.** Original framing was wrong (claimed needed upstream fix). Verified Apr 2026: the column is genuinely NULL across all 4,816 rows, BUT real category data lives in `c.tags` as a JSON array. PR 19 rewrites `queries.performance_benchmarks_raw()` to parse tags via `arrayFilter(t -> NOT startsWith(lower(t), 'internal-'), JSONExtract(coalesce(c.tags, '[]'), 'Array(String)'))` — drops `internal-*` system tags (network/channel metadata), keeps real categories. Result: 25+ categories with usable sample sizes light up Tier 2/3 benchmarks. Same pattern applies to `publisher_top_categories()`. SYSTEM_PROMPT DATA DICTIONARY updated with the same SQL pattern so the LLM ad-hoc `run_sql_query` path uses tags too.
 
 **[New schema-deps pattern — PR 19] Boot-time validation against `system.columns`.** `scout_agent._SCHEMA_DEPS` is a list of `(table, column, must_have_data)` tuples for the columns Scout reads. `_validate_schema_deps(ch)` runs on startup (wired into `_run_startup_smoke_test()` in scout_bot.py), confirms each column exists, and (where `must_have_data=True`) confirms it has at least 100 non-null rows. Violations post to #scout-qa. Catches the "Scout reads a column with no data" class of silent failure that bit us with `categories`. When you add a new ClickHouse query to Scout, add the columns it reads to `_SCHEMA_DEPS`. The threshold lives in `_SCHEMA_DEPS_MIN_ROWS` (=100).
+
+**[Cleanup — when `smoke_test.py` is next touched] Bring smoke tests into compliance with the Tests-as-behaviors + Smoke-vs-runtime-vs-config rules.** PR 19b shipped the rules but deferred the cleanup (the cleanup itself would have been pattern #5 — bandaid on bandaid — see /autoplan review of PR 19b). When the next PR has reason to touch `smoke_test.py`:
+- Rename the 14 PR-numbered tests (`PR 15c — _compute_health_status() shape...`, `PR 16a — _DIGEST_NETWORKS derived...`, `PR 17b — get_scout_config() registered...`, etc.) to behavior names. Example: `PR 16a — _DIGEST_NETWORKS derived (Big 4 priority preserved)` → `_DIGEST_NETWORKS derives from offers_latest.json keyset, Big 4 priority preserved`.
+- Consolidate the 3 `_extract_real_categories` tests into 1 with named sub-asserts (filter / case-insensitive / edge cases / order — all in one test).
+- Delete 4 of 5 runtime probes (already covered elsewhere): `ClickHouse — connection + query` (in heartbeat), `Offer inventory — offers_latest.json present` (in `_compute_health_status`), `Slack token — auth.test` (called at boot in `main()` already), `Notion queue DB ID — env var set` (in `_compute_health_status`).
+- Do NOT delete the Anthropic API check until the paired migration below is done.
+
+**[Cleanup — paired migration with smoke cleanup] Anthropic API auth check needs a replacement home before it can be deleted from `smoke_test.py`.** Currently the only place Scout would notice an Anthropic API key revocation is the smoke test at boot. If we delete the smoke check without adding a replacement, Scout silently 401s on every @mention until a human notices. Required: add an Anthropic ping (a 1-token completion call) to `_compute_health_status()` (or as a daemon similar to `_run_health_heartbeat` if rate-limit concerns) BEFORE removing it from `smoke_test.py`. Same PR.
+
+**[Future — when `smoke_test.py` is touched] Replace `format_slack_blocks()` wall-of-checkmarks with a signal-not-list rendering.** The current 40-line wall trains the eye to skip the post. After: pass case = 3-line status card ("✅ Scout boot — N tests passed · benchmarks fresh · X offers · CH connected"); fail case = highlighted failures + "+M other tests passed" summary line. Required safety (per /autoplan eng review of PR 19b): unit-test the renderer with 0-tests / all-pass / 1-fail / 15-fail cases; cap failure list at 10 + "and N more" to stay under Slack's 50-block limit; zero-tests case must render as ❌ not ✅; wrap the renderer call in try/except with plain-text fallback so a renderer crash never leaves no Slack post (today's wall of green at least confirms boot succeeded).
 
 **[Future] Signal thresholds in `scout_bot.py` SQL queries are still decorative** — PR 18 wired the `digest` and `health` sections of `config/scout_thresholds.json` to actually drive behavior. The `signals` section (fill_rate_min_sessions_7d, ghost_recency_hours, velocity ±%, cap_alert_pct) is surfaced by `@Scout config` but the SQL queries that use them in `_run_pulse_signals()` and `_query_*` functions still hardcode the literal numbers (e.g. `HAVING sessions_7d > 5000`, `> 48 HOUR`). Editing the JSON for those keys is a no-op until each query is parameterised. Wire them via ClickHouse parameter binding when next touching those queries.
 
