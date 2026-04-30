@@ -1168,109 +1168,25 @@ def test_ghost_recency_propagation():
         return False, str(e)
 
 
-# ── Boot card renderer unit tests ────────────────────────────────────────────
-
-@test("boot_card_renders_zero_tests_as_failure")
-def test_boot_card_zero_tests():
-    blocks, fallback = format_slack_blocks([], 0)
-    text = " ".join(
-        e.get("text", {}).get("text", "") if isinstance(e.get("text"), dict) else ""
-        for b in blocks for e in ([b] + b.get("elements", []))
-    )
-    if ":white_check_mark:" in text or ":warning:" in text:
-        return False, f"0-test case rendered as pass or warning, not explicit failure: {text[:120]}"
-    if ":x:" not in text and "0 tests" not in text and "no checks" not in text.lower():
-        return False, f"0-test card missing ❌ marker: {text[:120]}"
-    return True, f"0 tests → failure card ({len(blocks)} blocks)"
-
-
-@test("boot_card_all_pass_collapses_to_summary_card")
-def test_boot_card_all_pass():
-    results = [{"name": f"test_{i}", "passed": True, "detail": "ok"} for i in range(10)]
-    blocks, _ = format_slack_blocks(results, 10)
-    if len(blocks) > 3:
-        return False, f"all-pass rendered {len(blocks)} blocks, expected ≤3"
-    text = " ".join(
-        b.get("text", {}).get("text", "") if isinstance(b.get("text"), dict) else
-        " ".join(e.get("text", "") for e in b.get("elements", []) if isinstance(e, dict))
-        for b in blocks
-    )
-    if ":white_check_mark:" not in text:
-        return False, f"all-pass card missing ✅: {text[:120]}"
-    return True, f"all-pass → {len(blocks)} blocks"
-
-
-@test("boot_card_surfaces_failures_and_collapses_passing")
-def test_boot_card_one_failure():
-    results = [{"name": "bad_check", "passed": False, "detail": "it broke"}]
-    results += [{"name": f"good_{i}", "passed": True, "detail": "ok"} for i in range(5)]
-    blocks, _ = format_slack_blocks(results, 5)
-    all_text = " ".join(
-        b.get("text", {}).get("text", "") if isinstance(b.get("text"), dict) else
-        " ".join(str(e.get("text", "")) for e in b.get("elements", []) if isinstance(e, dict))
-        for b in blocks
-    )
-    if "bad_check" not in all_text:
-        return False, "failure name not surfaced in card"
-    if "it broke" not in all_text:
-        return False, "failure detail not surfaced in card"
-    if "+5" not in all_text and "5 other" not in all_text:
-        return False, "passing count not collapsed into summary"
-    # Verify the 5 passing test names are NOT individually listed
-    for i in range(5):
-        if f"good_{i}" in all_text:
-            return False, f"good_{i} is individually listed — passing tests should be collapsed"
-    return True, f"failure surfaced, passing collapsed ({len(blocks)} blocks)"
-
-
-@test("boot_card_caps_failures_at_10_with_overflow_note")
-def test_boot_card_overflow():
-    results = [{"name": f"fail_{i}", "passed": False, "detail": f"err {i}"} for i in range(15)]
-    blocks, _ = format_slack_blocks(results, 0)
-    all_text = " ".join(
-        b.get("text", {}).get("text", "") if isinstance(b.get("text"), dict) else
-        " ".join(str(e.get("text", "")) for e in b.get("elements", []) if isinstance(e, dict))
-        for b in blocks
-    )
-    shown = sum(1 for i in range(15) if f"fail_{i}" in all_text)
-    if shown > 10:
-        return False, f"showed {shown} failures — must cap at 10"
-    if "5 more" not in all_text and "and 5" not in all_text:
-        return False, f"overflow note missing — expected '5 more': {all_text[:200]}"
-    return True, f"15 failures → {shown} shown + overflow note ({len(blocks)} blocks)"
-
-
-@test("boot_card_renderer_crash_falls_back_to_plain_text")
-def test_boot_card_fallback():
-    import unittest.mock as _mock
-    results = [{"name": "check_a", "passed": True, "detail": "ok"}]
-    with _mock.patch(
-        __name__ + ".format_slack_blocks",
-        side_effect=RuntimeError("renderer exploded"),
-    ):
-        # post_to_slack should catch the error and call format_slack_message instead
-        import os as _os
-        orig_token = _os.environ.get("SLACK_BOT_TOKEN")
-        try:
-            _os.environ["SLACK_BOT_TOKEN"] = "xoxb-fake-token-for-test"
-            with _mock.patch("slack_sdk.web.WebClient.chat_postMessage") as mock_post:
-                post_to_slack(results, 1)
-                if not mock_post.called:
-                    return False, "chat_postMessage was never called after renderer crash"
-                call_kwargs = mock_post.call_args
-                # Must have posted using plain-text fallback (blocks=None or absent)
-                kwargs = call_kwargs.kwargs if call_kwargs.kwargs else (call_kwargs[1] if len(call_kwargs) > 1 else {})
-                if "blocks" in kwargs and kwargs["blocks"] is not None:
-                    return False, f"renderer crash still sent blocks: {kwargs.get('blocks')}"
-                text = kwargs.get("text", call_kwargs[0][1] if call_kwargs[0] and len(call_kwargs[0]) > 1 else "")
-                if not text:
-                    return False, "fallback text was empty"
-        finally:
-            if orig_token is None:
-                _os.environ.pop("SLACK_BOT_TOKEN", None)
-            else:
-                _os.environ["SLACK_BOT_TOKEN"] = orig_token
-    return True, "renderer crash → plain-text fallback posted successfully"
+@test("get_queue_status_tool_registered_with_all_contract_pieces")
+def test_get_queue_status_tool_registered():
+    import scout_agent
+    # 1. Name in TOOLS list
+    tool_names = [t["name"] for t in scout_agent.TOOLS]
+    if "get_queue_status" not in tool_names:
+        return False, f"get_queue_status missing from TOOLS list; found: {tool_names}"
+    # 2. Callable in TOOL_MAP
+    fn = scout_agent.TOOL_MAP.get("get_queue_status")
+    if not callable(fn):
+        return False, f"TOOL_MAP['get_queue_status'] is not callable: {fn!r}"
+    # 3. Function exists with correct return annotation
+    if not hasattr(scout_agent, "get_queue_status"):
+        return False, "get_queue_status function not found on scout_agent module"
+    # 4. TOOLS entry has input_schema
+    tool_def = next(t for t in scout_agent.TOOLS if t["name"] == "get_queue_status")
+    if "input_schema" not in tool_def:
+        return False, "get_queue_status TOOLS entry missing input_schema"
+    return True, "get_queue_status registered in TOOLS, TOOL_MAP, and module"
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────

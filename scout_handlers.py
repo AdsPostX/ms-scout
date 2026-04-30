@@ -28,11 +28,12 @@ from scout_notion import (
     _generate_offer_copy, _write_to_notion_queue, _update_notion_status,
     _queue_copy_enrichment,
     _patch_notion_copy, _copy_cache_key, _copy_cache_get, _copy_cache_set,
+    _fetch_notion_queue_items,
 )
 from scout_slack_ui import (
     _build_brief_blocks, _queue_confirm_blocks, _build_opportunity_cards,
     _build_suggestion_buttons, _build_help_blocks, _build_feedback_buttons,
-    _build_home_view, _text_to_blocks, _is_help_query,
+    _build_home_view, _build_queue_card, _text_to_blocks, _is_help_query,
     _build_advertiser_rpm_context_blocks,
 )
 from scout_state import (
@@ -544,21 +545,17 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
             brief_data.get("geo", offer.get("geo", "US")),
         )
 
-    # 6. Thread reply in the digest card where the user clicked
+    # 6. Ephemeral confirmation to the approver — only they see it, reduces channel noise
     _notion_link = f" · <{notion_url}|Brief in Notion →>" if notion_url else ""
     try:
-        web.chat_postMessage(
+        web.chat_postEphemeral(
             channel=channel,
+            user=user_id,
             thread_ts=message_ts,
             text=f"✅ Added to Pipeline — {advertiser}{_notion_link}",
-            blocks=[{
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"✅ Added to Pipeline{_notion_link}"},
-            }],
-            unfurl_links=False,
         )
     except Exception as e:
-        log.warning(f"[approve] thread reply failed: {e}")
+        log.warning(f"[approve] ephemeral confirm failed: {e}")
 
     # 7. Persist approval state (lifecycle tracking + launch notification)
     _record_queued_offer(
@@ -1134,35 +1131,10 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
 
     try:
         if command == "/scout-queue":
-            result = get_demand_queue_status()
-            items  = result.get("pending", [])
-            if not items:
-                text = ":white_check_mark: Queue is clear — nothing pending entry."
-            else:
-                from datetime import datetime, timezone
-                now = datetime.now(timezone.utc)
-                lines = [f":hourglass_flowing_sand: *{result['count']} offer{'s' if result['count'] != 1 else ''} in queue*"]
-                for item in items:
-                    adv         = item["advertiser"]
-                    payout      = item.get("payout", "")
-                    network     = item.get("network", "")
-                    notion_url  = item.get("notion_url", "")
-                    approved_at = item.get("approved_at", "")
-                    is_live     = item.get("status") == "likely_live"
-                    badge       = ":large_green_circle: likely live" if is_live else ":white_circle: pending"
-                    notion_link = f" · <{notion_url}|Notion>" if notion_url else ""
-                    # Days waiting
-                    days_str = ""
-                    if approved_at:
-                        try:
-                            approved_dt = datetime.fromisoformat(approved_at).replace(tzinfo=timezone.utc)
-                            days = (now - approved_dt).days
-                            days_str = f" · {days}d"
-                        except Exception:
-                            pass
-                    lines.append(f"{badge} *{adv}* — {payout} · {network}{days_str}{notion_link}")
-                text = "\n".join(lines)
-            web.chat_postEphemeral(channel=channel, user=user_id, text=text)
+            queue_items = _fetch_notion_queue_items()
+            queue_blocks = _build_queue_card(queue_items)
+            fallback = "Queue is clear." if queue_items == [] else ("Offer pipeline queue" if queue_items else "Could not reach Notion — queue data unavailable.")
+            web.chat_postEphemeral(channel=channel, user=user_id, text=fallback, blocks=queue_blocks)
 
         elif command == "/scout-status":
             s       = get_scout_status()
@@ -1373,7 +1345,8 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         user_id = event.get("user", "")
         if user_id:
             try:
-                web.views_publish(user_id=user_id, view=_build_home_view())
+                queue_items = _fetch_notion_queue_items()
+                web.views_publish(user_id=user_id, view=_build_home_view(queue_items=queue_items))
             except Exception as e:
                 log.warning(f"app_home_opened: views_publish failed: {e}")
         return

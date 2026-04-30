@@ -712,8 +712,9 @@ INTENTS — resolve every query to one, then act immediately.
    NOTE: "let's do the projection/analysis/breakdown for [publisher]" is Intent 9 or 14, not this.
    → draft_campaign_brief(advertiser=X). Output ONLY the JSON block (see BRIEF MODE below).
 
-2. DEMAND QUEUE — "queue", "pending", "what's approved", "waiting to go live", "what's queued"
-   → get_demand_queue_status(). Lead with count. For each offer: name · network · payout · days in queue · Notion link. Flag likely-live offers. If empty: "Queue is clear."
+2. DEMAND QUEUE — "queue", "pipeline", "what's in the queue", "what's approved", "waiting to go live", "what's queued", "pending offers"
+   → get_queue_status(). Returns a Slack Block Kit card sourced from Notion — reply ONLY with the card, no additional prose.
+   For ClickHouse impression lookups ("is X live?", "how many impressions since approval?") → get_demand_queue_status().
    DIFFERENT from pipeline health (Intent 25 → aggregate stats, stale detection, launch velocity).
 
 3. CONFIRM LIVE — "X is live", "confirm X is live", "mark X as launched"
@@ -1414,13 +1415,25 @@ TOOLS = [
         },
     },
     {
+        "name": "get_queue_status",
+        "description": (
+            "Fetch the offer pipeline queue from Notion and return a Slack Block Kit card. "
+            "Grouped by pipeline stage: Awaiting Entry → In Platform → Test Offer ON → Live. "
+            "Use for: 'what's in the queue?', 'what's pending?', 'queue status', 'pipeline', "
+            "'what's been approved?', 'what's waiting to go live?'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "get_demand_queue_status",
         "description": (
-            "Read the MS Demand Queue — approved offers waiting to go live. "
-            "Cross-references ClickHouse to auto-detect if any queued offer is already live "
-            "(impressions > 0 since approval date). "
-            "Use for: 'what's in the queue?', 'what's pending?', 'what's waiting to go live?', "
-            "'what's been approved?', 'queue status', 'pipeline'."
+            "Read the MS Demand Queue — cross-references ClickHouse to detect if any queued offer "
+            "is already live (impressions > 0 since approval date). "
+            "Use for impression-based queries: 'is X live?', 'how many impressions since X was approved?'. "
+            "For general queue visibility use get_queue_status() instead."
         ),
         "input_schema": {
             "type": "object",
@@ -2745,6 +2758,29 @@ def get_scout_config() -> dict:
     except Exception as e:
         log.warning(f"get_scout_config failed: {e}")
         return {"error": str(e), "thresholds": _SCOUT_THRESHOLDS_FALLBACK}
+
+
+def get_queue_status() -> dict:
+    """
+    Fetch the offer pipeline queue from Notion and return a Block Kit card.
+    Shared render path with App Home tab and /scout-queue — same data, same view.
+    Returns a dict with 'blocks' (list) and 'text' (fallback string).
+    """
+    # Deferred import — scout_slack_ui imports from scout_agent inside a function body
+    # (see _build_home_view at line ~1556), so we mirror that pattern here to avoid
+    # creating a circular import at module load time.
+    from scout_notion import _fetch_notion_queue_items
+    from scout_slack_ui import _build_queue_card
+
+    items = _fetch_notion_queue_items()
+    blocks = _build_queue_card(items)
+    if items is None:
+        text = "Could not reach Notion — queue data unavailable."
+    elif not items:
+        text = "Queue is clear — nothing awaiting entry or in platform."
+    else:
+        text = f"Offer pipeline: {len(items)} offer{'s' if len(items) != 1 else ''} in queue."
+    return {"blocks": blocks, "text": text}
 
 
 def get_demand_queue_status() -> dict:
@@ -4234,6 +4270,7 @@ TOOL_MAP = {
     "draft_campaign_brief": draft_campaign_brief,
     "get_publisher_competitive_landscape": get_publisher_competitive_landscape,
     "get_fallback_candidates": get_fallback_candidates,
+    "get_queue_status": get_queue_status,
     "get_demand_queue_status": get_demand_queue_status,
     "mark_offer_launched": mark_offer_launched,
     "get_publisher_health": get_publisher_health,
