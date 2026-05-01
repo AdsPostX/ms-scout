@@ -60,6 +60,7 @@ See `## User-Facing Action Rule` above.
 Before marking any Scout PR complete, verify ALL of the following:
 
 - [ ] `python3 smoke_test.py` passes — paste the output line ("PASSED N/N" or "FAILED M/N") into the PR description
+- [ ] `python3 -m unittest discover -s tests -p "test_*.py" -v` passes — all tests OK
 - [ ] No new test names contain PR numbers, fix labels, or dates — test names describe behavior only
 - [ ] No new live API calls added to `smoke_test.py` — health probes belong in `_compute_health_status()`, not the smoke suite
 - [ ] Every new `_query_*()` shared function has a corresponding smoke test
@@ -88,6 +89,7 @@ Before marking any Scout PR complete, verify ALL of the following:
 | Pulse recall | `get_pulse_summary()` in `scout_agent.py` reads `last_signals_summary` from `pulse_state.json` | Agent tool only — Pulse writes summary, agent reads it | Written by `_run_once_pulse()` (non-force runs only). Force runs intentionally excluded to preserve canonical 8am state. |
 | Health heartbeat (PR 15c) | `_run_health_heartbeat()` in `scout_bot.py` | Background daemon every 30 min | Calls `_compute_health_status()` + standalone CH ping. CH ping affects HEARTBEAT only — never the HTTP `/health` probe (Render must not restart on CH outage). Posts one Slack alert on transition to degraded after `_HEALTH_CONSECUTIVE_THRESHOLD` consecutive bad checks; one recovery alert on return to ok. PR 16c: `_run_startup_smoke_test()` also fires a one-shot CH ping right after smoke posts so the 35-min warmup window is no longer a blind spot. |
 | Benchmarks warmer (PR 19a) | `_benchmarks_warmer()` in `scout_bot.py` | Background daemon every 30 min | Keeps `_BENCHMARKS` populated in memory by calling `_get_benchmarks()` on a schedule. Boot-time warm happens in `_run_startup_smoke_test()`. `get_scout_status()` self-heals stale/missing benchmarks before reporting. Result: status check never reports "not loaded" except in real CH outage scenarios. |
+| Queue pipeline status (PR 23) | `_fetch_notion_queue_items()` in `scout_notion.py` | `get_queue_status()` agent tool + `app_home_opened` Home tab + `/scout-queue` slash command | TTL-cached (30s module-level). Returns `None` on Notion error, `[]` on empty. Callers distinguish: None → "unavailable", [] → "clear". Three surfaces share one render path: `_build_queue_card()` in `scout_slack_ui.py`. |
 
 ---
 
@@ -330,6 +332,8 @@ Env var checklist:
 
 **[Resolved by PR 22] Cleanup — smoke test compliance + boot card redesign** — 14 PR-numbered tests renamed to behavior names, 4 runtime probes deleted (CH/offers/Slack/Notion all covered by heartbeat), `format_slack_blocks()` redesigned to 2-block summary card on all-pass and capped failure list on fail, 5 renderer unit tests added, name validator added at `@test()` decorator (fails at import time on PR-numbered names).
 
+**[Resolved by PR 23] Renderer tests migrated from smoke_test.py to tests/test_boot_card.py** — 5 `unittest.TestCase` tests now in `tests/` directory. Run with `python3 -m unittest discover -s tests -p "test_*.py" -v`. Smoke suite reduced by 5 tests (now 40); new boot invariant `get_queue_status_tool_registered_with_all_contract_pieces` added.
+
 **[Cleanup — paired migration with smoke cleanup] Anthropic API auth check needs a replacement home before it can be deleted from `smoke_test.py`.** Currently the only place Scout would notice an Anthropic API key revocation is the smoke test at boot. If we delete the smoke check without adding a replacement, Scout silently 401s on every @mention until a human notices. Required: add an Anthropic ping (a 1-token completion call) to `_compute_health_status()` (or as a daemon similar to `_run_health_heartbeat` if rate-limit concerns) BEFORE removing it from `smoke_test.py`. Same PR.
 
 **[Future] Signal thresholds in `scout_bot.py` SQL queries are still decorative** — PR 18 wired the `digest` and `health` sections of `config/scout_thresholds.json` to actually drive behavior. The `signals` section (fill_rate_min_sessions_7d, ghost_recency_hours, velocity ±%, cap_alert_pct) is surfaced by `@Scout config` but the SQL queries that use them in `_run_pulse_signals()` and `_query_*` functions still hardcode the literal numbers (e.g. `HAVING sessions_7d > 5000`, `> 48 HOUR`). Editing the JSON for those keys is a no-op until each query is parameterised. Wire them via ClickHouse parameter binding when next touching those queries.
@@ -339,3 +343,9 @@ Env var checklist:
 **[Future] `@test()` category system deferred** — PR 22 added a name validator that rejects PR-numbered test names at import time. The remaining structural gap is test *body* contents: a developer could write `@test("legit-name")` and still call `_get_ch_client()` inside, adding a runtime probe invisibly. The fix is a `category` parameter on `@test` (`"code" | "runtime" | "config"`) with the renderer filtering by category. Deferred because: (a) all 4 current runtime probes are deleted in PR 22, so the risk is absent; (b) adding the parameter requires tagging all ~39 existing tests; (c) it doesn't structurally prevent body-level violations anyway — code review remains the gate. Revisit if runtime probes re-accumulate.
 
 **[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. SYSTEM_PROMPT line ~430 still requires a manual edit when a network is added or removed. This was intentional — converting the 4300-line SYSTEM_PROMPT to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
+
+**[Future — PR 24] Slack Canvas as ambient pipeline board** — `conversations.canvases.create` + `canvases.edit` APIs allow a pinned always-visible canvas in #revenue-operations showing live queue status. Higher value than Slack Lists (no scope gap, simpler write API, shared visibility). Spike before any Slack Lists re-attempt. PLAN.md has the full opportunity catalog.
+
+**[Future — PR 24] `get_demand_queue_status()` consolidation** — still reads from local `launched_offers.json`; `get_queue_status()` (PR 23) now reads from Notion. The two tools serve different purposes (Notion pipeline view vs ClickHouse impression check), but `get_demand_queue_status` could be narrowed further or removed once Notion becomes the sole source of truth for queue state.
+
+**[Future — PR 25] Slack write-back from queue card** — `views.push` for drill-down from Home tab offer row → push detail view with approve/reject. `reminders.add` for Scout nudging ops when an offer is stuck in "Awaiting Entry" >48h. Both require PR 23 (queue read path) to ship first.

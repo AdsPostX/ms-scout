@@ -784,6 +784,108 @@ def _check_notion_queue_changes(web: WebClient, notion_token: str, queue_db_id: 
     if changed:
         _save_notion_notified(notified)
 
+_QUEUE_CACHE_TTL_SECONDS = 30
+_queue_items_cache: dict = {"ts": 0.0, "items": None}
+
+def _fetch_notion_queue_items() -> "list[dict] | None":
+    """
+    Query the Notion Demand Queue DB and return structured queue items.
+    Returns None on API error (callers show "Notion unavailable").
+    Returns [] when queue is genuinely empty.
+    Results cached for _QUEUE_CACHE_TTL_SECONDS seconds (module-level, not per-user).
+    """
+    import time
+
+    now = time.time()
+    cached = _queue_items_cache
+    if cached["items"] is not None and now - cached["ts"] < _QUEUE_CACHE_TTL_SECONDS:
+        return cached["items"]
+
+    notion_token = os.environ.get("NOTION_TOKEN", "")
+    queue_db_id  = os.environ.get("NOTION_QUEUE_DB_ID", "")
+    if not notion_token or not queue_db_id:
+        log.warning("[queue-fetch] NOTION_TOKEN or NOTION_QUEUE_DB_ID not set")
+        return None
+
+    try:
+        resp = requests.post(
+            f"https://api.notion.com/v1/databases/{queue_db_id}/query",
+            headers={
+                "Authorization": f"Bearer {notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            json={
+                "filter": {
+                    "property": "Status",
+                    "select": {"does_not_equal": "Rejected"},
+                }
+            },
+            timeout=5,
+        )
+    except Exception as e:
+        log.warning(f"[queue-fetch] request error: {e}")
+        return None
+
+    if resp.status_code != 200:
+        log.warning(f"[queue-fetch] query failed {resp.status_code}: {resp.text[:200]}")
+        return None
+
+    try:
+        results = resp.json().get("results", [])
+    except Exception as e:
+        log.warning(f"[queue-fetch] json parse error: {e}")
+        return None
+
+    items = []
+    for page in results:
+        try:
+            props       = page.get("properties", {})
+            page_id     = page.get("id", "").replace("-", "")
+            notion_url  = f"https://www.notion.so/{page_id}"
+            status      = (props.get("Status") or {}).get("select", {}).get("name", "Unknown")
+            network     = (props.get("Network") or {}).get("select", {}).get("name", "")
+            payout_raw  = (props.get("Payout") or {}).get("number")
+            payout      = float(payout_raw) if payout_raw is not None else 0.0
+            payout_type = (props.get("Payout Type") or {}).get("select", {}).get("name", "")
+
+            # Name field is formatted as "Advertiser — $payout · network" by _write_to_notion_queue
+            name_rt     = (props.get("Name") or {}).get("title", [{}])
+            name_raw    = name_rt[0].get("plain_text", "") if name_rt else ""
+            # Extract advertiser from the composite title (split on " — ")
+            advertiser  = name_raw.split(" — ")[0].strip() if " — " in name_raw else name_raw.strip()
+
+            approved_by = ""
+            ab_rt       = (props.get("Approved By") or {}).get("rich_text", [])
+            if ab_rt:
+                approved_by = ab_rt[0].get("plain_text", "")
+
+            approved_at = ""
+            da          = (props.get("Date Approved") or {}).get("date", {})
+            if da:
+                approved_at = (da or {}).get("start", "")
+
+            items.append({
+                "page_id":     page_id,
+                "advertiser":  advertiser,
+                "payout":      payout,
+                "payout_type": payout_type,
+                "network":     network,
+                "status":      status,
+                "notion_url":  notion_url,
+                "approved_by": approved_by,
+                "approved_at": approved_at,
+                "category":    "",
+            })
+        except Exception as e:
+            log.warning(f"[queue-fetch] page parse error: {e}")
+            continue
+
+    _queue_items_cache["ts"]    = now
+    _queue_items_cache["items"] = items
+    return items
+
+
 def _notion_watcher_loop(web: WebClient) -> None:
     """
     Background daemon: polls the Notion Demand Queue DB every 5 minutes.

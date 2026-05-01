@@ -1500,56 +1500,97 @@ def _format_pulse_blocks(
     fallback = f"{'Weekend Watchdog' if is_weekend else 'Pulse'} — {today_label}: {len(ghost_camps)} ghost, {len(downs)} need attention, {len(ups)} in momentum."
     return fallback, blocks
 
-def _build_home_queue_section() -> list:
-    """Build queue status blocks for the App Home dashboard. Reads from disk — no network calls."""
-    from datetime import datetime, timezone
+_MAX_QUEUE_ITEMS_RENDERED = 12
 
-    state = _load_launched_offers()
-    queued = [
-        (adv, entry) for adv, entry in state.items()
-        if entry.get("status") == "queued"
-    ]
+_QUEUE_STATUS_EMOJI: dict = {
+    "Awaiting Entry": "🟡",
+    "In Platform":    "🔵",
+    "Test Offer ON":  "🟠",
+    "Live":           "✅",
+}
 
-    blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": ":inbox_tray: Offer Queue", "emoji": True}},
-    ]
+_QUEUE_STATUS_ORDER = ["Awaiting Entry", "In Platform", "Test Offer ON", "Live"]
 
-    if not queued:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": ":white_check_mark: Queue is clear — nothing pending entry."},
-        })
-        return blocks
 
-    now = datetime.now(timezone.utc)
-    for adv, entry in sorted(queued, key=lambda x: x[1].get("approved_at", ""), reverse=False):
-        payout     = entry.get("payout", "")
-        network    = entry.get("network", "")
-        notion_url = entry.get("notion_url", "")
-        approved_at = entry.get("approved_at", "")
-        days_str   = ""
-        if approved_at:
-            try:
-                approved_dt = datetime.fromisoformat(approved_at).replace(tzinfo=timezone.utc)
-                days = (now - approved_dt).days
-                days_str = f" · {days}d waiting"
-            except Exception:
-                pass
-        notion_link = f" · <{notion_url}|View in Notion>" if notion_url else ""
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*{adv}* — {payout} · {network}{days_str}{notion_link}"},
-        })
+def _build_queue_card(items: "list[dict] | None") -> list:
+    """
+    Build Block Kit blocks for the offer pipeline queue sourced from Notion.
+    items=None  → Notion unreachable (error state).
+    items=[]    → queue genuinely empty.
+    items=[...] → rendered grouped by status.
+    """
+    header = [{"type": "header", "text": {"type": "plain_text", "text": ":inbox_tray: Offer Queue", "emoji": True}}]
+
+    if items is None:
+        return header + [{"type": "section", "text": {"type": "mrkdwn", "text": ":warning: Could not reach Notion — queue data unavailable."}}]
+
+    if not items:
+        return header + [{"type": "section", "text": {"type": "mrkdwn", "text": ":white_check_mark: Queue is clear — nothing awaiting entry or in platform."}}]
+
+    # Group by status preserving canonical order
+    groups: dict = {s: [] for s in _QUEUE_STATUS_ORDER}
+    for item in items:
+        status = item.get("status", "Unknown")
+        if status not in groups:
+            groups[status] = []
+        groups[status].append(item)
+
+    blocks = list(header)
+    rendered = 0
+
+    for status in _QUEUE_STATUS_ORDER:
+        group = groups.get(status, [])
+        if not group:
+            continue
+        emoji = _QUEUE_STATUS_EMOJI.get(status, "⚪")
+        blocks += _build_signal_header(emoji, f"{status} ({len(group)})")
+        for item in group:
+            if rendered >= _MAX_QUEUE_ITEMS_RENDERED:
+                remaining = sum(len(g) for g in groups.values()) - rendered
+                blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"_+ {remaining} more — view full queue in Notion_"}]})
+                return blocks
+            adv         = item.get("advertiser", "Unknown")
+            network     = item.get("network", "")
+            payout      = item.get("payout", 0.0)
+            payout_type = item.get("payout_type", "")
+            notion_url  = item.get("notion_url", "")
+            payout_str  = f"${payout:,.2f}" if payout else "—"
+            if payout_type:
+                payout_str += f" {payout_type}"
+            left_body   = f"{payout_str} · {network}" if network else payout_str
+            right_body  = f"<{notion_url}|View in Notion>" if notion_url else ""
+            blocks += _build_item_card(adv, left_body, right_body=right_body)
+            rendered += 1
+
+    # Unknown statuses (not in canonical order)
+    for status, group in groups.items():
+        if status in _QUEUE_STATUS_ORDER or not group:
+            continue
+        emoji = _QUEUE_STATUS_EMOJI.get(status, "⚪")
+        blocks += _build_signal_header(emoji, f"{status} ({len(group)})")
+        for item in group:
+            if rendered >= _MAX_QUEUE_ITEMS_RENDERED:
+                break
+            adv        = item.get("advertiser", "Unknown")
+            network    = item.get("network", "")
+            payout     = item.get("payout", 0.0)
+            notion_url = item.get("notion_url", "")
+            payout_str = f"${payout:,.2f}" if payout else "—"
+            left_body  = f"{payout_str} · {network}" if network else payout_str
+            right_body = f"<{notion_url}|View in Notion>" if notion_url else ""
+            blocks += _build_item_card(adv, left_body, right_body=right_body)
+            rendered += 1
 
     return blocks
 
-def _build_home_view() -> dict:
+
+def _build_home_view(queue_items: "list[dict] | None" = None) -> dict:
     """
     App Home dashboard — live queue at the top, system health strip, then examples.
     Refreshed every time the user opens the App Home tab.
     """
     # ── Queue section ─────────────────────────────────────────────────────────
-    blocks: list = _build_home_queue_section()
+    blocks: list = _build_queue_card(queue_items)
 
     # ── System health strip ───────────────────────────────────────────────────
     try:
