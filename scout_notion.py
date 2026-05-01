@@ -815,12 +815,7 @@ def _fetch_notion_queue_items() -> "list[dict] | None":
                 "Notion-Version": "2022-06-28",
                 "Content-Type": "application/json",
             },
-            json={
-                "filter": {
-                    "property": "Status",
-                    "select": {"does_not_equal": "Rejected"},
-                }
-            },
+            json={},
             timeout=5,
         )
     except Exception as e:
@@ -843,7 +838,13 @@ def _fetch_notion_queue_items() -> "list[dict] | None":
             props       = page.get("properties", {})
             page_id     = page.get("id", "").replace("-", "")
             notion_url  = f"https://www.notion.so/{page_id}"
-            status      = (props.get("Status") or {}).get("select", {}).get("name", "Unknown")
+            # Support both Notion "select" and native "status" property types
+            _status_prop = props.get("Status") or {}
+            status = (
+                (_status_prop.get("select") or {}).get("name")
+                or (_status_prop.get("status") or {}).get("name")
+                or "Unknown"
+            )
             network     = (props.get("Network") or {}).get("select", {}).get("name", "")
             payout_raw  = (props.get("Payout") or {}).get("number")
             payout      = float(payout_raw) if payout_raw is not None else 0.0
@@ -864,6 +865,9 @@ def _fetch_notion_queue_items() -> "list[dict] | None":
             da          = (props.get("Date Approved") or {}).get("date", {})
             if da:
                 approved_at = (da or {}).get("start", "")
+
+            if status == "Rejected":
+                continue
 
             items.append({
                 "page_id":     page_id,
