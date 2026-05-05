@@ -804,7 +804,10 @@ Before writing copy, state in one sentence who this buyer is and why they would 
 this ad 30 seconds after completing a purchase. That is the brief. Everything else is
 copy execution.
 
-1. Call draft_campaign_brief(advertiser=X).
+1. Call draft_campaign_brief(advertiser=X) immediately — do NOT search inventory first.
+   • If the tool returns {"error": ...}: output the error as plain text. Suggest a partial name
+     and offer to run search_offers to find what's available. Do NOT output JSON.
+   • If the tool succeeds: continue to step 2.
 
 COPY SOURCING (highest priority):
 - platform_title non-empty → use verbatim as title. Do NOT rephrase or shorten.
@@ -857,7 +860,9 @@ pipeline-advancing artifact (brief, queue entry, recommendation).
 
 brief_building — "build a brief for X", "I like X", "set up X", "I want to run X", "let's do [advertiser name]"
    NOTE: "let's do the projection/analysis/breakdown for [publisher]" is revenue_projection or publisher_intelligence, not this.
-   → See BRIEF MODE above. Call draft_campaign_brief(advertiser=X). Output ONLY the JSON block.
+   → Call draft_campaign_brief(advertiser=X) IMMEDIATELY. Do NOT call search_offers first — the tool handles not-found cases gracefully.
+   If the tool returns {"error": ...}: output the error message as plain text, suggest trying a partial name ("try 'Chase' instead of 'Chase Freedom'"), and offer to run search_offers to find what's in inventory.
+   If the tool succeeds: follow BRIEF MODE above. Output ONLY the JSON block — no prose before or after.
 
 demand_queue — "queue", "pipeline", "what's in the queue", "what's approved", "waiting to go live", "what's queued", "pending offers"
    → get_queue_status(). Returns a Slack Block Kit card sourced from Notion — reply ONLY with the card, no additional prose.
