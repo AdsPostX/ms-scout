@@ -37,7 +37,7 @@ PAYOUT_CACHE = DATA_DIR / "payout_cache.json"
 STATE_FILE   = DATA_DIR / "digest_state.json"
 
 # ── Slack ──────────────────────────────────────────────────────────────────────
-_SCOUT_QA_CHANNEL    = "C0AQEECF800"  # #scout-qa — always used in dev/force
+_SCOUT_QA_CHANNEL    = "C0AQEECF800"  # #bot-qa (renamed from #scout-qa) — always used in dev/force
 _SCOUT_ENV           = os.getenv("SCOUT_ENV", "development")
 _PROD_OFFERS_CHANNEL = os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_QA_CHANNEL)  # #scout-offers
 

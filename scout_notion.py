@@ -17,7 +17,7 @@ import time
 import requests
 
 _SCOUT_ENV = os.getenv("SCOUT_ENV", "development")
-_SCOUT_HQ_CHANNEL = "C0AQEECF800"  # #scout-qa
+_SCOUT_HQ_CHANNEL = "C0AQEECF800"  # #bot-qa (renamed from #scout-qa)
 _SCOUT_DIGEST_CHANNEL = os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL)
 
 from scout_state import (

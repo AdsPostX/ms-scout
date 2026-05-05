@@ -307,7 +307,7 @@ def _slack_thread_url(channel: str, thread_ts: str) -> str:
 
 # ── Environment-aware channel routing ─────────────────────────────────────────
 _SCOUT_ENV = os.getenv("SCOUT_ENV", "development")
-_SCOUT_HQ_CHANNEL = "C0AQEECF800"  # #scout-qa
+_SCOUT_HQ_CHANNEL = "C0AQEECF800"  # #bot-qa (renamed from #scout-qa)
 _PULSE_CHANNEL = os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL)
 _SCOUT_DIGEST_CHANNEL = os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL)
 
