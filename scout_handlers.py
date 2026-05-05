@@ -1442,10 +1442,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         )
         return
 
-    # "force pulse" — admin command to trigger the pulse immediately to #scout-qa
+    # "force pulse" — admin command to trigger the pulse immediately to #bot-qa
     if re.search(r'\bforce\s+pulse\b', lower):
         web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                             text=":hourglass_flowing_sand: Running pulse signals now — will post to #scout-qa...")
+                             text=":hourglass_flowing_sand: Running pulse signals now — will post to #bot-qa...")
         def _run_force_pulse():
             try:
                 if _PULSE_RUNNER is None:
@@ -1454,7 +1454,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                     return
                 _PULSE_RUNNER(web, force=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text=":white_check_mark: Force pulse complete — check #scout-qa.")
+                                     text=":white_check_mark: Force pulse complete — check #bot-qa.")
             except Exception as e:
                 log.error(f"[force pulse] failed: {e}", exc_info=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
@@ -1462,10 +1462,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         threading.Thread(target=_run_force_pulse, daemon=True).start()
         return
 
-    # "force signal" / "force sniper" — run the offer digest immediately, posts to #scout-qa
+    # "force signal" / "force sniper" — run the offer digest immediately, posts to #bot-qa
     if re.search(r'\bforce\s+s(?:ignal|niper)\b', lower):
         web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                             text=":hourglass_flowing_sand: Running Scout Signal digest now — offer cards will post to #scout-qa...")
+                             text=":hourglass_flowing_sand: Running Scout Signal digest now — offer cards will post to #bot-qa...")
         def _run_force_sniper():
             try:
                 import scout_digest
@@ -1497,7 +1497,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
                 scout_digest.post_digest(is_force=True)
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text=":white_check_mark: Signal digest posted to #scout-qa — click *Add to Queue* on any offer to test the flow.")
+                                     text=":white_check_mark: Signal digest posted to #bot-qa — click *Add to Queue* on any offer to test the flow.")
             except RuntimeError as e:
                 # post_digest raises RuntimeError with filter breakdown when 0 offers pass
                 log.warning(f"[force signal] 0 offers posted: {e}")
