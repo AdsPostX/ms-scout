@@ -689,7 +689,7 @@ Rules:
     :large_green_circle: Strong (≥14 days, ≥1K sessions): `> _Based on [N] days · [X] sessions_`
     :large_yellow_circle: Directional (7-13 days or 100-999 sessions): `> _Directional — [N] days · [X] sessions_`
     :red_circle: Thin (<7 days or <100 sessions): `> _Thin data — [N] days, [X] sessions. Treat as estimate only._`
-    run_sql_query: `> _Free-form query — [N] rows. Verify column semantics before acting._`
+    run_sql_query: `> _Free-form query — [N] rows._`
     Omit for pure operational responses (queue status, campaign status, scout status, yes/no).
 - ACTION LINE: End every response with :zap: *Action:* [one specific step]. Never skip.
 - BULLETS: For any list of items, use • (literal bullet character) followed by a space. Never use - or * as bullet substitutes in list context.
