@@ -1003,6 +1003,18 @@ BRIEF_JSON>>>
 CLICKHOUSE DATA DICTIONARY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+── CRITICAL TYPE RULES — read before writing any SQL ────────────────────────────────────────────
+
+1. revenue and payout are STRINGS — always cast: toFloat64OrNull(revenue), toFloat64OrNull(payout)
+   NEVER sum or compare them as strings. Every conversion revenue query must cast.
+
+2. categories column is NULL across all rows in from_airbyte_campaigns and from_airbyte_publisher_campaigns
+   NEVER reference c.categories. Real category data lives in the tags JSON array.
+   Pattern: arrayFilter(t -> NOT startsWith(lower(t), 'internal-'), JSONExtract(coalesce(c.tags, '[]'), 'Array(String)'))
+
+3. pid in adpx_impressions_details is a STRING publisher ID — NOT user_id
+   Join to users via: i.pid = toString(u.id)  (NOT i.pid = u.id — types differ)
+
 ── EVENT TABLES (partitioned by toYYYYMM(created_at)) ──────────────────────────────────────────
 
 adpx_sdk_sessions [460M] — one row per SDK session (user visit to confirmation page)
