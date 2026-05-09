@@ -1587,6 +1587,30 @@ _QUEUE_STATUS_EMOJI: dict = {
 _QUEUE_STATUS_ORDER = ["Awaiting Entry", "In Platform", "Test Offer ON", "Live"]
 
 
+def _normalise_payout_type(raw: str) -> str:
+    """'$ PER LEAD' → 'per lead', 'CPA' → 'CPA', '' → ''"""
+    if not raw:
+        return ""
+    cleaned = raw.lstrip("$").strip()
+    upper = cleaned.upper()
+    if upper in ("CPA", "CPL", "CPC", "CPM", "CPS", "REV SHARE"):
+        return upper
+    return cleaned.lower()
+
+
+def _queue_item_context(approved_at: str) -> str:
+    """'2026-04-28' → 'Approved 2d ago'  |  '' → ''"""
+    if not approved_at:
+        return ""
+    try:
+        from datetime import datetime, timezone, date as _date
+        dt = datetime.fromisoformat(approved_at.replace("Z", "+00:00"))
+        days = (datetime.now(timezone.utc) - dt).days
+        return "Approved today" if days == 0 else f"Approved {days}d ago"
+    except Exception:
+        return ""
+
+
 def _build_queue_card(items: "list[dict] | None") -> list:
     """
     Build Block Kit blocks for the offer pipeline queue sourced from Notion.
@@ -1629,12 +1653,20 @@ def _build_queue_card(items: "list[dict] | None") -> list:
             payout      = item.get("payout", 0.0)
             payout_type = item.get("payout_type", "")
             notion_url  = item.get("notion_url", "")
-            payout_str  = f"${payout:,.2f}" if payout else "—"
-            if payout_type:
-                payout_str += f" {payout_type}"
+            approved_at = item.get("approved_at", "")
+            pt          = _normalise_payout_type(payout_type)
+            if payout and pt:
+                payout_str = f"${payout:,.2f} {pt}"
+            elif payout:
+                payout_str = f"${payout:,.2f}"
+            elif pt:
+                payout_str = pt
+            else:
+                payout_str = "—"
             left_body   = f"{payout_str} · {network}" if network else payout_str
             right_body  = f"<{notion_url}|View in Notion>" if notion_url else ""
-            blocks += _build_item_card(adv, left_body, right_body=right_body)
+            context     = _queue_item_context(approved_at)
+            blocks += _build_item_card(adv, left_body, right_body=right_body, context=context)
             rendered += 1
 
     # Unknown statuses (not in canonical order)
@@ -1646,14 +1678,25 @@ def _build_queue_card(items: "list[dict] | None") -> list:
         for item in group:
             if rendered >= _MAX_QUEUE_ITEMS_RENDERED:
                 break
-            adv        = item.get("advertiser", "Unknown")
-            network    = item.get("network", "")
-            payout     = item.get("payout", 0.0)
-            notion_url = item.get("notion_url", "")
-            payout_str = f"${payout:,.2f}" if payout else "—"
-            left_body  = f"{payout_str} · {network}" if network else payout_str
-            right_body = f"<{notion_url}|View in Notion>" if notion_url else ""
-            blocks += _build_item_card(adv, left_body, right_body=right_body)
+            adv         = item.get("advertiser", "Unknown")
+            network     = item.get("network", "")
+            payout      = item.get("payout", 0.0)
+            payout_type = item.get("payout_type", "")
+            notion_url  = item.get("notion_url", "")
+            approved_at = item.get("approved_at", "")
+            pt          = _normalise_payout_type(payout_type)
+            if payout and pt:
+                payout_str = f"${payout:,.2f} {pt}"
+            elif payout:
+                payout_str = f"${payout:,.2f}"
+            elif pt:
+                payout_str = pt
+            else:
+                payout_str = "—"
+            left_body   = f"{payout_str} · {network}" if network else payout_str
+            right_body  = f"<{notion_url}|View in Notion>" if notion_url else ""
+            context     = _queue_item_context(approved_at)
+            blocks += _build_item_card(adv, left_body, right_body=right_body, context=context)
             rendered += 1
 
     return blocks

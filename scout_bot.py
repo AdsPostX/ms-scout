@@ -107,7 +107,7 @@ _BOT_USER_ID: str = ""  # cached at startup — never changes
 
 # ── Scout Signal: approve / reject handlers ───────────────────────────────────
 
-_SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #scout-qa (was #scout-hq)
+_SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #bot-qa (was #scout-qa, was #scout-hq)
 
 
 # ── Approve helpers ───────────────────────────────────────────────────────────

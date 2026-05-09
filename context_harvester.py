@@ -31,7 +31,7 @@ _BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 # Channels to EXCLUDE from harvesting — noise, not signal
 _EXCLUDE_NAMES = frozenset({
     "general", "random", "announcements", "social", "watercooler",
-    "scout-qa", "scout-dev", "scout-test",
+    "bot-qa", "scout-qa", "scout-dev", "scout-test",  # bot-qa = renamed from scout-qa
 })
 
 _ENTITY_EXTRACTION_PROMPT = """You are extracting DURABLE entity knowledge from internal Slack channel summaries for a revenue operations assistant called Scout.
