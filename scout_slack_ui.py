@@ -18,10 +18,22 @@ from __future__ import annotations
 
 import json
 import logging
+import pathlib
 import random
 import re
 
 from scout_state import _load_launched_offers
+
+# Load Scout thresholds directly (avoids circular import with scout_agent).
+# Used for pulse diff suppression in _format_pulse_blocks().
+def _load_ui_thresholds() -> dict:
+    try:
+        p = pathlib.Path(__file__).parent / "config" / "scout_thresholds.json"
+        return json.loads(p.read_text()) if p.exists() else {}
+    except Exception:
+        return {}
+
+SCOUT_THRESHOLDS = _load_ui_thresholds()
 
 log = logging.getLogger("scout_slack_ui")
 
@@ -1143,12 +1155,13 @@ def _format_pulse_blocks(
 
     today_d      = _today if _today is not None else _date.today()
     today_label  = today_d.strftime("%B %-d, %Y")
-    cap_alerts   = signals.get("cap_alerts", [])
-    vel_shifts   = signals.get("velocity_shifts", [])
-    night_events = signals.get("overnight_events", [])
-    ghost_camps  = signals.get("ghost_campaigns", [])
-    fill_rate    = signals.get("fill_rate", [])
-    opportunities = signals.get("opportunities", [])
+    cap_alerts        = signals.get("cap_alerts", [])
+    vel_shifts        = signals.get("velocity_shifts", [])
+    night_events      = signals.get("overnight_events", [])
+    ghost_camps       = signals.get("ghost_campaigns", [])
+    fill_rate         = signals.get("fill_rate", [])
+    opportunities     = signals.get("opportunities", [])
+    revenue_baseline  = signals.get("revenue_baseline", [])
 
     # Sort by absolute dollar impact (not % change) — a -48% drop on $29K/mo
     # outranks a -98% drop on $129/mo. Magnitude matters more than ratio.
@@ -1192,6 +1205,21 @@ def _format_pulse_blocks(
 
     blocks: list = []
 
+    # ── PR 24a: diff suppression helpers ──────────────────────────────────────
+    _sig_cfg        = SCOUT_THRESHOLDS.get("signals", {})
+    _collapse_after = int(_sig_cfg.get("pulse_diff_collapse_after_days", 2))
+
+    def _is_chronic(item: dict) -> bool:
+        meta = item.get("_diff_meta", {})
+        return not meta.get("is_new", True) and meta.get("consecutive_days", 1) >= _collapse_after
+
+    def _chronic_ctx(items: list, name_field: str, cmd: str) -> dict:
+        """Single context block for suppressed chronic items — one line, no cards."""
+        names = ", ".join(item.get(name_field, "?") for item in items[:4])
+        extra = f" +{len(items) - 4} more" if len(items) > 4 else ""
+        return {"type": "context", "elements": [{"type": "mrkdwn",
+            "text": f"↔ {len(items)} unchanged: {names}{extra} — `@Scout {cmd}` for detail"}]}
+
     # ── Title ─────────────────────────────────────────────────────────────────
     if is_weekend:
         sat = today_d if today_d.weekday() == 5 else today_d - _td(days=1)
@@ -1209,35 +1237,67 @@ def _format_pulse_blocks(
             {"type": "mrkdwn", "text": ":calendar:  Weekend mode — showing high-magnitude moves only"}
         ]})
 
-    # ── Ghost campaigns ──────────────────────────────────────────────────────
-    # ── Ghost campaigns (Change A header + Change C per-item) ───────────────
-    if ghost_camps:
+    # ── Revenue baseline alert (PR 24b) ─────────────────────────────────────
+    if revenue_baseline:
+        rb = revenue_baseline[0]
+        actual    = float(rb.get("actual", 0))
+        expected  = float(rb.get("expected", 0))
+        pct       = float(rb.get("pct_of_expected", 0))
+        weekday   = rb.get("weekday", "yesterday")
+        days      = int(rb.get("sample_days", 0))
+        gap       = expected - actual
+        severity  = "🔴" if pct < 50 else "🟠"
         blocks.append({"type": "divider"})
-        impr_total = sum(g["impressions_7d"] for g in ghost_camps)
-        impr_str = f"{impr_total / 1000:.0f}K" if impr_total >= 1000 else str(impr_total)
         blocks.extend(_build_signal_header(
-            "🔴",
-            f"DARK OFFERS — {len(ghost_camps)} active with $0 revenue",
-            f"{impr_str} impressions burning, zero conversion",
+            severity,
+            f"REVENUE SOFT — {pct:.0f}% of {weekday} baseline",
+            f"${actual:,.0f} actual vs ${expected:,.0f} expected  ·  ${gap:,.0f} below ({days}wk median)",
         ))
-        for g in ghost_camps[:5]:
-            imp_str = f"{g['impressions_7d'] / 1000:.0f}K" if g["impressions_7d"] >= 1000 else str(g["impressions_7d"])
-            rev_str = f"${g['revenue_7d']:,.0f}" if g.get("revenue_7d", 0) > 0 else "$0"
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*{g['adv_name']}*  ·  {imp_str} impressions/7d  ·  {rev_str} revenue"},
-            })
-        if len(ghost_camps) > 5:
-            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"+{len(ghost_camps) - 5} more"}]})
         blocks.append({
-            "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Get Ghost Brief", "emoji": True},
-                "action_id": "pulse_ghost_brief",
-                "style": "primary",
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text":
+                f"Check: (1) top CPA campaigns tracking? (2) AT&T serving? (3) overnight network issues? "
+                f"Run `@Scout ghost campaigns` if impressions are up but revenue is down."
             }],
         })
+
+    # ── Ghost campaigns — suppression-aware (PR 24a) ─────────────────────────
+    if ghost_camps:
+        new_ghosts = [g for g in ghost_camps if not _is_chronic(g)]
+        chr_ghosts = [g for g in ghost_camps if _is_chronic(g)]
+        blocks.append({"type": "divider"})
+        if new_ghosts:
+            impr_total     = sum(g["impressions_7d"] for g in new_ghosts)
+            total_impr_str = f"{impr_total / 1000:.0f}K" if impr_total >= 1000 else str(impr_total)
+            title_suffix   = " — " + ", ".join(f"🆕 {g['adv_name']}" for g in new_ghosts[:2])
+            blocks.extend(_build_signal_header(
+                "🔴",
+                f"DARK OFFERS — {len(new_ghosts)} new{title_suffix}",
+                f"{total_impr_str} impressions burning, zero conversion",
+            ))
+            for g in new_ghosts[:5]:
+                item_impr_str = f"{g['impressions_7d'] / 1000:.0f}K" if g["impressions_7d"] >= 1000 else str(g["impressions_7d"])
+                rev_str = f"${g['revenue_7d']:,.0f}" if g.get("revenue_7d", 0) > 0 else "$0"
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"🆕 *{g['adv_name']}*  ·  {item_impr_str} impressions/7d  ·  {rev_str} revenue"},
+                })
+            if len(new_ghosts) > 5:
+                blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"+{len(new_ghosts) - 5} more new"}]})
+            if chr_ghosts:
+                blocks.append(_chronic_ctx(chr_ghosts, "adv_name", "ghost campaigns"))
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Get Ghost Brief", "emoji": True},
+                    "action_id": "pulse_ghost_brief",
+                    "style": "primary",
+                }],
+            })
+        else:
+            # All ghosts chronic — one context line, no full section, no button
+            blocks.append(_chronic_ctx(chr_ghosts, "adv_name", "ghost campaigns"))
     else:
         # PR 15b: explicit all-clear for ghost so silence isn't ambiguous.
         # Without this, the team can't tell if "no ghost section" means
@@ -1249,35 +1309,44 @@ def _format_pulse_blocks(
             "All campaigns with impressions are converting",
         ))
 
-    # ── Low fill rate (Change A header + Change B per-publisher) ─────────────────────
+    # ── Low fill rate — suppression-aware (PR 24a) ────────────────────────────
     if fill_rate:
-        blocks.append({"type": "divider"})
-        total_missed = sum(f["missed_sessions"] for f in fill_rate)
-        missed_str = f"{total_missed / 1_000_000:.1f}M" if total_missed >= 1_000_000 else f"{total_missed / 1000:.0f}K"
-        blocks.extend(_build_signal_header(
-            "🟡",
-            f"LOW FILL RATE — {len(fill_rate)} publisher{'s' if len(fill_rate) != 1 else ''}",
-            f"{missed_str} missed sessions/7d",
-        ))
-        for f in fill_rate[:4]:
-            sess_str = f"{f['sessions_7d'] / 1_000_000:.1f}M" if f["sessions_7d"] >= 1_000_000 else f"{f['sessions_7d'] / 1000:.0f}K"
-            rev_at_risk = f.get("revenue_at_risk", 0)
-            risk_str = f"  ·  ~{_fmt_k(rev_at_risk)}/wk at risk" if rev_at_risk else ""
+        new_fill = [f for f in fill_rate if not _is_chronic(f)]
+        chr_fill = [f for f in fill_rate if _is_chronic(f)]
+        if new_fill:
+            blocks.append({"type": "divider"})
+            total_missed = sum(f["missed_sessions"] for f in new_fill)
+            missed_str = f"{total_missed / 1_000_000:.1f}M" if total_missed >= 1_000_000 else f"{total_missed / 1000:.0f}K"
+            blocks.extend(_build_signal_header(
+                "🟡",
+                f"LOW FILL RATE — {len(new_fill)} new publisher{'s' if len(new_fill) != 1 else ''}",
+                f"{missed_str} missed sessions/7d",
+            ))
+            for f in new_fill[:4]:
+                sess_str = f"{f['sessions_7d'] / 1_000_000:.1f}M" if f["sessions_7d"] >= 1_000_000 else f"{f['sessions_7d'] / 1000:.0f}K"
+                rev_at_risk = f.get("revenue_at_risk", 0)
+                risk_str = f"  ·  ~{_fmt_k(rev_at_risk)}/wk at risk" if rev_at_risk else ""
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"🆕 *{f['publisher_name']}*  ·  {f['fill_rate_pct']:.0f}% fill  ·  {sess_str} sessions/7d{risk_str}"},
+                })
+            if len(new_fill) > 4:
+                blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"+{len(new_fill) - 4} more new"}]})
+            if chr_fill:
+                blocks.append(_chronic_ctx(chr_fill, "publisher_name", "fill rate"))
             blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*{f['publisher_name']}*  ·  {f['fill_rate_pct']:.0f}% fill  ·  {sess_str} sessions/7d{risk_str}"},
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Get Fill Rate Brief", "emoji": True},
+                    "action_id": "pulse_fill_rate_brief",
+                    "style": "primary",
+                }],
             })
-        if len(fill_rate) > 4:
-            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"+{len(fill_rate) - 4} more publishers"}]})
-        blocks.append({
-            "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Get Fill Rate Brief", "emoji": True},
-                "action_id": "pulse_fill_rate_brief",
-                "style": "primary",
-            }],
-        })
+        elif chr_fill:
+            # All fill rate publishers chronic — one context line, no section header
+            blocks.append({"type": "divider"})
+            blocks.append(_chronic_ctx(chr_fill, "publisher_name", "fill rate"))
 
     # ── Revenue opportunities (Change A header + Change F per-opp, Mondays only) ─
     if opportunities and today_d.weekday() == 0:
@@ -1332,28 +1401,30 @@ def _format_pulse_blocks(
             {"type": "mrkdwn", "text": ":white_check_mark:  All clear — no signals above threshold today"}
         ]})
 
-    # ── NEEDS ATTENTION (Change A header + Change D fields + G1 caps + G3 hint) ─
-    if regular_downs or urgent_caps:
+    # ── NEEDS ATTENTION — suppression-aware (PR 24a) ─────────────────────────
+    new_downs = [(v, fc) for v, fc in regular_downs if not _is_chronic(v)]
+    chr_downs = [v for v, _  in regular_downs if _is_chronic(v)]
+    if new_downs or urgent_caps or chr_downs:
         blocks.append({"type": "divider"})
-        blocks.extend(_build_signal_header("⬇️", "NEEDS ATTENTION", "Revenue down — action required"))
-        for v, flag_count in regular_downs:
-            attr = _inline_attr(v)
-            pct  = float(v.get("pct_delta", 0))
-            left = f"*{pct:+.0f}%*  ·  {_fmt_k(v['revenue_7d_ann'])}/mo"
-            # Change J: fall back to plain section when no attribution
+        if new_downs or urgent_caps:
+            blocks.extend(_build_signal_header("⬇️", "NEEDS ATTENTION", "Revenue down — action required"))
+        for v, flag_count in new_downs:
+            attr  = _inline_attr(v)
+            pct   = float(v.get("pct_delta", 0))
+            left  = f"*{pct:+.0f}%*  ·  {_fmt_k(v['revenue_7d_ann'])}/mo"
+            name_text = f"🆕 *{v['publisher_name']}*"
             if attr:
                 card: dict = {
                     "type": "section",
                     "fields": [
-                        {"type": "mrkdwn", "text": f"*{v['publisher_name']}*\n{left}"},
+                        {"type": "mrkdwn", "text": f"{name_text}\n{left}"},
                         {"type": "mrkdwn", "text": f"*Top Advertiser*\n{attr}"},
                     ],
                 }
             else:
-                card = {"type": "section", "text": {"type": "mrkdwn", "text": f"*{v['publisher_name']}*\n{left}"}}
+                card = {"type": "section", "text": {"type": "mrkdwn", "text": f"{name_text}\n{left}"}}
             blocks.append(card)
 
-            # Change D + K: combined context, \n separator
             ctx_parts: list[str] = []
             if v.get("hypothesis"):
                 ctx_parts.append(v["hypothesis"])
@@ -1388,7 +1459,10 @@ def _format_pulse_blocks(
                 ],
             })
 
-        # Change G1: urgent caps — no NBSP padding
+        if chr_downs:
+            blocks.append(_chronic_ctx(chr_downs, "publisher_name", "velocity drops"))
+
+        # Urgent caps — no NBSP padding
         for a in urgent_caps[:3]:
             hit_note = f"~{a['days_to_cap']:.0f}d to cap"
             blocks.append({
@@ -1396,11 +1470,12 @@ def _format_pulse_blocks(
                 "text": {"type": "mrkdwn", "text": f"*{a['adv_name']}*  ·  *{a['cap_pct']}% of cap*  ·  {hit_note}"},
             })
 
-        # Change G3: NA hint — no NBSP
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f":speech_balloon:  {na_section_hint}"}],
-        })
+        # NA hint only when there's active content to act on (not just a chronic footer)
+        if new_downs or urgent_caps:
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f":speech_balloon:  {na_section_hint}"}],
+            })
 
     # ── MOMENTUM (Change A header + Change E fields + Change J empty attr) ──────
     if ups:
