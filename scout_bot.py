@@ -792,6 +792,10 @@ def _revenue_tracker(web, ch) -> None:
     while True:
         _time.sleep(300)  # 5-min poll
         try:
+            # Feature flag — flip to true in scout_thresholds.json once validated in #bot-qa
+            if not SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_enabled", False):
+                continue
+
             now_ct = _dt.now(CT_TZ)
 
             # Fire window: target hour ± 10 minutes
