@@ -705,15 +705,23 @@ def _run_pulse_signals() -> dict:
 
 
 
-def _format_revenue_alert(total: dict, publishers: list) -> str:
+def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None) -> str:
     """
-    Format the proactive 3pm CT revenue alert message.
+    Format the proactive revenue alert message.
 
     total: dict from _query_intraday_revenue_total (today_revenue, projected_full_day,
            dow_median, pct_of_expected, weekday, sample_days)
     publishers: list of dicts from _query_intraday_revenue_by_publisher
                 (publisher_name, publisher_id, delta, root_cause, ...)
+    as_of: human-readable time string, e.g. "3pm CT" — defaults to current CT time
     """
+    import pytz
+    from datetime import datetime as _dt
+
+    if as_of is None:
+        _ct = _dt.now(pytz.timezone("America/Chicago"))
+        as_of = _ct.strftime("%-I:%M%p CT").lower()  # e.g. "3:04pm CT"
+
     pct        = round(total["pct_of_expected"])
     today_rev  = total["today_revenue"]
     projected  = total["projected_full_day"]
@@ -723,7 +731,7 @@ def _format_revenue_alert(total: dict, publishers: list) -> str:
 
     lines = [
         ":red_circle: *Revenue alert — today is tracking soft*\n",
-        f"Platform so far (3pm CT): *${today_rev:,.0f}* | projected: *${projected:,.0f}* | expected [{weekday}]: ~*${expected:,.0f}*",
+        f"Platform so far ({as_of}): *${today_rev:,.0f}* | projected: *${projected:,.0f}* | expected [{weekday}]: ~*${expected:,.0f}*",
         f"Tracking at *{pct}%* of expected ({samples} same-weekday samples)\n",
     ]
 
