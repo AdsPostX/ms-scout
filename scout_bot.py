@@ -794,10 +794,6 @@ def _revenue_tracker(web, ch) -> None:
         try:
             now_ct = _dt.now(CT_TZ)
 
-            # Weekdays only
-            if now_ct.weekday() >= 5:
-                continue
-
             # Fire window: target hour ± 10 minutes
             if not (now_ct.hour == check_hour and now_ct.minute < 10):
                 continue
