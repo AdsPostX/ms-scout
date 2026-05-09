@@ -663,34 +663,55 @@ def _pulse_signal_opportunities(ch) -> list:
     ]
 
 
+def _pulse_signal_revenue_baseline(ch) -> list:
+    """
+    Revenue baseline signal — fires when yesterday's platform revenue is materially
+    below the 8-week same-weekday median.
+
+    Uses _query_revenue_baseline() from scout_agent — the shared function also
+    powering get_revenue_health() for ad-hoc @Scout queries.
+
+    Returns [] when revenue is within normal range or history is too thin.
+    Returns [{actual, expected, pct_of_expected, weekday, sample_days}] on anomaly.
+    """
+    try:
+        from scout_agent import _query_revenue_baseline
+        result = _query_revenue_baseline(ch)
+        return [result] if result is not None else []
+    except Exception as e:
+        log.warning(f"Pulse revenue baseline signal failed: {e}")
+        return []
+
+
 # ── Pulse signal orchestrator ─────────────────────────────────────────────────
 
 def _run_pulse_signals() -> dict:
     """
-    Run all 6 Pulse signals in parallel against ClickHouse.
+    Run all 7 Pulse signals in parallel against ClickHouse.
     Each signal owns its own connection — no shared state, no lock needed.
     Returns a dict with cap_alerts, velocity_shifts, overnight_events,
-    ghost_campaigns, fill_rate, opportunities.
+    ghost_campaigns, fill_rate, opportunities, revenue_baseline.
     """
     from scout_agent import _get_ch_client
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": [], "ghost_campaigns": [], "fill_rate": [], "opportunities": []}
+    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": [], "ghost_campaigns": [], "fill_rate": [], "opportunities": [], "revenue_baseline": []}
 
     _signal_fns = [
-        ("cap_alerts",       _pulse_signal_cap),
-        ("velocity_shifts",  _pulse_signal_velocity),
-        ("overnight_events", _pulse_signal_overnight),
-        ("ghost_campaigns",  _pulse_signal_ghost),
-        ("fill_rate",        _pulse_signal_fill_rate),
-        ("opportunities",    _pulse_signal_opportunities),
+        ("cap_alerts",         _pulse_signal_cap),
+        ("velocity_shifts",    _pulse_signal_velocity),
+        ("overnight_events",   _pulse_signal_overnight),
+        ("ghost_campaigns",    _pulse_signal_ghost),
+        ("fill_rate",          _pulse_signal_fill_rate),
+        ("opportunities",      _pulse_signal_opportunities),
+        ("revenue_baseline",   _pulse_signal_revenue_baseline),
     ]
 
     def _run_one(key, fn):
         ch = _get_ch_client()
         return key, fn(ch)
 
-    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="pulse") as pool:
+    with ThreadPoolExecutor(max_workers=7, thread_name_prefix="pulse") as pool:
         futures = {pool.submit(_run_one, key, fn): key for key, fn in _signal_fns}
         for future in as_completed(futures):
             try:
@@ -926,6 +947,27 @@ def _launch_watchdog(web: WebClient) -> None:
             time.sleep(3600)
 
 
+def _snapshot_keys(sigs: dict) -> dict:
+    """
+    Extract string key sets for each signal type from a signals dict.
+
+    Used by _run_pulse_once to build the daily snapshot for PR 24a diff logic.
+    Module-level so smoke tests can exercise it without running a full pulse.
+
+    Key contract: each key is a stable identifier that is the same day-over-day
+    for the same item, so yesterday's snapshot can be diffed against today's.
+    """
+    snap: dict[str, set] = {}
+    snap["ghost"] = {g["adv_name"] for g in (sigs.get("ghost_campaigns") or [])}
+    snap["fill"]  = {f["publisher_name"] for f in (sigs.get("fill_rate") or [])}
+    snap["down"]  = {v["publisher_name"] for v in (sigs.get("velocity_shifts") or []) if v.get("direction") == "down"}
+    snap["up"]    = {v["publisher_name"] for v in (sigs.get("velocity_shifts") or []) if v.get("direction") == "up"}
+    snap["cap"]   = {a["adv_name"] for a in (sigs.get("cap_alerts") or [])}
+    snap["opp"]   = {f"{o['publisher_name']}:{o['adv_name']}" for o in (sigs.get("opportunities") or [])}
+    snap["rev"]   = {"platform"} if sigs.get("revenue_baseline") else set()
+    return snap
+
+
 def _run_pulse_once(web: WebClient, force: bool = False) -> None:
     """
     Execute one pulse run immediately. If force=True, always routes to #scout-qa
@@ -985,6 +1027,57 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
             chronic.append(pname)
     state["chronic"] = chronic
 
+    # ── PR 24a: Pulse diff — compare today's signals against yesterday's snapshot ──
+    # Build today's snapshot as sets of item keys per signal type.
+    # Key contract: stable identifier that is the same day-over-day for the same item.
+    _collapse_after = int(_SIGNAL_CFG.get("pulse_diff_collapse_after_days", 2))
+
+    prev_snap_raw: dict = state.get("signal_snapshot", {})
+    prev_snap = {k: set(v) for k, v in prev_snap_raw.items()} if prev_snap_raw else {}
+    today_snap = _snapshot_keys(signals)
+
+    # Consecutive-day counters — persist across runs
+    consec: dict = state.get("signal_consecutive_days", {})
+
+    def _days(signal_type: str, key: str) -> int:
+        """Return consecutive days an item has been in the signal (including today)."""
+        full_key = f"{signal_type}:{key}"
+        if key in prev_snap.get(signal_type, set()):
+            consec[full_key] = consec.get(full_key, 1) + 1
+        else:
+            consec[full_key] = 1
+        return consec[full_key]
+
+    def _annotate(item: dict, signal_type: str, key_field: str) -> dict:
+        """Attach _diff_meta to a signal item dict in-place and return it."""
+        key = item.get(key_field, "")
+        d = _days(signal_type, key)
+        is_new = d == 1
+        item["_diff_meta"] = {"is_new": is_new, "consecutive_days": d}
+        return item
+
+    # Annotate each signal item
+    for g in signals.get("ghost_campaigns", []):
+        _annotate(g, "ghost", "adv_name")
+    for f in signals.get("fill_rate", []):
+        _annotate(f, "fill", "publisher_name")
+    for v in signals.get("velocity_shifts", []):
+        sig_type = "down" if v.get("direction") == "down" else "up"
+        _annotate(v, sig_type, "publisher_name")
+    for a in signals.get("cap_alerts", []):
+        _annotate(a, "cap", "adv_name")
+    for o in signals.get("opportunities", []):
+        key = f"{o.get('publisher_name', '')}:{o.get('adv_name', '')}"
+        d = _days("opp", key)
+        o["_diff_meta"] = {"is_new": d == 1, "consecutive_days": d}
+    if signals.get("revenue_baseline"):
+        signals["revenue_baseline"][0]["_diff_meta"] = {
+            "is_new": "platform" not in prev_snap.get("rev", set()),
+            "consecutive_days": _days("rev", "platform"),
+        }
+
+    # ── End PR 24a diff ──────────────────────────────────────────────────────
+
     has_content = (
         signals.get("cap_alerts")
         or signals.get("velocity_shifts")
@@ -992,6 +1085,7 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
         or signals.get("ghost_campaigns")
         or signals.get("fill_rate")
         or signals.get("opportunities")
+        or signals.get("revenue_baseline")
     )
     # Force pulse always routes to #scout-qa; normal pulse uses _route_channel
     channel = _route_channel("pulse", force=force)
@@ -1029,7 +1123,11 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
             "fill_rate_count": len(signals.get("fill_rate") or []),
             "opportunities_count": len(signals.get("opportunities") or []),
             "overnight_events_count": len(signals.get("overnight_events") or []),
+            "revenue_baseline_alert": bool(signals.get("revenue_baseline")),
         }
+        # PR 24a: persist today's snapshot for diff on next run
+        state["signal_snapshot"] = {k: list(v) for k, v in today_snap.items()}
+        state["signal_consecutive_days"] = consec
         _save_pulse_state(state)
 
 
@@ -1123,6 +1221,7 @@ def _proactive_pulse(web: WebClient) -> None:
                     or signals.get("ghost_campaigns")
                     or signals.get("fill_rate")
                     or signals.get("opportunities")
+                    or signals.get("revenue_baseline")
                 )
                 channel = _route_channel("pulse")
                 if has_content:

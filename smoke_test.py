@@ -1189,6 +1189,61 @@ def test_get_queue_status_tool_registered():
     return True, "get_queue_status registered in TOOLS, TOOL_MAP, and module"
 
 
+@test("get_revenue_health_tool_registered_with_shared_query_function")
+def test_get_revenue_health_tool_registered():
+    import scout_agent
+    # 1. Name in TOOLS list
+    tool_names = [t["name"] for t in scout_agent.TOOLS]
+    if "get_revenue_health" not in tool_names:
+        return False, f"get_revenue_health missing from TOOLS list; found: {tool_names}"
+    # 2. Callable in TOOL_MAP
+    fn = scout_agent.TOOL_MAP.get("get_revenue_health")
+    if not callable(fn):
+        return False, f"TOOL_MAP['get_revenue_health'] is not callable: {fn!r}"
+    # 3. Shared _query_revenue_baseline function exists on module
+    if not hasattr(scout_agent, "_query_revenue_baseline"):
+        return False, "_query_revenue_baseline shared function not found on scout_agent module"
+    # 4. TOOLS entry has input_schema
+    tool_def = next(t for t in scout_agent.TOOLS if t["name"] == "get_revenue_health")
+    if "input_schema" not in tool_def:
+        return False, "get_revenue_health TOOLS entry missing input_schema"
+    # 5. Threshold keys loaded from config (not hardcoded)
+    thresholds = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+    if "revenue_baseline_tolerance_pct" not in thresholds:
+        return False, "revenue_baseline_tolerance_pct missing from signals config"
+    if "revenue_baseline_min_sample_days" not in thresholds:
+        return False, "revenue_baseline_min_sample_days missing from signals config"
+    return True, "get_revenue_health registered in TOOLS, TOOL_MAP, module, and config"
+
+
+@test("pulse_diff_signal_snapshot_keys_emitted_by_run_pulse_signals_result")
+def test_pulse_diff_snapshot_keys():
+    """Verify _snapshot_keys() can consume the output of _run_pulse_signals() without error."""
+    import scout_bot
+    # Build a synthetic signals dict matching what _run_pulse_signals returns
+    synthetic_signals = {
+        "cap_alerts": [{"adv_name": "TestAdv", "cap_pct": 95, "days_to_cap": 2, "days_remaining": 30, "monthly_cap": 5000, "revenue_mtd": 4800}],
+        "velocity_shifts": [{"publisher_name": "TestPub", "direction": "down", "pct_delta": -45, "revenue_7d_ann": 8000, "revenue_30d": 15000}],
+        "overnight_events": [],
+        "ghost_campaigns": [{"adv_name": "GhostAdv", "impressions_7d": 10000, "impressions_2d": 3000, "revenue_7d": 0}],
+        "fill_rate": [{"publisher_name": "FillPub", "fill_rate_pct": 10.0, "sessions_7d": 8000, "missed_sessions": 7200}],
+        "opportunities": [{"publisher_name": "OppPub", "adv_name": "OppAdv", "est_monthly_rev": 5000, "sessions_30d": 200000}],
+        "revenue_baseline": [{"actual": 5000, "expected": 10000, "pct_of_expected": 50.0, "weekday": "Monday", "sample_days": 6}],
+    }
+    try:
+        snap = scout_bot._snapshot_keys(synthetic_signals)
+    except Exception as e:
+        return False, f"_snapshot_keys raised: {e}"
+    expected_keys = {"ghost", "fill", "down", "up", "cap", "opp", "rev"}
+    if set(snap.keys()) != expected_keys:
+        return False, f"snapshot keys mismatch: expected {expected_keys}, got {set(snap.keys())}"
+    if "GhostAdv" not in snap["ghost"]:
+        return False, f"GhostAdv not in ghost snapshot: {snap['ghost']}"
+    if "platform" not in snap["rev"]:
+        return False, f"'platform' key missing from rev snapshot when revenue_baseline present"
+    return True, f"_snapshot_keys emits correct keys: {{{', '.join(sorted(snap.keys()))}}}"
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

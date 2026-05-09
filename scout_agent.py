@@ -945,6 +945,13 @@ ghost_campaigns — "ghost campaigns", "campaigns earning nothing", "campaigns w
    NEVER suggest action buttons — Scout cannot execute campaign operations from Slack.
    Surface campaign_id and publisher name + ID in every row.
 
+revenue_health — "how is revenue", "revenue check", "are we on pace", "revenue health", "is revenue low today", "revenue vs baseline", "how did we do yesterday", "revenue vs historical"
+   → get_revenue_health().
+   Compares yesterday's total platform revenue vs the 8-week same-weekday median.
+   Lead with the status emoji (✅ on pace / 🟠 soft / 🔴 significantly below). Bold the key numbers.
+   Show actual vs expected, gap amount, % of expected, and sample size.
+   End with diagnostic prompts if below baseline (ghost campaigns? fill rate? cap hits?).
+
 fill_rate — "fill rate", "low fill rate", "publishers not serving offers", "sessions not getting offers", "confirmation page fill"
    → get_low_fill_publishers().
    Publishers on post-transaction placements with fill rate below 15%. Fill rate = % of sessions with at least one offer impression.
@@ -1718,6 +1725,20 @@ TOOLS = [
             "pixel/postback diagnosis. "
             "Use for: 'ghost brief', 'ghost campaigns', 'what campaigns are earning nothing', "
             "'campaigns with no revenue', 'show me the ghosts', 'zero revenue campaigns'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_revenue_health",
+        "description": (
+            "Compare yesterday's total platform revenue against the 8-week same-weekday historical median. "
+            "Returns whether revenue is on pace, how far above or below the expected baseline, and "
+            "whether a Pulse alert would fire. Covers the INTELLIGENCE cluster. "
+            "Use for: 'how is revenue', 'revenue health', 'are we on pace', 'revenue check', "
+            "'is revenue low today', 'revenue vs baseline', 'revenue vs historical', 'how did we do yesterday'."
         ),
         "input_schema": {
             "type": "object",
@@ -3794,6 +3815,170 @@ def get_ghost_campaigns() -> str:
     return "\n".join(lines)
 
 
+def _query_revenue_baseline(ch) -> dict | None:
+    """
+    Compare yesterday's total platform revenue against the 8-week same-weekday median.
+
+    Fires when yesterday's actuals fall below the tolerance band (default 70% of expected).
+    Returns None when revenue is within normal range or history is too thin to trust.
+
+    Returns dict with keys:
+        actual (float)            — yesterday's total revenue ($)
+        expected (float)          — median revenue for this weekday over last 8 weeks
+        pct_of_expected (float)   — actual / expected × 100
+        weekday (str)             — e.g. "Monday"
+        sample_days (int)         — number of historical same-weekday data points used
+    Returns None if no anomaly or insufficient history.
+    Raises on ClickHouse error — callers must catch.
+    """
+    tolerance = float(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
+    min_days  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_min_sample_days", 4))
+
+    sql = """
+WITH history AS (
+    SELECT
+        toDate(created_at, 'America/Chicago') AS day,
+        toDayOfWeek(day)                       AS dow,
+        sum(toFloat64OrNull(revenue))          AS daily_revenue
+    FROM adpx_conversionsdetails
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 60)
+    WHERE created_at >= today() - 60
+      AND created_at < today()
+    GROUP BY day, dow
+),
+baseline AS (
+    SELECT
+        dow,
+        median(daily_revenue) AS expected_revenue,
+        count()               AS sample_days
+    FROM history
+    GROUP BY dow
+    HAVING sample_days >= {min_days:UInt8}
+),
+yesterday_rev AS (
+    SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS actual
+    FROM adpx_conversionsdetails
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(yesterday())
+    WHERE created_at >= yesterday()
+      AND created_at < today()
+)
+SELECT
+    y.actual,
+    b.expected_revenue,
+    round(100.0 * y.actual / nullIf(b.expected_revenue, 0), 1) AS pct_of_expected,
+    b.sample_days,
+    toDayOfWeek(yesterday())                                     AS dow_num,
+    ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][toDayOfWeek(yesterday())] AS weekday
+FROM yesterday_rev y
+CROSS JOIN baseline b
+WHERE b.dow = toDayOfWeek(yesterday())
+LIMIT 1
+""".strip()
+
+    rows = ch.query(sql, parameters={"min_days": min_days}).result_rows
+    if not rows:
+        return None  # not enough history for this weekday
+
+    actual, expected, pct, sample_days, _dow_num, weekday = rows[0]
+    actual   = float(actual or 0)
+    expected = float(expected or 0)
+    pct      = float(pct or 0)
+
+    if pct >= tolerance:
+        return None  # within normal range
+
+    return {
+        "actual":          actual,
+        "expected":        expected,
+        "pct_of_expected": pct,
+        "weekday":         weekday,
+        "sample_days":     int(sample_days),
+    }
+
+
+def get_revenue_health() -> str:
+    """
+    Return yesterday's revenue vs the 8-week same-weekday baseline with context.
+    Covers the INTELLIGENCE cluster: revenue health / "how's revenue" / "are we on pace".
+
+    Shows:
+    - Yesterday's total platform revenue
+    - Expected range (median ± context) for that weekday
+    - % of expected
+    - Whether Scout would flag this in the Pulse
+    """
+    ch = _get_ch_client()
+    try:
+        result = _query_revenue_baseline(ch)
+    except Exception as e:
+        return f"Revenue baseline query failed: {e}"
+
+    # Also pull yesterday's actual unconditionally for display
+    try:
+        actual_rows = ch.query("""
+            SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS actual
+            FROM adpx_conversionsdetails
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM(yesterday())
+            WHERE created_at >= yesterday() AND created_at < today()
+        """).result_rows
+        yesterday_actual = float(actual_rows[0][0]) if actual_rows else 0.0
+    except Exception:
+        yesterday_actual = result["actual"] if result else 0.0
+
+    if result is None:
+        # Build a context message — revenue is within normal range OR insufficient history
+        try:
+            history_rows = ch.query("""
+                WITH history AS (
+                    SELECT
+                        toDate(created_at, 'America/Chicago') AS day,
+                        toDayOfWeek(day) AS dow,
+                        sum(toFloat64OrNull(revenue)) AS daily_revenue
+                    FROM adpx_conversionsdetails
+                    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 60)
+                    WHERE created_at >= today() - 60 AND created_at < today()
+                    GROUP BY day, dow
+                )
+                SELECT
+                    ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][dow] AS weekday,
+                    median(daily_revenue) AS expected_revenue,
+                    count() AS sample_days
+                FROM history
+                WHERE dow = toDayOfWeek(yesterday())
+                GROUP BY dow
+                LIMIT 1
+            """).result_rows
+            if history_rows:
+                wday, expected, days = history_rows[0]
+                pct = round(100.0 * yesterday_actual / float(expected or 1), 1)
+                return (
+                    f"*Revenue Health — {wday}*\n\n"
+                    f"✅ Yesterday: *${yesterday_actual:,.0f}* — {pct}% of {wday} median "
+                    f"(${float(expected):,.0f} based on {int(days)} weeks of history)\n\n"
+                    f"Revenue is within normal range. No Pulse alert would fire."
+                )
+        except Exception:
+            pass
+        return f"*Revenue Health*\n\nYesterday: *${yesterday_actual:,.0f}*\nInsufficient baseline history to compare (need at least 4 same-weekday data points)."
+
+    pct      = result["pct_of_expected"]
+    expected = result["expected"]
+    weekday  = result["weekday"]
+    days     = result["sample_days"]
+    gap      = expected - result["actual"]
+
+    severity = "🔴" if pct < 50 else "🟠"
+    return (
+        f"*Revenue Health — {weekday}*\n\n"
+        f"{severity} Yesterday: *${result['actual']:,.0f}* — only {pct}% of the {weekday} median "
+        f"(${expected:,.0f} based on {days} weeks of history)\n\n"
+        f"Gap: *${gap:,.0f} below expected.* "
+        f"This would fire a Pulse alert — revenue is materially below the {weekday} baseline.\n\n"
+        f"Check: (1) any network outages overnight? (2) top CPA campaigns tracking? "
+        f"(3) AT&T still serving? Run `@Scout ghost campaigns` if impressions are up but revenue is down."
+    )
+
+
 _POST_TX_PLACEMENTS = (
     "'checkout_confirmation_page'", "'order_confirmation'", "'order-confirmation'",
     "'buy_flow_thank_you'", "'buyflowthankyou'", "'acctmgmt_payment_confirmation'",
@@ -4409,6 +4594,7 @@ TOOL_MAP = {
     "get_scout_status": get_scout_status,
     "get_advertiser_revenue_projection": get_advertiser_revenue_projection,
     "get_ghost_campaigns": get_ghost_campaigns,
+    "get_revenue_health": get_revenue_health,
     "get_low_fill_publishers": get_low_fill_publishers,
     "get_top_revenue_opportunities": get_top_revenue_opportunities,
     "run_offer_scraper": run_offer_scraper,
