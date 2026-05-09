@@ -1189,31 +1189,50 @@ def test_get_queue_status_tool_registered():
     return True, "get_queue_status registered in TOOLS, TOOL_MAP, and module"
 
 
-@test("get_revenue_health_tool_registered_with_shared_query_function")
-def test_get_revenue_health_tool_registered():
+@test("revenue_tracker_daemon_function_exists_with_formatter")
+def test_revenue_tracker_daemon_function_exists():
+    import scout_bot
+    # 1. _revenue_tracker daemon exists and is callable
+    if not hasattr(scout_bot, "_revenue_tracker"):
+        return False, "_revenue_tracker function not found on scout_bot module"
+    if not callable(scout_bot._revenue_tracker):
+        return False, "_revenue_tracker is not callable"
+    # 2. _format_revenue_alert formatter exists
+    if not hasattr(scout_bot, "_format_revenue_alert"):
+        return False, "_format_revenue_alert formatter not found on scout_bot module"
+    if not callable(scout_bot._format_revenue_alert):
+        return False, "_format_revenue_alert is not callable"
+    # 3. Threshold key for check hour is wired
     import scout_agent
-    # 1. Name in TOOLS list
-    tool_names = [t["name"] for t in scout_agent.TOOLS]
-    if "get_revenue_health" not in tool_names:
-        return False, f"get_revenue_health missing from TOOLS list; found: {tool_names}"
-    # 2. Callable in TOOL_MAP
-    fn = scout_agent.TOOL_MAP.get("get_revenue_health")
-    if not callable(fn):
-        return False, f"TOOL_MAP['get_revenue_health'] is not callable: {fn!r}"
-    # 3. Shared _query_revenue_baseline function exists on module
-    if not hasattr(scout_agent, "_query_revenue_baseline"):
-        return False, "_query_revenue_baseline shared function not found on scout_agent module"
-    # 4. TOOLS entry has input_schema
-    tool_def = next(t for t in scout_agent.TOOLS if t["name"] == "get_revenue_health")
-    if "input_schema" not in tool_def:
-        return False, "get_revenue_health TOOLS entry missing input_schema"
-    # 5. Threshold keys loaded from config (not hardcoded)
     thresholds = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
-    if "revenue_baseline_tolerance_pct" not in thresholds:
-        return False, "revenue_baseline_tolerance_pct missing from signals config"
-    if "revenue_baseline_min_sample_days" not in thresholds:
-        return False, "revenue_baseline_min_sample_days missing from signals config"
-    return True, "get_revenue_health registered in TOOLS, TOOL_MAP, module, and config"
+    if "revenue_tracker_check_hour_ct" not in thresholds:
+        return False, "revenue_tracker_check_hour_ct missing from signals config"
+    if "revenue_tracker_publisher_min_delta" not in thresholds:
+        return False, "revenue_tracker_publisher_min_delta missing from signals config"
+    return True, "_revenue_tracker daemon and _format_revenue_alert formatter registered with config keys"
+
+
+@test("intraday_revenue_total_query_function_exists_on_scout_agent")
+def test_intraday_revenue_total_query_exists():
+    import scout_agent
+    if not hasattr(scout_agent, "_query_intraday_revenue_total"):
+        return False, "_query_intraday_revenue_total not found on scout_agent module"
+    if not callable(scout_agent._query_intraday_revenue_total):
+        return False, "_query_intraday_revenue_total is not callable"
+    # Verify shared baseline query it depends on also exists
+    if not hasattr(scout_agent, "_query_revenue_baseline"):
+        return False, "_query_revenue_baseline (used by Phase 1) not found on scout_agent module"
+    return True, "_query_intraday_revenue_total callable, shared _query_revenue_baseline present"
+
+
+@test("intraday_revenue_by_publisher_query_function_exists_on_scout_agent")
+def test_intraday_revenue_by_publisher_query_exists():
+    import scout_agent
+    if not hasattr(scout_agent, "_query_intraday_revenue_by_publisher"):
+        return False, "_query_intraday_revenue_by_publisher not found on scout_agent module"
+    if not callable(scout_agent._query_intraday_revenue_by_publisher):
+        return False, "_query_intraday_revenue_by_publisher is not callable"
+    return True, "_query_intraday_revenue_by_publisher callable"
 
 
 @test("pulse_diff_signal_snapshot_keys_emitted_by_run_pulse_signals_result")
@@ -1228,19 +1247,16 @@ def test_pulse_diff_snapshot_keys():
         "ghost_campaigns": [{"adv_name": "GhostAdv", "impressions_7d": 10000, "impressions_2d": 3000, "revenue_7d": 0}],
         "fill_rate": [{"publisher_name": "FillPub", "fill_rate_pct": 10.0, "sessions_7d": 8000, "missed_sessions": 7200}],
         "opportunities": [{"publisher_name": "OppPub", "adv_name": "OppAdv", "est_monthly_rev": 5000, "sessions_30d": 200000}],
-        "revenue_baseline": [{"actual": 5000, "expected": 10000, "pct_of_expected": 50.0, "weekday": "Monday", "sample_days": 6}],
     }
     try:
         snap = scout_bot._snapshot_keys(synthetic_signals)
     except Exception as e:
         return False, f"_snapshot_keys raised: {e}"
-    expected_keys = {"ghost", "fill", "down", "up", "cap", "opp", "rev"}
+    expected_keys = {"ghost", "fill", "down", "up", "cap", "opp"}
     if set(snap.keys()) != expected_keys:
         return False, f"snapshot keys mismatch: expected {expected_keys}, got {set(snap.keys())}"
     if "GhostAdv" not in snap["ghost"]:
         return False, f"GhostAdv not in ghost snapshot: {snap['ghost']}"
-    if "platform" not in snap["rev"]:
-        return False, f"'platform' key missing from rev snapshot when revenue_baseline present"
     return True, f"_snapshot_keys emits correct keys: {{{', '.join(sorted(snap.keys()))}}}"
 
 

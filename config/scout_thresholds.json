@@ -19,7 +19,11 @@
     "cvr_anomaly_min_impressions_7d": 5000,
     "pulse_diff_collapse_after_days": 2,
     "pulse_diff_chronic_after_days": 5,
-    "expiration_warning_days": 7
+    "expiration_warning_days": 7,
+    "revenue_tracker_check_hour_ct": 15,
+    "revenue_tracker_publisher_min_delta": 500,
+    "revenue_tracker_ghost_min_impressions": 100,
+    "revenue_tracker_cvr_min_impressions": 500
   },
   "health": {
     "offer_staleness_hours": 30,
