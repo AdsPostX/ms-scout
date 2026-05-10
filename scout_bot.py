@@ -663,39 +663,20 @@ def _pulse_signal_opportunities(ch) -> list:
     ]
 
 
-def _pulse_signal_revenue_baseline(ch) -> list:
-    """
-    Revenue baseline signal — fires when yesterday's platform revenue is materially
-    below the 8-week same-weekday median.
-
-    Uses _query_revenue_baseline() from scout_agent — the shared function also
-    powering get_revenue_health() for ad-hoc @Scout queries.
-
-    Returns [] when revenue is within normal range or history is too thin.
-    Returns [{actual, expected, pct_of_expected, weekday, sample_days}] on anomaly.
-    """
-    try:
-        from scout_agent import _query_revenue_baseline
-        result = _query_revenue_baseline(ch)
-        return [result] if result is not None else []
-    except Exception as e:
-        log.warning(f"Pulse revenue baseline signal failed: {e}")
-        return []
-
-
 # ── Pulse signal orchestrator ─────────────────────────────────────────────────
 
 def _run_pulse_signals() -> dict:
     """
-    Run all 7 Pulse signals in parallel against ClickHouse.
+    Run all 6 Pulse signals in parallel against ClickHouse.
     Each signal owns its own connection — no shared state, no lock needed.
     Returns a dict with cap_alerts, velocity_shifts, overnight_events,
-    ghost_campaigns, fill_rate, opportunities, revenue_baseline.
+    ghost_campaigns, fill_rate, opportunities.
+    Revenue tracking moved to the _revenue_tracker daemon (PR 25).
     """
     from scout_agent import _get_ch_client
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": [], "ghost_campaigns": [], "fill_rate": [], "opportunities": [], "revenue_baseline": []}
+    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": [], "ghost_campaigns": [], "fill_rate": [], "opportunities": []}
 
     _signal_fns = [
         ("cap_alerts",         _pulse_signal_cap),
@@ -704,7 +685,6 @@ def _run_pulse_signals() -> dict:
         ("ghost_campaigns",    _pulse_signal_ghost),
         ("fill_rate",          _pulse_signal_fill_rate),
         ("opportunities",      _pulse_signal_opportunities),
-        ("revenue_baseline",   _pulse_signal_revenue_baseline),
     ]
 
     def _run_one(key, fn):
@@ -723,6 +703,145 @@ def _run_pulse_signals() -> dict:
     return signals
 
 
+
+
+def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None) -> str:
+    """
+    Format the proactive revenue alert message.
+
+    total: dict from _query_intraday_revenue_total (today_revenue, projected_full_day,
+           dow_median, pct_of_expected, weekday, sample_days)
+    publishers: list of dicts from _query_intraday_revenue_by_publisher
+                (publisher_name, publisher_id, delta, root_cause, ...)
+    as_of: human-readable time string, e.g. "3pm CT" — defaults to current CT time
+    """
+    import pytz
+    from datetime import datetime as _dt
+
+    if as_of is None:
+        _ct = _dt.now(pytz.timezone("America/Chicago"))
+        as_of = _ct.strftime("%-I:%M%p CT").lower()  # e.g. "3:04pm CT"
+
+    pct        = round(total["pct_of_expected"])
+    today_rev  = total["today_revenue"]
+    projected  = total["projected_full_day"]
+    expected   = total["dow_median"]
+    weekday    = total["weekday"]
+    samples    = total["sample_days"]
+
+    lines = [
+        ":red_circle: *Revenue alert — today is tracking soft*\n",
+        f"Platform so far ({as_of}): *${today_rev:,.0f}* | projected: *${projected:,.0f}* | expected [{weekday}]: ~*${expected:,.0f}*",
+        f"Tracking at *{pct}%* of expected ({samples} same-weekday samples)\n",
+    ]
+
+    _ROOT_LABELS = {
+        "ghost_campaign": "impressions ✓, $0 revenue → ghost campaign",
+        "fill_rate":      "zero impressions → fill rate or cap hit",
+        "cvr_drop":       "CVR collapsed vs historical → CVR anomaly",
+        "traffic":        "zero sessions → no upstream traffic",
+    }
+
+    if publishers:
+        lines.append("*Where the gap is:*")
+        for p in publishers:
+            name     = p.get("publisher_name") or f"pub {p.get('publisher_id', '?')}"
+            pub_id   = p.get("publisher_id", "")
+            delta    = p.get("delta", 0.0)
+            cause    = p.get("root_cause", "normal")
+            label    = _ROOT_LABELS.get(cause, cause)
+            id_str   = f" *(pub {pub_id})*" if pub_id else ""
+            lines.append(f"• {name}{id_str}: *−${abs(delta):,.0f}* below expected · {label}")
+
+        lines.append("\nAll other publishers within normal range.")
+
+        # Suggest a next step based on top root cause
+        top_cause = publishers[0].get("root_cause", "normal")
+        top_pub   = publishers[0].get("publisher_name", "")
+        if top_cause == "ghost_campaign":
+            lines.append(f"\nImmediate: `@Scout ghost campaigns` — {top_pub} matches ghost detection criteria.")
+        elif top_cause == "fill_rate":
+            lines.append(f"\nImmediate: `@Scout fill rate` — {top_pub} has zero impressions despite active sessions.")
+        elif top_cause == "cvr_drop":
+            lines.append(f"\nImmediate: `@Scout {top_pub}` — CVR anomaly, check offer quality or postback tracking.")
+        elif top_cause == "traffic":
+            lines.append(f"\nImmediate: `@Scout {top_pub}` — no sessions; confirm SDK is sending traffic.")
+    else:
+        lines.append(
+            "No single publisher accounts for the gap — revenue is spread-down across the platform.\n"
+            "Likely causes: session volume drop, fill rate platform-wide, or a slow day.\n"
+            "\nRun `@Scout fill rate` to check publisher-level session health."
+        )
+
+    return "\n".join(lines)
+
+
+def _revenue_tracker(web, ch) -> None:
+    """
+    Daemon: proactive intraday revenue alert at 3pm CT on weekdays.
+
+    Two-phase check:
+    - Phase 1: fast platform total — returns None if within normal range
+    - Phase 2: per-publisher decomposition + root cause tagging (only if Phase 1 fires)
+
+    Runs every 5 minutes. Fires at most once per calendar day.
+    Posts to #revenue-operations (or #scout-qa in non-production envs).
+    """
+    import time as _time
+    import pytz
+    from datetime import datetime as _dt
+    from scout_agent import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher
+    from scout_state import _load_revenue_alert_state, _save_revenue_alert_date
+
+    CT_TZ       = pytz.timezone("America/Chicago")
+    check_hour  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_check_hour_ct", 15))
+    channel     = _route_channel("revenue")
+
+    while True:
+        _time.sleep(300)  # 5-min poll
+        try:
+            # Feature flag — flip to true in scout_thresholds.json once validated in #bot-qa
+            if not SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_enabled", False):
+                continue
+
+            now_ct = _dt.now(CT_TZ)
+
+            # Fire window: target hour ± 10 minutes
+            if not (now_ct.hour == check_hour and now_ct.minute < 10):
+                continue
+
+            today_str = now_ct.date().isoformat()
+            if _load_revenue_alert_state() == today_str:
+                continue  # already posted today
+
+            # Phase 1: fast platform total
+            try:
+                total = _query_intraday_revenue_total(ch)
+            except Exception as e:
+                log.warning(f"[revenue-tracker] Phase 1 query failed: {e}")
+                _save_revenue_alert_date(today_str)  # avoid hammering on CH error
+                continue
+
+            if total is None:
+                # Revenue within normal range — mark checked, stay silent
+                _save_revenue_alert_date(today_str)
+                log.info("[revenue-tracker] Revenue on pace — no alert needed.")
+                continue
+
+            # Phase 2: per-publisher decomposition
+            try:
+                publishers = _query_intraday_revenue_by_publisher(ch, total)
+            except Exception as e:
+                log.warning(f"[revenue-tracker] Phase 2 query failed: {e}")
+                publishers = []
+
+            msg = _format_revenue_alert(total, publishers)
+            web.chat_postMessage(channel=channel, text=msg)
+            _save_revenue_alert_date(today_str)
+            log.info(f"[revenue-tracker] Alert posted for {today_str} ({total['pct_of_expected']:.0f}% of expected).")
+
+        except Exception as e:
+            log.warning(f"[revenue-tracker] Unexpected error: {e}")
 
 
 def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
@@ -964,7 +1083,6 @@ def _snapshot_keys(sigs: dict) -> dict:
     snap["up"]    = {v["publisher_name"] for v in (sigs.get("velocity_shifts") or []) if v.get("direction") == "up"}
     snap["cap"]   = {a["adv_name"] for a in (sigs.get("cap_alerts") or [])}
     snap["opp"]   = {f"{o['publisher_name']}:{o['adv_name']}" for o in (sigs.get("opportunities") or [])}
-    snap["rev"]   = {"platform"} if sigs.get("revenue_baseline") else set()
     return snap
 
 
@@ -1070,12 +1188,6 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
         key = f"{o.get('publisher_name', '')}:{o.get('adv_name', '')}"
         d = _days("opp", key)
         o["_diff_meta"] = {"is_new": d == 1, "consecutive_days": d}
-    if signals.get("revenue_baseline"):
-        signals["revenue_baseline"][0]["_diff_meta"] = {
-            "is_new": "platform" not in prev_snap.get("rev", set()),
-            "consecutive_days": _days("rev", "platform"),
-        }
-
     # ── End PR 24a diff ──────────────────────────────────────────────────────
 
     has_content = (
@@ -1085,7 +1197,6 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
         or signals.get("ghost_campaigns")
         or signals.get("fill_rate")
         or signals.get("opportunities")
-        or signals.get("revenue_baseline")
     )
     # Force pulse always routes to #scout-qa; normal pulse uses _route_channel
     channel = _route_channel("pulse", force=force)
@@ -1123,7 +1234,6 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
             "fill_rate_count": len(signals.get("fill_rate") or []),
             "opportunities_count": len(signals.get("opportunities") or []),
             "overnight_events_count": len(signals.get("overnight_events") or []),
-            "revenue_baseline_alert": bool(signals.get("revenue_baseline")),
         }
         # PR 24a: persist today's snapshot for diff on next run
         state["signal_snapshot"] = {k: list(v) for k, v in today_snap.items()}
@@ -1221,7 +1331,6 @@ def _proactive_pulse(web: WebClient) -> None:
                     or signals.get("ghost_campaigns")
                     or signals.get("fill_rate")
                     or signals.get("opportunities")
-                    or signals.get("revenue_baseline")
                 )
                 channel = _route_channel("pulse")
                 if has_content:
@@ -2217,6 +2326,9 @@ def main():
     # PR 19a — benchmark warmer: keep CVR/RPM benchmarks warm so `@Scout status`
     # never surfaces "Benchmarks not loaded" except in actual CH outage scenarios
     _start_daemon(_benchmarks_warmer,     name="benchmarks-warmer")
+    # PR 25 — revenue tracker: proactive 3pm CT intraday alert when revenue tracks soft
+    from scout_agent import _get_ch_client as _ch_factory
+    _start_daemon(_revenue_tracker, name="revenue-tracker", args=(web_client, _ch_factory()))
 
     # Background: daily launch health watchdog (no register — campaign-level, not infrastructure)
     threading.Thread(target=_launch_watchdog, args=(web_client,), daemon=True, name="launch-watchdog").start()

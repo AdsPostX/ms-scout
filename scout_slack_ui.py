@@ -1161,7 +1161,6 @@ def _format_pulse_blocks(
     ghost_camps       = signals.get("ghost_campaigns", [])
     fill_rate         = signals.get("fill_rate", [])
     opportunities     = signals.get("opportunities", [])
-    revenue_baseline  = signals.get("revenue_baseline", [])
 
     # Sort by absolute dollar impact (not % change) — a -48% drop on $29K/mo
     # outranks a -98% drop on $129/mo. Magnitude matters more than ratio.
@@ -1236,30 +1235,6 @@ def _format_pulse_blocks(
         blocks.append({"type": "context", "elements": [
             {"type": "mrkdwn", "text": ":calendar:  Weekend mode — showing high-magnitude moves only"}
         ]})
-
-    # ── Revenue baseline alert (PR 24b) ─────────────────────────────────────
-    if revenue_baseline:
-        rb = revenue_baseline[0]
-        actual    = float(rb.get("actual", 0))
-        expected  = float(rb.get("expected", 0))
-        pct       = float(rb.get("pct_of_expected", 0))
-        weekday   = rb.get("weekday", "yesterday")
-        days      = int(rb.get("sample_days", 0))
-        gap       = expected - actual
-        severity  = "🔴" if pct < 50 else "🟠"
-        blocks.append({"type": "divider"})
-        blocks.extend(_build_signal_header(
-            severity,
-            f"REVENUE SOFT — {pct:.0f}% of {weekday} baseline",
-            f"${actual:,.0f} actual vs ${expected:,.0f} expected  ·  ${gap:,.0f} below ({days}wk median)",
-        ))
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text":
-                f"Check: (1) top CPA campaigns tracking? (2) AT&T serving? (3) overnight network issues? "
-                f"Run `@Scout ghost campaigns` if impressions are up but revenue is down."
-            }],
-        })
 
     # ── Ghost campaigns — suppression-aware (PR 24a) ─────────────────────────
     if ghost_camps:

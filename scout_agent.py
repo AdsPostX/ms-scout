@@ -761,6 +761,7 @@ Rules:
 - NO EM OR EN DASHES IN PROSE: Never use — or – in sentences. Use a comma, period, or colon instead. Dashes only in compound words (cost-per-lead) or numeric ranges ($10-$20).
 - Simple answers (yes/no, queue status): plain text, no --- needed.
 - Never: | tables | **double asterisks** | ## headers | methodology unless asked.
+- Revenue comparisons: "Yesterday: *$22K* vs expected *$27K* (81% of typical Monday)" — inline, never tabular.
 
 MRKDWN RULES (output Slack mrkdwn natively — never markdown):
 - Bold: *text* (NOT **text** — double asterisks render literally in Slack)
@@ -944,13 +945,6 @@ ghost_campaigns — "ghost campaigns", "campaigns earning nothing", "campaigns w
    Lead with count, then ranked list by impressions. Per-campaign pixel/postback diagnosis. End with :zap: action prompt.
    NEVER suggest action buttons — Scout cannot execute campaign operations from Slack.
    Surface campaign_id and publisher name + ID in every row.
-
-revenue_health — "how is revenue", "revenue check", "are we on pace", "revenue health", "is revenue low today", "revenue vs baseline", "how did we do yesterday", "revenue vs historical"
-   → get_revenue_health().
-   Compares yesterday's total platform revenue vs the 8-week same-weekday median.
-   Lead with the status emoji (✅ on pace / 🟠 soft / 🔴 significantly below). Bold the key numbers.
-   Show actual vs expected, gap amount, % of expected, and sample size.
-   End with diagnostic prompts if below baseline (ghost campaigns? fill rate? cap hits?).
 
 fill_rate — "fill rate", "low fill rate", "publishers not serving offers", "sessions not getting offers", "confirmation page fill"
    → get_low_fill_publishers().
@@ -1725,20 +1719,6 @@ TOOLS = [
             "pixel/postback diagnosis. "
             "Use for: 'ghost brief', 'ghost campaigns', 'what campaigns are earning nothing', "
             "'campaigns with no revenue', 'show me the ghosts', 'zero revenue campaigns'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-        },
-    },
-    {
-        "name": "get_revenue_health",
-        "description": (
-            "Compare yesterday's total platform revenue against the 8-week same-weekday historical median. "
-            "Returns whether revenue is on pace, how far above or below the expected baseline, and "
-            "whether a Pulse alert would fire. Covers the INTELLIGENCE cluster. "
-            "Use for: 'how is revenue', 'revenue health', 'are we on pace', 'revenue check', "
-            "'is revenue low today', 'revenue vs baseline', 'revenue vs historical', 'how did we do yesterday'."
         ),
         "input_schema": {
             "type": "object",
@@ -3896,87 +3876,256 @@ LIMIT 1
     }
 
 
-def get_revenue_health() -> str:
+def _query_intraday_revenue_total(ch) -> dict | None:
     """
-    Return yesterday's revenue vs the 8-week same-weekday baseline with context.
-    Covers the INTELLIGENCE cluster: revenue health / "how's revenue" / "are we on pace".
+    Phase 1 of the revenue tracker daemon.
 
-    Shows:
-    - Yesterday's total platform revenue
-    - Expected range (median ± context) for that weekday
-    - % of expected
-    - Whether Scout would flag this in the Pulse
+    Checks whether today's revenue (CT midnight to now) is tracking below the
+    8-week same-weekday median when projected to end-of-day via the 70% arrival curve.
+
+    Returns None when revenue is within normal range or history is too thin.
+    Returns a dict with total platform numbers when an anomaly is detected.
+
+    Returns dict with keys:
+        today_revenue (float)      — revenue since CT midnight to now
+        projected_full_day (float) — today_revenue / 0.70 (3pm CT = ~70% of day)
+        dow_median (float)         — 8-week same-weekday full-day median
+        pct_of_expected (float)    — projected_full_day / dow_median × 100
+        weekday (str)              — e.g. "Friday"
+        sample_days (int)          — number of historical same-weekday data points
+    Returns None if no anomaly or insufficient history.
+    Raises on ClickHouse error — callers must catch.
     """
-    ch = _get_ch_client()
+    tolerance = float(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
+    min_days  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_min_sample_days", 4))
+
+    sql = """
+WITH today_rev AS (
+    SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS today_revenue
+    FROM adpx_conversionsdetails
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today())
+    WHERE created_at >= toStartOfDay(now(), 'America/Chicago')
+      AND created_at < now()
+),
+history AS (
+    SELECT
+        toDate(created_at, 'America/Chicago') AS day,
+        toDayOfWeek(toDate(created_at, 'America/Chicago')) AS dow,
+        sum(toFloat64OrNull(revenue)) AS daily_revenue
+    FROM adpx_conversionsdetails
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 60)
+    WHERE created_at >= today() - 60
+      AND created_at < today()
+    GROUP BY day, dow
+),
+baseline AS (
+    SELECT
+        dow,
+        median(daily_revenue) AS dow_median,
+        count()               AS sample_days
+    FROM history
+    GROUP BY dow
+    HAVING sample_days >= {min_days:UInt8}
+)
+SELECT
+    t.today_revenue,
+    b.dow_median,
+    b.sample_days,
+    ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][toDayOfWeek(today())] AS weekday
+FROM today_rev t
+CROSS JOIN baseline b
+WHERE b.dow = toDayOfWeek(today())
+LIMIT 1
+""".strip()
+
+    rows = ch.query(sql, parameters={"min_days": min_days}).result_rows
+    if not rows:
+        return None  # insufficient history for today's weekday
+
+    today_revenue, dow_median, sample_days, weekday = rows[0]
+    today_revenue = float(today_revenue or 0)
+    dow_median    = float(dow_median or 0)
+
+    if dow_median == 0:
+        return None
+
+    projected_full_day = today_revenue / 0.70  # 3pm CT ≈ 70% of daily revenue
+    pct_of_expected    = round(100.0 * projected_full_day / dow_median, 1)
+
+    if pct_of_expected >= tolerance:
+        return None  # within normal range
+
+    return {
+        "today_revenue":      today_revenue,
+        "projected_full_day": projected_full_day,
+        "dow_median":         dow_median,
+        "pct_of_expected":    pct_of_expected,
+        "weekday":            weekday,
+        "sample_days":        int(sample_days),
+    }
+
+
+def _query_intraday_revenue_by_publisher(ch, total_result: dict) -> list[dict]:
+    """
+    Phase 2 of the revenue tracker daemon — called only when Phase 1 fires.
+
+    For each publisher that significantly contributes to the platform shortfall,
+    returns their intraday revenue vs their own 8-week same-DOW median, plus a
+    root cause tag based on impressions/sessions cross-reference.
+
+    Root cause tags (applied in priority order):
+        "traffic"        — zero sessions today (no upstream traffic)
+        "fill_rate"      — sessions present, zero impressions (offers not serving)
+        "ghost_campaign" — impressions > ghost_min, revenue = $0 (postback broken)
+        "cvr_drop"       — impressions + revenue, but CVR < 50% of historical
+        "normal"         — within expected variance (filtered out of returned list)
+
+    Only publishers with abs(delta) >= publisher_min_delta AND root_cause != "normal"
+    are included. Cap at 5. Sorted by abs(delta) descending.
+
+    Note on publisher key mismatch: impressions use `pid` (string), sessions/conversions
+    use `user_id` (numeric). We query them separately and align via mv_adpx_users.
+    """
+    min_days        = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_min_sample_days", 4))
+    min_delta       = float(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_publisher_min_delta", 500))
+    ghost_min_impr  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_ghost_min_impressions", 100))
+    cvr_min_impr    = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_cvr_min_impressions", 500))
+
+    # ── Query 1: today's per-publisher revenue + conversions via user_id ──────
+    revenue_sql = """
+SELECT
+    toString(user_id)                                AS publisher_id,
+    coalesce(sum(toFloat64OrNull(revenue)), 0)       AS revenue_today,
+    count()                                          AS conversions_today
+FROM adpx_conversionsdetails
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(today())
+WHERE created_at >= toStartOfDay(now(), 'America/Chicago')
+  AND created_at < now()
+GROUP BY user_id
+""".strip()
+
+    # ── Query 2: today's per-publisher impressions via pid ────────────────────
+    impressions_sql = """
+SELECT
+    pid                                              AS publisher_id,
+    count()                                          AS impressions_today
+FROM adpx_impressions_details
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(today())
+WHERE created_at >= toStartOfDay(now(), 'America/Chicago')
+  AND created_at < now()
+GROUP BY pid
+""".strip()
+
+    # ── Query 3: today's per-publisher sessions via user_id ───────────────────
+    sessions_sql = """
+SELECT
+    toString(user_id)                                AS publisher_id,
+    count()                                          AS sessions_today
+FROM adpx_sdk_sessions
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(today())
+WHERE created_at >= toStartOfDay(now(), 'America/Chicago')
+  AND created_at < now()
+GROUP BY user_id
+""".strip()
+
+    # ── Query 4: 8-week same-DOW per-publisher revenue median ─────────────────
+    baseline_sql = """
+WITH history AS (
+    SELECT
+        toString(user_id)                                AS publisher_id,
+        toDate(created_at, 'America/Chicago')            AS day,
+        toDayOfWeek(toDate(created_at, 'America/Chicago')) AS dow,
+        sum(toFloat64OrNull(revenue))                    AS daily_revenue,
+        count()                                          AS daily_conversions
+    FROM adpx_conversionsdetails
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 60)
+    WHERE created_at >= today() - 60
+      AND created_at < today()
+    GROUP BY publisher_id, day, dow
+)
+SELECT
+    publisher_id,
+    median(daily_revenue * 0.70)  AS revenue_expected,
+    median(daily_conversions * 0.70) AS conversions_expected,
+    count()                        AS sample_days
+FROM history
+WHERE dow = toDayOfWeek(today())
+GROUP BY publisher_id
+HAVING sample_days >= {min_days:UInt8}
+""".strip()
+
+    # ── Query 5: publisher name lookup ────────────────────────────────────────
+    names_sql = """
+SELECT toString(user_id) AS publisher_id, organization
+FROM mv_adpx_users
+WHERE user_id > 0
+""".strip()
+
     try:
-        result = _query_revenue_baseline(ch)
+        rev_rows   = ch.query(revenue_sql).result_rows
+        impr_rows  = ch.query(impressions_sql).result_rows
+        sess_rows  = ch.query(sessions_sql).result_rows
+        base_rows  = ch.query(baseline_sql, parameters={"min_days": min_days}).result_rows
+        names_rows = ch.query(names_sql).result_rows
     except Exception as e:
-        return f"Revenue baseline query failed: {e}"
+        import logging as _log
+        _log.getLogger("scout_agent").warning(f"_query_intraday_revenue_by_publisher query failed: {e}")
+        return []
 
-    # Also pull yesterday's actual unconditionally for display
-    try:
-        actual_rows = ch.query("""
-            SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS actual
-            FROM adpx_conversionsdetails
-            PREWHERE toYYYYMM(created_at) >= toYYYYMM(yesterday())
-            WHERE created_at >= yesterday() AND created_at < today()
-        """).result_rows
-        yesterday_actual = float(actual_rows[0][0]) if actual_rows else 0.0
-    except Exception:
-        yesterday_actual = result["actual"] if result else 0.0
+    # Build lookup dicts
+    revenue_by_pub     = {r[0]: (float(r[1] or 0), int(r[2] or 0)) for r in rev_rows}
+    impressions_by_pub = {r[0]: int(r[1] or 0) for r in impr_rows}
+    sessions_by_pub    = {r[0]: int(r[1] or 0) for r in sess_rows}
+    baseline_by_pub    = {r[0]: (float(r[1] or 0), float(r[2] or 0), int(r[3] or 0)) for r in base_rows}
+    names_by_pub       = {r[0]: str(r[1] or "") for r in names_rows}
 
-    if result is None:
-        # Build a context message — revenue is within normal range OR insufficient history
-        try:
-            history_rows = ch.query("""
-                WITH history AS (
-                    SELECT
-                        toDate(created_at, 'America/Chicago') AS day,
-                        toDayOfWeek(day) AS dow,
-                        sum(toFloat64OrNull(revenue)) AS daily_revenue
-                    FROM adpx_conversionsdetails
-                    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 60)
-                    WHERE created_at >= today() - 60 AND created_at < today()
-                    GROUP BY day, dow
-                )
-                SELECT
-                    ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][dow] AS weekday,
-                    median(daily_revenue) AS expected_revenue,
-                    count() AS sample_days
-                FROM history
-                WHERE dow = toDayOfWeek(yesterday())
-                GROUP BY dow
-                LIMIT 1
-            """).result_rows
-            if history_rows:
-                wday, expected, days = history_rows[0]
-                pct = round(100.0 * yesterday_actual / float(expected or 1), 1)
-                return (
-                    f"*Revenue Health — {wday}*\n\n"
-                    f"✅ Yesterday: *${yesterday_actual:,.0f}* — {pct}% of {wday} median "
-                    f"(${float(expected):,.0f} based on {int(days)} weeks of history)\n\n"
-                    f"Revenue is within normal range. No Pulse alert would fire."
-                )
-        except Exception:
-            pass
-        return f"*Revenue Health*\n\nYesterday: *${yesterday_actual:,.0f}*\nInsufficient baseline history to compare (need at least 4 same-weekday data points)."
+    # All publishers with a baseline (those we can evaluate)
+    all_pub_ids = set(baseline_by_pub.keys())
 
-    pct      = result["pct_of_expected"]
-    expected = result["expected"]
-    weekday  = result["weekday"]
-    days     = result["sample_days"]
-    gap      = expected - result["actual"]
+    results = []
+    for pub_id in all_pub_ids:
+        revenue_expected, conv_expected, sample_days = baseline_by_pub[pub_id]
+        revenue_today, conv_today = revenue_by_pub.get(pub_id, (0.0, 0))
+        impressions_today = impressions_by_pub.get(pub_id, 0)
+        sessions_today    = sessions_by_pub.get(pub_id, 0)
+        delta             = revenue_today - revenue_expected
 
-    severity = "🔴" if pct < 50 else "🟠"
-    return (
-        f"*Revenue Health — {weekday}*\n\n"
-        f"{severity} Yesterday: *${result['actual']:,.0f}* — only {pct}% of the {weekday} median "
-        f"(${expected:,.0f} based on {days} weeks of history)\n\n"
-        f"Gap: *${gap:,.0f} below expected.* "
-        f"This would fire a Pulse alert — revenue is materially below the {weekday} baseline.\n\n"
-        f"Check: (1) any network outages overnight? (2) top CPA campaigns tracking? "
-        f"(3) AT&T still serving? Run `@Scout ghost campaigns` if impressions are up but revenue is down."
-    )
+        if abs(delta) < min_delta:
+            continue  # not a meaningful contributor
+
+        # Root cause tagging (priority order)
+        if sessions_today == 0:
+            root_cause = "traffic"
+        elif impressions_today == 0:
+            root_cause = "fill_rate"
+        elif revenue_today == 0 and impressions_today > ghost_min_impr:
+            root_cause = "ghost_campaign"
+        elif (conv_expected > 0 and impressions_today > cvr_min_impr
+              and conv_today / max(impressions_today, 1) < (conv_expected / max(revenue_expected / max(delta, 1), 1)) * 0.5):
+            # Simple CVR proxy: today's conv/impr vs historical conv_expected/revenue_expected ratio
+            root_cause = "cvr_drop"
+        else:
+            root_cause = "normal"
+
+        if root_cause == "normal":
+            continue  # within variance, not the cause
+
+        results.append({
+            "publisher_id":       pub_id,
+            "publisher_name":     names_by_pub.get(pub_id, f"pub {pub_id}"),
+            "revenue_today":      revenue_today,
+            "revenue_expected":   revenue_expected,
+            "delta":              delta,
+            "impressions_today":  impressions_today,
+            "sessions_today":     sessions_today,
+            "conversions_today":  conv_today,
+            "sample_days":        sample_days,
+            "root_cause":         root_cause,
+        })
+
+    # Sort by absolute delta descending, cap at 5
+    results.sort(key=lambda r: abs(r["delta"]), reverse=True)
+    return results[:5]
 
 
 _POST_TX_PLACEMENTS = (
@@ -4594,7 +4743,6 @@ TOOL_MAP = {
     "get_scout_status": get_scout_status,
     "get_advertiser_revenue_projection": get_advertiser_revenue_projection,
     "get_ghost_campaigns": get_ghost_campaigns,
-    "get_revenue_health": get_revenue_health,
     "get_low_fill_publishers": get_low_fill_publishers,
     "get_top_revenue_opportunities": get_top_revenue_opportunities,
     "run_offer_scraper": run_offer_scraper,

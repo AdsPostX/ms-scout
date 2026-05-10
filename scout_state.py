@@ -156,6 +156,23 @@ def _save_launched_offers(state: dict):
         log.warning(f"Could not persist launched_offers: {e}")
 
 
+# ── Revenue alert state ────────────────────────────────────────────────────────
+# Tracks the last calendar date (YYYY-MM-DD, CT timezone) the revenue tracker
+# daemon fired an alert. Persisted in pulse_state.json under "last_revenue_alert_date".
+# Used to enforce once-per-day firing — no double-posts if daemon restarts mid-day.
+
+def _load_revenue_alert_state() -> str | None:
+    """Return the date string (YYYY-MM-DD) of the last revenue alert, or None."""
+    return _load_pulse_state().get("last_revenue_alert_date")
+
+
+def _save_revenue_alert_date(date_str: str) -> None:
+    """Persist today's date as the last revenue alert date in pulse_state.json."""
+    state = _load_pulse_state()
+    state["last_revenue_alert_date"] = date_str
+    _save_pulse_state(state)
+
+
 # ── Pulse state ────────────────────────────────────────────────────────────────
 
 def _load_pulse_state() -> dict:
