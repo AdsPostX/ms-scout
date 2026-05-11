@@ -794,7 +794,7 @@ def _revenue_tracker(web, ch) -> None:
     import time as _time
     import pytz
     from datetime import datetime as _dt
-    from scout_agent import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher
+    from scout_agent import SCOUT_THRESHOLDS, _query_intraday_revenue_total, _query_intraday_revenue_by_publisher
     from scout_state import _load_revenue_alert_state, _save_revenue_alert_date
 
     while True:  # outer restart wrapper — self-heals any unhandled crash
