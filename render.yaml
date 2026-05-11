@@ -58,3 +58,60 @@ services:
         sync: false
       - key: SCOUT_ADMIN_USER_ID
         sync: false
+
+  - type: worker
+    name: ms-demand-feed
+    runtime: python
+    region: oregon
+    plan: starter          # $7/mo — never sleeps, auto-restarts on crash
+    buildCommand: pip install -r requirements-demand-feed.txt
+    startCommand: python demand_feed_main.py
+    disk:
+      name: demand-feed-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1            # Persists offers_latest.json + scraper_state.json across deploys
+    envVars:
+      # Affiliate network credentials — set all in Render dashboard, never commit values
+      - key: IMPACT_SID
+        sync: false
+      - key: IMPACT_TOKEN
+        sync: false
+      - key: FLEXOFFERS_API_KEY
+        sync: false
+      - key: FLEXOFFERS_DOMAIN_ID
+        sync: false
+      - key: MAXBOUNTY_EMAIL
+        sync: false
+      - key: MAXBOUNTY_PASSWORD
+        sync: false
+      # Optional networks (set when credentials are available — see Known Debt in CLAUDE.md)
+      - key: CJ_API_KEY
+        sync: false
+      - key: CJ_WEBSITE_ID
+        sync: false
+      - key: CJ_PUBLISHER_ID
+        sync: false
+      - key: SHAREASALE_API_TOKEN
+        sync: false
+      - key: SHAREASALE_API_SECRET
+        sync: false
+      - key: RAKUTEN_API_TOKEN
+        sync: false
+      - key: AWIN_PUBLISHER_ID
+        sync: false
+      - key: AWIN_API_KEY
+        sync: false
+      # Notion — offer inventory database
+      - key: NOTION_TOKEN
+        sync: false
+      - key: NOTION_DB_ID
+        sync: false
+      # ClickHouse — campaign matching enrichment in offer_scraper.py
+      - key: CH_HOST
+        sync: false
+      - key: CH_USER
+        sync: false
+      - key: CH_PASSWORD
+        sync: false
+      - key: CH_DATABASE
+        sync: false
