@@ -225,6 +225,7 @@ _PRODUCTION_CHANNELS = {
     "pulse":    os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
     "watchdog": os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
     "offers":   os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL),   # #scout-offers
+    "revenue":  os.getenv("REVENUE_OPS_CHANNEL", _SCOUT_HQ_CHANNEL),    # #revenue-operations
 }
 
 def _route_channel(purpose: str, force: bool = False) -> str:
@@ -786,6 +787,9 @@ def _revenue_tracker(web, ch) -> None:
 
     Runs every 5 minutes. Fires at most once per calendar day.
     Posts to #revenue-operations (or #scout-qa in non-production envs).
+
+    Outer restart wrapper: any unhandled crash logs the traceback and restarts after 30s
+    so the thread stays alive indefinitely without a Render redeploy.
     """
     import time as _time
     import pytz
@@ -793,55 +797,61 @@ def _revenue_tracker(web, ch) -> None:
     from scout_agent import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher
     from scout_state import _load_revenue_alert_state, _save_revenue_alert_date
 
-    CT_TZ       = pytz.timezone("America/Chicago")
-    check_hour  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_check_hour_ct", 15))
-    channel     = _route_channel("revenue")
-
-    while True:
-        _time.sleep(300)  # 5-min poll
+    while True:  # outer restart wrapper — self-heals any unhandled crash
         try:
-            # Feature flag — flip to true in scout_thresholds.json once validated in #bot-qa
-            if not SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_enabled", False):
-                continue
+            CT_TZ       = pytz.timezone("America/Chicago")
+            check_hour  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_check_hour_ct", 15))
+            channel     = _route_channel("revenue")
 
-            now_ct = _dt.now(CT_TZ)
+            while True:  # inner poll loop
+                _time.sleep(300)  # 5-min poll
+                try:
+                    # Feature flag — flip to true in scout_thresholds.json once validated in #bot-qa
+                    if not SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_enabled", False):
+                        continue
 
-            # Fire window: target hour ± 10 minutes
-            if not (now_ct.hour == check_hour and now_ct.minute < 10):
-                continue
+                    now_ct = _dt.now(CT_TZ)
 
-            today_str = now_ct.date().isoformat()
-            if _load_revenue_alert_state() == today_str:
-                continue  # already posted today
+                    # Fire window: target hour ± 10 minutes
+                    if not (now_ct.hour == check_hour and now_ct.minute < 10):
+                        continue
 
-            # Phase 1: fast platform total
-            try:
-                total = _query_intraday_revenue_total(ch)
-            except Exception as e:
-                log.warning(f"[revenue-tracker] Phase 1 query failed: {e}")
-                _save_revenue_alert_date(today_str)  # avoid hammering on CH error
-                continue
+                    today_str = now_ct.date().isoformat()
+                    if _load_revenue_alert_state() == today_str:
+                        continue  # already posted today
 
-            if total is None:
-                # Revenue within normal range — mark checked, stay silent
-                _save_revenue_alert_date(today_str)
-                log.info("[revenue-tracker] Revenue on pace — no alert needed.")
-                continue
+                    # Phase 1: fast platform total
+                    try:
+                        total = _query_intraday_revenue_total(ch)
+                    except Exception as e:
+                        log.warning(f"[revenue-tracker] Phase 1 query failed: {e}")
+                        _save_revenue_alert_date(today_str)  # avoid hammering on CH error
+                        continue
 
-            # Phase 2: per-publisher decomposition
-            try:
-                publishers = _query_intraday_revenue_by_publisher(ch, total)
-            except Exception as e:
-                log.warning(f"[revenue-tracker] Phase 2 query failed: {e}")
-                publishers = []
+                    if total is None:
+                        # Revenue within normal range — mark checked, stay silent
+                        _save_revenue_alert_date(today_str)
+                        log.info("[revenue-tracker] Revenue on pace — no alert needed.")
+                        continue
 
-            msg = _format_revenue_alert(total, publishers)
-            web.chat_postMessage(channel=channel, text=msg)
-            _save_revenue_alert_date(today_str)
-            log.info(f"[revenue-tracker] Alert posted for {today_str} ({total['pct_of_expected']:.0f}% of expected).")
+                    # Phase 2: per-publisher decomposition
+                    try:
+                        publishers = _query_intraday_revenue_by_publisher(ch, total)
+                    except Exception as e:
+                        log.warning(f"[revenue-tracker] Phase 2 query failed: {e}")
+                        publishers = []
+
+                    msg = _format_revenue_alert(total, publishers)
+                    web.chat_postMessage(channel=channel, text=msg)
+                    _save_revenue_alert_date(today_str)
+                    log.info(f"[revenue-tracker] Alert posted for {today_str} ({total['pct_of_expected']:.0f}% of expected).")
+
+                except Exception as e:
+                    log.warning(f"[revenue-tracker] Unexpected error: {e}")
 
         except Exception as e:
-            log.warning(f"[revenue-tracker] Unexpected error: {e}")
+            log.error(f"[revenue-tracker] Fatal crash — restarting in 30s: {e}", exc_info=True)
+            _time.sleep(30)
 
 
 def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
@@ -2259,20 +2269,27 @@ def _benchmarks_warmer() -> None:
 
 
 def _thread_watchdog(web: WebClient) -> None:
-    """Check all named daemon threads are alive every 60s. Alert #scout-qa if any die."""
+    """Check all named daemon threads are alive every 60s.
+
+    Alerts #scout-qa on TRANSITION only — when a daemon newly dies or recovers.
+    Does NOT spam on every check interval when a daemon is already known-dead.
+    """
     import time as _time
 
     # PR 16b: read from _REQUIRED_DAEMONS (populated at startup via _start_daemon)
     # instead of a hardcoded set. Same source of truth as _compute_health_status().
     _time.sleep(120)  # Give all threads time to start before first check
+    last_dead: set[str] = set()  # tracks already-alerted dead daemons
     while True:
         try:
             live = {t.name for t in threading.enumerate()}
             required = set(_REQUIRED_DAEMONS)
             dead = required - live
-            if dead:
-                names = ", ".join(sorted(dead))
-                log.error(f"[watchdog] daemon thread(s) died: {names}")
+            newly_dead = dead - last_dead
+            recovered  = last_dead - dead
+            if newly_dead:
+                names = ", ".join(sorted(newly_dead))
+                log.error(f"[watchdog] daemon thread(s) newly died: {names}")
                 try:
                     web.chat_postMessage(
                         channel=_SCOUT_HQ_CHANNEL,
@@ -2280,6 +2297,17 @@ def _thread_watchdog(web: WebClient) -> None:
                     )
                 except Exception as slack_err:
                     log.warning(f"[watchdog] Slack alert failed: {slack_err}")
+            if recovered:
+                names = ", ".join(sorted(recovered))
+                log.info(f"[watchdog] daemon thread(s) recovered: {names}")
+                try:
+                    web.chat_postMessage(
+                        channel=_SCOUT_HQ_CHANNEL,
+                        text=f":white_check_mark: Scout daemon thread(s) recovered: *{names}*",
+                    )
+                except Exception as slack_err:
+                    log.warning(f"[watchdog] Slack recovery alert failed: {slack_err}")
+            last_dead = dead
         except Exception as e:
             log.warning(f"[watchdog] check error: {e}")
         _time.sleep(60)
