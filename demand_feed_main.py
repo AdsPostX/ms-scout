@@ -16,9 +16,9 @@ State: data/scraper_state.json  (same key as Scout's daemon — no conflict,
 
 import json
 import logging
+import multiprocessing
 import os
 import pathlib
-import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -49,8 +49,16 @@ except Exception:
 
 _RUN_HOUR_CT = 6  # 06:00 CT
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        log.warning("[demand-feed] %s is not a valid integer; using default %d", name, default)
+        return default
+
+
 # Scraper is killed and retried after this many seconds (default 30 min).
-_SCRAPER_TIMEOUT_SECS = int(os.getenv("SCRAPER_TIMEOUT_SECS", "1800"))
+_SCRAPER_TIMEOUT_SECS = _env_int("SCRAPER_TIMEOUT_SECS", 1800)
 
 
 def _now_chicago() -> datetime:
@@ -82,33 +90,39 @@ def _alert_slack(msg: str) -> None:
         return
     try:
         import requests as _req
-        _req.post(
+        r = _req.post(
             "https://slack.com/api/chat.postMessage",
             headers={"Authorization": f"Bearer {token}"},
             json={"channel": channel, "text": f"*ms-demand-feed* {msg}"},
             timeout=10,
         )
+        if not r.ok or not r.json().get("ok", False):
+            log.warning("[demand-feed] Slack alert failed: %s", r.text[:200])
     except Exception:
         pass  # alerting must never crash the scheduler loop
 
 
-def _run() -> None:
+def _scraper_worker(q: multiprocessing.Queue) -> None:
     from offer_scraper import run_headless
-    exc_holder: list[Exception] = []
+    try:
+        run_headless(post_digest=False)
+    except Exception as e:
+        q.put(e)
 
-    def _target() -> None:
-        try:
-            run_headless(post_digest=False)
-        except Exception as e:
-            exc_holder.append(e)
 
-    t = threading.Thread(target=_target, daemon=True)
-    t.start()
-    t.join(timeout=_SCRAPER_TIMEOUT_SECS)
-    if t.is_alive():
+def _run() -> None:
+    q: multiprocessing.Queue = multiprocessing.Queue()
+    p = multiprocessing.Process(target=_scraper_worker, args=(q,), daemon=True)
+    p.start()
+    p.join(timeout=_SCRAPER_TIMEOUT_SECS)
+    if p.is_alive():
+        p.terminate()
+        p.join(timeout=5)
+        if p.is_alive():
+            p.kill()
         raise TimeoutError(f"run_headless() hung after {_SCRAPER_TIMEOUT_SECS}s")
-    if exc_holder:
-        raise exc_holder[0]
+    if not q.empty():
+        raise q.get()
 
 
 def main() -> None:

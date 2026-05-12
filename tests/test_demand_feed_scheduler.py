@@ -114,5 +114,22 @@ class TestDemandFeedScheduler(unittest.TestCase):
         mock_run.assert_called_once()
 
 
+    # ------------------------------------------------------------------
+    # C5-4: SCRAPER_TIMEOUT_SECS env var is respected; bad value falls back
+    # ------------------------------------------------------------------
+    def test_scraper_timeout_configurable(self):
+        """_env_int reads SCRAPER_TIMEOUT_SECS; invalid value falls back to 1800."""
+        import importlib
+        import demand_feed_main as dm
+
+        with patch.dict(os.environ, {"SCRAPER_TIMEOUT_SECS": "999"}):
+            importlib.reload(dm)
+            self.assertEqual(dm._SCRAPER_TIMEOUT_SECS, 999)
+
+        with patch.dict(os.environ, {"SCRAPER_TIMEOUT_SECS": "not_a_number"}):
+            importlib.reload(dm)
+            self.assertEqual(dm._SCRAPER_TIMEOUT_SECS, 1800)
+
+
 if __name__ == "__main__":
     unittest.main()
