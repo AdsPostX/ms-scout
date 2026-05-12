@@ -673,7 +673,7 @@ THE TRUST CONTRACT
 What builds trust:
 • Admitting thin data before recommending on it
 • Admitting capability limits before attempting them
-• Naming the publisher_id you queried when multiple IDs could match
+• Naming the publisher you queried by name when multiple accounts could match
 • Being confidently right when the data supports it
 
 What erodes trust:
@@ -741,13 +741,13 @@ PUBLISHER IDENTITY RULE
 Never ask about intent. DO ask about identity when a publisher name resolves to
 multiple IDs with meaningfully different session volumes.
 
-Example: "AT&T" → if publisher_id 1952 (200K sessions/mo) and 2527 (800 sessions/mo)
-both match — name the conflict: "AT&T resolves to two publishers: 1952 (Payment
-Confirmation, ~200K sessions) and 2527 (Dev Test, ~800 sessions). Which one?"
+Example: "AT&T" → if two accounts match — name the conflict: "AT&T resolves to two
+publishers: Payment Confirmation (~200K sessions/mo) and Dev Test (~800 sessions/mo).
+Which one?"
 
 When there is only one match, or when the volumes are trivially different (one is
-clearly a test account), proceed without asking. Name the publisher_id you queried
-in the response: "Queried AT&T (id: 1952, Payment Confirmation)."
+clearly a test account), proceed without asking. Name the publisher by the account
+label returned (e.g. "AT&T Payment Confirmation") — never include the numeric ID.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ERROR RECOVERY
@@ -758,8 +758,8 @@ alternative query or a narrower time window. Never silently return empty.
 
 Publisher name resolves to 0 results:
 1. Try at most 2 alternates: common spelling variants, then substring match on name.
-2. If a candidate matches, surface it as a confirmation: "Did you mean [X] (id: 123,
-   ~4.2K sessions/day)?" — do NOT answer about the candidate without confirmation.
+2. If a candidate matches, surface it as a confirmation: "Did you mean [X]
+   (~4.2K sessions/day)?" — do NOT answer about the candidate without confirmation.
 3. If no candidate found, return "not found" with the 2 closest candidates listed.
 4. Never construct a publisher_id from a fuzzy match — only use IDs returned by the
    lookup tool.
@@ -4977,15 +4977,9 @@ def get_revenue_today() -> dict:
 
     try:
         ch = _get_ch_client()
-        now_ct = _dt_mod.datetime.now(_dt_mod.timezone.utc).astimezone(
-            _dt_mod.timezone(_dt_mod.timedelta(hours=-5))  # CT approx
-        )
-        today_str = now_ct.strftime("%Y-%m-%d")
-        today_ym = int(now_ct.strftime("%Y%m"))
-        thirty_ago_ym = int((now_ct - _dt_mod.timedelta(days=35)).strftime("%Y%m"))
 
-        # Today's revenue by publisher
-        today_sql = f"""
+        # Let ClickHouse own timezone math — avoids DST drift from Python UTC offset
+        today_sql = """
 SELECT
     c.user_id,
     u.organization AS publisher_name,
@@ -4993,36 +4987,32 @@ SELECT
     count() AS conversions
 FROM adpx_conversionsdetails c
 LEFT JOIN from_airbyte_users u ON u.id = c.user_id
-PREWHERE toYYYYMM(c.created_at) = {today_ym}
-WHERE c.created_at >= toDate('{today_str}')
-  AND c.created_at < toDate('{today_str}') + INTERVAL 1 DAY
+PREWHERE toYYYYMM(c.created_at) = toYYYYMM(toDate(toTimeZone(now(), 'America/Chicago')))
+WHERE toDate(toTimeZone(c.created_at, 'America/Chicago'))
+      = toDate(toTimeZone(now(), 'America/Chicago'))
 GROUP BY c.user_id, u.organization
 HAVING today_rev > 0
 ORDER BY today_rev DESC
 """
 
-        # 30-day rolling avg (per publisher, per calendar day, then avg those days)
-        avg_sql = f"""
+        # 30-day avg divided by 30 calendar days (includes zero-revenue days in denominator)
+        avg_sql = """
 SELECT
     c.user_id,
-    avg(daily_rev) AS avg_daily_rev
-FROM (
-    SELECT
-        c.user_id,
-        toDate(c.created_at, 'America/Chicago') AS day,
-        sum(toFloat64OrNull(c.revenue)) AS daily_rev
-    FROM adpx_conversionsdetails c
-    PREWHERE toYYYYMM(c.created_at) >= {thirty_ago_ym}
-    WHERE c.created_at >= toDate('{today_str}') - INTERVAL 30 DAY
-      AND c.created_at < toDate('{today_str}')
-    GROUP BY c.user_id, day
-    HAVING daily_rev > 0
-) c
+    sum(toFloat64OrNull(c.revenue)) / 30 AS avg_daily_rev
+FROM adpx_conversionsdetails c
+PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(
+    toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 35 DAY
+)
+WHERE toDate(toTimeZone(c.created_at, 'America/Chicago'))
+      >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 30 DAY
+  AND toDate(toTimeZone(c.created_at, 'America/Chicago'))
+      < toDate(toTimeZone(now(), 'America/Chicago'))
 GROUP BY c.user_id
 """
 
-        today_rows = ch.execute(today_sql)
-        avg_rows = ch.execute(avg_sql)
+        today_rows = ch.query(today_sql).result_rows
+        avg_rows = ch.query(avg_sql).result_rows
 
         # Build avg lookup: user_id → avg_daily_rev
         avg_lookup: dict[int, float] = {int(r[0]): float(r[1] or 0) for r in avg_rows}
@@ -5033,7 +5023,7 @@ GROUP BY c.user_id
         total_avg = 0.0
         for row in today_rows:
             uid = int(row[0])
-            name = (row[1] or f"Partner {uid}").strip()
+            name = (row[1] or "").strip() or "Unknown Partner"
             rev = float(row[2] or 0)
             convs = int(row[3] or 0)
             avg = avg_lookup.get(uid, 0.0)
@@ -5064,7 +5054,9 @@ GROUP BY c.user_id
 
         # Headline
         pct_of_avg = (total_today / total_avg * 100) if total_avg > 0 else None
-        hour_ct = now_ct.hour
+        import datetime as _dt_now
+        _now_ct = _dt_now.datetime.now(_dt_now.timezone.utc) - _dt_now.timedelta(hours=5)
+        hour_ct = _now_ct.hour
         time_note = "Still early." if hour_ct < 12 else ("Midday pace." if hour_ct < 17 else "")
         headline_pct = f" — {pct_of_avg:.0f}% of daily avg. {time_note}".strip() if pct_of_avg else "."
         headline = f"*{_fmt_rev(total_today)} today*{headline_pct}"

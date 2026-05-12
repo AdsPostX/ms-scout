@@ -15,9 +15,14 @@ sys.path.insert(0, str(ROOT))
 
 
 def _make_ch_mock(today_rows, avg_rows):
-    """Return a mock ClickHouse client that returns given rows for execute()."""
+    """Return a mock ClickHouse client that returns given rows for query().result_rows."""
     mock_ch = unittest.mock.MagicMock()
-    mock_ch.execute.side_effect = [today_rows, avg_rows]
+    # First call to ch.query() → today rows; second → avg rows
+    today_result = unittest.mock.MagicMock()
+    today_result.result_rows = today_rows
+    avg_result = unittest.mock.MagicMock()
+    avg_result.result_rows = avg_rows
+    mock_ch.query.side_effect = [today_result, avg_result]
     return mock_ch
 
 
