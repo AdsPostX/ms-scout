@@ -267,12 +267,18 @@ def _get_corrections_context() -> str:
     except Exception:
         pass
     # Entity overrides (publisher + advertiser notes recorded by the team via @Scout)
+    # Plan v3 §3.5: emit provenance (added_by + added date) inline so the LLM can
+    # cite "[learned from <user> on <date>]" when it surfaces an override fact.
     try:
         overrides = _load_entity_overrides()
         for pub, data in overrides.get("publishers", {}).items():
-            corrections.append({"confidence": "high", "correction": f"Publisher {pub}: {data['note']}"})
+            prov = f" [learned from {data.get('added_by','?')} on {data.get('added','?')}]"
+            corrections.append({"confidence": "high",
+                                 "correction": f"Publisher {pub}: {data['note']}{prov}"})
         for adv, data in overrides.get("advertisers", {}).items():
-            corrections.append({"confidence": "high", "correction": f"Advertiser {adv}: {data['note']}"})
+            prov = f" [learned from {data.get('added_by','?')} on {data.get('added','?')}]"
+            corrections.append({"confidence": "high",
+                                 "correction": f"Advertiser {adv}: {data['note']}{prov}"})
     except Exception:
         pass
     if not corrections:
@@ -1105,6 +1111,15 @@ record_entity_knowledge — "note that [entity]...", "[entity] has a known limit
    Never omit this confirmation line — it is the only signal the team has to catch a mis-logged fact.
    Do NOT wait for "log this" — if they're explaining entity behavior in a way that should change signal interpretation, that IS a record request.
    PROACTIVE TRIGGER: if Scout detects an anomaly that could be explained by entity-specific context AND no entity override exists, surface it proactively. "Filling at 0% on 10K sessions — expected behavior for this publisher? I can log it to exclude from fill rate alerts going forward."
+   CITATION RULE: When you rely on an entity_overrides fact in an answer, append "[learned from <user> on <date>]" inline so the team can see who taught it.
+
+forget_entity_note — "forget that about [entity]", "drop the note on [entity]", "scout, forget what you know about [entity]", "remove the fact about [entity]"
+   → forget_entity_note(entity_name=<name>, entity_type=<"publisher"|"advertiser">).
+   Removes the entry and writes an audit row. Confirm with one line: "Forgot: [entity] — [what was removed]."
+
+why_entity_note — "why do you think [X] about [entity]", "where did you learn [entity] does X", "who told you that about [entity]", "source for [entity]"
+   → why_entity_note(entity_name=<name>) — entity_type optional; searches both publishers and advertisers if omitted.
+   Returns the note, who taught it, when, and the Slack receipt link if present.
 
 DEFAULT (unclear/ambiguous input): route to open_prospecting. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
@@ -1888,6 +1903,57 @@ TOOLS = [
                 },
             },
             "required": ["entity_name", "entity_type", "note"],
+        },
+    },
+    {
+        "name": "forget_entity_note",
+        "description": (
+            "Drop a previously-recorded publisher or advertiser fact. "
+            "Use when a team member tells Scout to forget, retract, or remove a learned note. "
+            "Triggers: 'forget that about [entity]', 'scout, that was wrong about [entity]', "
+            "'remove the note about [entity]', 'scratch that for [entity]', "
+            "'unlearn [entity]', 'never mind about [entity]'. "
+            "Idempotent — friendly message if no note exists."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_name": {
+                    "type": "string",
+                    "description": "Publisher or advertiser name whose note should be dropped.",
+                },
+                "entity_type": {
+                    "type": "string",
+                    "enum": ["publisher", "advertiser"],
+                    "description": "'publisher' or 'advertiser'.",
+                },
+            },
+            "required": ["entity_name", "entity_type"],
+        },
+    },
+    {
+        "name": "why_entity_note",
+        "description": (
+            "Explain where a stored publisher/advertiser fact came from — returns the note, "
+            "who taught Scout (Slack user_id), when, and the Slack permalink if available. "
+            "Use when a team member challenges or audits Scout's beliefs about an entity. "
+            "Triggers: 'why do you think [X] about [entity]', 'where did you learn that about [entity]', "
+            "'who told you [entity] [does X]', 'source for [entity]', 'scout, justify [entity]'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_name": {
+                    "type": "string",
+                    "description": "Publisher or advertiser name to audit.",
+                },
+                "entity_type": {
+                    "type": "string",
+                    "enum": ["publisher", "advertiser"],
+                    "description": "Optional. Omit to search both sections.",
+                },
+            },
+            "required": ["entity_name"],
         },
     },
     {
@@ -4573,32 +4639,109 @@ def get_usage_report(requesting_user_id: str = "") -> str:
 
 
 def record_entity_note(entity_name: str, entity_type: str, note: str,
-                       exclude_from_fill_rate: bool = False) -> str:
+                       exclude_from_fill_rate: bool = False,
+                       _caller_user_id: str = "",
+                       _caller_permalink: str = "") -> str:
     """
     Record publisher or advertiser knowledge in Scout's persistent learning store.
     Writes immediately and shows exactly what was stored (write-confirm-correct pattern).
     Calling again overwrites the previous entry — idempotent upsert.
     entity_type: 'publisher' or 'advertiser'
     exclude_from_fill_rate: publishers only — True suppresses from Pulse fill rate signals.
+
+    Plan v3 §3.4 — provenance: `added_by` is the caller's Slack user_id (when
+    available); falls back to "scout-agent" only if no caller is wired through.
+    `permalink` records the Slack message that taught Scout this fact, so
+    `why_entity_note` can return a clickable receipt.
     """
     import datetime as _dt
 
     overrides = _load_entity_overrides()
     section = "publishers" if entity_type.lower() == "publisher" else "advertisers"
-    overrides.setdefault(section, {})[entity_name] = {
+    entry = {
         "note": note,
         "exclude_from_fill_rate": exclude_from_fill_rate if section == "publishers" else False,
         "added": _dt.date.today().isoformat(),
-        "added_by": "scout-agent",
+        "added_by": _caller_user_id or "scout-agent",
     }
+    if _caller_permalink:
+        entry["permalink"] = _caller_permalink
+    overrides.setdefault(section, {})[entity_name] = entry
     _save_entity_overrides(overrides)
 
     lines = [f":white_check_mark: *{entity_name}* ({entity_type}) logged:"]
     lines.append(f"> _{note}_")
     if exclude_from_fill_rate and section == "publishers":
         lines.append(":no_entry_sign: Excluded from Pulse fill rate signals starting tomorrow's 8am run.")
-    lines.append("_Reply to correct if I got anything wrong — I'll overwrite it._")
+    lines.append("_Reply to correct if I got anything wrong — I'll overwrite it, "
+                 "or say `@Scout forget that about " + entity_name + "` to drop it._")
     return "\n".join(lines)
+
+
+def forget_entity_note(entity_name: str, entity_type: str,
+                       _caller_user_id: str = "",
+                       _caller_permalink: str = "") -> str:
+    """
+    Plan v3 §3.4 — drop a previously-recorded publisher/advertiser fact.
+    No-op (with friendly message) if the entry doesn't exist. Records a
+    deletion audit row to data/entity_overrides_audit.jsonl for review.
+    """
+    import datetime as _dt
+
+    overrides = _load_entity_overrides()
+    section = "publishers" if entity_type.lower() == "publisher" else "advertisers"
+    bucket = overrides.get(section) or {}
+    if entity_name not in bucket:
+        return (f":mag: I had no note for *{entity_name}* ({entity_type}) — "
+                "nothing to forget.")
+    dropped = bucket.pop(entity_name)
+    overrides[section] = bucket
+    _save_entity_overrides(overrides)
+
+    # Append-only audit so we can review later who dropped what
+    try:
+        audit_path = pathlib.Path(__file__).parent / "data" / "entity_overrides_audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a") as _fh:
+            _fh.write(json.dumps({
+                "ts": _dt.datetime.utcnow().isoformat() + "Z",
+                "action": "forget",
+                "section": section,
+                "entity": entity_name,
+                "dropped": dropped,
+                "by_user_id": _caller_user_id or "",
+                "permalink": _caller_permalink or "",
+            }) + "\n")
+    except Exception:
+        pass
+
+    return (f":wastebasket: Forgot the note about *{entity_name}* ({entity_type}). "
+            f"Was: _{dropped.get('note','(no note)')}_")
+
+
+def why_entity_note(entity_name: str, entity_type: str = "") -> str:
+    """
+    Plan v3 §3.4 — explain where a publisher/advertiser fact came from.
+    Returns the stored note plus provenance (who taught Scout, when, and the
+    Slack permalink if available). Searches both sections when type omitted.
+    """
+    overrides = _load_entity_overrides()
+    sections = (["publishers", "advertisers"] if not entity_type
+                else ["publishers" if entity_type.lower() == "publisher" else "advertisers"])
+    hits = []
+    for section in sections:
+        bucket = overrides.get(section) or {}
+        if entity_name in bucket:
+            row = bucket[entity_name]
+            line = (f"*{entity_name}* ({section[:-1]}): _{row.get('note','(no note)')}_\n"
+                    f":bookmark: learned from `{row.get('added_by','?')}` "
+                    f"on {row.get('added','?')}")
+            if row.get("permalink"):
+                line += f" — <{row['permalink']}|Slack receipt>"
+            hits.append(line)
+    if not hits:
+        return f":mag: I don't have a note for *{entity_name}*. Nothing to explain."
+    return "\n\n".join(hits)
 
 
 def get_offers_for_publisher(publisher_name: str) -> dict:  # returns dict since PR #18; old str annotation was stale
@@ -4790,6 +4933,8 @@ TOOL_MAP = {
     "get_pipeline_health": get_pipeline_health,
     "get_usage_report": get_usage_report,
     "record_entity_note": record_entity_note,
+    "forget_entity_note": forget_entity_note,
+    "why_entity_note": why_entity_note,
     "get_offers_for_publisher": get_offers_for_publisher,
     "get_pulse_summary": get_pulse_summary,
     "get_scout_config": None,   # registered below after function definition
@@ -4936,7 +5081,8 @@ TOOL_MAP["run_self_qa"] = run_self_qa
 TOOL_MAP["get_scout_config"] = get_scout_config
 
 
-def _run_tool(name: str, inputs: dict, _caller_user_id: str = ""):
+def _run_tool(name: str, inputs: dict, _caller_user_id: str = "",
+              _caller_permalink: str = ""):
     fn = TOOL_MAP.get(name)
     if not fn:
         return {"error": f"Unknown tool: {name}"}
@@ -4944,6 +5090,11 @@ def _run_tool(name: str, inputs: dict, _caller_user_id: str = ""):
     # manually extract and pass the user_id from the injected context prefix.
     if name == "get_usage_report" and not inputs.get("requesting_user_id"):
         inputs = {**inputs, "requesting_user_id": _caller_user_id}
+    # Plan v3 §3.4: inject Slack provenance (caller user_id + permalink) into
+    # entity-note tools so `added_by` and `permalink` are populated automatically.
+    if name in {"record_entity_note", "forget_entity_note"}:
+        inputs = {**inputs, "_caller_user_id": _caller_user_id,
+                  "_caller_permalink": _caller_permalink}
     return fn(**inputs)
 
 
@@ -5064,7 +5215,8 @@ def _select_model(user_message: str) -> str:
     return "claude-sonnet-4-6"
 
 
-def ask(user_message: str, history: list | None = None, user_id: str = "") -> AskResult:
+def ask(user_message: str, history: list | None = None, user_id: str = "",
+        permalink: str = "") -> AskResult:
     """
     Send a message to Scout and get a response.
     history: optional list of prior {"role": "user"/"assistant", "content": str} messages
@@ -5250,7 +5402,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "") -> As
             try:
                 with ThreadPoolExecutor(max_workers=len(tool_blocks)) as executor:
                     futures = {
-                        executor.submit(_run_tool, block.name, block.input, user_id): (i, block)
+                        executor.submit(_run_tool, block.name, block.input, user_id, permalink): (i, block)
                         for i, block in tool_blocks
                     }
                     results_map = {}
@@ -5278,7 +5430,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "") -> As
                 # Interpreter shutting down — fall back to sequential
                 for i, block in tool_blocks:
                     _tools_called.append(block.name)
-                    result = _run_tool(block.name, block.input, user_id)
+                    result = _run_tool(block.name, block.input, user_id, permalink)
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
                     _all_tool_results.append(result)
@@ -5291,7 +5443,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "") -> As
             # Single tool call — keep sequential path unchanged
             for i, block in tool_blocks:
                 _tools_called.append(block.name)
-                result = _run_tool(block.name, block.input, user_id)
+                result = _run_tool(block.name, block.input, user_id, permalink)
                 if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                     _brief_results.append(result)  # collect all, use first for primary
                 if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
