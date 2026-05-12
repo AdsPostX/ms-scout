@@ -1930,6 +1930,14 @@ TOOLS = [
 
 
 def _load_offers() -> list:
+    """Load offers from DEMAND_FEED_URL when set; fall back to disk snapshot."""
+    url = os.getenv("DEMAND_FEED_URL")
+    if url:
+        try:
+            with urllib.request.urlopen(f"{url.rstrip('/')}/offers", timeout=10) as resp:
+                return json.loads(resp.read())
+        except Exception as exc:
+            log.warning(f"[scout_agent] DEMAND_FEED_URL fetch failed ({exc}); falling back to disk")
     if not SNAPSHOT_PATH.exists():
         return []
     with open(SNAPSHOT_PATH) as f:
