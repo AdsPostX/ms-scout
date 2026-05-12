@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import pathlib
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -38,8 +39,8 @@ _SCRAPER_STATE = _DATA_DIR / "scraper_state.json"
 _OFFERS_FILE   = _DATA_DIR / "offers_latest.json"
 
 # 06:00 CT in UTC offset hours (CST = UTC-6, CDT = UTC-5).
-# zoneinfo handles DST automatically; fall back to a fixed UTC-6 offset
-# if the system tzdata is absent (e.g. minimal Docker images).
+# zoneinfo handles DST automatically; fall back to a month-based approximation
+# if tzdata is absent (e.g. minimal Docker images on Render).
 try:
     from zoneinfo import ZoneInfo
     _CHICAGO_TZ: ZoneInfo | None = ZoneInfo("America/Chicago")
@@ -48,12 +49,17 @@ except Exception:
 
 _RUN_HOUR_CT = 6  # 06:00 CT
 
+# Scraper is killed and retried after this many seconds (default 30 min).
+_SCRAPER_TIMEOUT_SECS = int(os.getenv("SCRAPER_TIMEOUT_SECS", "1800"))
+
 
 def _now_chicago() -> datetime:
     if _CHICAGO_TZ is not None:
         return datetime.now(_CHICAGO_TZ)
-    # Fallback: treat UTC-6 as Chicago (ignores DST, acceptable for a 1h window)
-    return datetime.now(timezone(timedelta(hours=-6)))
+    # Fallback: approximate DST — CDT (UTC-5) runs roughly Mar–Oct
+    _utc_now = datetime.now(timezone.utc)
+    _offset = -5 if 3 <= _utc_now.month <= 10 else -6
+    return _utc_now.astimezone(timezone(timedelta(hours=_offset)))
 
 
 def _load_state() -> dict:
@@ -69,9 +75,40 @@ def _save_state(state: dict) -> None:
     tmp.replace(_SCRAPER_STATE)
 
 
+def _alert_slack(msg: str) -> None:
+    token = os.getenv("SLACK_BOT_TOKEN")
+    channel = os.getenv("SLACK_ALERT_CHANNEL", "#scout-offers")
+    if not token:
+        return
+    try:
+        import requests as _req
+        _req.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"channel": channel, "text": f"*ms-demand-feed* {msg}"},
+            timeout=10,
+        )
+    except Exception:
+        pass  # alerting must never crash the scheduler loop
+
+
 def _run() -> None:
     from offer_scraper import run_headless
-    run_headless()
+    exc_holder: list[Exception] = []
+
+    def _target() -> None:
+        try:
+            run_headless(post_digest=False)
+        except Exception as e:
+            exc_holder.append(e)
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=_SCRAPER_TIMEOUT_SECS)
+    if t.is_alive():
+        raise TimeoutError(f"run_headless() hung after {_SCRAPER_TIMEOUT_SECS}s")
+    if exc_holder:
+        raise exc_holder[0]
 
 
 def main() -> None:
@@ -105,8 +142,10 @@ def main() -> None:
                     state["last_run_date"] = today_str
                     _save_state(state)
                     log.info("[demand-feed] done — offers_latest.json updated")
+                    _alert_slack(":white_check_mark: daily scrape complete — offers_latest.json updated")
                 except Exception as e:
                     log.error(f"[demand-feed] scraper failed: {e}", exc_info=True)
+                    _alert_slack(f":rotating_light: scrape failed — retrying in 1h: {e}")
                     # Don't update last_run_date — retry next cycle
                     time.sleep(3600)
                     continue
