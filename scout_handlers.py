@@ -140,9 +140,12 @@ def _seed_feedback_reactions(web: WebClient, channel: str, ts: str) -> None:
     for name in ("+1", "-1"):
         try:
             web.reactions_add(channel=channel, timestamp=ts, name=name)
-        except Exception:
-            # already_reacted or reactions:write scope missing — degrade gracefully
-            pass
+        except Exception as _e:
+            _msg = str(_e)
+            if "already_reacted" not in _msg:
+                # Log anything other than the benign already_reacted so we can
+                # catch missing reactions:write scope in Render logs.
+                log.warning(f"[feedback] reactions_add {name!r} failed: {_msg}")
 
 
 def _permalink_for(web: WebClient, channel: str, msg_ts: str) -> str:
@@ -1625,7 +1628,14 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 messages=[{"role": "user", "content": _body}],
             )
             import json as _json
-            _parsed = _json.loads(_parse_resp.content[0].text.strip())
+            _raw_text = _parse_resp.content[0].text.strip()
+            # Haiku sometimes wraps JSON in markdown code fences — strip them.
+            if _raw_text.startswith("```"):
+                _raw_text = _raw_text.split("```")[1]
+                if _raw_text.startswith("json"):
+                    _raw_text = _raw_text[4:]
+                _raw_text = _raw_text.strip()
+            _parsed = _json.loads(_raw_text)
             _ename = _parsed.get("entity_name", "").strip()
             _etype = _parsed.get("entity_type", "publisher").lower().strip()
             _enote = _parsed.get("note", _body).strip()
