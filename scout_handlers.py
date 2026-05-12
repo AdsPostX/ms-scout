@@ -1647,11 +1647,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                     _caller_user_id=user_id,
                     _caller_permalink=_permalink,
                 )
-                web.chat_postMessage(
+                _rpost = web.chat_postMessage(
                     channel=channel, thread_ts=thread_ts,
                     text=_result, unfurl_links=False,
                 )
-                _seed_feedback_reactions(web, channel, thread_ts or msg_ts)
+                _seed_feedback_reactions(web, channel, (_rpost.get("ts") or thread_ts or msg_ts))
                 log.info(f"[remember shortcut] {_ename!r} ({_etype}) logged by {user_id}")
                 return
         except Exception as _re:
