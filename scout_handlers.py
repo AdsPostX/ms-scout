@@ -828,9 +828,9 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     with _LAST_THREAD_LOCK:
         _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
 
-    if isinstance(response, dict) and response.get("type") == "brief":
-        brief_data = response["brief_data"]
-        copy       = response["copy"]
+    if response.payload and response.payload.get("type") == "brief":
+        brief_data = response.payload["brief_data"]
+        copy       = response.payload["copy"]
         _store_brief(thread_ts, brief_data, copy)
         _merge_thread_context(thread_ts, {
             "offer":       brief_data.get("advertiser"),
@@ -839,20 +839,18 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         })
         blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
         web.chat_update(channel=channel, ts=placeholder["ts"],
-                        text=response.get("fallback_text", "Campaign Brief ready."), blocks=blocks)
+                        text=response.payload.get("fallback_text", "Campaign Brief ready."), blocks=blocks)
         return
 
     sugg: list = []
     launched_offer_sg: dict | None = None
-    if isinstance(response, dict) and response.get("type") == "text_with_context":
-        extracted = response.get("extracted_context", {})
+    if response.payload and response.payload.get("type") == "text_with_context":
+        extracted = response.payload.get("extracted_context", {})
         if extracted:
             launched_offer_sg = extracted.pop("launched_offer", None)
             _merge_thread_context(thread_ts, extracted)
-        sugg = response.get("suggestions", [])
-        response_text = response["text"]
-    else:
-        response_text = response if isinstance(response, str) else str(response)
+        sugg = response.payload.get("suggestions", [])
+    response_text = response.text
 
     # Launch notification (same logic as handle_event)
     if launched_offer_sg:
@@ -936,7 +934,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         msg_ts  = (payload.get("message") or {}).get("ts", "")
         def _run_ghost(u=user_id, t=msg_ts):
             resp = ask("ghost campaigns", history=[], user_id=u)
-            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            text = resp.text
             web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
         threading.Thread(target=_run_ghost, daemon=True).start()
         return
@@ -946,7 +944,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         msg_ts  = (payload.get("message") or {}).get("ts", "")
         def _run_fill(u=user_id, t=msg_ts):
             resp = ask("fill rate brief", history=[], user_id=u)
-            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            text = resp.text
             web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
         threading.Thread(target=_run_fill, daemon=True).start()
         return
@@ -956,7 +954,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         msg_ts  = (payload.get("message") or {}).get("ts", "")
         def _run_opps(u=user_id, t=msg_ts):
             resp = ask("top revenue opportunities", history=[], user_id=u)
-            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            text = resp.text
             web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {_sanitize_slack(str(text))}")
         threading.Thread(target=_run_opps, daemon=True).start()
         return
@@ -968,7 +966,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         query   = f"offers for {pub}" if action_id == "pulse_scout_offers" else f"dig into {pub}"
         def _run_pub(q=query, u=user_id, t=msg_ts):
             resp = ask(q, history=[], user_id=u)
-            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            text = resp.text
             web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
         threading.Thread(target=_run_pub, daemon=True).start()
         return
@@ -1084,21 +1082,21 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
         finally:
             stop_rotating()
 
-        if isinstance(response, dict) and response.get("type") == "brief":
-            brief_data = response["brief_data"]
-            copy       = response["copy"]
+        if response.payload and response.payload.get("type") == "brief":
+            brief_data = response.payload["brief_data"]
+            copy       = response.payload["copy"]
             blocks     = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
             web.chat_update(
                 channel=dm_channel, ts=placeholder["ts"],
                 text="Campaign Brief", blocks=blocks,
             )
         else:
-            if isinstance(response, dict) and response.get("type") == "text_with_context":
-                response_text     = response.get("text", "")
-                suggestions       = response.get("suggestions", [])
+            if response.payload and response.payload.get("type") == "text_with_context":
+                response_text     = response.text
+                suggestions       = response.payload.get("suggestions", [])
                 suggestion_blocks = _build_suggestion_buttons(suggestions)
             else:
-                response_text     = response if isinstance(response, str) else str(response)
+                response_text     = response.text
                 suggestion_blocks = []
             response_text = response_text[:3000]  # cap for Slack text= limit
             content_blocks = _text_to_blocks(response_text)
@@ -1565,10 +1563,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                     try:
                         response = ask(question, history=[], user_id="self-qa")
                         elapsed = _time.monotonic() - t0
-                        if isinstance(response, dict):
-                            text = response.get("fallback_text") or response.get("text") or str(response)
+                        if response.payload:
+                            text = response.payload.get("fallback_text") or response.text
                         else:
-                            text = str(response)
+                            text = response.text
                         responded = len(text.strip()) > 40
                         hint_match = any(h.lower() in text.lower() for h in pass_hints)
                         passed = responded and hint_match
@@ -1740,7 +1738,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             response = ask(query, history=history, user_id=user_id)
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
-            _tools_called = response.get("tools_called", []) if isinstance(response, dict) else []
+            _tools_called = response.tools_called
             try:
                 user_info = web.users_info(user=user_id)
                 _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
@@ -1769,18 +1767,17 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
         # Extract structured context + suggestion buttons
         suggestions: list = []
-        if isinstance(response, dict) and response.get("type") == "text_with_context":
-            extracted = response.get("extracted_context", {})
+        if response.payload and response.payload.get("type") == "text_with_context":
+            extracted = response.payload.get("extracted_context", {})
             if extracted:
                 launched_offer_dm = extracted.pop("launched_offer", None)
                 _merge_thread_context(thread_ts or msg_ts, extracted)
-            suggestions = response.get("suggestions", [])
-            response = response["text"]
+            suggestions = response.payload.get("suggestions", [])
 
         # Post reply — flat DM message (thread_ts=None) or in-thread if user was already in one
-        if isinstance(response, dict) and response.get("type") == "brief":
-            brief_data = response["brief_data"]
-            copy       = response["copy"]
+        if response.payload and response.payload.get("type") == "brief":
+            brief_data = response.payload["brief_data"]
+            copy       = response.payload["copy"]
             _store_brief(thread_ts or msg_ts, brief_data, copy)
             _merge_thread_context(thread_ts or msg_ts, {
                 "offer":       brief_data.get("advertiser"),
@@ -1790,14 +1787,14 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
             web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
-                text=response.get("fallback_text", "Campaign Brief ready."),
+                text=response.payload.get("fallback_text", "Campaign Brief ready."),
                 blocks=blocks,
                 unfurl_links=False,
             )
-        elif isinstance(response, dict) and response.get("type") == "opportunities":
-            header_text       = _sanitize_slack(response.get("text", ""))
-            offer_cards       = _build_opportunity_cards(response.get("offers", []), thread_ts=thread_ts)
-            suggestion_blocks = _build_suggestion_buttons(response.get("suggestions", []))
+        elif response.payload and response.payload.get("type") == "opportunities":
+            header_text       = _sanitize_slack(response.text)
+            offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+            suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
             all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks]
             web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
@@ -1806,7 +1803,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 unfurl_links=False,
             )
         else:
-            response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))[:3000]
+            response_text     = _sanitize_slack(response.text)[:3000]
             content_blocks    = _text_to_blocks(response_text)
             suggestion_blocks = _build_suggestion_buttons(suggestions)
             # No elapsed-time footer in DMs — the reaction disappearing IS the signal
@@ -1833,7 +1830,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting
-        _tools_called = response.get("tools_called", []) if isinstance(response, dict) else []
+        _tools_called = response.tools_called
         try:
             user_info = web.users_info(user=user_id)
             _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
@@ -1857,14 +1854,13 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     # Block B: extract entities + suggestions from text_with_context responses
     suggestions: list = []
     launched_offer: dict | None = None
-    if isinstance(response, dict) and response.get("type") == "text_with_context":
-        extracted = response.get("extracted_context", {})
+    if response.payload and response.payload.get("type") == "text_with_context":
+        extracted = response.payload.get("extracted_context", {})
         if extracted:
             launched_offer = extracted.pop("launched_offer", None)
             _merge_thread_context(thread_ts, extracted)
             log.info(f"Saved thread context for {thread_ts}: {list(extracted.keys())}")
-        suggestions = response.get("suggestions", [])
-        response = response["text"]
+        suggestions = response.payload.get("suggestions", [])
 
     # Launch notification — thread-only, targeted tags, no channel noise
     if launched_offer:
@@ -1894,9 +1890,9 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 daemon=True,
             ).start()
 
-    if isinstance(response, dict) and response.get("type") == "brief":
-        brief_data = response["brief_data"]
-        copy       = response["copy"]
+    if response.payload and response.payload.get("type") == "brief":
+        brief_data = response.payload["brief_data"]
+        copy       = response.payload["copy"]
 
         # Persist brief to disk — survives Scout restarts and dual-instance races
         _store_brief(thread_ts, brief_data, copy)
@@ -1910,7 +1906,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         })
 
         blocks        = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
-        fallback_text = response.get("fallback_text", "Campaign Brief ready.")
+        fallback_text = response.payload.get("fallback_text", "Campaign Brief ready.")
 
         web.chat_update(
             channel=channel,
@@ -1925,10 +1921,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         if _real_url and not _real_url.startswith("Not available"):
             _run_preflight_qa(web, channel, thread_ts, brief_data)
 
-    elif isinstance(response, dict) and response.get("type") == "opportunities":
-        header_text       = _sanitize_slack(response.get("text", ""))
-        offer_cards       = _build_opportunity_cards(response.get("offers", []), thread_ts=thread_ts)
-        suggestion_blocks = _build_suggestion_buttons(response.get("suggestions", []))
+    elif response.payload and response.payload.get("type") == "opportunities":
+        header_text       = _sanitize_slack(response.text)
+        offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+        suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
         elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
         all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, elapsed_ctx]
         web.chat_update(
@@ -1937,11 +1933,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             text=header_text or "Top opportunities",
             blocks=all_blocks,
         )
-        log.info(f"Posted opportunity cards ({len(response.get('offers', []))} offers) in {channel}")
+        log.info(f"Posted opportunity cards ({len(response.payload.get('offers', []))} offers) in {channel}")
 
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
-        response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))[:3000]
+        response_text     = _sanitize_slack(response.text)[:3000]
         content_blocks    = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
         web.chat_update(
