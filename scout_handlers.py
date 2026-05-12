@@ -1648,6 +1648,65 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             log.warning(f"[remember shortcut] parse failed, falling through to agent: {_re}")
         # Fall through to agent if parse fails
 
+    # @Scout why do you think that about [entity] / where did you learn about [entity]
+    # Direct shortcut — bypasses LLM so it cannot answer from conversation context.
+    _WHY_RE = re.compile(
+        r'(?:why\s+(?:do\s+you\s+(?:think|know|say)|did\s+you\s+(?:learn|get))\s+(?:that\s+)?about\s+|'
+        r'where\s+did\s+you\s+(?:learn|get\s+that)\s+about\s+|'
+        r'source\s+for\s+|'
+        r'who\s+told\s+you\s+(?:that\s+)?about\s+)'
+        r'(.+)',
+        re.IGNORECASE | re.DOTALL,
+    )
+    _why_m = _WHY_RE.search(query)
+    if _why_m:
+        _wentity = _why_m.group(1).strip().rstrip("?").strip()
+        try:
+            from scout_agent import why_entity_note
+            _wresult = why_entity_note(_wentity)
+            _wpost = web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=_wresult, unfurl_links=False,
+            )
+            _seed_feedback_reactions(web, channel, (_wpost.get("ts") or thread_ts or msg_ts))
+            log.info(f"[why shortcut] {_wentity!r} by {user_id}")
+            return
+        except Exception as _we:
+            log.warning(f"[why shortcut] failed, falling through to agent: {_we}")
+
+    # @Scout forget that for [entity] / drop the note on [entity]
+    # Direct shortcut — same pattern as remember/why.
+    _FORGET_RE = re.compile(
+        r'(?:forget\s+(?:that\s+for|(?:that\s+)?about|what\s+you\s+know\s+about)|'
+        r'drop\s+the\s+note\s+(?:on|for|about)|'
+        r'remove\s+the\s+(?:note|fact)\s+(?:on|for|about)\s*)'
+        r'\s*(.+)',
+        re.IGNORECASE | re.DOTALL,
+    )
+    _forget_m = _FORGET_RE.search(query)
+    if _forget_m:
+        _fentity = _forget_m.group(1).strip().rstrip("?").strip()
+        _permalink = _permalink_for(web, channel, msg_ts)
+        try:
+            from scout_agent import forget_entity_note
+            # Try publisher first, then advertiser (why_entity_note searches both — forget needs a type)
+            _fresult = forget_entity_note(_fentity, "publisher",
+                                          _caller_user_id=user_id, _caller_permalink=_permalink)
+            if "no note" in _fresult.lower():
+                _fresult2 = forget_entity_note(_fentity, "advertiser",
+                                               _caller_user_id=user_id, _caller_permalink=_permalink)
+                if "Forgot" in _fresult2:
+                    _fresult = _fresult2
+            _fpost = web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=_fresult, unfurl_links=False,
+            )
+            _seed_feedback_reactions(web, channel, (_fpost.get("ts") or thread_ts or msg_ts))
+            log.info(f"[forget shortcut] {_fentity!r} by {user_id}")
+            return
+        except Exception as _fe:
+            log.warning(f"[forget shortcut] failed, falling through to agent: {_fe}")
+
     # Help / capabilities discovery — no need to spin up the agent for this
     if _is_help_query(query):
         web.chat_postMessage(
