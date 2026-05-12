@@ -105,8 +105,14 @@ def test_ask_status():
         elapsed = time.monotonic() - t0
 
         text = result.get("text", result) if isinstance(result, dict) else result
-        if not text or "broke" in text.lower() or "error" in text.lower():
+        # Check for Scout self-reporting failure — not ops vocabulary like "tracking errors"
+        _fail_phrases = ("something broke", "i got an error", "encountered an error", "failed to retrieve")
+        if not text or any(p in text.lower() for p in _fail_phrases):
             return False, f"Bad response: {str(text)[:120]}"
+        # Positive check: a status response must contain at least one health keyword
+        _status_keywords = ("healthy", "degraded", "available", "version", "benchmark", "offer", "uptime")
+        if not any(kw in text.lower() for kw in _status_keywords):
+            return False, f"Unexpected response (no status keywords found): {str(text)[:120]}"
         first_line = str(text).split('\n')[0].strip()
         preview = (first_line[:60] + "…") if len(first_line) > 60 else first_line
         return True, f"Responded in {elapsed:.1f}s — {preview}"

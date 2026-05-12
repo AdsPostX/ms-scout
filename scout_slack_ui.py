@@ -42,6 +42,10 @@ log_ref = None  # populated at import time by scout_bot
 # NOTE: _SOLO_HEADER_RE is promoted to module level (was inside _text_to_blocks)
 _SOLO_HEADER_RE = re.compile(r'^\*[^*]{15,}\*\s*')
 
+# Pipe table fallback: requires ≥2 columns to avoid false-positives on single-pipe lines.
+_TABLE_ROW_RE = re.compile(r'^\|(.+\|){2,}\s*$')
+_TABLE_SEP_RE = re.compile(r'^\|[-:\s|]+\|?\s*$')
+
 _HELP_TRIGGERS = {
     "help", "commands", "capabilities", "what can you do", "how do you work",
     "what do you know", "what do you do", "?", "who are you", "teach me",
@@ -212,27 +216,6 @@ def _build_card_with_image(
 
     return blocks
 
-
-def _build_data_table(headers: list[str], rows: list[list[str]]) -> list[dict]:
-    """
-    Build a structured data table for metrics display.
-
-    Uses section.fields for 2-column grid layout.
-    Headers should be ≤4 for readable display.
-    """
-    if not headers or not rows:
-        return []
-
-    if len(headers) > 4:
-        headers = headers[:4]
-
-    fields = [{"type": "mrkdwn", "text": f"*{h}*"} for h in headers]
-
-    for row in rows[:8]:
-        row_text = "  ·  ".join(str(cell) for cell in row[:len(headers)])
-        fields.append({"type": "mrkdwn", "text": row_text})
-
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": ""}, "fields": fields}]
 
 
 def _build_rich_text_list(items: list[str], ordered: bool = False, indent: int = 0) -> list[dict]:
@@ -732,6 +715,7 @@ def _text_to_blocks(text: str) -> list:
         ctx_lines: list = []
         line_buf: list = []
         list_buf: list = []
+        table_buf: list = []
         in_fence = False
         fence_buf: list = []
 
@@ -768,6 +752,23 @@ def _text_to_blocks(text: str) -> list:
 
             stripped = raw_line.strip()
 
+            # ── Pipe table fallback ──────────────────────────────────────────
+            if _TABLE_ROW_RE.match(stripped):
+                if _TABLE_SEP_RE.match(stripped):
+                    continue  # skip separator rows silently
+                table_buf.append(stripped)
+                continue
+
+            # Flush table_buf before processing non-table lines
+            if table_buf:
+                table_text = '\n'.join(table_buf)
+                log.debug("[text_to_blocks] pipe table fallback triggered: %d rows", len(table_buf))
+                rt_elems.append({
+                    "type": "rich_text_preformatted",
+                    "elements": [{"type": "text", "text": table_text}],
+                })
+                table_buf = []
+
             # ── Bullet line ──────────────────────────────────────────────────
             if _BULLET_RE.match(stripped):
                 item_text = _BULLET_RE.sub('', stripped)
@@ -791,6 +792,13 @@ def _text_to_blocks(text: str) -> list:
                 line_buf.append(stripped)
 
         # Flush remaining buffers
+        if table_buf:
+            table_text = '\n'.join(table_buf)
+            log.debug("[text_to_blocks] pipe table fallback triggered: %d rows", len(table_buf))
+            rt_elems.append({
+                "type": "rich_text_preformatted",
+                "elements": [{"type": "text", "text": table_text}],
+            })
         if list_buf:
             el = _flush_list(list_buf)
             if el: rt_elems.append(el)
