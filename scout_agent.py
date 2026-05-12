@@ -20,7 +20,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from typing import Optional
+from types import MappingProxyType
+from typing import Mapping, Optional
 import anthropic
 from scout_types import FormattedOffer, Brief  # type: ignore[import]  # noqa: F401
 from dotenv import load_dotenv
@@ -40,9 +41,18 @@ log = logging.getLogger("scout_agent")
 @dataclass(frozen=True)
 class AskResult:
     text: str
-    tools_called: list = field(default_factory=list)
+    tools_called: tuple = ()
     duration_ms: int = 0
-    payload: Optional[dict] = None
+    payload: Optional[Mapping] = None
+
+    def __post_init__(self) -> None:
+        # Defense-in-depth: callers may pass a list; coerce to tuple so handlers
+        # cannot mutate telemetry mid-flight. Wrap payload dicts in a read-only
+        # MappingProxyType for the same reason (CodeRabbit on PR #69).
+        if not isinstance(self.tools_called, tuple):
+            object.__setattr__(self, "tools_called", tuple(self.tools_called))
+        if self.payload is not None and not isinstance(self.payload, MappingProxyType):
+            object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
 
 
 # ── PR 17c / PR 18: SUPPORTED_NETWORKS — single source ───────────────────────

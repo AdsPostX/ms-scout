@@ -9,6 +9,7 @@ These tests do NOT call the live Anthropic API. They exercise the typed
 boundary contract directly: ask() must return AskResult on every code
 path, including the no-API-key early return.
 """
+import dataclasses
 import os
 import sys
 import unittest
@@ -28,26 +29,44 @@ class TestAskContract(unittest.TestCase):
             r = ask("status", user_id="test-contract")
         self.assertIsInstance(r, AskResult)
         self.assertIsInstance(r.text, str)
-        self.assertIsInstance(r.tools_called, list)
+        # tools_called is coerced to tuple by __post_init__ for deep immutability.
+        self.assertIsInstance(r.tools_called, tuple)
         self.assertIsInstance(r.duration_ms, int)
 
     def test_askresult_is_frozen(self):
         """AskResult must be immutable so handlers can't mutate telemetry mid-flight."""
-        r = AskResult(text="x", tools_called=[], duration_ms=0)
-        with self.assertRaises(Exception):
+        r = AskResult(text="x", tools_called=(), duration_ms=0)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
             r.text = "y"  # type: ignore[misc]
+
+    def test_askresult_tools_called_is_immutable_sequence(self):
+        """Passing a list at construction must be coerced to a tuple (no .append())."""
+        r = AskResult(text="x", tools_called=["a", "b"], duration_ms=0)
+        self.assertIsInstance(r.tools_called, tuple)
+        self.assertEqual(r.tools_called, ("a", "b"))
+        with self.assertRaises(AttributeError):
+            r.tools_called.append("c")  # type: ignore[attr-defined]
+
+    def test_askresult_payload_is_read_only_mapping(self):
+        """payload dict must be wrapped in MappingProxyType so handlers can't mutate it."""
+        r = AskResult(text="x", tools_called=(), duration_ms=0, payload={"k": "v"})
+        # Still dict-like for read access.
+        self.assertEqual(r.payload["k"], "v")
+        # But mutation is blocked at runtime.
+        with self.assertRaises(TypeError):
+            r.payload["k"] = "z"  # type: ignore[index]
 
     def test_askresult_payload_defaults_to_none(self):
         """Payload field is optional — plain-text responses must not require it."""
-        r = AskResult(text="hello", tools_called=["q"], duration_ms=42)
+        r = AskResult(text="hello", tools_called=("q",), duration_ms=42)
         self.assertIsNone(r.payload)
-        self.assertEqual(r.tools_called, ["q"])
+        self.assertEqual(r.tools_called, ("q",))
         self.assertEqual(r.duration_ms, 42)
 
     def test_askresult_payload_round_trips(self):
         """Structured-dispatch payload must survive untouched for handler routing."""
         payload = {"type": "brief", "brief_data": {"advertiser": "ACME"}}
-        r = AskResult(text="brief ready", tools_called=[], duration_ms=0, payload=payload)
+        r = AskResult(text="brief ready", tools_called=(), duration_ms=0, payload=payload)
         self.assertEqual(r.payload["type"], "brief")
         self.assertEqual(r.payload["brief_data"]["advertiser"], "ACME")
 

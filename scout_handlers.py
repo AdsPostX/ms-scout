@@ -842,6 +842,20 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
                         text=response.payload.get("fallback_text", "Campaign Brief ready."), blocks=blocks)
         return
 
+    if response.payload and response.payload.get("type") == "opportunities":
+        header_text       = _sanitize_slack(response.text)
+        offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+        suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
+        all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks,
+                             {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}]
+        web.chat_update(
+            channel=channel, ts=_placeholder_ts_sg,
+            text=header_text or "Top opportunities",
+            blocks=all_blocks,
+        )
+        log.info(f"Suggestion answered (opportunities) in {channel} (thread {thread_ts}): {query!r}")
+        return
+
     sugg: list = []
     launched_offer_sg: dict | None = None
     if response.payload and response.payload.get("type") == "text_with_context":
@@ -1089,6 +1103,17 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
             web.chat_update(
                 channel=dm_channel, ts=placeholder["ts"],
                 text="Campaign Brief", blocks=blocks,
+            )
+        elif response.payload and response.payload.get("type") == "opportunities":
+            header_text       = _sanitize_slack(response.text)
+            offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+            suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
+            all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks,
+                                 {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}]
+            web.chat_update(
+                channel=dm_channel, ts=_placeholder_ts_ah,
+                text=header_text or "Top opportunities",
+                blocks=all_blocks,
             )
         else:
             if response.payload and response.payload.get("type") == "text_with_context":
