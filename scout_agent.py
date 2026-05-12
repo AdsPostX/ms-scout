@@ -3910,9 +3910,10 @@ def run_offer_scraper() -> str:
     Takes ~2 minutes. Writes data/offers_latest.json and posts digest.
     """
     import scout_bot as _sb
-    if _sb._SCRAPER_RUNNING.is_set():
+    _running = getattr(_sb, "_SCRAPER_RUNNING", None)
+    if _running is not None and _running.is_set():
         return (
-            ":hourglass_flowing_sand: Scraper is already running (daily 6am CT run in progress). "
+            ":hourglass_flowing_sand: Scraper is already running. "
             "Check back in a few minutes — offer inventory will be fresh when it completes."
         )
     try:
