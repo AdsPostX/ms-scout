@@ -1602,6 +1602,52 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     # ── Special commands (handled before agent) ───────────────────────────────
 
+    # @Scout remember ... — direct shortcut, bypasses LLM routing entirely.
+    # Catches "remember [entity] is/has/does..." without requiring "that".
+    # Parses entity via a small Haiku call so natural language names are handled.
+    _REMEMBER_RE = re.compile(r'^remember\s+(.+)', re.IGNORECASE | re.DOTALL)
+    _remember_m = _REMEMBER_RE.match(query)
+    if _remember_m:
+        _body = _remember_m.group(1).strip()
+        _permalink = _permalink_for(web, channel, msg_ts)
+        try:
+            from scout_agent import record_entity_note
+            import anthropic as _ant, os as _os
+            _ant_client = _ant.Anthropic(api_key=_os.getenv("ANTHROPIC_API_KEY", ""))
+            _parse_resp = _ant_client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=256,
+                system=(
+                    'Extract entity_name, entity_type ("publisher" or "advertiser"), '
+                    'and a concise note from the user message. '
+                    'Return JSON only: {"entity_name": "...", "entity_type": "...", "note": "..."}'
+                ),
+                messages=[{"role": "user", "content": _body}],
+            )
+            import json as _json
+            _parsed = _json.loads(_parse_resp.content[0].text.strip())
+            _ename = _parsed.get("entity_name", "").strip()
+            _etype = _parsed.get("entity_type", "publisher").lower().strip()
+            _enote = _parsed.get("note", _body).strip()
+            if _etype not in ("publisher", "advertiser"):
+                _etype = "publisher"
+            if _ename:
+                _result = record_entity_note(
+                    _ename, _etype, _enote,
+                    _caller_user_id=user_id,
+                    _caller_permalink=_permalink,
+                )
+                web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=_result, unfurl_links=False,
+                )
+                _seed_feedback_reactions(web, channel, thread_ts or msg_ts)
+                log.info(f"[remember shortcut] {_ename!r} ({_etype}) logged by {user_id}")
+                return
+        except Exception as _re:
+            log.warning(f"[remember shortcut] parse failed, falling through to agent: {_re}")
+        # Fall through to agent if parse fails
+
     # Help / capabilities discovery — no need to spin up the agent for this
     if _is_help_query(query):
         web.chat_postMessage(
