@@ -58,8 +58,12 @@ services:
         sync: false
       - key: SCOUT_ADMIN_USER_ID
         sync: false
+      # Cross-service offer feed — set to ms-demand-feed internal URL once confirmed stable.
+      # Leave unset (or "") to use disk fallback (current production behavior).
+      - key: DEMAND_FEED_URL
+        value: ""
 
-  - type: worker
+  - type: web
     name: ms-demand-feed
     runtime: python
     region: oregon
@@ -71,6 +75,8 @@ services:
       mountPath: /opt/render/project/src/data
       sizeGB: 1            # Persists offers_latest.json + scraper_state.json across deploys
     envVars:
+      - key: DEMAND_FEED_PORT
+        value: "8080"
       # Affiliate network credentials — set all in Render dashboard, never commit values
       - key: IMPACT_SID
         sync: false

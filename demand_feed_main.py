@@ -14,11 +14,14 @@ State: data/scraper_state.json  (same key as Scout's daemon — no conflict,
        different disk volumes on Render)
 """
 
+import http.server
 import json
 import logging
 import multiprocessing
 import os
 import pathlib
+import socketserver
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -125,7 +128,34 @@ def _run() -> None:
         raise q.get()
 
 
+class _OffersHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/offers":
+            self.send_error(404)
+            return
+        try:
+            data = _OFFERS_FILE.read_bytes()
+        except FileNotFoundError:
+            self.send_error(503, "offers not yet available")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):  # suppress request logs
+        pass
+
+
+def _start_http_server() -> None:
+    port = int(os.getenv("DEMAND_FEED_PORT", "8080"))
+    server = socketserver.TCPServer(("", port), _OffersHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log.info(f"[demand-feed] HTTP server started on :{port}")
+
+
 def main() -> None:
+    _start_http_server()
     log.info("[demand-feed] starting")
 
     while True:
