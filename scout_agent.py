@@ -3901,8 +3901,8 @@ def get_scout_status() -> dict:
     except Exception as e:
         status["clickhouse"] = f"unavailable: {str(e)[:80]}"
 
-    # Data quality warnings
-    warnings = []
+    # Data quality warnings — extend rather than overwrite so earlier warnings survive
+    warnings = list(status.get("warnings", []))
     if bench and not bench.get("by_offer_impact_id"):
         warnings.append("No Tier 1 (exact offer) benchmarks — all scoring from Tier 2+")
     cats_null = sum(1 for o in offers if not o.get("category"))
