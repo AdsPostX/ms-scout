@@ -50,9 +50,6 @@ from scout_handlers import (
 
 load_dotenv()  # plist env vars (SCOUT_ENV, PULSE_CHANNEL, etc.) take precedence over .env
 
-# Mutex: prevents daemon and on-demand trigger from running run_headless() concurrently.
-# On-demand run_offer_scraper() checks this before calling run_headless().
-_SCRAPER_RUNNING = threading.Event()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1820,82 +1817,6 @@ def _post_harvest_audit(harvest_result: dict) -> None:
         log.warning(f"[harvest] audit post failed (non-fatal): {e}")
 
 
-def _run_scraper_daemon() -> None:
-    """
-    Offer scraper daemon — fetches affiliate inventory (Impact/FlexOffers/MaxBounty)
-    once per day at 6:00 AM CT, then posts the Scout Signal digest.
-
-    First-boot behaviour: if scraper_state.json doesn't exist, run immediately
-    regardless of time of day. This ensures Render deployments (which can happen
-    any time) don't leave offer inventory empty for hours.
-
-    Check-first on subsequent starts: if past 6am and haven't run today, fire now.
-    State: data/scraper_state.json
-    """
-    import pytz
-    from datetime import datetime as _dt, timedelta
-    from offer_scraper import run_headless as _run_scraper
-
-    _SCRAPER_STATE = _DATA_DIR / "scraper_state.json"
-
-    def _load_state():
-        try:
-            return json.loads(_SCRAPER_STATE.read_text())
-        except Exception:
-            return {}
-
-    def _save_state(s):
-        _atomic_write(_SCRAPER_STATE, s)
-
-    while True:
-        try:
-            chicago = pytz.timezone("America/Chicago")
-            now_chi = _dt.now(chicago)
-            today_str = now_chi.strftime("%Y-%m-%d")
-            state = _load_state()
-
-            # FIRST BOOT: no state file → run immediately regardless of hour.
-            # Also triggers when offers_latest.json is missing (e.g. fresh Render deploy
-            # mid-day after the scraper already ran on the previous container).
-            _OFFERS_FILE = _DATA_DIR / "offers_latest.json"
-            offers_missing = not _OFFERS_FILE.exists() or _OFFERS_FILE.stat().st_size < 100
-            is_first_boot = not _SCRAPER_STATE.exists() or not state or offers_missing
-
-            # CHECK FIRST: past 6am and haven't run today → fire immediately.
-            should_run = is_first_boot or (
-                state.get("last_run_date") != today_str and now_chi.hour >= 6
-            )
-
-            if should_run:
-                if not _SCRAPER_STATE.exists() or not state:
-                    reason = "first boot"
-                elif offers_missing:
-                    reason = "offers file missing"
-                else:
-                    reason = "daily run"
-                log.info(f"[scraper] running offer fetch ({reason})")
-                _SCRAPER_RUNNING.set()
-                try:
-                    _run_scraper()
-                finally:
-                    _SCRAPER_RUNNING.clear()
-                state["last_run_date"] = today_str
-                _save_state(state)
-                log.info("[scraper] done — offers_latest.json updated")
-
-            # Sleep until next 6am CT
-            target = now_chi.replace(hour=6, minute=0, second=0, microsecond=0)
-            if now_chi >= target:
-                target += timedelta(days=1)
-            sleep_secs = (target - now_chi).total_seconds()
-            log.info(f"[scraper] sleeping {sleep_secs / 3600:.1f}h until next run at {target}")
-            time.sleep(sleep_secs)
-
-        except Exception as e:
-            log.error(f"[scraper] cycle failed: {e}", exc_info=True)
-            time.sleep(3600)  # retry in 1 hour on failure
-
-
 _PID_FILE = _DATA_DIR / "scout.pid"
 
 
@@ -2346,7 +2267,6 @@ def main():
     else:
         log.info("[pulse] disabled via PULSE_ENABLED=false — skipping pulse thread")
     _start_daemon(_nightly_harvest,       name="context-harvest")
-    _start_daemon(_run_scraper_daemon,    name="scraper")
     _start_daemon(_notion_watcher_loop,   name="notion-watcher",      args=(web_client,))
     _start_daemon(_copy_coalescer_loop,   name="copy-coalescer")
     # PR 15c — live health heartbeat (CH ping every 30 min, NOT in HTTP /health)
