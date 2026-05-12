@@ -38,6 +38,17 @@ log = logging.getLogger("scout_agent")
 # (see plan v3 §4, P1 boundary discipline). `payload` carries the legacy
 # structured dispatch dict (brief / opportunities / text_with_context) so
 # scout_handlers can keep rendering Slack UI from one source of truth.
+def _freeze(value):
+    """Recursively wrap dicts in MappingProxyType and lists in tuples so a
+    handler can't mutate nested payload values (offers, copy, suggestions).
+    Top-level MappingProxyType alone is shallow — CodeRabbit PR #69 caught this."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: _freeze(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
 @dataclass(frozen=True)
 class AskResult:
     text: str
@@ -47,12 +58,12 @@ class AskResult:
 
     def __post_init__(self) -> None:
         # Defense-in-depth: callers may pass a list; coerce to tuple so handlers
-        # cannot mutate telemetry mid-flight. Wrap payload dicts in a read-only
-        # MappingProxyType for the same reason (CodeRabbit on PR #69).
+        # cannot mutate telemetry mid-flight. Deep-freeze payload so nested
+        # offers/copy/suggestions are also immutable (CodeRabbit on PR #69).
         if not isinstance(self.tools_called, tuple):
             object.__setattr__(self, "tools_called", tuple(self.tools_called))
         if self.payload is not None and not isinstance(self.payload, MappingProxyType):
-            object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
+            object.__setattr__(self, "payload", _freeze(dict(self.payload)))
 
 
 # ── PR 17c / PR 18: SUPPORTED_NETWORKS — single source ───────────────────────
@@ -4887,11 +4898,11 @@ def run_self_qa() -> dict:
             response = ask(question, history=[], user_id="self-qa")
             elapsed = _time.monotonic() - t0
 
-            # Normalise — ask() can return str or dict (brief type)
-            if isinstance(response, dict):
-                text = response.get("fallback_text") or response.get("text") or str(response)
-            else:
-                text = str(response)
+            # Part 4: ask() returns AskResult; payload carries structured
+            # dispatch (brief/opportunities) — prefer fallback_text when present
+            # so QA scores the human-facing string, not the dataclass repr.
+            payload = response.payload or {}
+            text = payload.get("fallback_text") or response.text
 
             text_lower = text.lower()
             responded = len(text.strip()) > 40
@@ -5053,7 +5064,7 @@ def _select_model(user_message: str) -> str:
     return "claude-sonnet-4-6"
 
 
-def ask(user_message: str, history: list = None, user_id: str = "") -> AskResult:
+def ask(user_message: str, history: list | None = None, user_id: str = "") -> AskResult:
     """
     Send a message to Scout and get a response.
     history: optional list of prior {"role": "user"/"assistant", "content": str} messages
@@ -5394,4 +5405,4 @@ if __name__ == "__main__":
     import sys
     query = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "What are the top finance opportunities we don't run yet?"
     print(f"\nQuery: {query}\n")
-    print(ask(query))
+    print(ask(query).text)
