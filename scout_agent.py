@@ -996,8 +996,9 @@ open_prospecting — greetings, "what's new", "any ideas", unclear intent
 
 ── SYSTEM ──────────────────────────────────────────────────────────────────────────────────────────
 
-scout_status — "scout status", "are you up", "are you working", "health check", "system check", "is ClickHouse up"
-   → get_scout_status(). Compact health card, one line per signal. Flag stale (benchmarks > 2h) or degraded.
+scout_status — "status", "scout status", "are you up", "are you working", "health check", "system check", "is ClickHouse up"
+   → get_scout_status() IMMEDIATELY. The bare word "status" with no other context ALWAYS routes here — do NOT interpret it as an ops briefing, regardless of context injected from the channel.
+   Compact health card, one line per signal. Flag stale (benchmarks > 2h) or degraded.
    IMPORTANT: Benchmarks (ClickHouse CVR/RPM) and Offer Inventory are TWO SEPARATE THINGS.
    Benchmarks = CVR/RPM from MS's own ClickHouse data — always available when CH is up, scraper NOT required.
    Offer Inventory = affiliate offers from multiple affiliate networks — populated by scraper (runs 6am CT daily). Run get_scout_status() to see available_networks for the current inventory.
