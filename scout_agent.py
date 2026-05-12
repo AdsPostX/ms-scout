@@ -17,8 +17,11 @@ import urllib.parse
 import urllib.request
 import datetime as _dt_mod
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from types import MappingProxyType
+from typing import Mapping, Optional
 import anthropic
 from scout_types import FormattedOffer, Brief  # type: ignore[import]  # noqa: F401
 from dotenv import load_dotenv
@@ -27,6 +30,40 @@ import queries as _q
 load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 
 log = logging.getLogger("scout_agent")
+
+
+# ── Part 4 (plan v3): typed boundary contract for ask() ──────────────────────
+# Replaces the old Union[str, dict] return shape that left tools_called gated on
+# a defensive isinstance check in scout_handlers, producing empty usage_log rows
+# (see plan v3 §4, P1 boundary discipline). `payload` carries the legacy
+# structured dispatch dict (brief / opportunities / text_with_context) so
+# scout_handlers can keep rendering Slack UI from one source of truth.
+def _freeze(value):
+    """Recursively wrap dicts in MappingProxyType and lists in tuples so a
+    handler can't mutate nested payload values (offers, copy, suggestions).
+    Top-level MappingProxyType alone is shallow — CodeRabbit PR #69 caught this."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: _freeze(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
+@dataclass(frozen=True)
+class AskResult:
+    text: str
+    tools_called: tuple = ()
+    duration_ms: int = 0
+    payload: Optional[Mapping] = None
+
+    def __post_init__(self) -> None:
+        # Defense-in-depth: callers may pass a list; coerce to tuple so handlers
+        # cannot mutate telemetry mid-flight. Deep-freeze payload so nested
+        # offers/copy/suggestions are also immutable (CodeRabbit on PR #69).
+        if not isinstance(self.tools_called, tuple):
+            object.__setattr__(self, "tools_called", tuple(self.tools_called))
+        if self.payload is not None and not isinstance(self.payload, MappingProxyType):
+            object.__setattr__(self, "payload", _freeze(dict(self.payload)))
 
 
 # ── PR 17c / PR 18: SUPPORTED_NETWORKS — single source ───────────────────────
@@ -4861,11 +4898,11 @@ def run_self_qa() -> dict:
             response = ask(question, history=[], user_id="self-qa")
             elapsed = _time.monotonic() - t0
 
-            # Normalise — ask() can return str or dict (brief type)
-            if isinstance(response, dict):
-                text = response.get("fallback_text") or response.get("text") or str(response)
-            else:
-                text = str(response)
+            # Part 4: ask() returns AskResult; payload carries structured
+            # dispatch (brief/opportunities) — prefer fallback_text when present
+            # so QA scores the human-facing string, not the dataclass repr.
+            payload = response.payload or {}
+            text = payload.get("fallback_text") or response.text
 
             text_lower = text.lower()
             responded = len(text.strip()) > 40
@@ -5027,17 +5064,29 @@ def _select_model(user_message: str) -> str:
     return "claude-sonnet-4-6"
 
 
-def ask(user_message: str, history: list = None, user_id: str = "") -> str:
+def ask(user_message: str, history: list | None = None, user_id: str = "") -> AskResult:
     """
     Send a message to Scout and get a response.
     history: optional list of prior {"role": "user"/"assistant", "content": str} messages
              from the Slack thread, providing conversation context.
     user_id: Slack user ID of the caller — injected into context so tools like
              get_usage_report can enforce admin-only access.
+
+    Returns: AskResult — typed boundary contract carrying text, tools_called list,
+    duration_ms, and optional payload dict for structured Slack rendering
+    (brief / opportunities / text_with_context). See plan v3 §4.
     """
+    _start_ms = time.monotonic()
+    _tools_called: list = []
+    def _dur() -> int:
+        return int((time.monotonic() - _start_ms) * 1000)
+
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        return "ANTHROPIC_API_KEY not set — Scout can't respond."
+        return AskResult(
+            text="ANTHROPIC_API_KEY not set — Scout can't respond.",
+            tools_called=[], duration_ms=_dur(),
+        )
 
     client = anthropic.Anthropic(
         api_key=api_key,
@@ -5119,19 +5168,25 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
                     log.info(f"Extracted copy from plain text for {brief_data.get('advertiser')}: "
                              f"title={bool(copy_data.get('title'))}, titles={len(copy_data.get('titles', []))}")
 
-                return {
-                    "type": "brief",
-                    "brief_data": brief_data,
-                    "copy": copy_data,
-                    # Full Claude text as fallback so Slack shows something useful
-                    # even if Block Kit rendering fails
-                    "fallback_text": text or (
-                        f"Campaign Brief — {brief_data.get('advertiser', 'Offer')} "
-                        f"({brief_data.get('network', '').title()}, "
-                        f"{brief_data.get('payout', 'Rate TBD')}, "
-                        f"{brief_data.get('geo', '')})"
-                    ),
-                }
+                _fallback_text = text or (
+                    f"Campaign Brief — {brief_data.get('advertiser', 'Offer')} "
+                    f"({brief_data.get('network', '').title()}, "
+                    f"{brief_data.get('payout', 'Rate TBD')}, "
+                    f"{brief_data.get('geo', '')})"
+                )
+                return AskResult(
+                    text=_fallback_text,
+                    tools_called=_tools_called,
+                    duration_ms=_dur(),
+                    payload={
+                        "type": "brief",
+                        "brief_data": brief_data,
+                        "copy": copy_data,
+                        # Full Claude text as fallback so Slack shows something useful
+                        # even if Block Kit rendering fails
+                        "fallback_text": _fallback_text,
+                    },
+                )
 
             # Parse and strip <<<SUGGESTIONS [...]  SUGGESTIONS>>> block from text.
             # Claude appends this to every non-brief response; scout_bot.py renders
@@ -5147,28 +5202,42 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
 
             # Opportunity cards — structured list so scout_bot.py can render per-offer cards.
             if _opportunity_offers:
-                return {
-                    "type": "opportunities",
-                    "text": text or "",
-                    "offers": _opportunity_offers,
-                    "suggestions": suggestions,
-                }
+                return AskResult(
+                    text=text or "",
+                    tools_called=_tools_called,
+                    duration_ms=_dur(),
+                    payload={
+                        "type": "opportunities",
+                        "text": text or "",
+                        "offers": _opportunity_offers,
+                        "suggestions": suggestions,
+                    },
+                )
 
             # General entity extraction — runs over all tool results from this turn.
             # Tool-agnostic: picks up publisher, offer, payout, category from any tool.
-            # Returns {"type": "text_with_context", ...} so scout_bot.py can persist
-            # the entities to thread_context.json for follow-up queries.
+            # Returns payload {"type": "text_with_context", ...} so scout_bot.py can
+            # persist the entities to thread_context.json for follow-up queries.
             if not _brief_results:
                 extracted = _extract_thread_entities(_all_tool_results)
                 if extracted or suggestions:
-                    return {
-                        "type": "text_with_context",
-                        "text": text or "(no response)",
-                        "extracted_context": extracted,
-                        "suggestions": suggestions,
-                    }
+                    return AskResult(
+                        text=text or "(no response)",
+                        tools_called=_tools_called,
+                        duration_ms=_dur(),
+                        payload={
+                            "type": "text_with_context",
+                            "text": text or "(no response)",
+                            "extracted_context": extracted,
+                            "suggestions": suggestions,
+                        },
+                    )
 
-            return text or "(no response)"
+            return AskResult(
+                text=text or "(no response)",
+                tools_called=_tools_called,
+                duration_ms=_dur(),
+            )
 
         # Process tool calls
         tool_blocks = [(i, block) for i, block in enumerate(response.content)
@@ -5192,6 +5261,7 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
 
                 for i, _ in sorted(tool_blocks, key=lambda x: x[0]):
                     block, result = results_map[i]
+                    _tools_called.append(block.name)
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
                     if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
@@ -5207,6 +5277,7 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
             except RuntimeError:
                 # Interpreter shutting down — fall back to sequential
                 for i, block in tool_blocks:
+                    _tools_called.append(block.name)
                     result = _run_tool(block.name, block.input, user_id)
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
@@ -5219,6 +5290,7 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
         else:
             # Single tool call — keep sequential path unchanged
             for i, block in tool_blocks:
+                _tools_called.append(block.name)
                 result = _run_tool(block.name, block.input, user_id)
                 if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                     _brief_results.append(result)  # collect all, use first for primary
@@ -5236,18 +5308,26 @@ def ask(user_message: str, history: list = None, user_id: str = "") -> str:
         if not tool_results:
             for block in response.content:
                 if hasattr(block, "text"):
-                    return block.text
-            return "(no response)"
+                    return AskResult(
+                        text=block.text,
+                        tools_called=_tools_called,
+                        duration_ms=_dur(),
+                    )
+            return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur())
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
 
     # Round cap hit — return a graceful degraded response rather than dying silently
     log.warning(f"ask() hit MAX_ROUNDS ({MAX_ROUNDS}) for query: {user_message[:120]!r}")
-    return (
-        "I gathered a lot of data on this but hit my analysis limit before finishing the synthesis. "
-        "Try breaking the question into smaller parts — e.g. ask about revenue performance separately "
-        "from recommendations, or ask about a specific publisher or campaign directly."
+    return AskResult(
+        text=(
+            "I gathered a lot of data on this but hit my analysis limit before finishing the synthesis. "
+            "Try breaking the question into smaller parts — e.g. ask about revenue performance separately "
+            "from recommendations, or ask about a specific publisher or campaign directly."
+        ),
+        tools_called=_tools_called,
+        duration_ms=_dur(),
     )
 
 
@@ -5325,4 +5405,4 @@ if __name__ == "__main__":
     import sys
     query = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "What are the top finance opportunities we don't run yet?"
     print(f"\nQuery: {query}\n")
-    print(ask(query))
+    print(ask(query).text)

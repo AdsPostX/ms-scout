@@ -104,7 +104,7 @@ def test_ask_status():
         result = ask("status", history=[], user_id="smoke-test")
         elapsed = time.monotonic() - t0
 
-        text = result.get("text", result) if isinstance(result, dict) else result
+        text = result.text
         # Check for Scout self-reporting failure — not ops vocabulary like "tracking errors"
         _fail_phrases = ("something broke", "i got an error", "encountered an error", "failed to retrieve")
         if not text or any(p in text.lower() for p in _fail_phrases):
@@ -130,7 +130,7 @@ def test_ask_tool_call():
         result = ask("ghost campaigns", history=[], user_id="smoke-test")
         elapsed = time.monotonic() - t0
 
-        text = result.get("text", result) if isinstance(result, dict) else result
+        text = result.text
         if not text:
             return False, "Empty response from ghost campaign tool call"
         first_line = str(text).split('\n')[0].strip()
