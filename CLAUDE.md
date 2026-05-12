@@ -153,7 +153,6 @@ scout_notion.py         — Notion API: write queue page, AI copy pipeline, noti
 scout_state.py          — State I/O: all JSON read/write for 8 state files in data/
 scout_digest.py         — Daily digest: offer scoring + dedup + Slack post
 context_harvester.py    — Nightly Slack context extraction
-campaign_builder.py     — PARKED: Playwright automation (pending Vamsee sign-off)
 ```
 
 **Knowledge stores:**
