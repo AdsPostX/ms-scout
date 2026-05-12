@@ -72,6 +72,93 @@ def _set_pulse_runner(fn) -> None:
     global _PULSE_RUNNER
     _PULSE_RUNNER = fn
 
+
+# ── Part 3.6 — 👍/👎 feedback loop ──────────────────────────────────────────
+_FEEDBACK_LOG = _DATA_DIR / "feedback_log.jsonl"
+_FEEDBACK_PS_SEEN: set[str] = set()
+_FEEDBACK_LOCK = threading.Lock()
+_FEEDBACK_PS_LINE = (
+    "\n\n_P.S. — tap 👍 or 👎 below so I learn what's working. "
+    "First time? That's all you have to do._"
+)
+
+
+def _load_ps_seen() -> None:
+    """Populate the in-memory PS-seen set from the feedback log on first use."""
+    if _FEEDBACK_PS_SEEN or not _FEEDBACK_LOG.exists():
+        return
+    try:
+        with _FEEDBACK_LOG.open() as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                u = row.get("user")
+                if u and row.get("rating") in ("ps_shown", "up", "down"):
+                    _FEEDBACK_PS_SEEN.add(u)
+    except Exception as e:
+        log.warning(f"[feedback] could not preload PS-seen set: {e}")
+
+
+def _feedback_log_row(row: dict) -> None:
+    """Append one row to feedback_log.jsonl. Best-effort, never raises."""
+    try:
+        _FEEDBACK_LOG.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime, timezone
+        row.setdefault("ts", datetime.now(timezone.utc).isoformat())
+        with _FEEDBACK_LOCK, _FEEDBACK_LOG.open("a") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception as e:
+        log.warning(f"[feedback] log write failed: {e}")
+
+
+def _maybe_append_ps(user_id: str, text: str) -> str:
+    """Append the first-time-user P.S. nudge to the response text, exactly once per user.
+
+    Returns text unchanged for users who've already been shown the P.S. or rated before.
+    Records a `ps_shown` row in feedback_log.jsonl on first show.
+    """
+    if not user_id:
+        return text
+    _load_ps_seen()
+    if user_id in _FEEDBACK_PS_SEEN:
+        return text
+    _FEEDBACK_PS_SEEN.add(user_id)
+    _feedback_log_row({"user": user_id, "rating": "ps_shown"})
+    return text + _FEEDBACK_PS_LINE
+
+
+def _seed_feedback_reactions(web: WebClient, channel: str, ts: str) -> None:
+    """Pre-seed 👍/👎 on Scout's own message so they show up as tappable affordances.
+
+    Slack handler subtracts Scout's seed vote at read time (Scout's own reaction
+    counts as 0 by convention — see Part 3.6 in the adoption plan).
+    """
+    if not channel or not ts:
+        return
+    for name in ("+1", "-1"):
+        try:
+            web.reactions_add(channel=channel, timestamp=ts, name=name)
+        except Exception:
+            # already_reacted or reactions:write scope missing — degrade gracefully
+            pass
+
+
+def _permalink_for(web: WebClient, channel: str, msg_ts: str) -> str:
+    """Best-effort Slack permalink for a user message. Empty string on failure.
+
+    Used to thread provenance for @Scout remember/forget so entity_overrides
+    rows can be traced back to the Slack message that taught them.
+    """
+    if not channel or not msg_ts:
+        return ""
+    try:
+        resp = web.chat_getPermalink(channel=channel, message_ts=msg_ts)
+        return resp.get("permalink", "") or ""
+    except Exception:
+        return ""
+
 def _run_preflight_qa(  # replaces _check_url_async (removed — this is a strict superset)
     web: WebClient,
     channel: str,
@@ -1393,6 +1480,66 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 log.warning(f"[delete] failed to delete {item.get('ts')}: {e}")
         return
 
+    # ── 👍 / 👎 reaction → feedback signal ───────────────────────────────────
+    # Trust signal from Part 3.6. Scout pre-seeds +1/-1 on its own replies so
+    # they show up as visible affordances; user clicks increment the count.
+    # We log the user's rating and (for 👎) drop a threaded "remember" hint.
+    if event.get("type") == "reaction_added" and event.get("reaction") in ("+1", "-1"):
+        rater_id = event.get("user", "")
+        # Ignore Scout's own seed reactions (Scout's vote == 0 by convention)
+        try:
+            auth = web.auth_test()
+            if rater_id and rater_id == auth.get("user_id", ""):
+                return
+        except Exception:
+            pass
+        item = event.get("item", {})
+        if item.get("type") != "message":
+            return
+        ch_id  = item.get("channel", "")
+        msg_ts = item.get("ts", "")
+        try:
+            replies = web.conversations_replies(channel=ch_id, ts=msg_ts, limit=1).get("messages", [{}])
+            scout_msg = replies[0] if replies else {}
+            if not scout_msg.get("bot_id"):
+                return  # only count reactions on Scout's own messages
+            answer_text = scout_msg.get("text", "")[:1000]
+            # Fetch the question (thread parent) when we're in a thread
+            question_text = ""
+            parent_ts = scout_msg.get("thread_ts") or ""
+            if parent_ts and parent_ts != msg_ts:
+                try:
+                    parent = web.conversations_replies(channel=ch_id, ts=parent_ts, limit=1).get("messages", [{}])[0]
+                    if not parent.get("bot_id"):
+                        question_text = parent.get("text", "")[:500]
+                except Exception:
+                    pass
+            rating = "up" if event["reaction"] == "+1" else "down"
+            _feedback_log_row({
+                "user":       rater_id,
+                "message_ts": msg_ts,
+                "channel":    ch_id,
+                "question":   question_text,
+                "answer":     answer_text,
+                "rating":     rating,
+            })
+            # First reaction also closes the PS nudge for this user
+            _FEEDBACK_PS_SEEN.add(rater_id)
+            if rating == "down":
+                try:
+                    web.chat_postMessage(
+                        channel=ch_id,
+                        thread_ts=parent_ts or msg_ts,
+                        text=("Got it — Sidd will review. In the meantime: "
+                              "`@Scout remember <correct fact>` if you can phrase the fix."),
+                        unfurl_links=False,
+                    )
+                except Exception as e:
+                    log.warning(f"[feedback] threaded down-vote reply failed: {e}")
+        except Exception as e:
+            log.warning(f"[feedback] reaction handler failed: {e}")
+        return
+
     is_mention = event.get("type") == "app_mention"
     is_dm      = event.get("type") == "message" and event.get("channel_type") == "im"
 
@@ -1760,7 +1907,8 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
         try:
             _t0 = time.monotonic()
-            response = ask(query, history=history, user_id=user_id)
+            _permalink = _permalink_for(web, channel, msg_ts)
+            response = ask(query, history=history, user_id=user_id, permalink=_permalink)
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
             _tools_called = response.tools_called
@@ -1810,34 +1958,38 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
             })
             blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
-            web.chat_postMessage(
+            _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=response.payload.get("fallback_text", "Campaign Brief ready."),
                 blocks=blocks,
                 unfurl_links=False,
             )
+            _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         elif response.payload and response.payload.get("type") == "opportunities":
             header_text       = _sanitize_slack(response.text)
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
             suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
             all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks]
-            web.chat_postMessage(
+            _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=header_text or "Top opportunities",
                 blocks=all_blocks,
                 unfurl_links=False,
             )
+            _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         else:
-            response_text     = _sanitize_slack(response.text)[:3000]
+            response_text     = _maybe_append_ps(user_id, response.text)
+            response_text     = _sanitize_slack(response_text)[:3000]
             content_blocks    = _text_to_blocks(response_text)
             suggestion_blocks = _build_suggestion_buttons(suggestions)
             # No elapsed-time footer in DMs — the reaction disappearing IS the signal
-            web.chat_postMessage(
+            _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=response_text,
                 blocks=[*content_blocks, *suggestion_blocks],
                 unfurl_links=False,
             )
+            _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
 
@@ -1851,7 +2003,8 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     try:
         _t0 = time.monotonic()
-        response = ask(query, history=history, user_id=user_id)
+        _permalink = _permalink_for(web, channel, msg_ts)
+        response = ask(query, history=history, user_id=user_id, permalink=_permalink)
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting
@@ -1939,6 +2092,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             text=fallback_text,
             blocks=blocks,
         )
+        _seed_feedback_reactions(web, channel, placeholder["ts"])
         log.info(f"Posted Block Kit brief for {brief_data.get('advertiser')} in {channel}")
 
         # Async tracking URL check — fires when brief is first shown, before any queue action
@@ -1958,11 +2112,13 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             text=header_text or "Top opportunities",
             blocks=all_blocks,
         )
+        _seed_feedback_reactions(web, channel, _placeholder_ts)
         log.info(f"Posted opportunity cards ({len(response.payload.get('offers', []))} offers) in {channel}")
 
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
-        response_text     = _sanitize_slack(response.text)[:3000]
+        response_text     = _maybe_append_ps(user_id, response.text)
+        response_text     = _sanitize_slack(response_text)[:3000]
         content_blocks    = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
         web.chat_update(
@@ -1972,5 +2128,6 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             blocks=[*content_blocks, *suggestion_blocks,
                     {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
         )
+        _seed_feedback_reactions(web, channel, _placeholder_ts)
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 
