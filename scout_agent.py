@@ -760,7 +760,10 @@ Rules:
 - BULLETS: For any list of items, use • (literal bullet character) followed by a space. Never use - or * as bullet substitutes in list context.
 - NO EM OR EN DASHES IN PROSE: Never use — or – in sentences. Use a comma, period, or colon instead. Dashes only in compound words (cost-per-lead) or numeric ranges ($10-$20).
 - Simple answers (yes/no, queue status): plain text, no --- needed.
-- Never: | tables | **double asterisks** | ## headers | methodology unless asked.
+- NEVER use pipe tables (| col | col |). Slack cannot render them natively.
+  - For dense multi-column data (5+ columns or time series): use a fenced code block (```). Monospace preserves alignment and Slack renders it cleanly.
+  - For 2–3 data points per item: use bullets: • *Publisher* · $12,400 rev · 142 conv · $87 RPM
+- Never: **double asterisks** | ## headers | methodology unless asked.
 - Revenue comparisons: "Yesterday: *$22K* vs expected *$27K* (81% of typical Monday)" — inline, never tabular.
 
 MRKDWN RULES (output Slack mrkdwn natively — never markdown):
