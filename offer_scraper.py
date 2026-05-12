@@ -159,6 +159,8 @@ OFFER_FIELDS = [
     # Status & metadata
     "status",
     "date_scraped",
+    "last_verified",   # ISO timestamp of last scrape that included this offer
+    "fit_tier",        # PRIME | STRONG | STANDARD | WEAK — structural fit, computed at ingestion
 ]
 
 def empty_offer() -> Offer:
@@ -913,6 +915,53 @@ def match_ms_status(offer: dict, ms_index: dict) -> tuple:
         return "In System (Inactive)", adv_name
 
 
+# Verticals that historically convert poorly at post-transaction moments.
+# High-friction (loans, insurance) or medically regulated — flag at ingestion
+# so Scout can deprioritize without needing ClickHouse benchmarks.
+_BAD_FIT_CATEGORIES = frozenset({
+    "loans", "insurance", "credit", "mortgage", "legal", "medical",
+    "health insurance", "financial services",
+})
+
+
+def _compute_fit_tier(offer: dict) -> str:
+    """
+    Structural fit score — ClickHouse-free, computed at ingestion time.
+    Tiers are durable: they don't change between scrapes unless the offer's
+    payout_type, payout, or category changes.
+
+    PRIME:    CPA/CPL ≥ $5, no bad-fit vertical
+    STRONG:   CPA/CPL $2–$4.99, or CPS ≥ $10, no bad-fit vertical
+    STANDARD: anything else that passes clean_offers()
+    WEAK:     bad-fit vertical, or RevShare/CPC < $2
+    """
+    payout_type = (offer.get("payout_type") or "").upper()
+    category    = (offer.get("category") or "").lower()
+
+    try:
+        payout = float(offer.get("payout") or 0)
+    except (ValueError, TypeError):
+        payout = 0.0
+
+    if any(bad in category for bad in _BAD_FIT_CATEGORIES):
+        return "WEAK"
+
+    if payout_type in ("CPA", "CPL"):
+        if payout >= 5.0:
+            return "PRIME"
+        if payout >= 2.0:
+            return "STRONG"
+        return "STANDARD"
+
+    if payout_type == "CPS":
+        return "STRONG" if payout >= 10.0 else "STANDARD"
+
+    if payout_type in ("REVSHARE", "CPC") and payout < 2.0:
+        return "WEAK"
+
+    return "STANDARD"
+
+
 def clean_offers(offers: list, ms_index: dict = None) -> list:
     """Apply all normalizations. Returns cleaned list, active-only by default."""
     if ms_index is None:
@@ -929,7 +978,7 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
             str(o.get("payout", "")), str(o.get("payout_type", ""))
         )
         ms_status, ms_internal_name = match_ms_status(o, ms_index)
-        cleaned.append({
+        normalized = {
             **o,
             "status":            status,
             "geo":               geo,
@@ -941,7 +990,10 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
             "_unique_key":       f"{o['network']}:{o['offer_id']}",
             "_ms_status":        ms_status,
             "_ms_internal_name": ms_internal_name or "",
-        })
+        }
+        normalized["fit_tier"]     = _compute_fit_tier(normalized)
+        normalized["last_verified"] = normalized.get("date_scraped") or datetime.today().strftime("%Y-%m-%d")
+        cleaned.append(normalized)
     return cleaned
 
 

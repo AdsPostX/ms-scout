@@ -725,6 +725,7 @@ INTENTS — resolve every query to one, then act immediately.
    IMPORTANT: Benchmarks (ClickHouse CVR/RPM) and Offer Inventory are TWO SEPARATE THINGS.
    Benchmarks = CVR/RPM from MS's own ClickHouse data — always available when CH is up, scraper NOT required.
    Offer Inventory = affiliate offers from multiple affiliate networks — populated by scraper (runs 6am CT daily). Run get_scout_status() to see available_networks for the current inventory.
+   Each offer has a fit_tier field baked at ingestion (ClickHouse-free): PRIME (CPA/CPL ≥ $5, no bad-fit vertical) | STRONG | STANDARD | WEAK (high-friction vertical or RevShare/CPC < $2). Prefer PRIME/STRONG when multiple offers match a query. Mention WEAK tier when recommending an offer with known friction.
 
    USER-FACING ACTIONS RULE (PR 19a): only suggest a `@Scout X` command when the
    user MUST do something. Never suggest commands for state Scout can fix itself.
