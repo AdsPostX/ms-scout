@@ -50,9 +50,6 @@ from scout_handlers import (
 
 load_dotenv()  # plist env vars (SCOUT_ENV, PULSE_CHANNEL, etc.) take precedence over .env
 
-# Mutex: prevents daemon and on-demand trigger from running run_headless() concurrently.
-# On-demand run_offer_scraper() checks this before calling run_headless().
-_SCRAPER_RUNNING = threading.Event()
 
 logging.basicConfig(
     level=logging.INFO,
