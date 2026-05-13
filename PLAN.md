@@ -1,318 +1,398 @@
-# Plan: PR 23 — Slack as Front Door + Notion as Source of Truth
+<!-- /autoplan restore point: /Users/siddharthshah/.gstack/projects/AdsPostX-ms-scout/claude-eloquent-wing-7f0dc3-autoplan-restore-20260509-221742.md -->
 
-## Problem Statement
+# Scout Restructuring Plan
 
-The offer approval flow has a visibility gap: once an offer is approved, its pipeline progress (Awaiting Entry → In Platform → Test Offer ON → Live) lives entirely in Notion. Ops has to leave Slack to know where anything stands.
-
-**What already exists:**
-- `app_home_opened` handler in `scout_handlers.py` already calls `web.views_publish(user_id, _build_home_view())`
-- `_build_home_view()` + `_build_home_queue_section()` in `scout_slack_ui.py` already render the Home tab
-- `get_demand_queue_status()` tool in `scout_agent.py` already exists (reads local `launched_offers.json` + ClickHouse impressions)
-- `_check_notion_queue_changes()` in `scout_notion.py` already reads Notion DB for status changes and posts to #scout-offers
-
-**What's missing:**
-- `_build_home_queue_section()` reads from local state (`launched_offers.json`) — static after approval, no pipeline status
-- No Notion READ path that returns structured queue items grouped by stage
-- `get_demand_queue_status()` doesn't reflect actual pipeline stage (Awaiting Entry vs In Platform vs Live) — only ClickHouse impression detection
-
-**User intent:** Slack is the front door (ops lives there), Notion is the source of truth (all copy + pipeline status). When an op opens Scout in the left nav, they see the live queue. When they type @Scout queue, they get the same view.
+**Date:** 2026-05-09
+**Status:** DECISION READY
 
 ---
 
-## Proposed Architecture
+## The Problem in One Sentence
+
+Scout has 185 commits, 71 of which are fixes (38% fix rate). The team doesn't trust it.
+The revenue tracker is the first autonomous proactive signal — if it fires a false alarm in
+#revenue-operations before the trust is rebuilt, Scout is dead.
+
+---
+
+## What Success Looks Like (30 days from go-live)
+
+**Todd Bloch stops asking "@Scout why was revenue low yesterday?" because the 3pm alert answered it the day before.**
+
+Measurable: zero "why was yesterday's revenue low" questions from Todd in the 30 days after go-live.
+Falsifiable: if Todd is still asking reactively, the alert either isn't firing, isn't accurate, or isn't
+actionable enough for him to trust it.
+
+Everything else (line count, smoke tests passing, false alarm rate) is an output, not an outcome.
+This single behavioral change — Todd stops asking reactively — is the outcome.
+
+---
+
+## Usage Validation (May 10, 2026)
+
+Checked `data/usage_log.jsonl` (3 entries, all from Sidd) and Slack mention history.
+Slack is the real signal. Results from #revenue-operations Apr 1 – May 10 (39 days):
+
+**46 @Scout mentions from 5 distinct users:**
+- **Todd Bloch** — advertiser economics (TurboTax CJ margin, Fluent payout, BofA launch checks, low-RPM campaigns). Independent power user. Uses @Scout as a ClickHouse terminal.
+- **Sidd Shah** — ghost briefs, fill rate briefs, publisher analysis, follow-up questions
+- **Ali Abdelfadeel** — publisher needs-attention analysis, offer detail lookups
+- **Gordon Riordon** — Google Sheets → ClickHouse cross-reference
+- **Jon Nolz** — contact research
+
+**Today (May 10, 4:46pm CT):** Todd asked "@Scout yesterday was one of the lowest daily revenue we've earned this year. why?" and "@Scout why is QuinStreet/TuitionHero being reversed by $13K in May?" — the revenue tracker would have answered the first question proactively at 3pm yesterday. Todd had to ask reactively instead.
+
+**The Apr 22–May 9 usage gap** (18 days, ~2 mentions) correlates with Scout being unreliable during PRs 22–24. The team went quiet because Scout stopped working, not because they stopped caring. Todd came back the day PR activity settled.
+
+**Conclusion:** "Nobody uses @Scout" was wrong. @Scout is a real tool with real independent usage. SocketMode stays. `scout_agent.py` stays. The trust problem is proactive daemons posting uninvited, not the reactive layer.
+
+## Target Architecture
+
+Two separate services. Each does one thing. Each can fail independently.
 
 ```
-app_home_opened event (any user opens Scout in left nav)
-    └─ _fetch_notion_queue_items() [scout_notion.py]
-        ↓ returns list of queue items with pipeline status
-    └─ _build_queue_card(items) [scout_slack_ui.py]
-        ↓ returns Block Kit blocks grouped by status
-    └─ views.publish(user_id, home_view) [scout_handlers.py]
+ms-demand-feed     — Python cron, hits 9 networks every 6h, writes offers_latest.json
+                       No Slack. No Claude. No dependencies. Just data.
 
-@Scout "queue" / "what's in the queue" / "pipeline"
-    └─ get_queue_status() tool [scout_agent.py]
-        └─ _fetch_notion_queue_items() [shared with Home tab path]
-        └─ _build_queue_card(items) [shared render function]
-        └─ post message to channel
+ms-scout             — Two jobs only:
+                       1. _revenue_tracker daemon: posts to #revenue-operations when revenue
+                          is soft. 3pm CT weekdays. Once per day. Feature-flagged.
+                       2. @Scout reactive agent: answers ClickHouse questions when asked.
+                          No Pulse. No digest. No ghost daemon. No Notion pipeline.
+                       ~500 lines total after PR 27.
 ```
 
-Notion = source of truth. Slack Home = live pull-on-demand view. No sync, no cache, no Slack Lists.
+---
+
+## Move 1: Merge PR #62 now (today, 5 min)
+
+PR #62 is the revenue tracker. It's tested, dark (`revenue_tracker_enabled: false`),
+and ships zero behavior change. The kill switch means it cannot fire in #revenue-operations
+until you explicitly flip it.
+
+Holding it has no upside. Merging it:
+- Gets it off the branch (commits ahead of main right now)
+- Lets you validate at 3pm CT today by running `test_revenue_tracker.py`
+- Keeps the code reviewable in isolation before the restructure changes everything
+
+**Do this:** `gh pr merge 62 --merge`
 
 ---
 
-## What Already Exists (No Change)
+## Move 2: Extract offer scraper (PR 26) — 1-2 days
 
-- `app_home_opened` handler (scout_handlers.py ~line 1372) — already calls `views.publish`; only needs to inject Notion data
-- `_build_home_view()` (scout_slack_ui.py ~line 1546) — already renders home; needs to accept injected queue blocks
-- `_check_notion_queue_changes()` (scout_notion.py ~line 708) — already reads Notion DB for change detection; `_fetch_notion_queue_items()` will share the same query pattern
+`offer_scraper.py` is already 90% isolated. It has no Slack, no Claude, no ClickHouse.
+It reads network APIs and writes `offers_latest.json`. It runs as a daemon in scout_bot.py
+(`_run_scraper_daemon`) but doesn't need to be.
+
+### What extraction looks like
+
+1. New Render service: `ms-demand-feed`
+2. Files to move:
+   - `offer_scraper.py` (2,099 lines)
+   - `run_scraper.sh`
+   - Scraper-only slice of `requirements.txt` (requests, bs4, dotenv, schedule)
+3. Output: write `offers_latest.json` to its own Render Disk (ms-demand-feed service only)
+4. **`_run_scraper_daemon` STAYS in Scout during PR 26** — Render Disk volumes attach to one
+   service only; Scout cannot read from ms-demand-feed's disk. Scout keeps writing its own
+   `offers_latest.json` in parallel. Both services run the scraper until PR 27 removes it.
+5. New Render cron job or background worker: runs every 6h, no web server needed
+6. **Do NOT remove `_start_daemon(_run_scraper_daemon, ...)` from scout_bot.py in this PR** —
+   that removal ships in PR 27 when Scout is stripped entirely and no longer needs the file
+
+### Why this first
+
+- Zero Claude dependency removed from Scout's startup path
+- Scraper failures no longer restart the Scout process
+- Clearest win, lowest risk, most separable
+- Scraper is Scout's most reliable component — protect it by isolating it
 
 ---
 
-## Proposed Changes
+## Pre-PR-27: Validate @Scout answers a Todd-style question correctly
 
-### Change 1: Add `_fetch_notion_queue_items()` in scout_notion.py
+Before committing to keep `scout_agent.py` (5,324 lines), verify it actually works.
 
-**Env var correction:** Use `NOTION_QUEUE_DB_ID` (not `NOTION_DEMAND_QUEUE_DB_ID`) — matches all existing call sites in `scout_notion.py` (lines 481, 799) and `scout_agent.py` (line 3928). Using the wrong name silently returns `[]` on every call with no error.
+Run these two questions against @Scout in #revenue-operations with a Sidd account (dev Scout):
 
-**Timeout:** Set `timeout=5` on the Notion API call. This function is called in the `app_home_opened` hot path — a hung Notion connection blocks the home tab render indefinitely. 5s is sufficient under normal conditions and fails fast under degraded conditions.
+1. `@Scout why was yesterday's revenue lower than typical?`
+2. `@Scout what are the top fill rate issues today?`
 
-**Rate limit protection:** Add a module-level TTL cache keyed to the function, not per-user: `_QUEUE_CACHE_TTL_SECONDS = 30` (named constant, not magic number) + `_queue_items_cache = {"ts": 0, "items": None}`. When `app_home_opened` fires for 5+ simultaneous users, they all get the cached result from the first Notion call. Cache miss only after 30s. This caps Notion API calls to 2/min regardless of how many ops open Scout simultaneously.
+**Pass criteria:**
+- Returns a specific answer with actual numbers (not "I don't have data" or a tool error)
+- Cites publisher names and dollar amounts, not generic advice
+- Runs in <30s
+- Does NOT output a pipe table (SYSTEM_PROMPT prohibits this)
 
-**Error state:** Return `None` on any Notion API error (timeout, 429, network failure), return `[]` for genuinely empty queue. Callers distinguish these: `None` → render "_(Could not reach Notion — queue data unavailable)_"; `[]` → render "Queue is clear — nothing awaiting entry."
+**If @Scout passes:** proceed to PR 27 as planned. `scout_agent.py` stays intact.
+**If @Scout fails (wrong format, no numbers, timeout, error):** diagnose first. The specific failure
+determines whether this is a 30-min fix or a deeper problem. Do NOT delete the reactive layer
+without knowing it works — the plan's "why this is safer" section is predicated on @Scout being
+functional. Run validation BEFORE writing a single line of PR 27 deletion code.
 
-**Returns:** `list[dict] | None` — one dict per offer:
+---
+
+## Move 3: Strip Scout to revenue monitor + reactive @Scout (PR 27) — 3-5 days
+
+After the scraper is out, Scout has two jobs:
+1. Run `_revenue_tracker` — the one proactive signal
+2. Answer `@Scout` mentions — reactive analytics assistant (Sidd uses it for ad-hoc ClickHouse queries)
+
+The trust deficit came from **proactive signals firing uninvited**, not from `@Scout` responding
+when asked. Reactive tools have a different trust profile — the user controls when they fire.
+Strip the proactive machinery. Keep the reactive layer.
+
+### What stays (keep)
+
+```
+scout_bot.py            — stripped to: main(), _start_daemon(), _revenue_tracker(),
+                          _format_revenue_alert(), health server, SocketMode event handler
+                          (SocketMode stays — needed for @Scout mentions)
+scout_agent.py          — KEEP ENTIRELY. SYSTEM_PROMPT, TOOLS, TOOL_MAP, all _query_*()
+                          functions, _load_thresholds(). @Scout is the point of keeping this.
+scout_handlers.py       — STRIPPED (not deleted). Keep: _handle_mention(), handle_event().
+                          Remove: block action handlers for Pulse cards, home tab handler,
+                          slash command handlers. ~200 lines instead of current ~800.
+scout_slack_ui.py       — STRIPPED (not deleted). Keep: text formatters, _text_to_blocks(),
+                          helpers @Scout uses for response formatting, AND the 4 canonical
+                          Block Kit primitives (_build_signal_header, _build_item_card,
+                          _build_action_row, _build_publisher_card) — these are general-purpose
+                          and reusable across future MomentScience bots (see ms-slack-kit note).
+                          Remove: _format_pulse_blocks(), _build_queue_card(), _build_home_view(),
+                          _queue_confirm_blocks(). ~200 lines remaining.
+scout_state.py          — Keep _load_revenue_alert_state(), _save_revenue_alert_date(),
+                          and any state functions @Scout tools read.
+queries.py              — KEEP. revenue_opportunities() is still called by get_top_revenue_opportunities()
+                          agent tool. Remove only Pulse-only helpers with no agent callers.
+config/scout_thresholds.json — Keep as-is. All sections remain valid.
+requirements.txt        — Keep as-is. anthropic + slack_bolt/socket_mode stay (needed for @Scout).
+```
+
+### What goes (delete entirely)
+
+```
+scout_notion.py         — DELETED. No queue pipeline UI.
+scout_digest.py         — DELETED. No daily digest.
+context_harvester.py    — DELETED. No nightly Slack context harvest.
+campaign_builder.py     — DELETED. (Was already parked.)
+```
+
+### Daemons that go
+
+```
+_check_stale_queue      — gone (Notion queue gone)
+_performance_recap      — gone (digest gone)
+_cleanup_state          — gone (state files simplified)
+_proactive_pulse        — gone (Pulse gone — this is the trust-breaker)
+_nightly_harvest        — gone (context harvester gone)
+_run_scraper_daemon     — gone (moved to ms-demand-feed in Move 2)
+_notion_watcher_loop    — gone (Notion gone)
+_copy_coalescer_loop    — gone (AI copy pipeline gone)
+_run_health_heartbeat   — KEEP (Render health probe still needed)
+_benchmarks_warmer      — KEEP (benchmarks warm @Scout's get_scout_status() responses)
+_revenue_tracker        — KEEP (the one proactive signal)
+```
+
+### What Scout looks like after (~500 lines total)
+
 ```python
-{
-    "page_id": str,
-    "advertiser": str,
-    "payout": str,      # e.g. "$45 CPA"
-    "network": str,
-    "status": str,      # "Awaiting Entry" | "In Platform" | "Test Offer ON" | "Live" | "Rejected"
-    "notion_url": str,
-    "approved_by": str,
-    "approved_at": str, # ISO date
-    "category": str,    # empty string if not set
-}
+# scout_bot.py
+def main():
+    ch = _get_ch_client()
+    web = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
+    socket_client = SocketModeClient(app_token=os.environ["SLACK_APP_TOKEN"])
+    _start_daemon(_revenue_tracker, name="revenue-tracker", args=(web, ch))
+    _start_daemon(_run_health_heartbeat, name="health-heartbeat", args=(web,))
+    _start_daemon(_benchmarks_warmer, name="benchmarks-warmer", args=(ch,))
+    _start_health_server()
+    socket_client.socket_mode_request_listeners.append(handle_event)
+    socket_client.connect()
+    threading.Event().wait()
 ```
 
-**Implementation notes:**
-- Uses existing Notion API pattern from `_write_to_notion_queue()` — same DB ID via `NOTION_QUEUE_DB_ID`
-- Filters: exclude Rejected items by default (show active pipeline only)
-- Zero Slack calls (consistent with Zero-Slack-calls rule in `scout_notion.py`)
+Three daemons + HTTP health endpoint + SocketMode for @Scout. No Pulse. No digest.
+No Notion. No home tab. No block action routing. No slash commands.
 
-### Change 2: Add `_build_queue_card()` in scout_slack_ui.py + delete `_build_home_queue_section()`
+### smoke_test.py after PR 27 (named survivors)
 
-New Block Kit render function. Accepts `items: list[dict]` from `_fetch_notion_queue_items()`.
+Strip the 14 PR-numbered tests and Pulse/Notion/digest-specific tests. Surviving tests:
 
-**Output format:**
 ```
-📋 *Demand Queue — 3 offers*
-━━━━━━━━━━━━━━━━━━━━━━━━
-🟡 Awaiting Entry
-   Nike MX — $45 CPA · Impact  →  [Notion ↗]
-🔵 In Platform
-   Disney+ — $8.50 CPL · MaxBounty  →  [Notion ↗]
-✅ Live
-   Capital One — $65 CPA · CJ  →  [Notion ↗]
+test_clickhouse_connection_available         — CH client connects without error
+test_agent_tools_all_registered             — all TOOLS entries have TOOL_MAP counterparts
+test_revenue_tracker_daemon_function_exists — _revenue_tracker() exists in scout_bot
+test_intraday_revenue_total_query_exists    — _query_intraday_revenue_total() in scout_agent
+test_intraday_revenue_by_publisher_query_exists — _query_intraday_revenue_by_publisher() in scout_agent
+test_revenue_alert_state_load_save          — _load_revenue_alert_state + _save_revenue_alert_date roundtrip
+test_thresholds_load_correctly              — _load_thresholds() returns all expected signal keys
+test_benchmarks_warmer_daemon_registered    — _benchmarks_warmer in scout_bot
+test_revenue_opportunities_query_exists     — revenue_opportunities() in queries.py (agent tool target)
 ```
 
-**Status emoji map:**
-- `Awaiting Entry` → 🟡
-- `In Platform` → 🔵  
-- `Test Offer ON` → 🟠
-- `Live` → ✅
-- `Rejected` → ❌ (only shown if include_rejected=True)
+Run `python3 smoke_test.py` → expect "PASSED 9/9". Paste output in PR description.
 
-**Empty state:** "Queue is clear — nothing awaiting entry or in platform."
+### ms-slack-kit — Block Kit primitives are reusable
 
-**Block Kit constraints:** Uses canonical primitives from scout_slack_ui.py (no naked `section.fields`, no NBSP, no `·` separators between items). One `_build_item_card()` per offer.
+`scout_slack_ui.py` after PR 27 contains 4 general-purpose Block Kit primitives with no
+Scout-specific logic:
 
-**Block count cap:** `_build_home_view()` has a fixed structure of ~14 blocks. Budget for queue card: 36 blocks. With 4 status groups (2 header blocks each) + 2 blocks per offer item, cap at `_MAX_QUEUE_ITEMS_RENDERED = 12` offers (named constant, not magic number): 12×2 + 4×2 = 32 blocks. Beyond 12: append a single "…and N more — [View full queue in Notion ↗]" context block. This mirrors `_ALWAYS_TAIL` in `_format_pulse_blocks()`.
+```python
+# ms-slack-kit — MomentScience canonical Block Kit primitives
+# These are Scout-independent. When a second MomentScience bot (beverly, WiWo ops bot,
+# demand-feed alerter) needs Block Kit formatting, extract these to a shared package.
+_build_signal_header(emoji, title, context="")
+_build_item_card(name, left_body, right_body="", context="", action_button=None)
+_build_action_row(buttons)
+_build_publisher_card(name, delta_pct, ...)
+```
 
-**Error state rendering:** If caller passes `items=None` (Notion error), render: "_Could not reach Notion — queue data unavailable_" (italic context block, not the "Queue is clear" text).
+Plus `_text_to_blocks(text)` and `_is_help_query(query)` — also Scout-independent.
 
-**Dead code removal:** Delete `_build_home_queue_section()` in this same PR. It reads from `launched_offers.json` (no pipeline status), is replaced entirely by `_build_queue_card()`, and has no other callers. Leaving it risks future reuse by accident.
+**Extraction trigger**: when a second MomentScience bot is built. Don't extract prematurely.
+Add the `# ms-slack-kit` comment block at the top of the surviving functions in PR 27 so
+the boundary is clear when extraction time comes.
 
-### Change 3: Update `app_home_opened` handler in scout_handlers.py
+### ms-demand-feed intelligence boundary
 
-Update the handler (~line 1372) to:
-1. Call `_fetch_notion_queue_items()` from `scout_notion`
-2. Pass items to `_build_home_view(queue_items=items)`
+ms-demand-feed is a pure collector: scrape → `offers_latest.json`. No ClickHouse. No Claude.
 
-`_build_home_view()` passes them to `_build_queue_card()` instead of the current `_build_home_queue_section()`.
+All intelligence stays in Scout:
+- `revenue_opportunities()` in `queries.py` — fuzzy anti-join between offer catalog and live
+  campaign performance. The offer ID ↔ campaign ID mapping, category benchmarks, and network
+  performance comparisons all live here.
+- When ms-demand-feed eventually needs to enrich offers with ClickHouse data (e.g., "which
+  verticals perform best on which network"), that enrichment runs as a Scout tool call,
+  not as logic in ms-demand-feed itself.
 
-**Error boundary:** `_build_home_view()` accepts `queue_items: list | None = None`. If `None` (Notion error), still publish the Home view — render the error state in the queue section, not a blank page. If `[]` (empty), render "Queue is clear."
+### Why this is safer than the original "strip everything" plan
 
-**`/scout-queue` slash command:** Update the `/scout-queue` handler in `scout_handlers.py` to call `_fetch_notion_queue_items()` + `_build_queue_card()` — same as the Home tab path. Currently it calls `get_demand_queue_status()` (ClickHouse-based). After this PR, `/scout-queue`, `@Scout queue`, and the Home tab all show the same Notion-based pipeline view. Three surfaces, one truth.
+The original plan removed @Scout to eliminate complexity. Usage data shows that was wrong:
+- 46 mentions from 5 users in 39 days — Todd Bloch uses it daily as a ClickHouse terminal
+- @Scout responds to user intent — it can't fire a false alarm uninvited
+- The team's trust was broken by daemons posting uninvited (Pulse, ghost detection, digest)
+- Reactive tools have a fundamentally different trust profile — the user controls when they fire
+- Keeping @Scout preserves the team's ClickHouse interface with zero trust risk
 
-### Change 4: Add `get_queue_status()` tool in scout_agent.py
-
-New agent tool alongside existing `get_demand_queue_status()`.
-
-**Distinction:**
-- `get_demand_queue_status()` (existing) — ClickHouse-based live detection via impressions since approval. Answers "has this offer started running?"
-- `get_queue_status()` (new) — Notion-based pipeline view. Answers "where is each offer in the approval-to-live pipeline?"
-
-**Registration (all 4 required pieces):**
-1. `TOOLS` list entry with name, description, `input_schema: {"type": "object", "properties": {}}` (no parameters — reads full queue)
-2. `TOOL_MAP` entry: `"get_queue_status": get_queue_status`
-3. `SYSTEM_PROMPT` routing: Update **Intent 2** (currently routes "queue", "what's approved", "what's queued" → `get_demand_queue_status`) to route those triggers to `get_queue_status` instead. Narrow `get_demand_queue_status` to "is X live?", "has X started running?", "impressions since approval" — ClickHouse-specific queries only.
-4. Function `get_queue_status()` (no `input` arg — matches zero-arg tool pattern like `get_demand_queue_status`)
-
-**Import in function body (not top-level):** `get_queue_status()` must import `_build_queue_card` from `scout_slack_ui` inside the function body, not at the top of `scout_agent.py`. Reason: `scout_slack_ui.py` already imports from `scout_agent` (line 1556) inside a function body to avoid circular imports at module load. A top-level `from scout_slack_ui import` in `scout_agent.py` creates a circular import that crashes at boot.
-
-**Output:** Returns structured dict when LLM needs to reason, or directly posts the Block Kit card to channel.
-
-### Change 5: Tests — structural split (smoke_test.py + stdlib unittest)
-
-**The architectural decision:** `smoke_test.py` and `tests/` serve different purposes. Conflating them caused the bloat PR 22 fixed. Adding 6 more behavioral tests back into `smoke_test.py` would undo that fix.
-
-**Why `unittest` not `pytest`:** `requirements.txt` is Scout's single install file — `render.yaml` runs `pip install -r requirements.txt` on every deploy. `pytest` would ship to Render production and add `iniconfig`, `pluggy`, `packaging` as transitive deps. `unittest` is stdlib — zero new dependency, already used in `smoke_test.py` (it imports `unittest.mock`). The 5 behavioral tests have no pytest-specific features (no `@pytest.mark.parametrize`, no fixtures, no plugins). `unittest.TestCase` handles all 5 cleanly. If the test suite grows to the point where pytest pays off, migrate then — but that decision belongs with the growth, not the first 5 tests.
-
-**Rule:** `smoke_test.py` = boot invariants only (deploy-time signal). Never grows with features, only with new boot-time invariants. `tests/` = behavioral/unit tests for specific functions. Grows with each feature.
-
-**`smoke_test.py` — 1 new test (boot invariant):**
-- `get_queue_status_tool_registered_with_all_contract_pieces` — TOOLS list + TOOL_MAP + SYSTEM_PROMPT routing all present. Pattern mirrors existing `get_scout_config_registered_with_all_4_contract_pieces` at line 729.
-
-**`tests/test_queue_card.py` — 5 behavioral tests (`unittest.TestCase`):**
-1. `test_empty_state_shows_queue_clear_message` — `_build_queue_card([])` → contains "Queue is clear"
-2. `test_error_state_shows_notion_unavailable_not_clear` — `_build_queue_card(None)` → contains "Could not reach Notion", NOT "Queue is clear"
-3. `test_items_grouped_by_status_with_correct_emoji` — items with known statuses → correct emoji per group
-4. `test_unknown_status_falls_back_gracefully` — `status="Surprise Status"` → renders without crash, uses fallback emoji
-5. `test_queue_card_block_count_under_budget_with_12_offers` — `_build_queue_card(12_items)` → `len(blocks) <= 36` (the queue card's block budget, not `_build_home_view()` — avoids triggering `scout_agent` import chain via `_build_home_view` line 1556)
-
-**Test 5 isolation note:** The plan intentionally tests `_build_queue_card(items)` block count, NOT `_build_home_view(queue_items=items)`. Calling `_build_home_view()` triggers a function-body import of `scout_agent` at line 1556, which pulls in Anthropic, ClickHouse, and `.env` state — not a pure unit test. The queue card budget is 36 blocks (50 limit − 14 fixed blocks); testing the card directly validates the cap without the agent import side-effect.
-
-**New infrastructure (minimal):**
-- `tests/test_queue_card.py` — 5 tests above (no `tests/__init__.py` — not needed; Python discovers unittest tests by module path)
-- **No new dependency** — `python3 -m unittest discover -s tests -p "test_*.py"` works with stdlib
-
-**Run command (always from project root):**
-`python3 -m unittest discover -s tests -p "test_*.py" -v`
-
-**Verification command added to CLAUDE.md PR Definition of Done:**
-`python3 -m unittest discover -s tests -p "test_*.py"` — must pass alongside `python3 smoke_test.py`
-
-**Renderer test migration (in this PR):** The 5 renderer tests from PR 22 (`format_slack_blocks`) are behavioral tests currently in `smoke_test.py`. They belong in `tests/test_boot_card.py`. Since PR 23 creates `tests/` for the first time, this is the right moment — shipping `test_queue_card.py` without migrating `test_boot_card.py` would leave the directory half-done from day one.
-
-Migration: create `tests/test_boot_card.py`, `from smoke_test import format_slack_blocks`, rewrite each `@test()` as a `unittest.TestCase.test_*()` method (mechanical — identical assertions), delete the 5 from `smoke_test.py`. Verify `smoke_test.py` imports cleanly without triggering test execution (it should — runner is called via `run_all_tests()`, not at import time).
-
-### Change 6: CLAUDE.md + Known Debt update
-
-- **Keep** "campaign_builder.py PARKED" Known Debt entry until Vamsee Idaho meeting (~2026-05-06) resolves the API fork decision
-- Add to Signal Map: `get_queue_status()` — Notion-based pipeline view (no shared `_query_*` function — Notion not ClickHouse)
-- Note: `_fetch_notion_queue_items()` is the Notion read counterpart to `_write_to_notion_queue()`
-- Add Known Debt: `get_pipeline_health()` in `scout_agent.py` also reads the Notion Demand Queue DB independently — consolidate to call `_fetch_notion_queue_items()` in PR 24
-- Add `python3 -m unittest discover -s tests -p "test_*.py"` to PR Definition of Done verification checklist
+The deletion count drops from ~13,000 lines to ~8,000 lines. Lower risk, same trust outcome.
 
 ---
 
-## Files Touched
+---
 
-| File | Changes |
-|---|---|
-| `scout_notion.py` | Add `_fetch_notion_queue_items()` (with TTL cache + timeout=5 + `None`/`[]` error distinction) |
-| `scout_slack_ui.py` | Add `_build_queue_card()`, delete `_build_home_queue_section()`, update `_build_home_view(queue_items=None)` |
-| `scout_handlers.py` | Update `app_home_opened` handler; update `/scout-queue` handler to use Notion-based path |
-| `scout_agent.py` | Add `get_queue_status()` + TOOLS + TOOL_MAP + SYSTEM_PROMPT routing |
-| `smoke_test.py` | 1 new test (tool registration boot invariant only) |
-| `tests/test_queue_card.py` | New — 5 behavioral unittest tests for `_build_queue_card()` (no new dependency) |
-| `tests/test_boot_card.py` | New — 5 renderer tests migrated from `smoke_test.py` (rewritten as `unittest.TestCase`; `smoke_test.py` importable, runner not triggered at import) |
-| `CLAUDE.md` | Signal Map update + Known Debt cleanup + add `python3 -m unittest discover` to PR Definition of Done |
+## Move 4: Validate and flip the kill switch (after Move 3 ships)
+
+1. Run `python test_revenue_tracker.py` each weekday at ~3pm CT for 5 days — kill switch stays off, output goes to `#bot-qa`
+2. After each run, copy the `#bot-qa` message into `#revenue-operations` with a note: "preview of the revenue alert Scout will start sending automatically — does this look right?"
+3. Let Todd and Ali react in the channel. Don't curate or pre-filter. Natural reaction is the signal.
+4. Ali signs off on all 5 — not Sidd self-certifying. "Looks good" in the thread counts.
+5. If all 5 confirmed: flip `revenue_tracker_enabled: true` and redeploy
+6. If any fires wrong: diagnose before continuing. Do NOT skip a bad run.
+
+**Kill on first false alarm in #revenue-operations, no exceptions.** Set `revenue_tracker_enabled: false`, redeploy, diagnose. The credibility cost of one false alarm in #revenue-operations is higher than the cost of a delayed go-live.
+
+**Do not flip until Ali has signed off on 5 clean runs.** Self-certification is how the last 3 regressions shipped.
 
 ---
 
-## Out of Scope
+## What Does NOT Come Back
 
-- `campaign_builder.py` — PARKED pending Vamsee API conversation (Idaho meeting ~2026-05-06)
-- Slack Lists — Two independent API spikes confirmed not viable. First spike used `lists.*` (internal). Second spike used `slackLists.*` (documented Web API, 2026-04-30): list creation works, items create but `fields: []` always empty in response, `slackLists.items.list` + `slackLists.items.info` blocked by missing `lists:read` scope, `slackLists.items.update` cell value format undocumented (all tried field names rejected as `invalid additional property`). To revisit: add `lists:read` + `lists:write` scopes to app manifest and reinstall, then re-spike.
-- Write-back from Slack to Notion (Slack edits updating Notion) — deferred to PR 24
-- `get_demand_queue_status()` — keep as-is (ClickHouse-based live detection is a different question; both tools coexist)
-- `_post_offer_queue_card` mrkdwn → Block Kit refactor — intentionally dense per prior decision
+The following come back only if: (a) revenue tracker runs 30 days without a noise complaint,
+AND (b) someone on the team explicitly says "I need X because Y."
 
----
+```
+Ghost campaign detection    — first repeated false-alarm source; NOT the same as @Scout's
+                              get_ghost_campaigns() tool (that stays — user-initiated only)
+Pulse morning digest        — nobody asked for it during the dark period
+Fill rate / cap alerts      — revenue tracker's publisher breakdown covers the meaningful cases;
+                              @Scout fill rate query still works on demand
+Notion queue UI             — only if ops team explicitly requests it
+```
 
-## PR 23 Micro-Add: `chat.postEphemeral` for Approval Confirmations
-
-Currently the approval confirmation ("✅ Approved Nike MX") posts visibly to the channel. Swap to `chat.postEphemeral` — confirmation is only visible to the approving user. Zero new infrastructure, one change in `_handle_approve()` in `scout_handlers.py`. Reduces noise in #revenue-operations on days with multiple approvals.
-
-**Change:** In `_handle_approve()`, replace the confirmation `web.chat_postMessage(channel=..., text="✅ Approved...")` with `web.chat_postEphemeral(channel=..., user=user_id, text="✅ Approved...")`. Notion write, digest card update, and queue flush all stay as-is.
-
----
-
-## Slack API Opportunities (Future PRs)
-
-Reviewed against the full Slack Web API method list (2026-04-30). Check this list before planning any Scout PR — something here may slot in cleanly.
-
-### High Value — PR 24/25 candidates
-
-**`conversations.canvases.create` / `canvases.edit`** — Slack Canvas as ambient pipeline board. A channel canvas in #revenue-operations is always visible as a pinned tab — no user action required, shared across the whole team. Simpler write API than Slack Lists (edit sections, not structured rows). Spike this before committing to any Slack Lists re-attempt. This may be the "always visible" ambient view that Slack Lists promised but couldn't deliver.
-
-**`views.push`** — Drill-down from Home tab queue card. Clicking an offer pushes a detail view (full specs + approve/reject buttons) without leaving the Scout Home tab. Post-PR 23 when queue card exists. Makes approvals possible from the queue view instead of having to find the digest card in channel.
-
-**`reminders.add`** — Scout sets a Slack reminder for ops: "Nike MX has been Awaiting Entry for 48h — was it entered in the platform?" Closes the loop on stuck pipeline items proactively, without a new daemon. Natural PR 25 addition alongside Notion write-back.
-
-**`assistant.*` (setStatus, setSuggestedPrompts, setTitle)** — Scout as a Slack AI Assistant. Puts Scout in the AI sidebar with suggested prompts ("What's in the queue?", "Show ghost campaigns"). Requires enabling "Agent" capability in app manifest. Major UX upgrade when team is ready for it.
-
-### Medium Value — Future Consideration
-
-**`slackLists.*` with `lists:read` scope** — Already documented in Out of Scope. Path forward: add `lists:read` + `lists:write` to app manifest → reinstall app → re-spike `slackLists.items.create` + `slackLists.items.list` to verify field persistence. If the canvas spike fails, revisit this.
-
-**`search.messages`** — `@Scout search "Nike"` → searches Scout's message history in #revenue-operations. New agent tool: `search_scout_history(query)`. Low effort, useful for ops who want to find prior Scout analysis on a specific advertiser.
-
-**`users.profile.get`** — Enrich "approved by" in the queue card. Notion stores user IDs or emails; this would convert to display names for cleaner queue rendering.
-
-**`files.upload`** — Weekly queue CSV or performance report uploaded directly to #revenue-operations. Better than long messages for data-heavy content. Alternative delivery for the weekly digest.
-
-**`apps.datastore.*`** — Slack's hosted key-value store. Could replace `launched_offers.json`, `pulse_state.json`, `entity_overrides.json` with Slack-managed persistent storage. Requires migrating off SocketMode to Bolt. Long-term architectural option if Scout outgrows file-based state.
-
-### Low Value — Skip Unless Obvious Need
-
-**`reactions.add`** — Scout adds ✅ when offer goes live, 🔴 on Pulse warnings. Cute but low signal per engineering effort.
-
-**`pins.add`** — Pin Pulse messages to #revenue-operations. Bookmarks are better.
-
-**`chat.scheduleMessage`** — Not a win for Scout: Pulse needs ClickHouse at post time, so content can't be pre-baked. Daemons stay.
+Note: `@Scout` reactive agent is NOT in this list — it stays in PR 27. The separation
+is clear: proactive signals (daemons that post uninvited) were the trust problem.
+Reactive tools (respond when asked) were never the trust problem.
 
 ---
 
-## Verification
+## Sequencing Summary
 
-1. `python3 smoke_test.py` — PASSED N/N, 0 failures
-1b. `python3 -m unittest discover -s tests -p "test_*.py" -v` — PASSED N/N, 0 failures
-2. Open Scout in Slack left nav — Home tab shows queue grouped by pipeline stage
-3. Type `@Scout what's in the queue` — same queue card posts in channel
-4. Approve a test offer → Notion page created → open Scout Home → offer appears as "Awaiting Entry"
-5. Manually change Notion status to "In Platform" → re-open Scout Home → status reflects change
-6. Note for ops: Notion changes take up to 30 seconds to appear in Scout Home (TTL cache). This is expected behavior — not a bug.
-
----
-
-## Architecture Corrections (from CEO + Eng reviews, 2026-04-30)
-
-**A — Env var was wrong in original plan.** `NOTION_DEMAND_QUEUE_DB_ID` does not exist — the live env var is `NOTION_QUEUE_DB_ID`. Using the wrong name silently returns `[]` on every call. Fixed in Change 1.
-
-**B — `/scout-queue` slash command was missing from scope.** After this PR, three surfaces would have answered the same question with different data sources. Fixed: Change 3 now explicitly updates the `/scout-queue` handler in addition to the Home tab.
-
-**C — Notion API rate limits on concurrent `app_home_opened` events.** At 5+ simultaneous users (e.g., standup), concurrent Notion calls can hit the 3 req/s limit — silently returning empty queue data with no log differentiation from "actually empty." Fixed: 30-second in-process TTL cache added to `_fetch_notion_queue_items()`.
-
-**D — `None` vs `[]` error distinction required.** Returning `[]` on Notion error is indistinguishable from a genuinely empty queue. Fixed: `_fetch_notion_queue_items()` returns `None` on error, `[]` on empty. `_build_queue_card()` renders different text for each case.
-
-**E — Circular import risk if `scout_agent.py` imports `scout_slack_ui` at top level.** `scout_slack_ui.py` already imports from `scout_agent` (line 1556) inside a function body. A matching top-level import in `scout_agent.py` creates a circular import at boot. Fixed: `get_queue_status()` imports `_build_queue_card` inside the function body (deferred import).
-
-**F — Block Kit 50-block limit with full queue.** With 4 status groups + 15 offers, `_build_queue_card()` generates ~40 blocks — plus the 14-block fixed Home view structure = 54 total, silently truncated by Slack. Fixed: cap at 12 rendered offers; overflow becomes a "…and N more" context block.
-
-**G — `_build_home_queue_section()` dead code risk.** Leaving the old local-state-based function alongside the new Notion-based one invites accidental reuse. Fixed: explicitly deleted in Change 2.
-
-**H — `get_queue_status()` input_schema clarified.** Tool takes no parameters: `{"type": "object", "properties": {}}`. Function signature is `get_queue_status()` with no args (matches existing zero-arg tool pattern). Fixed in Change 4.
-
-**I — Intent 2 routing ambiguity.** Two tools with nearly identical trigger phrases ("queue", "pending", "pipeline") would leave routing to LLM judgment. Fixed: Change 4 explicitly updates Intent 2 to route queue/pipeline → `get_queue_status()` and narrows `get_demand_queue_status()` to ClickHouse-based impression queries only.
-
-**J — `timeout=5` on Notion call in hot path.** No timeout means a hung Notion connection blocks the home tab render indefinitely on Render. Fixed in Change 1.
+| Step | What | Risk | Timeline |
+|---|---|---|---|
+| **Now** | Merge PR #62 | None (dark) | 5 min |
+| **Pre-PR-27** | Validate @Scout answers a Todd-style revenue question correctly | None (read-only) | 30 min |
+| **PR 26** | Extract offer scraper to ms-demand-feed (scraper STAYS in Scout until PR 27) | Low | 1-2 days |
+| **PR 27** | Strip proactive signals only; keep @Scout reactive agent + revenue tracker | Medium (deleting ~8,000 lines) | 3-5 days |
+| **Validate** | 5 clean 3pm runs with flag off; Ali signs off on all 5 | None (passive) | 1 week |
+| **Go live** | Flip `revenue_tracker_enabled: true` | Low (feature-flagged) | 5 min |
+| **PR 28** | Ali tuning buttons (Acknowledged / Too sensitive / Run breakdown) — only if Ali reports threshold needs adjustment during the 5-run validation | Low | 1-2 days |
+| **PR 62b** | Bidirectional 🟢 upside alerts — after 30 days of clean 🔴 runs | Low | 1 day |
 
 ---
 
-## Decision Audit Trail
+## The Discipline Rule (permanent, from this point forward)
 
-| # | Phase | Decision | Classification | Principle | Rationale | Rejected |
-|---|-------|----------|-----------|-----------|-----------|---------|
-| 1 | Arch | Read from Notion on demand, no local sync | Mechanical | P1+P2 | Notion is source of truth; pull-on-demand via app_home_opened eliminates stale state risk | Cache Notion status in launched_offers.json |
-| 2 | Arch | Shared `_fetch_notion_queue_items()` + `_build_queue_card()` for both paths | Mechanical | P2 | One function per signal — same data, same render, no drift | Separate implementations per path |
-| 3 | Scope | Keep `get_demand_queue_status()` unchanged | Mechanical | P3 | It answers a different question (has offer started running?) vs pipeline stage; both coexist | Replace with Notion-based tool |
-| 4 | Spike | Slack Lists architecture abandoned after 2 independent spikes | Mechanical | P1 | Spike 1 (lists.* internal): empty fields, unknown_method on update. Spike 2 (slackLists.* Web API, 2026-04-30): list creation works, items create but fields always empty, read blocked by missing lists:read scope, update cell value format undocumented. Both spikes hit same core gap. Path forward if needed: add lists:read scope + reinstall app, then re-spike. | Build on Slack Lists |
-| 5 | Scope | campaign_builder.py untouched | Mechanical | P3 | PARKED — Playwright janky; correct path is MS platform API (Vamsee meeting) | Wire Playwright in this PR |
-| 6 | Arch | app_home_opened event (pull) not proactive push | Mechanical | P1+P5 | Slack fires event for every user click — no user ID list needed, always fresh | Push to fixed SCOUT_OPS_USER_IDS list |
-| 7 | Testing | unittest over pytest for behavioral tests | Mechanical | P5 | `requirements.txt` is single file shipped to Render production — pytest becomes a runtime dep; unittest is stdlib, already used via `unittest.mock`, no new dependency, sufficient for 5 tests with no pytest-specific features | Add pytest to requirements.txt |
-| 8 | Testing | Test 5 tests `_build_queue_card()` block count, not `_build_home_view()` | Mechanical | P5 | Calling `_build_home_view()` triggers deferred `scout_agent` import (line 1556) — not a pure unit test; testing the card directly validates the cap without import side-effect | Test full home view to "be thorough" |
+Before any capability comes back:
+
+1. **Validate before feature.** Revenue monitor must have run 30 days clean (Ali-confirmed, not self-reported).
+2. **Answer the JTBD question first.** "What does the team do differently because this exists?"
+   Vague answer = don't build it. If you can't name who on the team does what differently, stop.
+3. **One PR, one capability.** No compound PRs. Each signal gets its own PR, its own smoke
+   test run pasted in the description.
+4. **The test is the alert firing correctly.** Not "the code looks right." Run it at 3pm CT.
+   Screenshot the Slack message. Paste it in the PR.
+
+**Forcing function (what makes this stick):** Before writing a single line of new proactive signal code, Ali Abdelfadeel must explicitly say "yes, I would act on this within 24 hours" in `#revenue-operations`. Not "sounds useful." Not a thumbs-up. A named person committing to an action. Silence in 48h = feature does not exist. The default is no. The burden is on the feature to earn a yes, not on the team to veto it.
 
 ---
 
-## GSTACK REVIEW REPORT
+## Decisions — Resolved
 
-| Review | Run | Status | Findings |
-|--------|-----|--------|---------|
-| CEO | 2026-04-30 (round 1) | issues_resolved | 2 critical, 2 high, 3 medium — all incorporated |
-| Eng | 2026-04-30 (round 1) | issues_resolved | 4 high, 3 medium, 1 low — all incorporated |
-| CEO | 2026-04-30 (round 2) | issues_resolved | 0 critical, 2 high (pytest revert risk + TTL stale note), 3 medium — addressed via named constants, stale note, unittest decision |
-| Eng | 2026-04-30 (round 2) | issues_resolved | 2 critical (pytest ships to Render + test 5 triggers agent import), 2 high, 3 medium — addressed: switched to unittest, test 5 scoped to `_build_queue_card()` only, `tests/__init__.py` removed |
-| Design | skipped | — | No UI scope beyond Block Kit card |
+1. **Merge PR #62 now?** → **YES.** Dark, tested, no behavior change. 5 min.
+2. **Scraper first, then strip?** → **YES.** Scraper first (PR 26), then strip (PR 27).
+3. **Rename repo after PR 27?** → **NO.** Keeping `ms-scout`. @Scout stays as a reactive agent
+   — the name still describes what the service does. `ms-revenue-monitor` was the right name for
+   the "strip everything" plan. With @Scout intact, Scout is still Scout.
+4. **Ali tuning buttons (Move 3.5)?** → **PR 28, after 5 clean runs.** Don't entangle the strip
+   with new UI. Build the buttons only if validation confirms the threshold needs tuning.
+5. **Render disk gap** → **RESOLVED in plan.** Scraper stays in Scout during PR 26. Removed in PR 27.
+6. **PR 27 deletion/strip approach** → Three passes, in this exact order:
+
+   **Pass 0 — strip Notion dependencies from callers BEFORE deleting the file** (REQUIRED):
+   `scout_handlers.py` imports `scout_notion` at lines 27-30 (10+ symbols including
+   `_write_to_notion_queue`, `_generate_offer_copy`, `_fetch_notion_queue_items`, etc.).
+   `_handle_approve()` calls `_write_to_notion_queue()` at line 445. Deleting `scout_notion.py`
+   without removing these imports first causes an `ImportError` at startup — Scout won't boot.
+   Do this first, as a standalone commit:
+   - Remove the `scout_notion` import block from `scout_handlers.py` (lines 27-30)
+   - Strip the Notion call from `_handle_approve()` — approve/reject @Scout opportunity responses
+     become text-only (no Notion queue destination). Remove approve/reject buttons from
+     `_build_opportunity_cards()` and `_build_brief_blocks()` in `scout_slack_ui.py`.
+   - Strip `_build_queue_card()` and `_build_home_view()` import from `scout_handlers.py` (line 33-38)
+   - Run `python smoke_test.py` and confirm zero import errors before continuing.
+
+   **Pass 1 — full deletes** (modules now with no remaining callers):
+   `scout_notion.py` → `scout_digest.py` → `context_harvester.py` → `campaign_builder.py`.
+   Run `python smoke_test.py` after each. With Pass 0 complete, these are clean deletes.
+
+   **Pass 2 — strips** (modules that stay but are gutted):
+   `scout_bot.py` (remove Pulse runner, 8am scheduler, all but 3 daemon launches),
+   `scout_handlers.py` (remove block action router, home tab handler, slash commands — keep `_handle_mention`),
+   `scout_slack_ui.py` (remove `_format_pulse_blocks`, `_build_queue_card`, `_build_home_view`,
+   `_queue_confirm_blocks` — keep all canonical primitives + @Scout response formatters).
+   Run `python smoke_test.py` after each strip. Squash all three passes as one clean PR.
+7. **PR 27 SocketMode decision** → SocketMode STAYS. Usage data confirmed: 46 mentions from 5 users
+   in 39 days. Todd Bloch uses @Scout as a ClickHouse terminal for advertiser economics. Ali and
+   Sidd use it for signal analysis. TODAY Todd asked "why was yesterday the lowest revenue day this
+   year?" — that's the reactive JTBD in action. The original "remove SocketMode" direction was
+   predicated on removing @Scout entirely. That premise was wrong. @Scout is kept.
+   scout_bot.py keeps its SocketMode import, SocketModeClient init, and `socket_client.connect()`
+   in main(). What changes: remove Pulse runner, remove 8am scheduling logic, remove all daemon
+   launches except revenue_tracker, health_heartbeat, benchmarks_warmer.
+8. **State file persistence** → `data/` is already on Render persistent disk (`scout-data`).
+   `pulse_state.json` (containing `last_revenue_alert_date`) survives deploys. No action needed.
+9. **Bidirectional alerts (Move 1.5)** → **DEFERRED to PR 62b**, after 30-day validation.
+   The JTBD is "warn when revenue is soft." A 🟢 upside alert is a morale feature, not the
+   JTBD. Building it now would consume a PR during the trust rebuild for a nice-to-have.
+   Revisit only after 30 days of clean 🔴 runs have proven the signal is trustworthy.
+   PR 62b: add `revenue_tracker_upside_threshold_pct: 120` and `direction: "soft" | "strong"`
+   return field to `_query_intraday_revenue_total()` — exact spec stays in PR 62b planning.

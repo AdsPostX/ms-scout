@@ -104,9 +104,15 @@ def test_ask_status():
         result = ask("status", history=[], user_id="smoke-test")
         elapsed = time.monotonic() - t0
 
-        text = result.get("text", result) if isinstance(result, dict) else result
-        if not text or "broke" in text.lower() or "error" in text.lower():
+        text = result.text
+        # Check for Scout self-reporting failure — not ops vocabulary like "tracking errors"
+        _fail_phrases = ("something broke", "i got an error", "encountered an error", "failed to retrieve")
+        if not text or any(p in text.lower() for p in _fail_phrases):
             return False, f"Bad response: {str(text)[:120]}"
+        # Positive check: a status response must contain at least one health keyword
+        _status_keywords = ("healthy", "degraded", "available", "version", "benchmark", "offer", "uptime")
+        if not any(kw in text.lower() for kw in _status_keywords):
+            return False, f"Unexpected response (no status keywords found): {str(text)[:120]}"
         first_line = str(text).split('\n')[0].strip()
         preview = (first_line[:60] + "…") if len(first_line) > 60 else first_line
         return True, f"Responded in {elapsed:.1f}s — {preview}"
@@ -124,7 +130,7 @@ def test_ask_tool_call():
         result = ask("ghost campaigns", history=[], user_id="smoke-test")
         elapsed = time.monotonic() - t0
 
-        text = result.get("text", result) if isinstance(result, dict) else result
+        text = result.text
         if not text:
             return False, "Empty response from ghost campaign tool call"
         first_line = str(text).split('\n')[0].strip()
@@ -1187,6 +1193,77 @@ def test_get_queue_status_tool_registered():
     if "input_schema" not in tool_def:
         return False, "get_queue_status TOOLS entry missing input_schema"
     return True, "get_queue_status registered in TOOLS, TOOL_MAP, and module"
+
+
+@test("revenue_tracker_daemon_function_exists_with_formatter")
+def test_revenue_tracker_daemon_function_exists():
+    import scout_bot
+    # 1. _revenue_tracker daemon exists and is callable
+    if not hasattr(scout_bot, "_revenue_tracker"):
+        return False, "_revenue_tracker function not found on scout_bot module"
+    if not callable(scout_bot._revenue_tracker):
+        return False, "_revenue_tracker is not callable"
+    # 2. _format_revenue_alert formatter exists
+    if not hasattr(scout_bot, "_format_revenue_alert"):
+        return False, "_format_revenue_alert formatter not found on scout_bot module"
+    if not callable(scout_bot._format_revenue_alert):
+        return False, "_format_revenue_alert is not callable"
+    # 3. Threshold key for check hour is wired
+    import scout_agent
+    thresholds = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+    if "revenue_tracker_check_hour_ct" not in thresholds:
+        return False, "revenue_tracker_check_hour_ct missing from signals config"
+    if "revenue_tracker_publisher_min_delta" not in thresholds:
+        return False, "revenue_tracker_publisher_min_delta missing from signals config"
+    return True, "_revenue_tracker daemon and _format_revenue_alert formatter registered with config keys"
+
+
+@test("intraday_revenue_total_query_function_exists_on_scout_agent")
+def test_intraday_revenue_total_query_exists():
+    import scout_agent
+    if not hasattr(scout_agent, "_query_intraday_revenue_total"):
+        return False, "_query_intraday_revenue_total not found on scout_agent module"
+    if not callable(scout_agent._query_intraday_revenue_total):
+        return False, "_query_intraday_revenue_total is not callable"
+    # Verify shared baseline query it depends on also exists
+    if not hasattr(scout_agent, "_query_revenue_baseline"):
+        return False, "_query_revenue_baseline (used by Phase 1) not found on scout_agent module"
+    return True, "_query_intraday_revenue_total callable, shared _query_revenue_baseline present"
+
+
+@test("intraday_revenue_by_publisher_query_function_exists_on_scout_agent")
+def test_intraday_revenue_by_publisher_query_exists():
+    import scout_agent
+    if not hasattr(scout_agent, "_query_intraday_revenue_by_publisher"):
+        return False, "_query_intraday_revenue_by_publisher not found on scout_agent module"
+    if not callable(scout_agent._query_intraday_revenue_by_publisher):
+        return False, "_query_intraday_revenue_by_publisher is not callable"
+    return True, "_query_intraday_revenue_by_publisher callable"
+
+
+@test("pulse_diff_signal_snapshot_keys_emitted_by_run_pulse_signals_result")
+def test_pulse_diff_snapshot_keys():
+    """Verify _snapshot_keys() can consume the output of _run_pulse_signals() without error."""
+    import scout_bot
+    # Build a synthetic signals dict matching what _run_pulse_signals returns
+    synthetic_signals = {
+        "cap_alerts": [{"adv_name": "TestAdv", "cap_pct": 95, "days_to_cap": 2, "days_remaining": 30, "monthly_cap": 5000, "revenue_mtd": 4800}],
+        "velocity_shifts": [{"publisher_name": "TestPub", "direction": "down", "pct_delta": -45, "revenue_7d_ann": 8000, "revenue_30d": 15000}],
+        "overnight_events": [],
+        "ghost_campaigns": [{"adv_name": "GhostAdv", "impressions_7d": 10000, "impressions_2d": 3000, "revenue_7d": 0}],
+        "fill_rate": [{"publisher_name": "FillPub", "fill_rate_pct": 10.0, "sessions_7d": 8000, "missed_sessions": 7200}],
+        "opportunities": [{"publisher_name": "OppPub", "adv_name": "OppAdv", "est_monthly_rev": 5000, "sessions_30d": 200000}],
+    }
+    try:
+        snap = scout_bot._snapshot_keys(synthetic_signals)
+    except Exception as e:
+        return False, f"_snapshot_keys raised: {e}"
+    expected_keys = {"ghost", "fill", "down", "up", "cap", "opp"}
+    if set(snap.keys()) != expected_keys:
+        return False, f"snapshot keys mismatch: expected {expected_keys}, got {set(snap.keys())}"
+    if "GhostAdv" not in snap["ghost"]:
+        return False, f"GhostAdv not in ghost snapshot: {snap['ghost']}"
+    return True, f"_snapshot_keys emits correct keys: {{{', '.join(sorted(snap.keys()))}}}"
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────

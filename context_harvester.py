@@ -360,7 +360,17 @@ def _harvest_inner() -> dict:
                 audit_entries.append({"name": name, "type": etype, "action": "written", "note": note})
 
             if any(e["action"] == "written" for e in audit_entries):
-                _save_entity_overrides(overrides)
+                if os.getenv("HARVESTER_AUTO_WRITE_ENABLED", "false").lower() != "true":
+                    log.info(
+                        "[harvester] auto-write disabled — skipping entity_overrides update "
+                        "(HARVESTER_AUTO_WRITE_ENABLED=false). %d entries would have been written.",
+                        sum(1 for e in audit_entries if e["action"] == "written"),
+                    )
+                    for entry in audit_entries:
+                        if entry["action"] == "written":
+                            entry["action"] = "skipped_auto_write_disabled"
+                else:
+                    _save_entity_overrides(overrides)
 
         except Exception as e:
             log.warning(f"[harvest] entity extraction/write failed (non-fatal): {e}")
