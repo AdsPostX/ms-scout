@@ -775,12 +775,16 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
         "oid": data.get("offer_id", ""),
     }
 
-    # Write to Notion + update brief card in-place with ⏳ status
+    # Write to Notion + optionally update brief card in-place with ⏳ status.
+    # Opportunity-list cards (from find/recommend responses) pack minimal data —
+    # no "t" (title) key.  In that case skip the in-place card update; it would
+    # strip ALL offer buttons from the list and corrupt the message.
+    is_brief_card = bool(data.get("t") or data.get("sh"))
     notion_url = _try_add_to_demand_queue(
         web, brief_data, user_id, thread_url,
         copy_data=copy_data,
-        brief_channel=channel,
-        brief_ts=message_ts,
+        brief_channel=channel if is_brief_card else "",
+        brief_ts=message_ts if is_brief_card else "",
     )
     _record_queued_offer(
         advertiser, brief_data, user_id, thread_url,
