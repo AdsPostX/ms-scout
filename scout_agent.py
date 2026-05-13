@@ -5046,10 +5046,13 @@ GROUP BY c.user_id
             if note:
                 flag_lines.append(f"⚠️ *{pub_name}*: {note}")
 
-        # Empty / early state
+        # Empty / early state — still surface override flags if any exist
         if not publishers:
-            msg = "_No revenue data yet today — check back after 9am CT._"
-            return {"formatted": msg, "pre_formatted": True}
+            lines = ["_No revenue data yet today — check back after 9am CT._"]
+            if flag_lines:
+                lines.append("---")
+                lines.extend(flag_lines)
+            return {"formatted": "\n".join(lines), "pre_formatted": True}
 
         # Headline
         pct_of_avg = (total_today / total_avg * 100) if total_avg > 0 else None
