@@ -658,7 +658,7 @@ IDENTITY + NORTH STAR
 Scout exists to move offers along the pipeline: Source → Brief → Approved → Live.
 Every answer should move an offer closer to that sequence. Q&A intelligence serves this pipeline, not the other way around.
 
-MomentScience runs affiliate offers at post-transaction moments (right after a purchase). Best fits: low-friction, recognizable brands, simple conversion events (email/signup/free trial). High-intent or complex offers (loans, insurance, medical) convert poorly regardless of payout. 4,500+ offers across CJ, MaxBounty, Impact, FlexOffers, and other networks — plus real CVR and RPM from ClickHouse.
+MomentScience runs affiliate offers at post-transaction moments (right after a purchase). Best fits: low-friction, recognizable brands, simple conversion events (email/signup/free trial). High-intent or complex offers (loans, insurance, medical) convert poorly regardless of payout. Thousands of affiliate offers across CJ, MaxBounty, Impact, FlexOffers, and other networks — plus real CVR and RPM from ClickHouse.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WHO USES SCOUT
@@ -4462,6 +4462,33 @@ def get_scout_status() -> dict:
         status["by_network"] = networks
         status["available_networks"] = sorted(networks.keys())
 
+    # Offer file age — how long ago the last successful scrape wrote the snapshot
+    if SNAPSHOT_PATH.exists():
+        _age_secs = _time.time() - SNAPSHOT_PATH.stat().st_mtime
+        if _age_secs < 3600:
+            status["offers_age"] = f"{int(_age_secs / 60)}m ago"
+        elif _age_secs < 86400:
+            status["offers_age"] = f"{_age_secs / 3600:.1f}h ago"
+        else:
+            status["offers_age"] = f"{_age_secs / 86400:.1f}d ago — consider refreshing"
+    else:
+        status["offers_age"] = "no snapshot — run @Scout refresh offers"
+
+    # Unconfigured networks (creds absent → scraper silently skips them)
+    import os as _os
+    _missing_nets = []
+    if not _os.getenv("RAKUTEN_API_TOKEN"):
+        _missing_nets.append("rakuten")
+    if not (_os.getenv("AWIN_PUBLISHER_ID") and _os.getenv("AWIN_API_KEY")):
+        _missing_nets.append("awin")
+    if _missing_nets:
+        status["unconfigured_networks"] = _missing_nets
+        warnings = status.get("warnings", [])
+        warnings.append(
+            f"Creds missing for: {', '.join(_missing_nets)} — inventory excludes these networks"
+        )
+        status["warnings"] = warnings
+
     # Demand queue
     state = _load_launched_offers_state()
     queued    = [k for k, v in state.items() if v.get("status") == "queued"]
@@ -4479,8 +4506,8 @@ def get_scout_status() -> dict:
     except Exception as e:
         status["clickhouse"] = f"unavailable: {str(e)[:80]}"
 
-    # Data quality warnings
-    warnings = []
+    # Data quality warnings — extend rather than overwrite so earlier warnings survive
+    warnings = list(status.get("warnings", []))
     if bench and not bench.get("by_offer_impact_id"):
         warnings.append("No Tier 1 (exact offer) benchmarks — all scoring from Tier 2+")
     cats_null = sum(1 for o in offers if not o.get("category"))
