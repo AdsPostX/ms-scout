@@ -159,6 +159,8 @@ OFFER_FIELDS = [
     # Status & metadata
     "status",
     "date_scraped",
+    "last_verified",   # ISO timestamp of last scrape that included this offer
+    "fit_tier",        # PRIME | STRONG | STANDARD | WEAK — structural fit, computed at ingestion
 ]
 
 def empty_offer() -> Offer:
@@ -913,6 +915,73 @@ def match_ms_status(offer: dict, ms_index: dict) -> tuple:
         return "In System (Inactive)", adv_name
 
 
+# Canonical category labels (from normalize_categories) that historically convert
+# poorly at post-transaction moments.  Matched against _categories list — not
+# the raw joined string — so Finance/Insurance/Legal always resolve correctly.
+_BAD_FIT_CANONICAL = frozenset({
+    "Finance", "Insurance", "Legal", "Health & Wellness",
+})
+
+
+def _compute_fit_tier(offer: dict) -> str:
+    """
+    Structural fit score — ClickHouse-free, computed at ingestion time.
+    Tiers are durable: they don't change between scrapes unless the offer's
+    payout_type, payout, or category changes.
+
+    PRIME:    CPA/CPL ≥ $5, no bad-fit vertical
+    STRONG:   CPA/CPL $2-$4.99, or CPS ≥ $10, no bad-fit vertical
+    STANDARD: anything else that passes clean_offers()
+    WEAK:     bad-fit vertical, or RevShare/CPC < $2
+    """
+    # Prefer the pre-normalized payout type from clean_offers;
+    # fall back to raw uppercased for offers not yet through the pipeline.
+    _norm = (offer.get("_payout_type_norm") or "").lower()
+    _raw_pt = (offer.get("payout_type") or "").upper()
+    if _norm in ("$ per lead",):
+        payout_type = "CPL"
+    elif _norm == "% of sale":
+        # CPS (commission per sale) and REVSHARE both normalize to "% of Sale".
+        # Use raw payout_type to preserve the REVSHARE WEAK path for low rates.
+        payout_type = "CPS" if "CPS" in _raw_pt or "PER SALE" in _raw_pt else "REVSHARE"
+    elif _norm == "$ per click":
+        payout_type = "CPC"
+    elif _norm == "fixed":
+        payout_type = "CPA"  # fixed bounties behave like CPA for tiering
+    else:
+        payout_type = _raw_pt
+
+    # Prefer the precomputed numeric from clean_offers; fall back to parsing raw.
+    payout = offer.get("_payout_num")
+    if payout is None:
+        try:
+            raw = str(offer.get("payout") or "")
+            nums = re.findall(r"[\d]+(?:\.\d+)?", raw.replace(",", ""))
+            payout = float(nums[0]) if nums else 0.0
+        except (ValueError, TypeError, IndexError):
+            payout = 0.0
+
+    # Match against canonical labels stored in _categories list (exact, case-sensitive).
+    categories = offer.get("_categories") or []
+    if any(cat in _BAD_FIT_CANONICAL for cat in categories):
+        return "WEAK"
+
+    if payout_type in ("CPA", "CPL"):
+        if payout >= 5.0:
+            return "PRIME"
+        if payout >= 2.0:
+            return "STRONG"
+        return "STANDARD"
+
+    if payout_type == "CPS":
+        return "STRONG" if payout >= 10.0 else "STANDARD"
+
+    if payout_type in ("REVSHARE", "CPC") and payout < 2.0:
+        return "WEAK"
+
+    return "STANDARD"
+
+
 def clean_offers(offers: list, ms_index: dict = None) -> list:
     """Apply all normalizations. Returns cleaned list, active-only by default."""
     if ms_index is None:
@@ -929,7 +998,7 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
             str(o.get("payout", "")), str(o.get("payout_type", ""))
         )
         ms_status, ms_internal_name = match_ms_status(o, ms_index)
-        cleaned.append({
+        normalized = {
             **o,
             "status":            status,
             "geo":               geo,
@@ -941,7 +1010,10 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
             "_unique_key":       f"{o['network']}:{o['offer_id']}",
             "_ms_status":        ms_status,
             "_ms_internal_name": ms_internal_name or "",
-        })
+        }
+        normalized["fit_tier"]     = _compute_fit_tier(normalized)
+        normalized["last_verified"] = normalized.get("date_scraped") or datetime.today().strftime("%Y-%m-%d")
+        cleaned.append(normalized)
     return cleaned
 
 
