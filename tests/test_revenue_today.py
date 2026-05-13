@@ -115,6 +115,20 @@ class TestRevenueToday(unittest.TestCase):
         self.assertTrue(result.get("pre_formatted"))
         self.assertIn("No revenue data", result["formatted"])
 
+    def test_empty_state_still_surfaces_override_flags(self):
+        """Zero revenue today + flagged publisher → flag still appears in output."""
+        overrides = {
+            "publishers": {
+                "TuitionHero": {"note": "invalid conversions", "added_by": "scout-agent"}
+            },
+            "advertisers": {},
+        }
+        result = _run(today_rows=[], avg_rows=[], overrides=overrides)
+        formatted = result["formatted"]
+        self.assertIn("No revenue data", formatted)
+        self.assertIn("⚠️", formatted)
+        self.assertIn("TuitionHero", formatted)
+
     def test_green_yellow_red_thresholds(self):
         """Signal emoji matches threshold: ≥80% → 🟢, 40-79% → 🟡, <40% → 🔴."""
         rows = [

@@ -2805,7 +2805,6 @@ def get_publisher_competitive_landscape(
         serving_count = sum(1 for c in competitors if c["is_serving"])
         result = {
             "publisher": pub_full_name,
-            "publisher_id": pub_id_int,
             "publisher_pid": pub_pid,
             "weekly_impressions_avg": weekly_impressions,
             "projected_impressions_2w": weekly_impressions * weeks,
@@ -3315,7 +3314,6 @@ def get_advertiser_revenue_projection(
         pub_pid, pub_name, impr, sess, rev, pay, convs = row
         by_publisher.append({
             "publisher":          pub_name or f"Partner {pub_pid}",
-            "publisher_id":       pub_pid,
             "impressions_30d":    impr,
             "revenue_30d":        round(rev, 2),
             "projected_revenue":  round((rev / 30) * days_in_month, 2),
@@ -5022,7 +5020,7 @@ SELECT
     sum(toFloat64OrNull(c.revenue)) AS today_rev,
     count() AS conversions
 FROM adpx_conversionsdetails c
-LEFT JOIN from_airbyte_users u ON u.id = c.user_id
+LEFT JOIN from_airbyte_users u ON u.id = toInt64(c.user_id)
 PREWHERE toYYYYMM(c.created_at) = toYYYYMM(toDate(toTimeZone(now(), 'America/Chicago')))
 WHERE toDate(toTimeZone(c.created_at, 'America/Chicago'))
       = toDate(toTimeZone(now(), 'America/Chicago'))
@@ -5074,20 +5072,23 @@ GROUP BY c.user_id
             total_today += rev
             total_avg += avg
 
-        # Load entity_overrides flags — only surface for publishers with revenue today
+        # Load entity_overrides flags — surface all flagged publishers (including those
+        # with no revenue today, since the flag itself is the signal worth seeing)
         overrides = _load_entity_overrides()
         all_pubs = {**overrides.get("publishers", {})}
-        todays_publishers = {p["name"] for p in publishers}
         flag_lines: list[str] = []
         for pub_name, entry in all_pubs.items():
             note = (entry or {}).get("note", "")
-            if note and pub_name in todays_publishers:
+            if note:
                 flag_lines.append(f"⚠️ *{pub_name}*: {note}")
 
-        # Empty / early state
+        # Empty / early state — still surface override flags if any exist
         if not publishers:
-            msg = "_No revenue data yet today — check back after 9am CT._"
-            return {"formatted": msg, "pre_formatted": True}
+            lines = ["_No revenue data yet today — check back after 9am CT._"]
+            if flag_lines:
+                lines.append("---")
+                lines.extend(flag_lines)
+            return {"formatted": "\n".join(lines), "pre_formatted": True}
 
         # Headline
         pct_of_avg = (total_today / total_avg * 100) if total_avg > 0 else None
