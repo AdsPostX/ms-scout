@@ -88,8 +88,8 @@ class TestRevenueToday(unittest.TestCase):
         self.assertNotIn("0 others", result["formatted"])
         self.assertNotIn("others", result["formatted"])
 
-    def test_entity_override_flag_appears(self):
-        """Publisher with entity override note should appear as ⚠️ line."""
+    def test_no_override_lines_in_output(self):
+        """entity_overrides notes must NOT appear in get_revenue_today output — revenue is pure numbers."""
         overrides = {
             "publishers": {
                 "TuitionHero": {
@@ -105,9 +105,9 @@ class TestRevenueToday(unittest.TestCase):
             overrides=overrides,
         )
         formatted = result["formatted"]
-        self.assertIn("⚠️", formatted)
-        self.assertIn("TuitionHero", formatted)
-        self.assertIn("invalid conversions", formatted)
+        self.assertNotIn("⚠️", formatted)
+        self.assertNotIn("TuitionHero", formatted)
+        self.assertNotIn("invalid conversions", formatted)
 
     def test_empty_state_early_morning(self):
         """No rows from ClickHouse returns the empty-state message."""
@@ -115,8 +115,8 @@ class TestRevenueToday(unittest.TestCase):
         self.assertTrue(result.get("pre_formatted"))
         self.assertIn("No revenue data", result["formatted"])
 
-    def test_empty_state_still_surfaces_override_flags(self):
-        """Zero revenue today + flagged publisher → flag still appears in output."""
+    def test_empty_state_no_override_lines(self):
+        """Zero revenue today — only the early-morning message, no ⚠️ override lines."""
         overrides = {
             "publishers": {
                 "TuitionHero": {"note": "invalid conversions", "added_by": "scout-agent"}
@@ -126,8 +126,8 @@ class TestRevenueToday(unittest.TestCase):
         result = _run(today_rows=[], avg_rows=[], overrides=overrides)
         formatted = result["formatted"]
         self.assertIn("No revenue data", formatted)
-        self.assertIn("⚠️", formatted)
-        self.assertIn("TuitionHero", formatted)
+        self.assertNotIn("⚠️", formatted)
+        self.assertNotIn("TuitionHero", formatted)
 
     def test_green_yellow_red_thresholds(self):
         """Signal emoji matches threshold: ≥80% → 🟢, 40-79% → 🟡, <40% → 🔴."""
