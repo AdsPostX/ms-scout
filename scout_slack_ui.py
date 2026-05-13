@@ -1374,10 +1374,32 @@ def _format_pulse_blocks(
             ),
         }]})
 
+    # ── Seasonal radar ────────────────────────────────────────────────────
+    seasonal = signals.get("seasonal", [])
+    if seasonal:
+        blocks.append({"type": "divider"})
+        for evt in seasonal[:1]:  # fatigue budget: max 1 event per pulse
+            days = evt["days_until"]
+            cnt  = evt["offer_count"]
+            day_str = f"{days} day{'s' if days != 1 else ''}"
+            offer_lines = "\n".join(
+                f">  • {o.get('advertiser') or o.get('offer_name', '?')} · "
+                f"${o.get('payout', '?')} {(o.get('payout_type') or '').upper()} · "
+                f"{o.get('network', '?')}"
+                for o in evt["top_offers"]
+            )
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": (
+                    f":calendar: *{evt['event_name']} in {day_str}* — "
+                    f"{cnt} PRIME/STRONG offer{'s' if cnt != 1 else ''} available\n"
+                    + offer_lines
+                )}})
+
     # ── Change I: zero-signal all-clear ──────────────────────────────────
     _has_signals = bool(
         ghost_camps or fill_rate or regular_downs or urgent_caps or ups
         or (opportunities and today_d.weekday() == 0)
+        or seasonal
     )
     if not _has_signals:
         blocks.append({"type": "context", "elements": [
