@@ -869,8 +869,8 @@ _SEASONAL_CALENDAR = [
     ("Tax Day",           ["finance", "tax", "software"],                        21, lambda y: __import__("datetime").date(y, 4, 15)),
     ("4th of July",       ["travel", "retail", "sports"],                        10, lambda y: __import__("datetime").date(y, 7,  4)),
     ("Halloween",         ["entertainment", "retail"],                           14, lambda y: __import__("datetime").date(y, 10, 31)),
-    ("Black Friday",      ["retail", "electronics", "shopping"],                 21, lambda y: __import__("datetime").date(y, 11, 29)),
-    ("Cyber Monday",      ["retail", "electronics", "software"],                 21, lambda y: __import__("datetime").date(y, 12,  2)),
+    ("Black Friday",      ["retail", "electronics", "shopping"],                 21, lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=1)),   # day after 4th Thursday
+    ("Cyber Monday",      ["retail", "electronics", "software"],                 21, lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=4)),   # Monday after Black Friday
     ("Christmas/Holiday", ["gifts", "travel", "retail", "experiences"],          30, lambda y: __import__("datetime").date(y, 12, 25)),
     ("New Year's",        ["travel", "fitness", "health"],                       14, lambda y: __import__("datetime").date(y, 12, 31)),
     # Floating holidays — computed correctly per year via _nth_weekday
@@ -965,6 +965,9 @@ def _sourcing_signal_payout_upgrades(offers: list) -> list:
     Inventory gross payout × GROSS_TO_NET_FACTOR vs ClickHouse net payout.
     Only surfaces upgrades >= _MIN_UPGRADE_DELTA after normalization.
     """
+    if not offers:
+        return []
+
     if not _sourcing_signal_enabled("payout_upgrades"):
         return []
 
