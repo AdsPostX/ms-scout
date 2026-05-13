@@ -130,9 +130,9 @@ class TestRevenueToday(unittest.TestCase):
         result = _run(today_rows=rows, avg_rows=avg_rows)
         formatted = result["formatted"]
         lines = formatted.split("\n")
-        green_line = next((l for l in lines if "GreenPub" in l), "")
-        yellow_line = next((l for l in lines if "YellowPub" in l), "")
-        red_line = next((l for l in lines if "RedPub" in l), "")
+        green_line = next((line for line in lines if "GreenPub" in line), "")
+        yellow_line = next((line for line in lines if "YellowPub" in line), "")
+        red_line = next((line for line in lines if "RedPub" in line), "")
         self.assertIn("🟢", green_line)
         self.assertIn("🟡", yellow_line)
         self.assertIn("🔴", red_line)

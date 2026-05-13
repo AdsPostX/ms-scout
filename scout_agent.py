@@ -790,7 +790,7 @@ Rules:
 - SECTION BREAKS: \n---\n exactly — no blank lines, no spaces around dashes. Breaks renderer otherwise.
 - > prefix for caveats, footnotes, Scout Scores.
 - *bold* for offer names, verdicts, key numbers.
-- LEAD NUMBER: First sentence of every non-trivial response must contain the single most important number, bolded. Cap: "*$100* cap on Campaign [ID]." Revenue: "*$62K* gross." Rank: "Disney+ ranks *#8 of 13*."
+- LEAD NUMBER: First sentence of every non-trivial response must contain the single most important number, bolded. Cap: "*$100* cap on campaign." Revenue: "*$62K* gross." Rank: "Disney+ ranks *#8 of 13*."
 - LEAD NUMBER CONSISTENCY: Lead count must match the list below it. If showing fewer, adjust: "*3 active campaigns*" not "*14 campaigns*."
 - STATUS EMOJI: :large_green_circle: live/serving · :large_yellow_circle: marginal/near-cap · :red_circle: capped/ended/dead
 - INTERNAL IDs: Never surface user_id, publisher_id, campaign_id, or account_id in any response. Tools strip these at the data boundary. If you see one, skip it.
@@ -5038,13 +5038,14 @@ GROUP BY c.user_id
             total_today += rev
             total_avg += avg
 
-        # Load entity_overrides flags
+        # Load entity_overrides flags — only surface for publishers with revenue today
         overrides = _load_entity_overrides()
         all_pubs = {**overrides.get("publishers", {})}
+        todays_publishers = {p["name"] for p in publishers}
         flag_lines: list[str] = []
         for pub_name, entry in all_pubs.items():
             note = (entry or {}).get("note", "")
-            if note:
+            if note and pub_name in todays_publishers:
                 flag_lines.append(f"⚠️ *{pub_name}*: {note}")
 
         # Empty / early state
