@@ -934,7 +934,22 @@ def _compute_fit_tier(offer: dict) -> str:
     STANDARD: anything else that passes clean_offers()
     WEAK:     bad-fit vertical, or RevShare/CPC < $2
     """
-    payout_type = (offer.get("payout_type") or "").upper()
+    # Prefer the pre-normalized payout type from clean_offers;
+    # fall back to raw uppercased for offers not yet through the pipeline.
+    _norm = (offer.get("_payout_type_norm") or "").lower()
+    _raw_pt = (offer.get("payout_type") or "").upper()
+    if _norm in ("$ per lead",):
+        payout_type = "CPL"
+    elif _norm == "% of sale":
+        # CPS (commission per sale) and REVSHARE both normalize to "% of Sale".
+        # Use raw payout_type to preserve the REVSHARE WEAK path for low rates.
+        payout_type = "CPS" if "CPS" in _raw_pt or "PER SALE" in _raw_pt else "REVSHARE"
+    elif _norm == "$ per click":
+        payout_type = "CPC"
+    elif _norm == "fixed":
+        payout_type = "CPA"  # fixed bounties behave like CPA for tiering
+    else:
+        payout_type = _raw_pt
 
     # Prefer the precomputed numeric from clean_offers; fall back to parsing raw.
     payout = offer.get("_payout_num")
