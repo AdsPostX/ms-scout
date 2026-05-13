@@ -661,20 +661,80 @@ def _pulse_signal_opportunities(ch) -> list:
     ]
 
 
+def _pulse_signal_enabled(key: str) -> bool:
+    """Return True unless this signal name is listed in SCOUT_DISABLED_PULSE_SIGNALS.
+
+    Set SCOUT_DISABLED_PULSE_SIGNALS=new_offers (or comma-separated) to mute
+    any signal without a code deploy.
+    """
+    import os as _os
+    disabled = {s.strip() for s in _os.getenv("SCOUT_DISABLED_PULSE_SIGNALS", "").split(",") if s.strip()}
+    return key not in disabled
+
+
+def _pulse_signal_new_offers(ch, offers: list) -> list:
+    """Surface PRIME/STRONG offers that first appeared in inventory in the last 48 hours.
+
+    Uses the ``first_seen`` field (set once on first appearance, never updated).
+    Offers that predate the field (no ``first_seen`` key) are silently skipped.
+    Returns [] if the kill switch is set.
+
+    ch is accepted but unused — this is a pure local signal.
+    """
+    if not _pulse_signal_enabled("new_offers"):
+        return []
+
+    from datetime import datetime as _dt, timezone as _tz
+
+    cutoff = _dt.now(_tz.utc).timestamp() - (48 * 3600)  # 48-hour window
+
+    new_offers = []
+    for o in offers:
+        tier = o.get("fit_tier", "STANDARD")
+        if tier not in ("PRIME", "STRONG"):
+            continue
+
+        fs = o.get("first_seen", "")
+        if not fs:
+            continue  # offer predates first_seen field — skip
+
+        try:
+            ts = _dt.fromisoformat(fs.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+
+        if ts >= cutoff:
+            new_offers.append(o)
+
+    new_offers.sort(key=lambda x: float(x.get("payout") or 0), reverse=True)
+    return new_offers[:5]
+
+
 # ── Pulse signal orchestrator ─────────────────────────────────────────────────
 
 def _run_pulse_signals() -> dict:
     """
-    Run all 6 Pulse signals in parallel against ClickHouse.
-    Each signal owns its own connection — no shared state, no lock needed.
-    Returns a dict with cap_alerts, velocity_shifts, overnight_events,
-    ghost_campaigns, fill_rate, opportunities.
+    Run all Pulse signals in parallel.  Each ClickHouse signal owns its own
+    connection — no shared state, no lock needed.  Local signals (new_offers)
+    share a pre-loaded offer snapshot.
+    Returns a dict with all signal keys.
     Revenue tracking moved to the _revenue_tracker daemon (PR 25).
     """
-    from scout_agent import _get_ch_client
+    from scout_agent import _get_ch_client, _load_offers
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": [], "ghost_campaigns": [], "fill_rate": [], "opportunities": []}
+    # Load offer inventory once — shared by local signals
+    try:
+        offers = _load_offers()
+    except Exception as e:
+        log.warning(f"Pulse: could not load offer inventory: {e}")
+        offers = []
+
+    signals: dict = {
+        "cap_alerts": [], "velocity_shifts": [], "overnight_events": [],
+        "ghost_campaigns": [], "fill_rate": [], "opportunities": [],
+        "new_offers": [],
+    }
 
     _signal_fns = [
         ("cap_alerts",         _pulse_signal_cap),
@@ -683,13 +743,15 @@ def _run_pulse_signals() -> dict:
         ("ghost_campaigns",    _pulse_signal_ghost),
         ("fill_rate",          _pulse_signal_fill_rate),
         ("opportunities",      _pulse_signal_opportunities),
+        # Local signal — accepts ch to match _run_one signature; offers captured
+        ("new_offers",         lambda ch: _pulse_signal_new_offers(ch, offers)),
     ]
 
     def _run_one(key, fn):
         ch = _get_ch_client()
         return key, fn(ch)
 
-    with ThreadPoolExecutor(max_workers=7, thread_name_prefix="pulse") as pool:
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="pulse") as pool:
         futures = {pool.submit(_run_one, key, fn): key for key, fn in _signal_fns}
         for future in as_completed(futures):
             try:

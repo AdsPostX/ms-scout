@@ -1374,10 +1374,23 @@ def _format_pulse_blocks(
             ),
         }]})
 
+    new_offers = signals.get("new_offers", [])
+    if new_offers:
+        blocks.append({"type": "divider"})
+        lines = [":new: *New PRIME offers in the last 48h*"]
+        for o in new_offers:
+            lines.append(
+                f">  {o.get('offer_name') or o.get('advertiser', '?')} · "
+                f"${o.get('payout', '?')} {(o.get('payout_type') or '').upper()} · "
+                f"{o.get('network', '?')} · {o.get('fit_tier', '?')}"
+            )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+
     # ── Change I: zero-signal all-clear ──────────────────────────────────
     _has_signals = bool(
         ghost_camps or fill_rate or regular_downs or urgent_caps or ups
         or (opportunities and today_d.weekday() == 0)
+        or new_offers
     )
     if not _has_signals:
         blocks.append({"type": "context", "elements": [

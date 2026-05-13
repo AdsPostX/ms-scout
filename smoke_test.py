@@ -1266,6 +1266,164 @@ def test_pulse_diff_snapshot_keys():
     return True, f"_snapshot_keys emits correct keys: {{{', '.join(sorted(snap.keys()))}}}"
 
 
+# ── PR F: New PRIME Offer Alert tests ─────────────────────────────────────────
+
+@test("new_offers_signal_empty_offers_returns_empty")
+def test_new_offers_empty_offers():
+    """Empty offer list returns []."""
+    from scout_bot import _pulse_signal_new_offers
+    result = _pulse_signal_new_offers(ch=None, offers=[])
+    if result != []:
+        return False, f"Expected [], got {result}"
+    return True, "Empty offer list correctly returns []"
+
+
+@test("new_offers_signal_offers_without_first_seen_skipped")
+def test_new_offers_no_first_seen():
+    """Offers without first_seen field must be silently skipped."""
+    from scout_bot import _pulse_signal_new_offers
+    offers = [{"offer_name": "OldOffer", "fit_tier": "PRIME", "payout": "10.00",
+               "payout_type": "CPL", "network": "CJ"}]  # no first_seen key
+    result = _pulse_signal_new_offers(ch=None, offers=offers)
+    if result:
+        return False, f"Offer without first_seen should be skipped, got {result}"
+    return True, "Offers without first_seen correctly skipped"
+
+
+@test("new_offers_signal_old_first_seen_excluded")
+def test_new_offers_old_first_seen():
+    """PRIME offer with first_seen > 48h ago must not appear."""
+    from scout_bot import _pulse_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    offers = [{"offer_name": "OldOffer", "fit_tier": "PRIME", "payout": "10.00",
+               "payout_type": "CPL", "network": "CJ", "first_seen": old}]
+    result = _pulse_signal_new_offers(ch=None, offers=offers)
+    if result:
+        return False, f"Offer with 30-day-old first_seen should be excluded, got {result}"
+    return True, "Offer with old first_seen correctly excluded"
+
+
+@test("new_offers_signal_recent_first_seen_included")
+def test_new_offers_recent_first_seen():
+    """PRIME offer with first_seen < 48h ago must appear."""
+    from scout_bot import _pulse_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+    offers = [{"offer_name": "NewOffer", "fit_tier": "PRIME", "payout": "8.00",
+               "payout_type": "CPL", "network": "CJ", "first_seen": recent}]
+    result = _pulse_signal_new_offers(ch=None, offers=offers)
+    if not result:
+        return False, "PRIME offer with 12h-old first_seen should appear"
+    if result[0]["offer_name"] != "NewOffer":
+        return False, f"Wrong offer: {result[0]['offer_name']}"
+    return True, "Recent PRIME offer correctly surfaced"
+
+
+@test("new_offers_signal_standard_tier_excluded")
+def test_new_offers_standard_tier_excluded():
+    """STANDARD tier offers must not appear even if first_seen is recent."""
+    from scout_bot import _pulse_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    offers = [{"offer_name": "StdOffer", "fit_tier": "STANDARD", "payout": "3.00",
+               "payout_type": "CPL", "network": "CJ", "first_seen": recent}]
+    result = _pulse_signal_new_offers(ch=None, offers=offers)
+    if result:
+        return False, f"STANDARD tier should be excluded, got {result}"
+    return True, "STANDARD tier correctly excluded"
+
+
+@test("new_offers_signal_weak_tier_excluded")
+def test_new_offers_weak_tier_excluded():
+    """WEAK tier offers must not appear even if first_seen is recent."""
+    from scout_bot import _pulse_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    offers = [{"offer_name": "WeakOffer", "fit_tier": "WEAK", "payout": "1.00",
+               "payout_type": "CPL", "network": "CJ", "first_seen": recent}]
+    result = _pulse_signal_new_offers(ch=None, offers=offers)
+    if result:
+        return False, f"WEAK tier should be excluded, got {result}"
+    return True, "WEAK tier correctly excluded"
+
+
+@test("new_offers_signal_sorted_by_payout_descending")
+def test_new_offers_sorted_by_payout():
+    """Results must be sorted by payout descending."""
+    from scout_bot import _pulse_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    offers = [
+        {"offer_name": "LowPay",  "fit_tier": "PRIME", "payout": "4.00", "payout_type": "CPL", "network": "CJ", "first_seen": recent},
+        {"offer_name": "HighPay", "fit_tier": "PRIME", "payout": "12.00","payout_type": "CPL", "network": "CJ", "first_seen": recent},
+        {"offer_name": "MidPay",  "fit_tier": "PRIME", "payout": "7.50", "payout_type": "CPL", "network": "CJ", "first_seen": recent},
+    ]
+    result = _pulse_signal_new_offers(ch=None, offers=offers)
+    names = [o["offer_name"] for o in result]
+    if names != ["HighPay", "MidPay", "LowPay"]:
+        return False, f"Expected sorted descending, got {names}"
+    return True, "Results correctly sorted by payout descending"
+
+
+@test("new_offers_signal_max_5_results_returned")
+def test_new_offers_max_results():
+    """Result set capped at 5 even with more qualifying offers."""
+    from scout_bot import _pulse_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    offers = [{"offer_name": f"Offer{i}", "fit_tier": "PRIME", "payout": str(10.0 - i * 0.5),
+               "payout_type": "CPL", "network": "CJ", "first_seen": recent}
+              for i in range(8)]
+    result = _pulse_signal_new_offers(ch=None, offers=offers)
+    if len(result) > 5:
+        return False, f"Result should be capped at 5, got {len(result)}"
+    return True, f"Result correctly capped at 5 (had 8 qualifying offers)"
+
+
+@test("new_offers_signal_uses_first_seen_not_last_verified_regression")
+def test_new_offers_uses_first_seen_not_last_verified():
+    """Regression: signal must use first_seen, not last_verified."""
+    from scout_bot import _pulse_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    old    = (now - timedelta(days=30)).isoformat()
+    recent = (now - timedelta(hours=12)).isoformat()
+    offers = [
+        # Should NOT appear: first_seen is old, even though last_verified is recent
+        {"offer_name": "OldOffer", "fit_tier": "PRIME", "payout": "10.00",
+         "payout_type": "CPL", "network": "CJ",
+         "first_seen": old, "last_verified": recent},
+        # SHOULD appear: first_seen is recent
+        {"offer_name": "NewOffer", "fit_tier": "PRIME", "payout": "8.00",
+         "payout_type": "CPL", "network": "CJ",
+         "first_seen": recent, "last_verified": recent},
+    ]
+    result = _pulse_signal_new_offers(ch=None, offers=offers)
+    names = [o["offer_name"] for o in result]
+    if "OldOffer" in names:
+        return False, "OldOffer has old first_seen — must not appear (regression: last_verified was used instead)"
+    if "NewOffer" not in names:
+        return False, "NewOffer has recent first_seen — must appear"
+    return True, "first_seen used correctly (OldOffer excluded, NewOffer included)"
+
+
+@test("new_offers_signal_kill_switch_disables_signal")
+def test_new_offers_kill_switch():
+    """SCOUT_DISABLED_PULSE_SIGNALS=new_offers must return []."""
+    import os, unittest.mock
+    from scout_bot import _pulse_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    offers = [{"offer_name": "NewOffer", "fit_tier": "PRIME", "payout": "8.00",
+               "payout_type": "CPL", "network": "CJ", "first_seen": recent}]
+    with unittest.mock.patch.dict(os.environ, {"SCOUT_DISABLED_PULSE_SIGNALS": "new_offers"}):
+        result = _pulse_signal_new_offers(ch=None, offers=offers)
+    if result != []:
+        return False, f"Kill switch should suppress signal, got {result}"
+    return True, "Kill switch (SCOUT_DISABLED_PULSE_SIGNALS=new_offers) correctly disables signal"
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:
