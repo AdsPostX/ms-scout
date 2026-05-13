@@ -2029,13 +2029,16 @@ NETWORK_MAP = {
     "everflow":    fetch_everflow_all,
 }
 
-def run_headless() -> None:
+def run_headless(post_digest: bool = True) -> None:
     """
     Run the full scraper pipeline programmatically (no CLI args, no --dry-run).
 
     Called from scout_bot.py daemon thread — avoids argparse / sys.argv interaction.
     Fetches all networks, normalises offers, writes data/offers_latest.json,
-    rotates data/offers_previous.json, and posts the Scout Sniper digest.
+    rotates data/offers_previous.json, and optionally posts the Scout Sniper digest.
+
+    Pass post_digest=False when calling from ms-demand-feed to prevent double-posting
+    (Scout's own daemon handles the digest on Scout's schedule).
     """
     global DEBUG
     DEBUG = False
@@ -2074,12 +2077,13 @@ def run_headless() -> None:
     os.replace(tmp_path, snapshot_path)
     log.info(f"[scraper] snapshot written: {len(cleaned)} offers → {snapshot_path}")
 
-    try:
-        import scout_digest
-        log.info("[scraper] posting Scout Sniper digest...")
-        scout_digest.post_digest()
-    except Exception as e:
-        log.warning(f"[scraper] digest post failed (non-fatal): {e}")
+    if post_digest:
+        try:
+            import scout_digest
+            log.info("[scraper] posting Scout Sniper digest...")
+            scout_digest.post_digest()
+        except Exception as e:
+            log.warning(f"[scraper] digest post failed (non-fatal): {e}")
 
 
 def main():

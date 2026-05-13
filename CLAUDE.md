@@ -90,6 +90,8 @@ Before marking any Scout PR complete, verify ALL of the following:
 | Health heartbeat (PR 15c) | `_run_health_heartbeat()` in `scout_bot.py` | Background daemon every 30 min | Calls `_compute_health_status()` + standalone CH ping. CH ping affects HEARTBEAT only — never the HTTP `/health` probe (Render must not restart on CH outage). Posts one Slack alert on transition to degraded after `_HEALTH_CONSECUTIVE_THRESHOLD` consecutive bad checks; one recovery alert on return to ok. PR 16c: `_run_startup_smoke_test()` also fires a one-shot CH ping right after smoke posts so the 35-min warmup window is no longer a blind spot. |
 | Benchmarks warmer (PR 19a) | `_benchmarks_warmer()` in `scout_bot.py` | Background daemon every 30 min | Keeps `_BENCHMARKS` populated in memory by calling `_get_benchmarks()` on a schedule. Boot-time warm happens in `_run_startup_smoke_test()`. `get_scout_status()` self-heals stale/missing benchmarks before reporting. Result: status check never reports "not loaded" except in real CH outage scenarios. |
 | Queue pipeline status (PR 23) | `_fetch_notion_queue_items()` in `scout_notion.py` | `get_queue_status()` agent tool + `app_home_opened` Home tab + `/scout-queue` slash command | TTL-cached (30s module-level). Returns `None` on Notion error, `[]` on empty. Callers distinguish: None → "unavailable", [] → "clear". Three surfaces share one render path: `_build_queue_card()` in `scout_slack_ui.py`. |
+| Revenue tracker (PR 25) | Phase 1: `_query_intraday_revenue_total(ch)` + Phase 2: `_query_intraday_revenue_by_publisher(ch, total)` in `scout_agent.py` | `_revenue_tracker` daemon in `scout_bot.py` only — no agent tool (use `sql_query` for ad-hoc revenue questions) | Weekdays at 3pm CT: Phase 1 checks if projected full-day revenue < 70% of 8-week same-weekday median. Phase 2 (only when Phase 1 trips): per-publisher decomposition with root cause tagging (ghost_campaign / fill_rate / cvr_drop / traffic). Posts once per calendar day to #revenue-operations. State: `last_revenue_alert_date` in `pulse_state.json`. Thresholds: `revenue_tracker_check_hour_ct`, `revenue_tracker_publisher_min_delta`, `revenue_tracker_ghost_min_impressions`, `revenue_tracker_cvr_min_impressions` in `scout_thresholds.json`. |
+| Pulse diff snapshot (PR 24a) | `_snapshot_keys()` + `signal_consecutive_days` in `scout_bot.py` | `_run_pulse_once()` attaches `_diff_meta` to every signal item; `_format_pulse_blocks()` uses `is_new` / `consecutive_days` for 🆕/↔ rendering | State persisted in `pulse_state.json` as `signal_snapshot` (sets of item keys) + `signal_consecutive_days` (counters). Force runs (to `#scout-qa`) also compute diff but do NOT write snapshot — so scheduled 8am state is never overwritten by ad-hoc runs. |
 
 ---
 
@@ -151,7 +153,6 @@ scout_notion.py         — Notion API: write queue page, AI copy pipeline, noti
 scout_state.py          — State I/O: all JSON read/write for 8 state files in data/
 scout_digest.py         — Daily digest: offer scoring + dedup + Slack post
 context_harvester.py    — Nightly Slack context extraction
-campaign_builder.py     — PARKED: Playwright automation (pending Vamsee sign-off)
 ```
 
 **Knowledge stores:**
@@ -344,8 +345,12 @@ Env var checklist:
 
 **[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. SYSTEM_PROMPT line ~430 still requires a manual edit when a network is added or removed. This was intentional — converting the 4300-line SYSTEM_PROMPT to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
 
-**[Future — PR 24] Slack Canvas as ambient pipeline board** — `conversations.canvases.create` + `canvases.edit` APIs allow a pinned always-visible canvas in #revenue-operations showing live queue status. Higher value than Slack Lists (no scope gap, simpler write API, shared visibility). Spike before any Slack Lists re-attempt. PLAN.md has the full opportunity catalog.
+**[Future — PR 24c] CVR anomaly detection** — Ghost pattern (`impressions > 0, revenue = 0`) applied to conversion rate: fire when `cvr_yesterday < 50% of cvr_7d AND payout > $50`. New shared `_query_cvr_anomaly(ch)` in `scout_agent.py`. Truist case: 2% → 0.75% CVR × $325 CPA = $5-6K miss. New thresholds: `cvr_anomaly_drop_pct`, `cvr_anomaly_min_payout`, `cvr_anomaly_min_impressions_7d` (all in `scout_thresholds.json` but not wired yet). Depends on PR 24a diff mechanism for suppression.
 
-**[Future — PR 24] `get_demand_queue_status()` consolidation** — still reads from local `launched_offers.json`; `get_queue_status()` (PR 23) now reads from Notion. The two tools serve different purposes (Notion pipeline view vs ClickHouse impression check), but `get_demand_queue_status` could be narrowed further or removed once Notion becomes the sole source of truth for queue state.
+**[Future — PR 24d] Offer expiration warnings + signal muting** — New Pulse signal for campaigns with `end_date BETWEEN today() AND today() + 7`. One-time warning per campaign, suppressed after acknowledgment. Signal muting: "Mute for 30d" button on Pulse cards → `data/signal_mutes.json`. Load in `scout_state.py`. Depends on PR 24a diff mechanism.
+
+**[Future — PR 25] Slack Canvas as ambient pipeline board** — `conversations.canvases.create` + `canvases.edit` APIs allow a pinned always-visible canvas in #revenue-operations showing live queue status. Higher value than Slack Lists (no scope gap, simpler write API, shared visibility). Spike before any Slack Lists re-attempt.
+
+**[Future — PR 25] `get_demand_queue_status()` consolidation** — still reads from local `launched_offers.json`; `get_queue_status()` (PR 23) now reads from Notion. The two tools serve different purposes (Notion pipeline view vs ClickHouse impression check), but `get_demand_queue_status` could be narrowed further or removed once Notion becomes the sole source of truth for queue state.
 
 **[Future — PR 25] Slack write-back from queue card** — `views.push` for drill-down from Home tab offer row → push detail view with approve/reject. `reminders.add` for Scout nudging ops when an offer is stuck in "Awaiting Entry" >48h. Both require PR 23 (queue read path) to ship first.

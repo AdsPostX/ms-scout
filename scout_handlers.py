@@ -72,6 +72,96 @@ def _set_pulse_runner(fn) -> None:
     global _PULSE_RUNNER
     _PULSE_RUNNER = fn
 
+
+# ── Part 3.6 — 👍/👎 feedback loop ──────────────────────────────────────────
+_FEEDBACK_LOG = _DATA_DIR / "feedback_log.jsonl"
+_FEEDBACK_PS_SEEN: set[str] = set()
+_FEEDBACK_LOCK = threading.Lock()
+_FEEDBACK_PS_LINE = (
+    "\n\n_P.S. — tap 👍 or 👎 below so I learn what's working. "
+    "First time? That's all you have to do._"
+)
+
+
+def _load_ps_seen() -> None:
+    """Populate the in-memory PS-seen set from the feedback log on first use."""
+    if _FEEDBACK_PS_SEEN or not _FEEDBACK_LOG.exists():
+        return
+    try:
+        with _FEEDBACK_LOG.open() as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                u = row.get("user")
+                if u and row.get("rating") in ("ps_shown", "up", "down"):
+                    _FEEDBACK_PS_SEEN.add(u)
+    except Exception as e:
+        log.warning(f"[feedback] could not preload PS-seen set: {e}")
+
+
+def _feedback_log_row(row: dict) -> None:
+    """Append one row to feedback_log.jsonl. Best-effort, never raises."""
+    try:
+        _FEEDBACK_LOG.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime, timezone
+        row.setdefault("ts", datetime.now(timezone.utc).isoformat())
+        with _FEEDBACK_LOCK, _FEEDBACK_LOG.open("a") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception as e:
+        log.warning(f"[feedback] log write failed: {e}")
+
+
+def _maybe_append_ps(user_id: str, text: str) -> str:
+    """Append the first-time-user P.S. nudge to the response text, exactly once per user.
+
+    Returns text unchanged for users who've already been shown the P.S. or rated before.
+    Records a `ps_shown` row in feedback_log.jsonl on first show.
+    """
+    if not user_id:
+        return text
+    _load_ps_seen()
+    if user_id in _FEEDBACK_PS_SEEN:
+        return text
+    _FEEDBACK_PS_SEEN.add(user_id)
+    _feedback_log_row({"user": user_id, "rating": "ps_shown"})
+    return text + _FEEDBACK_PS_LINE
+
+
+def _seed_feedback_reactions(web: WebClient, channel: str, ts: str) -> None:
+    """Pre-seed 👍/👎 on Scout's own message so they show up as tappable affordances.
+
+    Slack handler subtracts Scout's seed vote at read time (Scout's own reaction
+    counts as 0 by convention — see Part 3.6 in the adoption plan).
+    """
+    if not channel or not ts:
+        return
+    for name in ("+1", "-1"):
+        try:
+            web.reactions_add(channel=channel, timestamp=ts, name=name)
+        except Exception as _e:
+            _msg = str(_e)
+            if "already_reacted" not in _msg:
+                # Log anything other than the benign already_reacted so we can
+                # catch missing reactions:write scope in Render logs.
+                log.warning(f"[feedback] reactions_add {name!r} failed: {_msg}")
+
+
+def _permalink_for(web: WebClient, channel: str, msg_ts: str) -> str:
+    """Best-effort Slack permalink for a user message. Empty string on failure.
+
+    Used to thread provenance for @Scout remember/forget so entity_overrides
+    rows can be traced back to the Slack message that taught them.
+    """
+    if not channel or not msg_ts:
+        return ""
+    try:
+        resp = web.chat_getPermalink(channel=channel, message_ts=msg_ts)
+        return resp.get("permalink", "") or ""
+    except Exception:
+        return ""
+
 def _run_preflight_qa(  # replaces _check_url_async (removed — this is a strict superset)
     web: WebClient,
     channel: str,
@@ -828,9 +918,9 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     with _LAST_THREAD_LOCK:
         _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
 
-    if isinstance(response, dict) and response.get("type") == "brief":
-        brief_data = response["brief_data"]
-        copy       = response["copy"]
+    if response.payload and response.payload.get("type") == "brief":
+        brief_data = response.payload["brief_data"]
+        copy       = response.payload["copy"]
         _store_brief(thread_ts, brief_data, copy)
         _merge_thread_context(thread_ts, {
             "offer":       brief_data.get("advertiser"),
@@ -839,20 +929,32 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         })
         blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
         web.chat_update(channel=channel, ts=placeholder["ts"],
-                        text=response.get("fallback_text", "Campaign Brief ready."), blocks=blocks)
+                        text=response.payload.get("fallback_text", "Campaign Brief ready."), blocks=blocks)
+        return
+
+    if response.payload and response.payload.get("type") == "opportunities":
+        header_text       = _sanitize_slack(response.text)
+        offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+        suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
+        all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks,
+                             {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}]
+        web.chat_update(
+            channel=channel, ts=_placeholder_ts_sg,
+            text=header_text or "Top opportunities",
+            blocks=all_blocks,
+        )
+        log.info(f"Suggestion answered (opportunities) in {channel} (thread {thread_ts}): {query!r}")
         return
 
     sugg: list = []
     launched_offer_sg: dict | None = None
-    if isinstance(response, dict) and response.get("type") == "text_with_context":
-        extracted = response.get("extracted_context", {})
+    if response.payload and response.payload.get("type") == "text_with_context":
+        extracted = response.payload.get("extracted_context", {})
         if extracted:
             launched_offer_sg = extracted.pop("launched_offer", None)
             _merge_thread_context(thread_ts, extracted)
-        sugg = response.get("suggestions", [])
-        response_text = response["text"]
-    else:
-        response_text = response if isinstance(response, str) else str(response)
+        sugg = response.payload.get("suggestions", [])
+    response_text = response.text
 
     # Launch notification (same logic as handle_event)
     if launched_offer_sg:
@@ -936,7 +1038,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         msg_ts  = (payload.get("message") or {}).get("ts", "")
         def _run_ghost(u=user_id, t=msg_ts):
             resp = ask("ghost campaigns", history=[], user_id=u)
-            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            text = resp.text
             web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
         threading.Thread(target=_run_ghost, daemon=True).start()
         return
@@ -946,7 +1048,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         msg_ts  = (payload.get("message") or {}).get("ts", "")
         def _run_fill(u=user_id, t=msg_ts):
             resp = ask("fill rate brief", history=[], user_id=u)
-            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            text = resp.text
             web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
         threading.Thread(target=_run_fill, daemon=True).start()
         return
@@ -956,7 +1058,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         msg_ts  = (payload.get("message") or {}).get("ts", "")
         def _run_opps(u=user_id, t=msg_ts):
             resp = ask("top revenue opportunities", history=[], user_id=u)
-            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            text = resp.text
             web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {_sanitize_slack(str(text))}")
         threading.Thread(target=_run_opps, daemon=True).start()
         return
@@ -968,7 +1070,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         query   = f"offers for {pub}" if action_id == "pulse_scout_offers" else f"dig into {pub}"
         def _run_pub(q=query, u=user_id, t=msg_ts):
             resp = ask(q, history=[], user_id=u)
-            text = resp if isinstance(resp, str) else resp.get("text", str(resp))
+            text = resp.text
             web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
         threading.Thread(target=_run_pub, daemon=True).start()
         return
@@ -1084,21 +1186,32 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
         finally:
             stop_rotating()
 
-        if isinstance(response, dict) and response.get("type") == "brief":
-            brief_data = response["brief_data"]
-            copy       = response["copy"]
+        if response.payload and response.payload.get("type") == "brief":
+            brief_data = response.payload["brief_data"]
+            copy       = response.payload["copy"]
             blocks     = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
             web.chat_update(
                 channel=dm_channel, ts=placeholder["ts"],
                 text="Campaign Brief", blocks=blocks,
             )
+        elif response.payload and response.payload.get("type") == "opportunities":
+            header_text       = _sanitize_slack(response.text)
+            offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+            suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
+            all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks,
+                                 {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}]
+            web.chat_update(
+                channel=dm_channel, ts=_placeholder_ts_ah,
+                text=header_text or "Top opportunities",
+                blocks=all_blocks,
+            )
         else:
-            if isinstance(response, dict) and response.get("type") == "text_with_context":
-                response_text     = response.get("text", "")
-                suggestions       = response.get("suggestions", [])
+            if response.payload and response.payload.get("type") == "text_with_context":
+                response_text     = response.text
+                suggestions       = response.payload.get("suggestions", [])
                 suggestion_blocks = _build_suggestion_buttons(suggestions)
             else:
-                response_text     = response if isinstance(response, str) else str(response)
+                response_text     = response.text
                 suggestion_blocks = []
             response_text = response_text[:3000]  # cap for Slack text= limit
             content_blocks = _text_to_blocks(response_text)
@@ -1370,6 +1483,66 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 log.warning(f"[delete] failed to delete {item.get('ts')}: {e}")
         return
 
+    # ── 👍 / 👎 reaction → feedback signal ───────────────────────────────────
+    # Trust signal from Part 3.6. Scout pre-seeds +1/-1 on its own replies so
+    # they show up as visible affordances; user clicks increment the count.
+    # We log the user's rating and (for 👎) drop a threaded "remember" hint.
+    if event.get("type") == "reaction_added" and event.get("reaction") in ("+1", "-1"):
+        rater_id = event.get("user", "")
+        # Ignore Scout's own seed reactions (Scout's vote == 0 by convention)
+        try:
+            auth = web.auth_test()
+            if rater_id and rater_id == auth.get("user_id", ""):
+                return
+        except Exception:
+            pass
+        item = event.get("item", {})
+        if item.get("type") != "message":
+            return
+        ch_id  = item.get("channel", "")
+        msg_ts = item.get("ts", "")
+        try:
+            replies = web.conversations_replies(channel=ch_id, ts=msg_ts, limit=1).get("messages", [{}])
+            scout_msg = replies[0] if replies else {}
+            if not scout_msg.get("bot_id"):
+                return  # only count reactions on Scout's own messages
+            answer_text = scout_msg.get("text", "")[:1000]
+            # Fetch the question (thread parent) when we're in a thread
+            question_text = ""
+            parent_ts = scout_msg.get("thread_ts") or ""
+            if parent_ts and parent_ts != msg_ts:
+                try:
+                    parent = web.conversations_replies(channel=ch_id, ts=parent_ts, limit=1).get("messages", [{}])[0]
+                    if not parent.get("bot_id"):
+                        question_text = parent.get("text", "")[:500]
+                except Exception:
+                    pass
+            rating = "up" if event["reaction"] == "+1" else "down"
+            _feedback_log_row({
+                "user":       rater_id,
+                "message_ts": msg_ts,
+                "channel":    ch_id,
+                "question":   question_text,
+                "answer":     answer_text,
+                "rating":     rating,
+            })
+            # First reaction also closes the PS nudge for this user
+            _FEEDBACK_PS_SEEN.add(rater_id)
+            if rating == "down":
+                try:
+                    web.chat_postMessage(
+                        channel=ch_id,
+                        thread_ts=parent_ts or msg_ts,
+                        text=("Got it — Sidd will review. In the meantime: "
+                              "`@Scout remember <correct fact>` if you can phrase the fix."),
+                        unfurl_links=False,
+                    )
+                except Exception as e:
+                    log.warning(f"[feedback] threaded down-vote reply failed: {e}")
+        except Exception as e:
+            log.warning(f"[feedback] reaction handler failed: {e}")
+        return
+
     is_mention = event.get("type") == "app_mention"
     is_dm      = event.get("type") == "message" and event.get("channel_type") == "im"
 
@@ -1431,6 +1604,118 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     lower = query.lower()
 
     # ── Special commands (handled before agent) ───────────────────────────────
+
+    # @Scout remember ... — direct shortcut, bypasses LLM routing entirely.
+    # Catches "remember [entity] is/has/does..." without requiring "that".
+    # Parses entity via a small Haiku call so natural language names are handled.
+    _REMEMBER_RE = re.compile(r'^remember\s+(.+)', re.IGNORECASE | re.DOTALL)
+    _remember_m = _REMEMBER_RE.match(query)
+    if _remember_m:
+        _body = _remember_m.group(1).strip()
+        _permalink = _permalink_for(web, channel, msg_ts)
+        try:
+            from scout_agent import record_entity_note
+            import anthropic as _ant, os as _os
+            _ant_client = _ant.Anthropic(api_key=_os.getenv("ANTHROPIC_API_KEY", ""))
+            _parse_resp = _ant_client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=256,
+                system=(
+                    'Extract entity_name, entity_type ("publisher" or "advertiser"), '
+                    'and a concise note from the user message. '
+                    'Return JSON only: {"entity_name": "...", "entity_type": "...", "note": "..."}'
+                ),
+                messages=[{"role": "user", "content": _body}],
+            )
+            import json as _json
+            _raw_text = _parse_resp.content[0].text.strip()
+            # Haiku sometimes wraps JSON in markdown code fences — strip them.
+            if _raw_text.startswith("```"):
+                _raw_text = _raw_text.split("```")[1]
+                if _raw_text.startswith("json"):
+                    _raw_text = _raw_text[4:]
+                _raw_text = _raw_text.strip()
+            _parsed = _json.loads(_raw_text)
+            _ename = _parsed.get("entity_name", "").strip()
+            _etype = _parsed.get("entity_type", "publisher").lower().strip()
+            _enote = _parsed.get("note", _body).strip()
+            if _etype not in ("publisher", "advertiser"):
+                _etype = "publisher"
+            if _ename:
+                _result = record_entity_note(
+                    _ename, _etype, _enote,
+                    _caller_user_id=user_id,
+                    _caller_permalink=_permalink,
+                )
+                _rpost = web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=_result, unfurl_links=False,
+                )
+                _seed_feedback_reactions(web, channel, (_rpost.get("ts") or thread_ts or msg_ts))
+                log.info(f"[remember shortcut] {_ename!r} ({_etype}) logged by {user_id}")
+                return
+        except Exception as _re:
+            log.warning(f"[remember shortcut] parse failed, falling through to agent: {_re}")
+        # Fall through to agent if parse fails
+
+    # @Scout why do you think that about [entity] / where did you learn about [entity]
+    # Direct shortcut — bypasses LLM so it cannot answer from conversation context.
+    _WHY_RE = re.compile(
+        r'(?:why\s+(?:do\s+you\s+(?:think|know|say)|did\s+you\s+(?:learn|get))\s+(?:that\s+)?about\s+|'
+        r'where\s+did\s+you\s+(?:learn|get\s+that)\s+about\s+|'
+        r'source\s+for\s+|'
+        r'who\s+told\s+you\s+(?:that\s+)?about\s+)'
+        r'(.+)',
+        re.IGNORECASE | re.DOTALL,
+    )
+    _why_m = _WHY_RE.search(query)
+    if _why_m:
+        _wentity = _why_m.group(1).strip().rstrip("?").strip()
+        try:
+            from scout_agent import why_entity_note
+            _wresult = why_entity_note(_wentity)
+            _wpost = web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=_wresult, unfurl_links=False,
+            )
+            _seed_feedback_reactions(web, channel, (_wpost.get("ts") or thread_ts or msg_ts))
+            log.info(f"[why shortcut] {_wentity!r} by {user_id}")
+            return
+        except Exception as _we:
+            log.warning(f"[why shortcut] failed, falling through to agent: {_we}")
+
+    # @Scout forget that for [entity] / drop the note on [entity]
+    # Direct shortcut — same pattern as remember/why.
+    _FORGET_RE = re.compile(
+        r'(?:forget\s+(?:that\s+for|(?:that\s+)?about|what\s+you\s+know\s+about)|'
+        r'drop\s+the\s+note\s+(?:on|for|about)|'
+        r'remove\s+the\s+(?:note|fact)\s+(?:on|for|about)\s*)'
+        r'\s*(.+)',
+        re.IGNORECASE | re.DOTALL,
+    )
+    _forget_m = _FORGET_RE.search(query)
+    if _forget_m:
+        _fentity = _forget_m.group(1).strip().rstrip("?").strip()
+        _permalink = _permalink_for(web, channel, msg_ts)
+        try:
+            from scout_agent import forget_entity_note
+            # Try publisher first, then advertiser (why_entity_note searches both — forget needs a type)
+            _fresult = forget_entity_note(_fentity, "publisher",
+                                          _caller_user_id=user_id, _caller_permalink=_permalink)
+            if "no note" in _fresult.lower():
+                _fresult2 = forget_entity_note(_fentity, "advertiser",
+                                               _caller_user_id=user_id, _caller_permalink=_permalink)
+                if "Forgot" in _fresult2:
+                    _fresult = _fresult2
+            _fpost = web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=_fresult, unfurl_links=False,
+            )
+            _seed_feedback_reactions(web, channel, (_fpost.get("ts") or thread_ts or msg_ts))
+            log.info(f"[forget shortcut] {_fentity!r} by {user_id}")
+            return
+        except Exception as _fe:
+            log.warning(f"[forget shortcut] failed, falling through to agent: {_fe}")
 
     # Help / capabilities discovery — no need to spin up the agent for this
     if _is_help_query(query):
@@ -1565,10 +1850,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                     try:
                         response = ask(question, history=[], user_id="self-qa")
                         elapsed = _time.monotonic() - t0
-                        if isinstance(response, dict):
-                            text = response.get("fallback_text") or response.get("text") or str(response)
+                        if response.payload:
+                            text = response.payload.get("fallback_text") or response.text
                         else:
-                            text = str(response)
+                            text = response.text
                         responded = len(text.strip()) > 40
                         hint_match = any(h.lower() in text.lower() for h in pass_hints)
                         passed = responded and hint_match
@@ -1737,10 +2022,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
         try:
             _t0 = time.monotonic()
-            response = ask(query, history=history, user_id=user_id)
+            _permalink = _permalink_for(web, channel, msg_ts)
+            response = ask(query, history=history, user_id=user_id, permalink=_permalink)
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
-            _tools_called = response.get("tools_called", []) if isinstance(response, dict) else []
+            _tools_called = response.tools_called
             try:
                 user_info = web.users_info(user=user_id)
                 _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
@@ -1769,18 +2055,17 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
         # Extract structured context + suggestion buttons
         suggestions: list = []
-        if isinstance(response, dict) and response.get("type") == "text_with_context":
-            extracted = response.get("extracted_context", {})
+        if response.payload and response.payload.get("type") == "text_with_context":
+            extracted = response.payload.get("extracted_context", {})
             if extracted:
                 launched_offer_dm = extracted.pop("launched_offer", None)
                 _merge_thread_context(thread_ts or msg_ts, extracted)
-            suggestions = response.get("suggestions", [])
-            response = response["text"]
+            suggestions = response.payload.get("suggestions", [])
 
         # Post reply — flat DM message (thread_ts=None) or in-thread if user was already in one
-        if isinstance(response, dict) and response.get("type") == "brief":
-            brief_data = response["brief_data"]
-            copy       = response["copy"]
+        if response.payload and response.payload.get("type") == "brief":
+            brief_data = response.payload["brief_data"]
+            copy       = response.payload["copy"]
             _store_brief(thread_ts or msg_ts, brief_data, copy)
             _merge_thread_context(thread_ts or msg_ts, {
                 "offer":       brief_data.get("advertiser"),
@@ -1788,34 +2073,38 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
             })
             blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
-            web.chat_postMessage(
+            _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
-                text=response.get("fallback_text", "Campaign Brief ready."),
+                text=response.payload.get("fallback_text", "Campaign Brief ready."),
                 blocks=blocks,
                 unfurl_links=False,
             )
-        elif isinstance(response, dict) and response.get("type") == "opportunities":
-            header_text       = _sanitize_slack(response.get("text", ""))
-            offer_cards       = _build_opportunity_cards(response.get("offers", []), thread_ts=thread_ts)
-            suggestion_blocks = _build_suggestion_buttons(response.get("suggestions", []))
+            _seed_feedback_reactions(web, channel, _post.get("ts", ""))
+        elif response.payload and response.payload.get("type") == "opportunities":
+            header_text       = _sanitize_slack(response.text)
+            offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+            suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
             all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks]
-            web.chat_postMessage(
+            _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=header_text or "Top opportunities",
                 blocks=all_blocks,
                 unfurl_links=False,
             )
+            _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         else:
-            response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))[:3000]
+            response_text     = _maybe_append_ps(user_id, response.text)
+            response_text     = _sanitize_slack(response_text)[:3000]
             content_blocks    = _text_to_blocks(response_text)
             suggestion_blocks = _build_suggestion_buttons(suggestions)
             # No elapsed-time footer in DMs — the reaction disappearing IS the signal
-            web.chat_postMessage(
+            _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=response_text,
                 blocks=[*content_blocks, *suggestion_blocks],
                 unfurl_links=False,
             )
+            _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
 
@@ -1829,11 +2118,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
     try:
         _t0 = time.monotonic()
-        response = ask(query, history=history, user_id=user_id)
+        _permalink = _permalink_for(web, channel, msg_ts)
+        response = ask(query, history=history, user_id=user_id, permalink=_permalink)
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting
-        _tools_called = response.get("tools_called", []) if isinstance(response, dict) else []
+        _tools_called = response.tools_called
         try:
             user_info = web.users_info(user=user_id)
             _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
@@ -1857,14 +2147,13 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     # Block B: extract entities + suggestions from text_with_context responses
     suggestions: list = []
     launched_offer: dict | None = None
-    if isinstance(response, dict) and response.get("type") == "text_with_context":
-        extracted = response.get("extracted_context", {})
+    if response.payload and response.payload.get("type") == "text_with_context":
+        extracted = response.payload.get("extracted_context", {})
         if extracted:
             launched_offer = extracted.pop("launched_offer", None)
             _merge_thread_context(thread_ts, extracted)
             log.info(f"Saved thread context for {thread_ts}: {list(extracted.keys())}")
-        suggestions = response.get("suggestions", [])
-        response = response["text"]
+        suggestions = response.payload.get("suggestions", [])
 
     # Launch notification — thread-only, targeted tags, no channel noise
     if launched_offer:
@@ -1894,9 +2183,9 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 daemon=True,
             ).start()
 
-    if isinstance(response, dict) and response.get("type") == "brief":
-        brief_data = response["brief_data"]
-        copy       = response["copy"]
+    if response.payload and response.payload.get("type") == "brief":
+        brief_data = response.payload["brief_data"]
+        copy       = response.payload["copy"]
 
         # Persist brief to disk — survives Scout restarts and dual-instance races
         _store_brief(thread_ts, brief_data, copy)
@@ -1910,7 +2199,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         })
 
         blocks        = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
-        fallback_text = response.get("fallback_text", "Campaign Brief ready.")
+        fallback_text = response.payload.get("fallback_text", "Campaign Brief ready.")
 
         web.chat_update(
             channel=channel,
@@ -1918,6 +2207,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             text=fallback_text,
             blocks=blocks,
         )
+        _seed_feedback_reactions(web, channel, placeholder["ts"])
         log.info(f"Posted Block Kit brief for {brief_data.get('advertiser')} in {channel}")
 
         # Async tracking URL check — fires when brief is first shown, before any queue action
@@ -1925,10 +2215,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         if _real_url and not _real_url.startswith("Not available"):
             _run_preflight_qa(web, channel, thread_ts, brief_data)
 
-    elif isinstance(response, dict) and response.get("type") == "opportunities":
-        header_text       = _sanitize_slack(response.get("text", ""))
-        offer_cards       = _build_opportunity_cards(response.get("offers", []), thread_ts=thread_ts)
-        suggestion_blocks = _build_suggestion_buttons(response.get("suggestions", []))
+    elif response.payload and response.payload.get("type") == "opportunities":
+        header_text       = _sanitize_slack(response.text)
+        offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+        suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
         elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
         all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, elapsed_ctx]
         web.chat_update(
@@ -1937,11 +2227,13 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             text=header_text or "Top opportunities",
             blocks=all_blocks,
         )
-        log.info(f"Posted opportunity cards ({len(response.get('offers', []))} offers) in {channel}")
+        _seed_feedback_reactions(web, channel, _placeholder_ts)
+        log.info(f"Posted opportunity cards ({len(response.payload.get('offers', []))} offers) in {channel}")
 
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
-        response_text     = _sanitize_slack(response if isinstance(response, str) else str(response))[:3000]
+        response_text     = _maybe_append_ps(user_id, response.text)
+        response_text     = _sanitize_slack(response_text)[:3000]
         content_blocks    = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
         web.chat_update(
@@ -1951,5 +2243,6 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             blocks=[*content_blocks, *suggestion_blocks,
                     {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
         )
+        _seed_feedback_reactions(web, channel, _placeholder_ts)
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 

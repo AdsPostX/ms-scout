@@ -20,6 +20,7 @@ import logging
 import os
 import pathlib
 import re
+import urllib.request
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -818,6 +819,14 @@ def build_digest_blocks(
 # ── Offer loader ───────────────────────────────────────────────────────────────
 
 def _load_offers() -> list:
+    """Load offers from DEMAND_FEED_URL when set; fall back to disk snapshot."""
+    url = os.getenv("DEMAND_FEED_URL")
+    if url:
+        try:
+            with urllib.request.urlopen(f"{url.rstrip('/')}/offers", timeout=10) as resp:
+                return json.loads(resp.read())
+        except Exception as exc:
+            log.warning(f"[scout_digest] DEMAND_FEED_URL fetch failed ({exc}); falling back to disk")
     try:
         return json.loads(OFFERS_FILE.read_text())
     except Exception as e:

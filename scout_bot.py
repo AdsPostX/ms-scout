@@ -50,9 +50,6 @@ from scout_handlers import (
 
 load_dotenv()  # plist env vars (SCOUT_ENV, PULSE_CHANNEL, etc.) take precedence over .env
 
-# Mutex: prevents daemon and on-demand trigger from running run_headless() concurrently.
-# On-demand run_offer_scraper() checks this before calling run_headless().
-_SCRAPER_RUNNING = threading.Event()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -225,6 +222,7 @@ _PRODUCTION_CHANNELS = {
     "pulse":    os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
     "watchdog": os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
     "offers":   os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL),   # #scout-offers
+    "revenue":  os.getenv("REVENUE_OPS_CHANNEL", _SCOUT_HQ_CHANNEL),    # #revenue-operations
 }
 
 def _route_channel(purpose: str, force: bool = False) -> str:
@@ -671,6 +669,7 @@ def _run_pulse_signals() -> dict:
     Each signal owns its own connection — no shared state, no lock needed.
     Returns a dict with cap_alerts, velocity_shifts, overnight_events,
     ghost_campaigns, fill_rate, opportunities.
+    Revenue tracking moved to the _revenue_tracker daemon (PR 25).
     """
     from scout_agent import _get_ch_client
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -678,19 +677,19 @@ def _run_pulse_signals() -> dict:
     signals: dict = {"cap_alerts": [], "velocity_shifts": [], "overnight_events": [], "ghost_campaigns": [], "fill_rate": [], "opportunities": []}
 
     _signal_fns = [
-        ("cap_alerts",       _pulse_signal_cap),
-        ("velocity_shifts",  _pulse_signal_velocity),
-        ("overnight_events", _pulse_signal_overnight),
-        ("ghost_campaigns",  _pulse_signal_ghost),
-        ("fill_rate",        _pulse_signal_fill_rate),
-        ("opportunities",    _pulse_signal_opportunities),
+        ("cap_alerts",         _pulse_signal_cap),
+        ("velocity_shifts",    _pulse_signal_velocity),
+        ("overnight_events",   _pulse_signal_overnight),
+        ("ghost_campaigns",    _pulse_signal_ghost),
+        ("fill_rate",          _pulse_signal_fill_rate),
+        ("opportunities",      _pulse_signal_opportunities),
     ]
 
     def _run_one(key, fn):
         ch = _get_ch_client()
         return key, fn(ch)
 
-    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="pulse") as pool:
+    with ThreadPoolExecutor(max_workers=7, thread_name_prefix="pulse") as pool:
         futures = {pool.submit(_run_one, key, fn): key for key, fn in _signal_fns}
         for future in as_completed(futures):
             try:
@@ -702,6 +701,154 @@ def _run_pulse_signals() -> dict:
     return signals
 
 
+
+
+def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None) -> str:
+    """
+    Format the proactive revenue alert message.
+
+    total: dict from _query_intraday_revenue_total (today_revenue, projected_full_day,
+           dow_median, pct_of_expected, weekday, sample_days)
+    publishers: list of dicts from _query_intraday_revenue_by_publisher
+                (publisher_name, publisher_id, delta, root_cause, ...)
+    as_of: human-readable time string, e.g. "3pm CT" — defaults to current CT time
+    """
+    import pytz
+    from datetime import datetime as _dt
+
+    if as_of is None:
+        _ct = _dt.now(pytz.timezone("America/Chicago"))
+        as_of = _ct.strftime("%-I:%M%p CT").lower()  # e.g. "3:04pm CT"
+
+    pct        = round(total["pct_of_expected"])
+    today_rev  = total["today_revenue"]
+    projected  = total["projected_full_day"]
+    expected   = total["dow_median"]
+    weekday    = total["weekday"]
+    samples    = total["sample_days"]
+
+    lines = [
+        ":red_circle: *Revenue alert — today is tracking soft*\n",
+        f"Platform so far ({as_of}): *${today_rev:,.0f}* | projected: *${projected:,.0f}* | expected [{weekday}]: ~*${expected:,.0f}*",
+        f"Tracking at *{pct}%* of expected ({samples} same-weekday samples)\n",
+    ]
+
+    _ROOT_LABELS = {
+        "ghost_campaign": "impressions ✓, $0 revenue → ghost campaign",
+        "fill_rate":      "zero impressions → fill rate or cap hit",
+        "cvr_drop":       "CVR collapsed vs historical → CVR anomaly",
+        "traffic":        "zero sessions → no upstream traffic",
+    }
+
+    if publishers:
+        lines.append("*Where the gap is:*")
+        for p in publishers:
+            name     = p.get("publisher_name") or f"pub {p.get('publisher_id', '?')}"
+            pub_id   = p.get("publisher_id", "")
+            delta    = p.get("delta", 0.0)
+            cause    = p.get("root_cause", "normal")
+            label    = _ROOT_LABELS.get(cause, cause)
+            id_str   = f" *(pub {pub_id})*" if pub_id else ""
+            lines.append(f"• {name}{id_str}: *−${abs(delta):,.0f}* below expected · {label}")
+
+        lines.append("\nAll other publishers within normal range.")
+
+        # Suggest a next step based on top root cause
+        top_cause = publishers[0].get("root_cause", "normal")
+        top_pub   = publishers[0].get("publisher_name", "")
+        if top_cause == "ghost_campaign":
+            lines.append(f"\nImmediate: `@Scout ghost campaigns` — {top_pub} matches ghost detection criteria.")
+        elif top_cause == "fill_rate":
+            lines.append(f"\nImmediate: `@Scout fill rate` — {top_pub} has zero impressions despite active sessions.")
+        elif top_cause == "cvr_drop":
+            lines.append(f"\nImmediate: `@Scout {top_pub}` — CVR anomaly, check offer quality or postback tracking.")
+        elif top_cause == "traffic":
+            lines.append(f"\nImmediate: `@Scout {top_pub}` — no sessions; confirm SDK is sending traffic.")
+    else:
+        lines.append(
+            "No single publisher accounts for the gap — revenue is spread-down across the platform.\n"
+            "Likely causes: session volume drop, fill rate platform-wide, or a slow day.\n"
+            "\nRun `@Scout fill rate` to check publisher-level session health."
+        )
+
+    return "\n".join(lines)
+
+
+def _revenue_tracker(web, ch) -> None:
+    """
+    Daemon: proactive intraday revenue alert at 3pm CT on weekdays.
+
+    Two-phase check:
+    - Phase 1: fast platform total — returns None if within normal range
+    - Phase 2: per-publisher decomposition + root cause tagging (only if Phase 1 fires)
+
+    Runs every 5 minutes. Fires at most once per calendar day.
+    Posts to #revenue-operations (or #scout-qa in non-production envs).
+
+    Outer restart wrapper: any unhandled crash logs the traceback and restarts after 30s
+    so the thread stays alive indefinitely without a Render redeploy.
+    """
+    import time as _time
+    import pytz
+    from datetime import datetime as _dt
+    from scout_agent import SCOUT_THRESHOLDS, _query_intraday_revenue_total, _query_intraday_revenue_by_publisher
+    from scout_state import _load_revenue_alert_state, _save_revenue_alert_date
+
+    while True:  # outer restart wrapper — self-heals any unhandled crash
+        try:
+            CT_TZ       = pytz.timezone("America/Chicago")
+            check_hour  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_check_hour_ct", 15))
+            channel     = _route_channel("revenue")
+
+            while True:  # inner poll loop
+                _time.sleep(300)  # 5-min poll
+                try:
+                    # Feature flag — flip to true in scout_thresholds.json once validated in #bot-qa
+                    if not SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_enabled", False):
+                        continue
+
+                    now_ct = _dt.now(CT_TZ)
+
+                    # Fire window: target hour ± 10 minutes
+                    if not (now_ct.hour == check_hour and now_ct.minute < 10):
+                        continue
+
+                    today_str = now_ct.date().isoformat()
+                    if _load_revenue_alert_state() == today_str:
+                        continue  # already posted today
+
+                    # Phase 1: fast platform total
+                    try:
+                        total = _query_intraday_revenue_total(ch)
+                    except Exception as e:
+                        log.warning(f"[revenue-tracker] Phase 1 query failed: {e}")
+                        _save_revenue_alert_date(today_str)  # avoid hammering on CH error
+                        continue
+
+                    if total is None:
+                        # Revenue within normal range — mark checked, stay silent
+                        _save_revenue_alert_date(today_str)
+                        log.info("[revenue-tracker] Revenue on pace — no alert needed.")
+                        continue
+
+                    # Phase 2: per-publisher decomposition
+                    try:
+                        publishers = _query_intraday_revenue_by_publisher(ch, total)
+                    except Exception as e:
+                        log.warning(f"[revenue-tracker] Phase 2 query failed: {e}")
+                        publishers = []
+
+                    msg = _format_revenue_alert(total, publishers)
+                    web.chat_postMessage(channel=channel, text=msg)
+                    _save_revenue_alert_date(today_str)
+                    log.info(f"[revenue-tracker] Alert posted for {today_str} ({total['pct_of_expected']:.0f}% of expected).")
+
+                except Exception as e:
+                    log.warning(f"[revenue-tracker] Unexpected error: {e}")
+
+        except Exception as e:
+            log.error(f"[revenue-tracker] Fatal crash — restarting in 30s: {e}", exc_info=True)
+            _time.sleep(30)
 
 
 def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
@@ -926,6 +1073,26 @@ def _launch_watchdog(web: WebClient) -> None:
             time.sleep(3600)
 
 
+def _snapshot_keys(sigs: dict) -> dict:
+    """
+    Extract string key sets for each signal type from a signals dict.
+
+    Used by _run_pulse_once to build the daily snapshot for PR 24a diff logic.
+    Module-level so smoke tests can exercise it without running a full pulse.
+
+    Key contract: each key is a stable identifier that is the same day-over-day
+    for the same item, so yesterday's snapshot can be diffed against today's.
+    """
+    snap: dict[str, set] = {}
+    snap["ghost"] = {g["adv_name"] for g in (sigs.get("ghost_campaigns") or [])}
+    snap["fill"]  = {f["publisher_name"] for f in (sigs.get("fill_rate") or [])}
+    snap["down"]  = {v["publisher_name"] for v in (sigs.get("velocity_shifts") or []) if v.get("direction") == "down"}
+    snap["up"]    = {v["publisher_name"] for v in (sigs.get("velocity_shifts") or []) if v.get("direction") == "up"}
+    snap["cap"]   = {a["adv_name"] for a in (sigs.get("cap_alerts") or [])}
+    snap["opp"]   = {f"{o['publisher_name']}:{o['adv_name']}" for o in (sigs.get("opportunities") or [])}
+    return snap
+
+
 def _run_pulse_once(web: WebClient, force: bool = False) -> None:
     """
     Execute one pulse run immediately. If force=True, always routes to #scout-qa
@@ -985,6 +1152,51 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
             chronic.append(pname)
     state["chronic"] = chronic
 
+    # ── PR 24a: Pulse diff — compare today's signals against yesterday's snapshot ──
+    # Build today's snapshot as sets of item keys per signal type.
+    # Key contract: stable identifier that is the same day-over-day for the same item.
+    _collapse_after = int(_SIGNAL_CFG.get("pulse_diff_collapse_after_days", 2))
+
+    prev_snap_raw: dict = state.get("signal_snapshot", {})
+    prev_snap = {k: set(v) for k, v in prev_snap_raw.items()} if prev_snap_raw else {}
+    today_snap = _snapshot_keys(signals)
+
+    # Consecutive-day counters — persist across runs
+    consec: dict = state.get("signal_consecutive_days", {})
+
+    def _days(signal_type: str, key: str) -> int:
+        """Return consecutive days an item has been in the signal (including today)."""
+        full_key = f"{signal_type}:{key}"
+        if key in prev_snap.get(signal_type, set()):
+            consec[full_key] = consec.get(full_key, 1) + 1
+        else:
+            consec[full_key] = 1
+        return consec[full_key]
+
+    def _annotate(item: dict, signal_type: str, key_field: str) -> dict:
+        """Attach _diff_meta to a signal item dict in-place and return it."""
+        key = item.get(key_field, "")
+        d = _days(signal_type, key)
+        is_new = d == 1
+        item["_diff_meta"] = {"is_new": is_new, "consecutive_days": d}
+        return item
+
+    # Annotate each signal item
+    for g in signals.get("ghost_campaigns", []):
+        _annotate(g, "ghost", "adv_name")
+    for f in signals.get("fill_rate", []):
+        _annotate(f, "fill", "publisher_name")
+    for v in signals.get("velocity_shifts", []):
+        sig_type = "down" if v.get("direction") == "down" else "up"
+        _annotate(v, sig_type, "publisher_name")
+    for a in signals.get("cap_alerts", []):
+        _annotate(a, "cap", "adv_name")
+    for o in signals.get("opportunities", []):
+        key = f"{o.get('publisher_name', '')}:{o.get('adv_name', '')}"
+        d = _days("opp", key)
+        o["_diff_meta"] = {"is_new": d == 1, "consecutive_days": d}
+    # ── End PR 24a diff ──────────────────────────────────────────────────────
+
     has_content = (
         signals.get("cap_alerts")
         or signals.get("velocity_shifts")
@@ -1030,6 +1242,9 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
             "opportunities_count": len(signals.get("opportunities") or []),
             "overnight_events_count": len(signals.get("overnight_events") or []),
         }
+        # PR 24a: persist today's snapshot for diff on next run
+        state["signal_snapshot"] = {k: list(v) for k, v in today_snap.items()}
+        state["signal_consecutive_days"] = consec
         _save_pulse_state(state)
 
 
@@ -1602,82 +1817,6 @@ def _post_harvest_audit(harvest_result: dict) -> None:
         log.warning(f"[harvest] audit post failed (non-fatal): {e}")
 
 
-def _run_scraper_daemon() -> None:
-    """
-    Offer scraper daemon — fetches affiliate inventory (Impact/FlexOffers/MaxBounty)
-    once per day at 6:00 AM CT, then posts the Scout Signal digest.
-
-    First-boot behaviour: if scraper_state.json doesn't exist, run immediately
-    regardless of time of day. This ensures Render deployments (which can happen
-    any time) don't leave offer inventory empty for hours.
-
-    Check-first on subsequent starts: if past 6am and haven't run today, fire now.
-    State: data/scraper_state.json
-    """
-    import pytz
-    from datetime import datetime as _dt, timedelta
-    from offer_scraper import run_headless as _run_scraper
-
-    _SCRAPER_STATE = _DATA_DIR / "scraper_state.json"
-
-    def _load_state():
-        try:
-            return json.loads(_SCRAPER_STATE.read_text())
-        except Exception:
-            return {}
-
-    def _save_state(s):
-        _atomic_write(_SCRAPER_STATE, s)
-
-    while True:
-        try:
-            chicago = pytz.timezone("America/Chicago")
-            now_chi = _dt.now(chicago)
-            today_str = now_chi.strftime("%Y-%m-%d")
-            state = _load_state()
-
-            # FIRST BOOT: no state file → run immediately regardless of hour.
-            # Also triggers when offers_latest.json is missing (e.g. fresh Render deploy
-            # mid-day after the scraper already ran on the previous container).
-            _OFFERS_FILE = _DATA_DIR / "offers_latest.json"
-            offers_missing = not _OFFERS_FILE.exists() or _OFFERS_FILE.stat().st_size < 100
-            is_first_boot = not _SCRAPER_STATE.exists() or not state or offers_missing
-
-            # CHECK FIRST: past 6am and haven't run today → fire immediately.
-            should_run = is_first_boot or (
-                state.get("last_run_date") != today_str and now_chi.hour >= 6
-            )
-
-            if should_run:
-                if not _SCRAPER_STATE.exists() or not state:
-                    reason = "first boot"
-                elif offers_missing:
-                    reason = "offers file missing"
-                else:
-                    reason = "daily run"
-                log.info(f"[scraper] running offer fetch ({reason})")
-                _SCRAPER_RUNNING.set()
-                try:
-                    _run_scraper()
-                finally:
-                    _SCRAPER_RUNNING.clear()
-                state["last_run_date"] = today_str
-                _save_state(state)
-                log.info("[scraper] done — offers_latest.json updated")
-
-            # Sleep until next 6am CT
-            target = now_chi.replace(hour=6, minute=0, second=0, microsecond=0)
-            if now_chi >= target:
-                target += timedelta(days=1)
-            sleep_secs = (target - now_chi).total_seconds()
-            log.info(f"[scraper] sleeping {sleep_secs / 3600:.1f}h until next run at {target}")
-            time.sleep(sleep_secs)
-
-        except Exception as e:
-            log.error(f"[scraper] cycle failed: {e}", exc_info=True)
-            time.sleep(3600)  # retry in 1 hour on failure
-
-
 _PID_FILE = _DATA_DIR / "scout.pid"
 
 
@@ -2051,20 +2190,27 @@ def _benchmarks_warmer() -> None:
 
 
 def _thread_watchdog(web: WebClient) -> None:
-    """Check all named daemon threads are alive every 60s. Alert #scout-qa if any die."""
+    """Check all named daemon threads are alive every 60s.
+
+    Alerts #scout-qa on TRANSITION only — when a daemon newly dies or recovers.
+    Does NOT spam on every check interval when a daemon is already known-dead.
+    """
     import time as _time
 
     # PR 16b: read from _REQUIRED_DAEMONS (populated at startup via _start_daemon)
     # instead of a hardcoded set. Same source of truth as _compute_health_status().
     _time.sleep(120)  # Give all threads time to start before first check
+    last_dead: set[str] = set()  # tracks already-alerted dead daemons
     while True:
         try:
             live = {t.name for t in threading.enumerate()}
             required = set(_REQUIRED_DAEMONS)
             dead = required - live
-            if dead:
-                names = ", ".join(sorted(dead))
-                log.error(f"[watchdog] daemon thread(s) died: {names}")
+            newly_dead = dead - last_dead
+            recovered  = last_dead - dead
+            if newly_dead:
+                names = ", ".join(sorted(newly_dead))
+                log.error(f"[watchdog] daemon thread(s) newly died: {names}")
                 try:
                     web.chat_postMessage(
                         channel=_SCOUT_HQ_CHANNEL,
@@ -2072,6 +2218,17 @@ def _thread_watchdog(web: WebClient) -> None:
                     )
                 except Exception as slack_err:
                     log.warning(f"[watchdog] Slack alert failed: {slack_err}")
+            if recovered:
+                names = ", ".join(sorted(recovered))
+                log.info(f"[watchdog] daemon thread(s) recovered: {names}")
+                try:
+                    web.chat_postMessage(
+                        channel=_SCOUT_HQ_CHANNEL,
+                        text=f":white_check_mark: Scout daemon thread(s) recovered: *{names}*",
+                    )
+                except Exception as slack_err:
+                    log.warning(f"[watchdog] Slack recovery alert failed: {slack_err}")
+            last_dead = dead
         except Exception as e:
             log.warning(f"[watchdog] check error: {e}")
         _time.sleep(60)
@@ -2110,7 +2267,6 @@ def main():
     else:
         log.info("[pulse] disabled via PULSE_ENABLED=false — skipping pulse thread")
     _start_daemon(_nightly_harvest,       name="context-harvest")
-    _start_daemon(_run_scraper_daemon,    name="scraper")
     _start_daemon(_notion_watcher_loop,   name="notion-watcher",      args=(web_client,))
     _start_daemon(_copy_coalescer_loop,   name="copy-coalescer")
     # PR 15c — live health heartbeat (CH ping every 30 min, NOT in HTTP /health)
@@ -2118,6 +2274,9 @@ def main():
     # PR 19a — benchmark warmer: keep CVR/RPM benchmarks warm so `@Scout status`
     # never surfaces "Benchmarks not loaded" except in actual CH outage scenarios
     _start_daemon(_benchmarks_warmer,     name="benchmarks-warmer")
+    # PR 25 — revenue tracker: proactive 3pm CT intraday alert when revenue tracks soft
+    from scout_agent import _get_ch_client as _ch_factory
+    _start_daemon(_revenue_tracker, name="revenue-tracker", args=(web_client, _ch_factory()))
 
     # Background: daily launch health watchdog (no register — campaign-level, not infrastructure)
     threading.Thread(target=_launch_watchdog, args=(web_client,), daemon=True, name="launch-watchdog").start()
