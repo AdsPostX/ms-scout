@@ -66,7 +66,7 @@ _INLINE_RE = re.compile(
     r'|:(?P<emoji>[a-z0-9_\-+]+?):'
     r'|<(?P<url>[^|>]+)\|(?P<url_text>[^>]*)>'
     r'|<@(?P<user>[A-Z0-9]+)>'
-    r'|(?P<plain>[^*_`:<\n]+|[*_`:<])'
+    r'|(?P<plain>[^*_`:<\n]+|\n|[*_`:<])'
 )
 
 
