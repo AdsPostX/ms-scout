@@ -159,7 +159,8 @@ OFFER_FIELDS = [
     # Status & metadata
     "status",
     "date_scraped",
-    "last_verified",   # ISO timestamp of last scrape that included this offer
+    "first_seen",      # ISO timestamp of first appearance in inventory — set ONCE, never updated
+    "last_verified",   # ISO timestamp of last scrape that included this offer — refreshed every scrape
     "fit_tier",        # PRIME | STRONG | STANDARD | WEAK — structural fit, computed at ingestion
 ]
 
@@ -986,6 +987,20 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
     """Apply all normalizations. Returns cleaned list, active-only by default."""
     if ms_index is None:
         ms_index = {"by_impact_id": {}, "by_name": {}}
+
+    # Build first_seen cache from existing snapshot — preserved across scrape runs.
+    # first_seen is set once on an offer's first appearance and never updated.
+    _snapshot = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
+    _first_seen_cache: dict = {}
+    if _snapshot.exists():
+        try:
+            for _o in json.loads(_snapshot.read_text()):
+                _key = (_o.get("network", ""), _o.get("offer_id", "") or _o.get("offer_name", ""))
+                if _o.get("first_seen"):
+                    _first_seen_cache[_key] = _o["first_seen"]
+        except Exception:
+            pass
+
     cleaned = []
     for o in offers:
         status = normalize_status(o.get("status", ""))
@@ -1011,8 +1026,15 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
             "_ms_status":        ms_status,
             "_ms_internal_name": ms_internal_name or "",
         }
-        normalized["fit_tier"]     = _compute_fit_tier(normalized)
+        normalized["fit_tier"]      = _compute_fit_tier(normalized)
         normalized["last_verified"] = normalized.get("date_scraped") or datetime.today().strftime("%Y-%m-%d")
+        # first_seen: set once on first appearance — pull from cache if this offer already existed
+        _offer_key = (normalized.get("network", ""), normalized.get("offer_id", "") or normalized.get("offer_name", ""))
+        normalized["first_seen"]   = (
+            _first_seen_cache.get(_offer_key)
+            or normalized.get("date_scraped")
+            or datetime.today().strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
         cleaned.append(normalized)
     return cleaned
 
