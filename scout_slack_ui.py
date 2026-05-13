@@ -1395,11 +1395,23 @@ def _format_pulse_blocks(
                     + offer_lines
                 )}})
 
+    payout_upgrades = signals.get("payout_upgrades", [])
+    if payout_upgrades:
+        blocks.append({"type": "divider"})
+        lines = [":moneybag: *Payout upgrades worth checking* _(est. net after ~30% margin)_"]
+        for u in payout_upgrades:
+            lines.append(
+                f">  {u['advertiser']} — running ${u['current_net_payout']:.2f} {u['payout_type']} net"
+                f" · {u['network']} has ${u['inventory_gross_payout']:.2f} gross"
+                f" (est. ~${u['inventory_net_est']:.2f} net, +${u['delta_net_est']:.2f})"
+            )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+
     # ── Change I: zero-signal all-clear ──────────────────────────────────
     _has_signals = bool(
         ghost_camps or fill_rate or regular_downs or urgent_caps or ups
         or (opportunities and today_d.weekday() == 0)
-        or seasonal
+        or seasonal or payout_upgrades
     )
     if not _has_signals:
         blocks.append({"type": "context", "elements": [

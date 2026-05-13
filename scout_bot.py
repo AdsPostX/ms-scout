@@ -791,6 +791,128 @@ def _pulse_signal_seasonal(ch, offers: list) -> list:
     return results
 
 
+# ── PR E: Payout upgrade detector ─────────────────────────────────────────────
+
+# ClickHouse payout is net (post MomentScience rev-share, ~30% margin).
+# Offer inventory payout is gross (network rate).
+# Multiply inventory gross by this factor before comparing to CH net.
+_GROSS_TO_NET_FACTOR: float = 0.70   # ~30% MS margin; adjust if rev-share changes
+_MIN_UPGRADE_DELTA:   float = 1.00   # at least $1 net improvement to surface
+
+# Tokens that signal a meaningfully different advertiser ("Gap" ≠ "Gap Insurance")
+_QUALIFIER_WORDS = frozenset({
+    "insurance", "capital", "financial", "mortgage", "credit", "loans",
+    "legal", "medical", "health", "realty", "properties", "banking", "fund",
+})
+
+_MATCH_STOP_WORDS = frozenset({"the", "and", "inc", "llc", "ltd", "corp", "co", "via"})
+
+
+def _fuzzy_name_match(a: str, b: str) -> bool:
+    """
+    Word-boundary advertiser name match.
+
+    Rules:
+    - 'Gap' does NOT match 'Gap Insurance' — qualifier words mark a different entity
+    - 'AT&T' DOES match 'AT&T Wireless' — non-qualifying modifiers are acceptable
+    - Both sides normalised: lowercase, split on non-alphanumeric, drop stop words
+    """
+    import re as _re
+
+    def _clean(s: str) -> frozenset[str]:
+        return frozenset(
+            t for t in _re.split(r"[^a-z0-9]+", s.lower())
+            if len(t) >= 2 and t not in _MATCH_STOP_WORDS
+        )
+
+    ca, cb = _clean(a), _clean(b)
+    if not ca or not cb:
+        return False
+    if ca == cb:
+        return True
+    shorter, longer = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+    if not shorter.issubset(longer):
+        return False
+    # Extra tokens in longer must not be meaning-changing qualifiers
+    extra = longer - shorter
+    return not (extra & _QUALIFIER_WORDS)
+
+
+def _pulse_signal_payout_upgrades(ch, offers: list) -> list:
+    """
+    Detect advertisers where inventory has a better payout than what's running.
+
+    Comparison is normalised: inventory_gross × _GROSS_TO_NET_FACTOR vs ClickHouse
+    net payout.  Only surfaces when delta ≥ _MIN_UPGRADE_DELTA to avoid noise.
+    Only compares offers with matching payout_type (CPA/CPL/CPS) to avoid
+    apples-to-oranges comparisons.
+
+    ch is a live ClickHouse client.  Returns [] if kill switch is set.
+    """
+    if not _pulse_signal_enabled("payout_upgrades"):
+        return []
+
+    try:
+        rows = ch.query("""
+            SELECT
+                adv_name,
+                payout_type,
+                avg(toFloat64OrNull(payout)) AS avg_net_payout
+            FROM default.adpx_conversionsdetails
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM(now() - INTERVAL 30 DAY)
+            WHERE created_at >= now() - INTERVAL 30 DAY
+              AND payout_type IN ('CPA', 'CPL', 'CPS')
+            GROUP BY adv_name, payout_type
+            HAVING avg_net_payout > 0 AND count() >= 5
+            ORDER BY count() DESC
+            LIMIT 100
+        """).result_rows
+    except Exception as e:
+        log.warning(f"Pulse payout_upgrades ClickHouse query failed: {e}")
+        return []
+
+    if not rows:
+        return []
+
+    upgrades: list[dict] = []
+    for adv_name, payout_type, avg_net_payout in rows:
+        if not adv_name:
+            continue
+
+        matches = [
+            o for o in offers
+            if _fuzzy_name_match(adv_name, o.get("advertiser") or o.get("offer_name") or "")
+            and (o.get("payout_type") or "").upper() == payout_type.upper()
+            and o.get("fit_tier") in ("PRIME", "STRONG")
+        ]
+
+        for m in matches:
+            inv_gross = float(m.get("payout") or 0)
+            inv_net_est = inv_gross * _GROSS_TO_NET_FACTOR
+            delta = inv_net_est - (avg_net_payout or 0)
+
+            if delta >= _MIN_UPGRADE_DELTA:
+                upgrades.append({
+                    "advertiser":             adv_name,
+                    "payout_type":            payout_type,
+                    "current_net_payout":     round(avg_net_payout or 0, 2),
+                    "inventory_gross_payout": round(inv_gross, 2),
+                    "inventory_net_est":      round(inv_net_est, 2),
+                    "network":                m.get("network", ""),
+                    "offer_name":             m.get("offer_name", ""),
+                    "delta_net_est":          round(delta, 2),
+                })
+
+    # Deduplicate: same advertiser + payout_type, keep best delta
+    seen: dict = {}
+    for u in upgrades:
+        key = (u["advertiser"].lower(), u["payout_type"])
+        if key not in seen or u["delta_net_est"] > seen[key]["delta_net_est"]:
+            seen[key] = u
+
+    return sorted(seen.values(), key=lambda x: x["delta_net_est"], reverse=True)[:5]
+
+
 # ── Pulse signal orchestrator ─────────────────────────────────────────────────
 
 def _run_pulse_signals() -> dict:
@@ -826,8 +948,9 @@ def _run_pulse_signals() -> dict:
         ("ghost_campaigns", _pulse_signal_ghost),
         ("fill_rate",       _pulse_signal_fill_rate),
         ("opportunities",   _pulse_signal_opportunities),
-        # Local signals — accept ch (unused) to match _run_one signature
-        ("seasonal",        lambda ch: _pulse_signal_seasonal(ch, offers)),
+        # Local signals — accept ch to match _run_one signature; offers captured from outer scope
+        ("seasonal",          lambda ch: _pulse_signal_seasonal(ch, offers)),
+        ("payout_upgrades",   lambda ch: _pulse_signal_payout_upgrades(ch, offers)),
     ]
 
     def _run_one(key, fn):

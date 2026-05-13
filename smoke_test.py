@@ -1375,6 +1375,168 @@ def test_seasonal_signal_kill_switch():
     return True, "Kill switch (SCOUT_DISABLED_PULSE_SIGNALS=seasonal) correctly disables signal"
 
 
+# ── PR E: Payout Upgrade Detector tests ───────────────────────────────────────
+
+def _make_ch_with_rows(rows):
+    """Helper: mock CH client that returns given rows for ch.query().result_rows."""
+    import unittest.mock
+    mock_ch  = unittest.mock.MagicMock()
+    mock_res = unittest.mock.MagicMock()
+    mock_res.result_rows = rows
+    mock_ch.query.return_value = mock_res
+    return mock_ch
+
+
+@test("payout_upgrade_empty_ch_rows_returns_empty")
+def test_payout_upgrade_empty_ch_rows():
+    """No ClickHouse rows → no upgrades."""
+    import scout_bot
+    ch = _make_ch_with_rows([])
+    result = scout_bot._pulse_signal_payout_upgrades(ch, offers=[])
+    if result != []:
+        return False, f"Expected [], got {result}"
+    return True, "Empty CH rows returns []"
+
+
+@test("payout_upgrade_empty_offers_returns_empty")
+def test_payout_upgrade_empty_offers():
+    """ClickHouse rows but no inventory → no upgrades."""
+    import scout_bot
+    ch = _make_ch_with_rows([("AT&T", "CPL", 2.00)])
+    result = scout_bot._pulse_signal_payout_upgrades(ch, offers=[])
+    if result != []:
+        return False, f"Expected [] with empty offers, got {result}"
+    return True, "Empty offer list returns []"
+
+
+@test("payout_upgrade_payout_type_mismatch_excluded")
+def test_payout_upgrade_payout_type_mismatch():
+    """CPL offer must NOT match a CPS advertiser in ClickHouse."""
+    import scout_bot
+    ch = _make_ch_with_rows([("AT&T", "CPS", 2.00)])  # CPS in CH
+    offers = [{"advertiser": "AT&T", "payout_type": "CPL", "payout": "10.00",  # CPL in inventory
+               "fit_tier": "PRIME", "network": "CJ", "offer_name": "AT&T CPL"}]
+    result = scout_bot._pulse_signal_payout_upgrades(ch, offers=offers)
+    if result:
+        return False, f"CPL offer should not match CPS advertiser, got {result}"
+    return True, "payout_type mismatch correctly excluded"
+
+
+@test("payout_upgrade_delta_below_minimum_excluded")
+def test_payout_upgrade_delta_below_minimum():
+    """Upgrade below _MIN_UPGRADE_DELTA must not fire."""
+    import scout_bot
+    # CH net = $4.00, inventory gross $5.00 → net_est = $3.50, delta = -$0.50 < $1
+    ch = _make_ch_with_rows([("TestAdv", "CPL", 4.00)])
+    offers = [{"advertiser": "TestAdv", "payout_type": "CPL", "payout": "5.00",
+               "fit_tier": "PRIME", "network": "CJ", "offer_name": "TestAdv Lead"}]
+    result = scout_bot._pulse_signal_payout_upgrades(ch, offers=offers)
+    if result:
+        return False, f"Delta below minimum should be excluded, got {result}"
+    return True, "Delta below _MIN_UPGRADE_DELTA correctly excluded"
+
+
+@test("payout_upgrade_delta_above_minimum_fires")
+def test_payout_upgrade_delta_fires():
+    """Qualifying upgrade (delta ≥ $1 net) must appear in results."""
+    import scout_bot
+    # CH net = $2.00, inventory gross $6.00 → net_est = $4.20, delta = +$2.20
+    ch = _make_ch_with_rows([("TestAdv", "CPL", 2.00)])
+    offers = [{"advertiser": "TestAdv", "payout_type": "CPL", "payout": "6.00",
+               "fit_tier": "PRIME", "network": "CJ", "offer_name": "TestAdv Lead"}]
+    result = scout_bot._pulse_signal_payout_upgrades(ch, offers=offers)
+    if not result:
+        return False, "Qualifying upgrade should appear in results"
+    if result[0]["advertiser"] != "TestAdv":
+        return False, f"Wrong advertiser: {result[0]['advertiser']}"
+    return True, f"Qualifying upgrade surfaced (delta ${result[0]['delta_net_est']})"
+
+
+@test("payout_upgrade_gap_does_not_match_gap_insurance")
+def test_payout_upgrade_gap_qualifier_word():
+    """'Gap' advertiser must NOT match 'Gap Insurance' offer."""
+    import scout_bot
+    ch = _make_ch_with_rows([("Gap", "CPL", 1.00)])
+    offers = [{"advertiser": "Gap Insurance", "payout_type": "CPL", "payout": "10.00",
+               "fit_tier": "PRIME", "network": "CJ", "offer_name": "Gap Insurance Lead"}]
+    result = scout_bot._pulse_signal_payout_upgrades(ch, offers=offers)
+    if result:
+        return False, f"'Gap' should not match 'Gap Insurance' (qualifier word), got {result}"
+    return True, "'Gap' correctly rejected as match for 'Gap Insurance'"
+
+
+@test("payout_upgrade_deduplication_keeps_best_delta")
+def test_payout_upgrade_deduplication():
+    """Same advertiser + payout_type with two inventory matches → only best delta kept."""
+    import scout_bot
+    ch = _make_ch_with_rows([("TestAdv", "CPL", 2.00)])
+    offers = [
+        {"advertiser": "TestAdv", "payout_type": "CPL", "payout": "6.00",
+         "fit_tier": "PRIME", "network": "CJ", "offer_name": "TestAdv A"},
+        {"advertiser": "TestAdv", "payout_type": "CPL", "payout": "10.00",
+         "fit_tier": "PRIME", "network": "Impact", "offer_name": "TestAdv B"},
+    ]
+    result = scout_bot._pulse_signal_payout_upgrades(ch, offers=offers)
+    if len(result) != 1:
+        return False, f"Dedup should produce 1 result, got {len(result)}: {result}"
+    if result[0]["network"] != "Impact":
+        return False, f"Should keep best delta (Impact $10), kept {result[0]['network']}"
+    return True, "Deduplication keeps highest-delta entry per advertiser+type"
+
+
+@test("payout_upgrade_max_5_results_returned")
+def test_payout_upgrade_max_results():
+    """Result set capped at 5 even with more qualifying upgrades."""
+    import scout_bot
+    # 8 advertisers, all with $2 net CH and $8 gross inventory → all qualify
+    rows = [(f"Adv{i}", "CPL", 2.00) for i in range(8)]
+    offers = [{"advertiser": f"Adv{i}", "payout_type": "CPL", "payout": "8.00",
+               "fit_tier": "PRIME", "network": "CJ", "offer_name": f"Adv{i} Lead"}
+              for i in range(8)]
+    ch = _make_ch_with_rows(rows)
+    result = scout_bot._pulse_signal_payout_upgrades(ch, offers=offers)
+    if len(result) > 5:
+        return False, f"Result should be capped at 5, got {len(result)}"
+    return True, f"Result correctly capped at 5 (had 8 qualifying upgrades)"
+
+
+@test("payout_upgrade_prewhere_partition_filter_in_query")
+def test_payout_upgrade_prewhere_in_query():
+    """Query must include PREWHERE with partition filter per project standards."""
+    import unittest.mock, scout_bot
+    captured = []
+    mock_ch = unittest.mock.MagicMock()
+    mock_res = unittest.mock.MagicMock()
+    mock_res.result_rows = []
+    def _capture(sql):
+        captured.append(sql)
+        return mock_res
+    mock_ch.query.side_effect = _capture
+    scout_bot._pulse_signal_payout_upgrades(mock_ch, offers=[])
+    if not captured:
+        return False, "ch.query() was not called"
+    sql = captured[0]
+    if "PREWHERE" not in sql.upper():
+        return False, "Query missing PREWHERE clause (required by project ClickHouse standards)"
+    if "toYYYYMM" not in sql:
+        return False, "Query missing toYYYYMM partition filter"
+    return True, "PREWHERE with partition filter present in payout_upgrades query"
+
+
+@test("payout_upgrade_kill_switch_disables_signal")
+def test_payout_upgrade_kill_switch():
+    """SCOUT_DISABLED_PULSE_SIGNALS=payout_upgrades must return []."""
+    import os, unittest.mock, scout_bot
+    ch = _make_ch_with_rows([("TestAdv", "CPL", 2.00)])
+    offers = [{"advertiser": "TestAdv", "payout_type": "CPL", "payout": "10.00",
+               "fit_tier": "PRIME", "network": "CJ", "offer_name": "TestAdv Lead"}]
+    with unittest.mock.patch.dict(os.environ, {"SCOUT_DISABLED_PULSE_SIGNALS": "payout_upgrades"}):
+        result = scout_bot._pulse_signal_payout_upgrades(ch, offers=offers)
+    if result != []:
+        return False, f"Kill switch should suppress signal, got {result}"
+    return True, "Kill switch (SCOUT_DISABLED_PULSE_SIGNALS=payout_upgrades) correctly disables signal"
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:
