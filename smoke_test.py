@@ -1266,6 +1266,115 @@ def test_pulse_diff_snapshot_keys():
     return True, f"_snapshot_keys emits correct keys: {{{', '.join(sorted(snap.keys()))}}}"
 
 
+# ── PR D: Seasonal Radar signal tests ─────────────────────────────────────────
+
+@test("seasonal_signal_nth_weekday_mothers_day_2026_is_may_10")
+def test_seasonal_nth_weekday_mothers_day():
+    """2nd Sunday in May 2026 must be May 10."""
+    from scout_bot import _nth_weekday
+    result = _nth_weekday(2026, 5, 2, 6)  # Sunday = weekday 6
+    if result.month != 5 or result.day != 10:
+        return False, f"Mother's Day 2026 should be May 10, got {result.month}/{result.day}"
+    return True, f"Mother's Day 2026 correctly computed as May {result.day}"
+
+
+@test("seasonal_signal_nth_weekday_fathers_day_2026_is_june_21")
+def test_seasonal_nth_weekday_fathers_day():
+    """3rd Sunday in June 2026 must be June 21."""
+    from scout_bot import _nth_weekday
+    result = _nth_weekday(2026, 6, 3, 6)  # Sunday = weekday 6
+    if result.month != 6 or result.day != 21:
+        return False, f"Father's Day 2026 should be June 21, got {result.month}/{result.day}"
+    return True, f"Father's Day 2026 correctly computed as June {result.day}"
+
+
+@test("seasonal_signal_nth_weekday_mlk_day_2027_is_jan_18")
+def test_seasonal_nth_weekday_mlk_day():
+    """3rd Monday in January 2027 must be January 18."""
+    from scout_bot import _nth_weekday
+    result = _nth_weekday(2027, 1, 3, 0)  # Monday = weekday 0
+    if result.month != 1 or result.day != 18:
+        return False, f"MLK Day 2027 should be Jan 18, got {result.month}/{result.day}"
+    return True, f"MLK Day 2027 correctly computed as Jan {result.day}"
+
+
+@test("seasonal_signal_empty_offers_returns_empty_list")
+def test_seasonal_signal_empty_offers():
+    """Empty offer inventory produces no seasonal results."""
+    from scout_bot import _pulse_signal_seasonal
+    result = _pulse_signal_seasonal(ch=None, offers=[])
+    if result != []:
+        return False, f"Expected [] with empty offers, got {result}"
+    return True, "Empty offer list correctly returns []"
+
+
+@test("seasonal_signal_weak_tier_offers_excluded")
+def test_seasonal_signal_weak_tier_excluded():
+    """WEAK tier offers must not appear in seasonal signal results."""
+    import datetime, unittest.mock, scout_bot
+    today = datetime.date.today()
+    event_date = today + datetime.timedelta(days=5)
+    test_calendar = [("Test Holiday", ["flowers", "gifts"], 21, lambda y: event_date)]
+    offers = [{"offer_name": "1-800-Flowers", "category": "flowers",
+               "fit_tier": "WEAK", "payout": "5.00", "payout_type": "CPL", "network": "CJ"}]
+    with unittest.mock.patch.object(scout_bot, "_SEASONAL_CALENDAR", test_calendar):
+        result = scout_bot._pulse_signal_seasonal(ch=None, offers=offers)
+    if result:
+        return False, f"WEAK tier offer should be excluded, got {result}"
+    return True, "WEAK tier offer correctly excluded from seasonal results"
+
+
+@test("seasonal_signal_prime_offer_within_window_is_surfaced")
+def test_seasonal_signal_prime_offer_surfaced():
+    """PRIME offer matching event verticals within window must be surfaced."""
+    import datetime, unittest.mock, scout_bot
+    today = datetime.date.today()
+    event_date = today + datetime.timedelta(days=5)
+    test_calendar = [("Test Holiday", ["flowers", "gifts"], 21, lambda y: event_date)]
+    offers = [{"offer_name": "1-800-Flowers", "category": "flowers",
+               "fit_tier": "PRIME", "payout": "8.50", "payout_type": "CPL", "network": "CJ"}]
+    with unittest.mock.patch.object(scout_bot, "_SEASONAL_CALENDAR", test_calendar):
+        result = scout_bot._pulse_signal_seasonal(ch=None, offers=offers)
+    if not result:
+        return False, "PRIME flowers offer should match Test Holiday within 5-day window"
+    if result[0]["event_name"] != "Test Holiday":
+        return False, f"Expected 'Test Holiday', got {result[0]['event_name']}"
+    return True, f"PRIME offer surfaced for Test Holiday ({result[0]['offer_count']} match)"
+
+
+@test("seasonal_signal_event_outside_window_suppressed")
+def test_seasonal_signal_out_of_window():
+    """Event more than window_days away must not fire."""
+    import datetime, unittest.mock, scout_bot
+    today = datetime.date.today()
+    event_date = today + datetime.timedelta(days=100)  # well outside any window
+    test_calendar = [("Far Holiday", ["flowers"], 21, lambda y: event_date)]
+    offers = [{"offer_name": "1-800-Flowers", "category": "flowers",
+               "fit_tier": "PRIME", "payout": "8.50", "payout_type": "CPL", "network": "CJ"}]
+    with unittest.mock.patch.object(scout_bot, "_SEASONAL_CALENDAR", test_calendar):
+        result = scout_bot._pulse_signal_seasonal(ch=None, offers=offers)
+    if result:
+        return False, f"Event 100 days away (window=21) should not fire, got {result}"
+    return True, "Event outside window_days correctly suppressed"
+
+
+@test("seasonal_signal_kill_switch_disables_signal")
+def test_seasonal_signal_kill_switch():
+    """SCOUT_DISABLED_PULSE_SIGNALS=seasonal must return []."""
+    import os, datetime, unittest.mock, scout_bot
+    today = datetime.date.today()
+    event_date = today + datetime.timedelta(days=5)
+    test_calendar = [("Test Holiday", ["flowers"], 21, lambda y: event_date)]
+    offers = [{"offer_name": "1-800-Flowers", "category": "flowers",
+               "fit_tier": "PRIME", "payout": "8.50", "payout_type": "CPL", "network": "CJ"}]
+    with unittest.mock.patch.dict(os.environ, {"SCOUT_DISABLED_PULSE_SIGNALS": "seasonal"}):
+        with unittest.mock.patch.object(scout_bot, "_SEASONAL_CALENDAR", test_calendar):
+            result = scout_bot._pulse_signal_seasonal(ch=None, offers=offers)
+    if result != []:
+        return False, f"Kill switch should suppress seasonal signal, got {result}"
+    return True, "Kill switch (SCOUT_DISABLED_PULSE_SIGNALS=seasonal) correctly disables signal"
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:
