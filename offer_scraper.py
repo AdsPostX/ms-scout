@@ -915,12 +915,11 @@ def match_ms_status(offer: dict, ms_index: dict) -> tuple:
         return "In System (Inactive)", adv_name
 
 
-# Verticals that historically convert poorly at post-transaction moments.
-# High-friction (loans, insurance) or medically regulated — flag at ingestion
-# so Scout can deprioritize without needing ClickHouse benchmarks.
-_BAD_FIT_CATEGORIES = frozenset({
-    "loans", "insurance", "credit", "mortgage", "legal", "medical",
-    "health insurance", "financial services",
+# Canonical category labels (from normalize_categories) that historically convert
+# poorly at post-transaction moments.  Matched against _categories list — not
+# the raw joined string — so Finance/Insurance/Legal always resolve correctly.
+_BAD_FIT_CANONICAL = frozenset({
+    "Finance", "Insurance", "Legal", "Health & Wellness",
 })
 
 
@@ -931,19 +930,25 @@ def _compute_fit_tier(offer: dict) -> str:
     payout_type, payout, or category changes.
 
     PRIME:    CPA/CPL ≥ $5, no bad-fit vertical
-    STRONG:   CPA/CPL $2–$4.99, or CPS ≥ $10, no bad-fit vertical
+    STRONG:   CPA/CPL $2-$4.99, or CPS ≥ $10, no bad-fit vertical
     STANDARD: anything else that passes clean_offers()
     WEAK:     bad-fit vertical, or RevShare/CPC < $2
     """
     payout_type = (offer.get("payout_type") or "").upper()
-    category    = (offer.get("category") or "").lower()
 
-    try:
-        payout = float(offer.get("payout") or 0)
-    except (ValueError, TypeError):
-        payout = 0.0
+    # Prefer the precomputed numeric from clean_offers; fall back to parsing raw.
+    payout = offer.get("_payout_num")
+    if payout is None:
+        try:
+            raw = str(offer.get("payout") or "")
+            nums = re.findall(r"[\d]+(?:\.\d+)?", raw.replace(",", ""))
+            payout = float(nums[0]) if nums else 0.0
+        except (ValueError, TypeError, IndexError):
+            payout = 0.0
 
-    if any(bad in category for bad in _BAD_FIT_CATEGORIES):
+    # Match against canonical labels stored in _categories list (exact, case-sensitive).
+    categories = offer.get("_categories") or []
+    if any(cat in _BAD_FIT_CANONICAL for cat in categories):
         return "WEAK"
 
     if payout_type in ("CPA", "CPL"):

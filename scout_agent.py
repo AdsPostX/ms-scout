@@ -1986,6 +1986,8 @@ def _format_offers(offers: list, benchmarks: dict) -> list[FormattedOffer]:
             "geo": o.get("geo", ""),
             "ms_status": o.get("_ms_status", ""),
             "ms_internal_name": o.get("_ms_internal_name", ""),
+            "fit_tier": o.get("fit_tier", "STANDARD"),
+            "last_verified": o.get("last_verified"),
             "scout_score_rpm": score,
             "performance_context": perf_note,
             "risk_flag": _get_risk_flag(advertiser, category, o.get("description", "")),
