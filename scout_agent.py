@@ -224,10 +224,23 @@ _ENTITY_OVERRIDES_PATH = pathlib.Path(__file__).parent / "data" / "entity_overri
 
 
 def _load_entity_overrides() -> dict:
-    """Load publisher/advertiser knowledge store. Returns empty structure if missing or corrupt."""
+    """Load publisher/advertiser knowledge store. Returns empty structure if missing or corrupt.
+
+    Harvester-authored entries (added_by == "harvester") are silently excluded at read time.
+    The harvester auto-write path is separately gated by HARVESTER_AUTO_WRITE_ENABLED, but
+    legacy harvester rows on disk are filtered here so they never reach LLM context.
+    """
     try:
         if _ENTITY_OVERRIDES_PATH.exists():
-            return json.loads(_ENTITY_OVERRIDES_PATH.read_text())
+            raw = json.loads(_ENTITY_OVERRIDES_PATH.read_text())
+            for section in ("publishers", "advertisers"):
+                bucket = raw.get(section) or {}
+                raw[section] = {
+                    name: entry
+                    for name, entry in bucket.items()
+                    if (entry or {}).get("added_by", "") != "harvester"
+                }
+            return raw
     except Exception:
         pass
     return {"publishers": {}, "advertisers": {}}
@@ -5877,6 +5890,21 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
                         duration_ms=_dur(),
                     )
             return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur())
+
+        # Short-circuit for pre-formatted tool results — bypass the LLM entirely.
+        # The LLM cannot reliably deliver mrkdwn strings verbatim across a tool_result
+        # boundary; returning directly is the only way to guarantee format fidelity.
+        for tr in tool_results:
+            try:
+                payload = json.loads(tr.get("content", "{}"))
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(payload, dict) and payload.get("pre_formatted") and payload.get("formatted"):
+                return AskResult(
+                    text=payload["formatted"],
+                    tools_called=_tools_called,
+                    duration_ms=_dur(),
+                )
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
