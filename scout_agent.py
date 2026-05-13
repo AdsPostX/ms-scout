@@ -4984,7 +4984,7 @@ SELECT
     sum(toFloat64OrNull(c.revenue)) AS today_rev,
     count() AS conversions
 FROM adpx_conversionsdetails c
-LEFT JOIN from_airbyte_users u ON u.id = c.user_id
+LEFT JOIN from_airbyte_users u ON u.id = toInt64(c.user_id)
 PREWHERE toYYYYMM(c.created_at) = toYYYYMM(toDate(toTimeZone(now(), 'America/Chicago')))
 WHERE toDate(toTimeZone(c.created_at, 'America/Chicago'))
       = toDate(toTimeZone(now(), 'America/Chicago'))
