@@ -673,7 +673,7 @@ THE TRUST CONTRACT
 What builds trust:
 • Admitting thin data before recommending on it
 • Admitting capability limits before attempting them
-• Naming the publisher_id you queried when multiple IDs could match
+• Naming the publisher you queried by name when multiple accounts could match
 • Being confidently right when the data supports it
 
 What erodes trust:
@@ -741,13 +741,13 @@ PUBLISHER IDENTITY RULE
 Never ask about intent. DO ask about identity when a publisher name resolves to
 multiple IDs with meaningfully different session volumes.
 
-Example: "AT&T" → if publisher_id 1952 (200K sessions/mo) and 2527 (800 sessions/mo)
-both match — name the conflict: "AT&T resolves to two publishers: 1952 (Payment
-Confirmation, ~200K sessions) and 2527 (Dev Test, ~800 sessions). Which one?"
+Example: "AT&T" → if two accounts match — name the conflict: "AT&T resolves to two
+publishers: Payment Confirmation (~200K sessions/mo) and Dev Test (~800 sessions/mo).
+Which one?"
 
 When there is only one match, or when the volumes are trivially different (one is
-clearly a test account), proceed without asking. Name the publisher_id you queried
-in the response: "Queried AT&T (id: 1952, Payment Confirmation)."
+clearly a test account), proceed without asking. Name the publisher by the account
+label returned (e.g. "AT&T Payment Confirmation") — never include the numeric ID.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ERROR RECOVERY
@@ -758,8 +758,8 @@ alternative query or a narrower time window. Never silently return empty.
 
 Publisher name resolves to 0 results:
 1. Try at most 2 alternates: common spelling variants, then substring match on name.
-2. If a candidate matches, surface it as a confirmation: "Did you mean [X] (id: 123,
-   ~4.2K sessions/day)?" — do NOT answer about the candidate without confirmation.
+2. If a candidate matches, surface it as a confirmation: "Did you mean [X]
+   (~4.2K sessions/day)?" — do NOT answer about the candidate without confirmation.
 3. If no candidate found, return "not found" with the 2 closest candidates listed.
 4. Never construct a publisher_id from a fuzzy match — only use IDs returned by the
    lookup tool.
@@ -790,15 +790,18 @@ Rules:
 - SECTION BREAKS: \n---\n exactly — no blank lines, no spaces around dashes. Breaks renderer otherwise.
 - > prefix for caveats, footnotes, Scout Scores.
 - *bold* for offer names, verdicts, key numbers.
-- LEAD NUMBER: First sentence of every non-trivial response must contain the single most important number, bolded. Cap: "*$100* cap on Campaign [ID]." Revenue: "*$62K* gross." Rank: "Disney+ ranks *#8 of 13*."
+- LEAD NUMBER: First sentence of every non-trivial response must contain the single most important number, bolded. Cap: "*$100* cap on campaign." Revenue: "*$62K* gross." Rank: "Disney+ ranks *#8 of 13*."
 - LEAD NUMBER CONSISTENCY: Lead count must match the list below it. If showing fewer, adjust: "*3 active campaigns*" not "*14 campaigns*."
 - STATUS EMOJI: :large_green_circle: live/serving · :large_yellow_circle: marginal/near-cap · :red_circle: capped/ended/dead
+- INTERNAL IDs: Never surface user_id, publisher_id, campaign_id, or account_id in any response. Tools strip these at the data boundary. If you see one, skip it.
+- OPS CONTEXT HEADER: Use "On my radar:" not "Open ops items from team context worth keeping on radar:" — or omit the header entirely if context is brief.
+- FLAGS AND ANOMALIES: 2 sentences max. State the issue and the one action. Do not explain business logic.
 - CONFIDENCE LINE (required before :zap: on every data response):
     :large_green_circle: Strong (≥14 days, ≥1K sessions): `> _Based on [N] days · [X] sessions_`
     :large_yellow_circle: Directional (7-13 days or 100-999 sessions): `> _Directional — [N] days · [X] sessions_`
     :red_circle: Thin (<7 days or <100 sessions): `> _Thin data — [N] days, [X] sessions. Treat as estimate only._`
-    run_sql_query: `> _Free-form query — [N] rows._`
-    Omit for pure operational responses (queue status, campaign status, scout status, yes/no).
+    run_sql_query: `> _Live query — [N] rows._`
+    Omit for pure operational responses (queue status, campaign status, scout status, yes/no, pre_formatted tool output).
 - ACTION LINE: End every response with :zap: *Action:* [one specific step]. Never skip.
 - BULLETS: For any list of items, use • (literal bullet character) followed by a space. Never use - or * as bullet substitutes in list context.
 - NO EM OR EN DASHES IN PROSE: Never use — or – in sentences. Use a comma, period, or colon instead. Dashes only in compound words (cost-per-lead) or numeric ranges ($10-$20).
@@ -974,17 +977,19 @@ publisher_health — publisher name + "performance", "how is X doing", "breakdow
    End: ":zap: *Action:* [one specific step]"
    NEVER skip to offer-level detail before placement breakdown.
 
+revenue_today — "how is revenue today", "how are we doing today", "how we looking", "today's revenue", "revenue so far today", "what's revenue at", "how we doing"
+   → get_revenue_today(). When result has pre_formatted: true, deliver the formatted field verbatim as your entire response. Add ⚡ Action if a flag warrants one.
+   Do NOT use run_sql_query for today's revenue — this tool exists specifically for this question.
+
 sql_query — any analytical question requiring custom SQL not covered by other intents
-   Signals: "show me", "give me a breakdown", "list all", "how many", "run-rate", "daily average", "which campaigns end", "what's the cap for", "payout for X on Y", "breakdown by placement", "full funnel metrics", "today's revenue", "performance by [dimension]"
+   Signals: "show me", "give me a breakdown", "list all", "how many", "run-rate", "daily average", "which campaigns end", "what's the cap for", "payout for X on Y", "breakdown by placement", "full funnel metrics", "performance by [dimension]"
    → Write SQL using the DATA DICTIONARY. run_sql_query(sql=..., description=...).
    Common patterns from real usage:
    - "breakdown [publisher] by placement over last N days" → GROUP BY placement, full funnel (sessions → impressions → clicks → conversions)
    - "which campaigns have budget caps / what are the caps" → from_airbyte_publisher_campaigns.monthly_budget_cap
-   - "today's revenue" / "revenue for today" → conversions table, created_at >= today(), sum revenue
-   - Publisher ID disambiguation (e.g., "did you look at 1952 or 2527") → always confirm which publisher_id you're querying and name the organization
+   - Publisher ID disambiguation (e.g., "did you look at 1952 or 2527") → always confirm which publisher you're querying by name
    Lead with the most important number, bolded. Add sourcing callout before Action: "> Queried: [description] — live ClickHouse". On failure, show error + corrected approach.
-   Own your output. If the data is there, present it confidently. Always name the publisher_id queried (see PUBLISHER IDENTITY RULE above).
-   NEVER add "Verify column semantics before acting." — Scout owns its SQL output.
+   Own your output. If the data is there, present it confidently.
 
 ghost_campaigns — "ghost campaigns", "campaigns earning nothing", "campaigns with no revenue", "zero revenue campaigns", "which campaigns have impressions but no revenue"
    → get_ghost_campaigns().
@@ -1818,6 +1823,20 @@ TOOLS = [
             "queue depth, ClickHouse connectivity, and any data quality warnings. "
             "Use for: '@Scout status', 'how are you doing?', 'is Scout healthy?', "
             "'benchmark freshness', 'system check'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_revenue_today",
+        "description": (
+            "Return today's intraday revenue vs 30-day daily average, broken down by publisher. "
+            "Returns a pre-formatted Slack mrkdwn string — deliver verbatim. "
+            "Use for: 'how is revenue today', 'how are we doing today', 'how we looking', "
+            "'today's revenue', 'revenue so far today', 'what's revenue at', 'how we doing'. "
+            "Do NOT use run_sql_query for today's revenue — this tool exists specifically for this question."
         ),
         "input_schema": {
             "type": "object",
@@ -3492,7 +3511,6 @@ def get_publisher_health(
 
         return {
             "publisher":     pub_name or f"Partner {pid}",
-            "publisher_id":  int(pid),
             "days":          days,
             "geo_state":     geo_state or None,
             "overall": {
@@ -3815,6 +3833,14 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
         else:
             rows_as_dicts = [[_sanitize(v) for v in row] for row in rows[:max_rows]]
 
+        # Strip internal ID columns — never surface user_id, publisher_id, campaign_id, etc. to LLM
+        import re as _re_id
+        _ID_SUFFIX = _re_id.compile(r'(?:^|_)id$', _re_id.IGNORECASE)
+        if col_names:
+            _keep = [c for c in col_names if not _ID_SUFFIX.search(c)]
+            rows_as_dicts = [{k: v for k, v in row.items() if not _ID_SUFFIX.search(k)} for row in rows_as_dicts]
+            col_names = _keep
+
         return {
             "description": description,
             "sql_run": sql_stripped,
@@ -3825,7 +3851,7 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
             "rows": rows_as_dicts,
             "data_quality": {
                 "tier": "free_form",
-                "note": f"Free-form query — {len(rows_as_dicts)} rows. Verify column semantics before acting.",
+                "note": f"Live query — {len(rows_as_dicts)} rows.",
             },
         }
     except Exception as e:
@@ -4916,6 +4942,161 @@ def get_offers_for_publisher(publisher_name: str) -> dict:  # returns dict since
     }
 
 
+def get_revenue_today() -> dict:
+    """
+    Return today's intraday revenue by publisher vs 30-day rolling average.
+    Pre-formatted as Slack mrkdwn — deliver verbatim, do not reformat.
+
+    Format spec:
+        *$14K today*, 58% of daily avg. Still early.
+        ---
+        🟢 *AT&T* · $3,400 · 343 conversions
+        🟡 *AT&T Buy Flow* · $515 · 41 conversions
+        > 4 others · $1,155 combined
+        ---
+        ⚠️ *TuitionHero*: invalid conversions. $5,500 excluded until ops confirms netting.
+
+    Signal thresholds vs publisher 30-day avg:
+        🟢 ≥ 80%   🟡 40–79%   🔴 < 40%
+
+    Revenue rounding:
+        ≥ $10K → $XK (nearest $100)   ≥ $1K → $X,X00 (nearest $100)   < $1K → exact
+    """
+    import datetime as _dt_mod
+
+    def _fmt_rev(amount: float) -> str:
+        """Round revenue to human-readable form."""
+        if amount >= 10_000:
+            return f"${round(amount / 100) * 100 / 1000:.0f}K"
+        elif amount >= 1_000:
+            rounded = round(amount / 100) * 100
+            return f"${rounded:,.0f}"
+        else:
+            return f"${amount:,.0f}"
+
+    def _signal(today_rev: float, avg_rev: float) -> str:
+        if avg_rev <= 0:
+            return "🟢"
+        pct = today_rev / avg_rev
+        if pct >= 0.80:
+            return "🟢"
+        elif pct >= 0.40:
+            return "🟡"
+        return "🔴"
+
+    try:
+        ch = _get_ch_client()
+
+        # Let ClickHouse own timezone math — avoids DST drift from Python UTC offset
+        today_sql = """
+SELECT
+    c.user_id,
+    u.organization AS publisher_name,
+    sum(toFloat64OrNull(c.revenue)) AS today_rev,
+    count() AS conversions
+FROM adpx_conversionsdetails c
+LEFT JOIN from_airbyte_users u ON u.id = c.user_id
+PREWHERE toYYYYMM(c.created_at) = toYYYYMM(toDate(toTimeZone(now(), 'America/Chicago')))
+WHERE toDate(toTimeZone(c.created_at, 'America/Chicago'))
+      = toDate(toTimeZone(now(), 'America/Chicago'))
+GROUP BY c.user_id, u.organization
+HAVING today_rev > 0
+ORDER BY today_rev DESC
+"""
+
+        # 30-day avg divided by 30 calendar days (includes zero-revenue days in denominator)
+        avg_sql = """
+SELECT
+    c.user_id,
+    sum(toFloat64OrNull(c.revenue)) / 30 AS avg_daily_rev
+FROM adpx_conversionsdetails c
+PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(
+    toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 35 DAY
+)
+WHERE toDate(toTimeZone(c.created_at, 'America/Chicago'))
+      >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 30 DAY
+  AND toDate(toTimeZone(c.created_at, 'America/Chicago'))
+      < toDate(toTimeZone(now(), 'America/Chicago'))
+GROUP BY c.user_id
+"""
+
+        today_rows = ch.query(today_sql).result_rows
+        avg_rows = ch.query(avg_sql).result_rows
+
+        # Build avg lookup: user_id → avg_daily_rev
+        avg_lookup: dict[int, float] = {int(r[0]): float(r[1] or 0) for r in avg_rows}
+
+        # Today rows: (user_id, publisher_name, today_rev, conversions)
+        publishers = []
+        total_today = 0.0
+        total_avg = 0.0
+        for row in today_rows:
+            uid = int(row[0])
+            name = (row[1] or "").strip() or "Unknown Partner"
+            rev = float(row[2] or 0)
+            convs = int(row[3] or 0)
+            avg = avg_lookup.get(uid, 0.0)
+            publishers.append({
+                "uid": uid,
+                "name": name,
+                "rev": rev,
+                "convs": convs,
+                "avg": avg,
+                "signal": _signal(rev, avg),
+            })
+            total_today += rev
+            total_avg += avg
+
+        # Load entity_overrides flags — only surface for publishers with revenue today
+        overrides = _load_entity_overrides()
+        all_pubs = {**overrides.get("publishers", {})}
+        todays_publishers = {p["name"] for p in publishers}
+        flag_lines: list[str] = []
+        for pub_name, entry in all_pubs.items():
+            note = (entry or {}).get("note", "")
+            if note and pub_name in todays_publishers:
+                flag_lines.append(f"⚠️ *{pub_name}*: {note}")
+
+        # Empty / early state
+        if not publishers:
+            msg = "_No revenue data yet today — check back after 9am CT._"
+            return {"formatted": msg, "pre_formatted": True}
+
+        # Headline
+        pct_of_avg = (total_today / total_avg * 100) if total_avg > 0 else None
+        import datetime as _dt_now
+        _now_ct = _dt_now.datetime.now(_dt_now.timezone.utc) - _dt_now.timedelta(hours=5)
+        hour_ct = _now_ct.hour
+        time_note = "Still early." if hour_ct < 12 else ("Midday pace." if hour_ct < 17 else "")
+        headline_pct = f" — {pct_of_avg:.0f}% of daily avg. {time_note}".strip() if pct_of_avg else "."
+        headline = f"*{_fmt_rev(total_today)} today*{headline_pct}"
+
+        # Top 3 inline, remainder grouped
+        lines: list[str] = [headline, "---"]
+        top3 = publishers[:3]
+        rest = publishers[3:]
+        for p in top3:
+            lines.append(f"{p['signal']} *{p['name']}* · {_fmt_rev(p['rev'])} · {p['convs']:,} conversions")
+
+        if rest:
+            rest_total = sum(p["rev"] for p in rest)
+            lines.append(f"> {len(rest)} others · {_fmt_rev(rest_total)} combined")
+
+        # Flags from entity_overrides
+        if flag_lines:
+            lines.append("---")
+            lines.extend(flag_lines)
+
+        return {"formatted": "\n".join(lines), "pre_formatted": True}
+
+    except Exception as e:
+        log.exception("get_revenue_today failed")
+        return {
+            "formatted": "⚠️ Revenue data unavailable — query failed. Try again or check ClickHouse.",
+            "pre_formatted": True,
+        }
+
+
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
 TOOL_MAP = {
@@ -4930,6 +5111,7 @@ TOOL_MAP = {
     "get_queue_status": get_queue_status,
     "get_demand_queue_status": get_demand_queue_status,
     "mark_offer_launched": mark_offer_launched,
+    "get_revenue_today": get_revenue_today,
     "get_publisher_health": get_publisher_health,
     "get_campaign_status": get_campaign_status,
     "get_perkswall_engagement": get_perkswall_engagement,
