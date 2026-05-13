@@ -5039,14 +5039,15 @@ GROUP BY c.user_id
         # Empty / early state
         if not publishers:
             return {
-                "formatted": "_No revenue data yet today — check back after 9am CT._",
+                "formatted": "_No revenue data yet today. Check back after 9am CT._",
                 "pre_formatted": True,
             }
 
         # Headline
         pct_of_avg = (total_today / total_avg * 100) if total_avg > 0 else None
         import datetime as _dt_now
-        _now_ct = _dt_now.datetime.now(_dt_now.timezone.utc) - _dt_now.timedelta(hours=5)
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        _now_ct = _dt_now.datetime.now(_ZoneInfo("America/Chicago"))
         hour_ct = _now_ct.hour
         time_note = "Still early." if hour_ct < 12 else ("Midday pace." if hour_ct < 17 else "")
         headline_pct = f", {pct_of_avg:.0f}% of daily avg. {time_note}".strip() if pct_of_avg else "."
