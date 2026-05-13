@@ -5275,31 +5275,21 @@ GROUP BY c.user_id
             total_today += rev
             total_avg += avg
 
-        # Load entity_overrides flags — surface all flagged publishers (including those
-        # with no revenue today, since the flag itself is the signal worth seeing)
-        overrides = _load_entity_overrides()
-        all_pubs = {**overrides.get("publishers", {})}
-        flag_lines: list[str] = []
-        for pub_name, entry in all_pubs.items():
-            note = (entry or {}).get("note", "")
-            if note:
-                flag_lines.append(f"⚠️ *{pub_name}*: {note}")
-
-        # Empty / early state — still surface override flags if any exist
+        # Empty / early state
         if not publishers:
-            lines = ["_No revenue data yet today — check back after 9am CT._"]
-            if flag_lines:
-                lines.append("---")
-                lines.extend(flag_lines)
-            return {"formatted": "\n".join(lines), "pre_formatted": True}
+            return {
+                "formatted": "_No revenue data yet today. Check back after 9am CT._",
+                "pre_formatted": True,
+            }
 
         # Headline
         pct_of_avg = (total_today / total_avg * 100) if total_avg > 0 else None
         import datetime as _dt_now
-        _now_ct = _dt_now.datetime.now(_dt_now.timezone.utc) - _dt_now.timedelta(hours=5)
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        _now_ct = _dt_now.datetime.now(_ZoneInfo("America/Chicago"))
         hour_ct = _now_ct.hour
         time_note = "Still early." if hour_ct < 12 else ("Midday pace." if hour_ct < 17 else "")
-        headline_pct = f" — {pct_of_avg:.0f}% of daily avg. {time_note}".strip() if pct_of_avg else "."
+        headline_pct = f", {pct_of_avg:.0f}% of daily avg. {time_note}".strip() if pct_of_avg else "."
         headline = f"*{_fmt_rev(total_today)} today*{headline_pct}"
 
         # Top 3 inline, remainder grouped
@@ -5312,11 +5302,6 @@ GROUP BY c.user_id
         if rest:
             rest_total = sum(p["rev"] for p in rest)
             lines.append(f"> {len(rest)} others · {_fmt_rev(rest_total)} combined")
-
-        # Flags from entity_overrides
-        if flag_lines:
-            lines.append("---")
-            lines.extend(flag_lines)
 
         return {"formatted": "\n".join(lines), "pre_formatted": True}
 
