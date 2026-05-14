@@ -21,7 +21,7 @@
     "pulse_diff_chronic_after_days": 5,
     "expiration_warning_days": 7,
     "revenue_tracker_enabled": true,
-    "revenue_tracker_check_hour_ct": 15,
+    "revenue_tracker_check_hour_ct": 14,
     "revenue_tracker_publisher_min_delta": 500,
     "revenue_tracker_ghost_min_impressions": 100,
     "revenue_tracker_cvr_min_impressions": 500
