@@ -1604,14 +1604,16 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                             unfurl_links=False,
                         )
                         # Seed 👍/👎 on the retry reply so the user can rate it too
-                        _seed_feedback_reactions(web, ch_id, reply.get("ts", ""))
+                        retry_ts = reply.get("ts", "")
+                        _seed_feedback_reactions(web, ch_id, retry_ts)
                         _feedback_log_row({
-                            "user":       rater_id,
-                            "message_ts": msg_ts,
-                            "channel":    ch_id,
-                            "question":   question_text,
-                            "answer":     answer_text,
-                            "rating":     "down_retry",
+                            "user":             rater_id,
+                            "message_ts":       msg_ts,
+                            "retry_message_ts": retry_ts,
+                            "channel":          ch_id,
+                            "question":         question_text,
+                            "answer":           answer_text,
+                            "rating":           "down_retry",
                         })
                     except Exception as e:
                         log.warning(f"[feedback] clarification retry failed: {e}")

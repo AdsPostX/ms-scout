@@ -2,7 +2,7 @@
 from scout_handlers import _is_clarification_response
 
 
-class TestIsClariificationResponse:
+class TestIsClarificationResponse:
     def test_pure_clarification_question(self):
         assert _is_clarification_response("Do you mean RPM or RPC?")
 
@@ -32,6 +32,10 @@ class TestIsClariificationResponse:
     def test_short_answer_no_phrase(self):
         # Ends with ? but no clarification phrase — should NOT classify.
         assert not _is_clarification_response("Revenue looks good today?")
+
+    def test_phrase_without_question_mark(self):
+        # Has clarification phrase but no trailing "?" — should NOT classify.
+        assert not _is_clarification_response("Can you confirm that is AT&T")
 
     def test_empty_string(self):
         assert not _is_clarification_response("")
