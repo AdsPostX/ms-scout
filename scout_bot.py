@@ -661,39 +661,15 @@ def _pulse_signal_opportunities(ch) -> list:
     ]
 
 
-# ── Proactive pulse: kill switch ─────────────────────────────────────────────
-
 def _pulse_signal_enabled(key: str) -> bool:
-    """Return True unless key appears in SCOUT_DISABLED_PULSE_SIGNALS env var.
+    """Return True unless this signal name is listed in SCOUT_DISABLED_PULSE_SIGNALS.
 
-    Set SCOUT_DISABLED_PULSE_SIGNALS=seasonal,payout_upgrades,new_offers to mute
-    any new signal without a deploy.  Existing ClickHouse signals are never in
-    this list and are not affected.
+    Set SCOUT_DISABLED_PULSE_SIGNALS=new_offers (or comma-separated) to mute
+    any signal without a code deploy.
     """
-    disabled = {s.strip() for s in os.getenv("SCOUT_DISABLED_PULSE_SIGNALS", "").split(",") if s.strip()}
+    import os as _os
+    disabled = {s.strip() for s in _os.getenv("SCOUT_DISABLED_PULSE_SIGNALS", "").split(",") if s.strip()}
     return key not in disabled
-
-
-# Proactive signal priority (fatigue budget: max 1 per pulse)
-# Seasonal events surface via scout_digest._sourcing_signal_seasonal, not the daily pulse.
-_PROACTIVE_SIGNAL_PRIORITY = ["new_offers", "payout_upgrades"]
-
-
-def _parse_payout(val) -> float:
-    """Parse a payout value into a float, returning 0.0 on any failure.
-
-    Handles numeric types as-is and strings like "$12.00", "1,500", or "N/A"
-    by stripping currency symbols and commas before conversion.
-    """
-    if val is None:
-        return 0.0
-    if isinstance(val, (int, float)):
-        return float(val)
-    try:
-        cleaned = str(val).replace("$", "").replace(",", "").strip()
-        return float(cleaned)
-    except (ValueError, TypeError):
-        return 0.0
 
 
 # ── Pulse signal orchestrator ─────────────────────────────────────────────────
@@ -701,43 +677,31 @@ def _parse_payout(val) -> float:
 def _run_pulse_signals() -> dict:
     """
     Run all Pulse signals in parallel.  Each ClickHouse signal owns its own
-    connection — no shared state, no lock needed.  Local signals (seasonal,
-    new_offers, payout_upgrades) share a pre-loaded offer snapshot.
-
-    Returns a dict with all signal keys.  Applies the proactive fatigue budget:
-    at most one of {new_offers, seasonal, payout_upgrades} is non-empty per run
-    (priority order: new_offers → seasonal → payout_upgrades).
+    connection — no shared state, no lock needed.  Local signals (new_offers)
+    share a pre-loaded offer snapshot.
+    Returns a dict with all signal keys.
+    Revenue tracking moved to the _revenue_tracker daemon (PR 25).
     """
-    from scout_agent import _get_ch_client, _load_offers
+    from scout_agent import _get_ch_client
     from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    # Load offer inventory once — shared by all local signals
-    try:
-        offers = _load_offers()
-    except Exception as e:
-        log.warning(f"Pulse: could not load offer inventory: {e}")
-        offers = []
 
     signals: dict = {
         "cap_alerts": [], "velocity_shifts": [], "overnight_events": [],
         "ghost_campaigns": [], "fill_rate": [], "opportunities": [],
-        "seasonal": [], "payout_upgrades": [], "new_offers": [],
+        "new_offers": [],
     }
 
     _signal_fns = [
-        ("cap_alerts",      _pulse_signal_cap),
-        ("velocity_shifts", _pulse_signal_velocity),
-        ("overnight_events",_pulse_signal_overnight),
-        ("ghost_campaigns", _pulse_signal_ghost),
-        ("fill_rate",       _pulse_signal_fill_rate),
-        ("opportunities",   _pulse_signal_opportunities),
+        ("cap_alerts",         _pulse_signal_cap),
+        ("velocity_shifts",    _pulse_signal_velocity),
+        ("overnight_events",   _pulse_signal_overnight),
+        ("ghost_campaigns",    _pulse_signal_ghost),
+        ("fill_rate",          _pulse_signal_fill_rate),
+        ("opportunities",      _pulse_signal_opportunities),
     ]
 
-    # Local signals run from offer snapshot — no ClickHouse connection needed
-    _LOCAL_SIGNALS = {"new_offers", "payout_upgrades"}
-
     def _run_one(key, fn):
-        ch = None if key in _LOCAL_SIGNALS else _get_ch_client()
+        ch = _get_ch_client()
         return key, fn(ch)
 
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="pulse") as pool:
@@ -748,13 +712,6 @@ def _run_pulse_signals() -> dict:
                 signals[key] = result
             except Exception as e:
                 log.warning(f"Pulse {futures[future]} signal failed unexpectedly: {e}")
-
-    # Fatigue budget: emit at most one proactive section per pulse
-    # Priority: new_offers → seasonal → payout_upgrades
-    active = next((k for k in _PROACTIVE_SIGNAL_PRIORITY if signals.get(k)), None)
-    for k in _PROACTIVE_SIGNAL_PRIORITY:
-        if k != active:
-            signals[k] = []
 
     return signals
 
@@ -1262,9 +1219,7 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
         or signals.get("ghost_campaigns")
         or signals.get("fill_rate")
         or signals.get("opportunities")
-        or signals.get("seasonal")
         or signals.get("new_offers")
-        or signals.get("payout_upgrades")
     )
     # Force pulse always routes to #scout-qa; normal pulse uses _route_channel
     channel = _route_channel("pulse", force=force)
@@ -1399,9 +1354,7 @@ def _proactive_pulse(web: WebClient) -> None:
                     or signals.get("ghost_campaigns")
                     or signals.get("fill_rate")
                     or signals.get("opportunities")
-                    or signals.get("seasonal")
                     or signals.get("new_offers")
-                    or signals.get("payout_upgrades")
                 )
                 channel = _route_channel("pulse")
                 if has_content:
