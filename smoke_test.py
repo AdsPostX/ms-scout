@@ -1265,8 +1265,6 @@ def test_pulse_diff_snapshot_keys():
         return False, f"GhostAdv not in ghost snapshot: {snap['ghost']}"
     return True, f"_snapshot_keys emits correct keys: {{{', '.join(sorted(snap.keys()))}}}"
 
-
-
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

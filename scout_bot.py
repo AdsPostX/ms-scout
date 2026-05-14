@@ -661,15 +661,21 @@ def _pulse_signal_opportunities(ch) -> list:
     ]
 
 
-def _pulse_signal_enabled(key: str) -> bool:
-    """Return True unless this signal name is listed in SCOUT_DISABLED_PULSE_SIGNALS.
+# ── Proactive pulse: kill switch ─────────────────────────────────────────────
 
-    Set SCOUT_DISABLED_PULSE_SIGNALS=new_offers (or comma-separated) to mute
-    any signal without a code deploy.
+def _pulse_signal_enabled(key: str) -> bool:
+    """Return True unless key appears in SCOUT_DISABLED_PULSE_SIGNALS env var.
+
+    Set SCOUT_DISABLED_PULSE_SIGNALS=seasonal,payout_upgrades,new_offers to mute
+    any new signal without a deploy.  Existing ClickHouse signals are never in
+    this list and are not affected.
     """
-    import os as _os
-    disabled = {s.strip() for s in _os.getenv("SCOUT_DISABLED_PULSE_SIGNALS", "").split(",") if s.strip()}
+    disabled = {s.strip() for s in os.getenv("SCOUT_DISABLED_PULSE_SIGNALS", "").split(",") if s.strip()}
     return key not in disabled
+
+
+# Proactive signal priority (fatigue budget: max 1 per pulse)
+_PROACTIVE_SIGNAL_PRIORITY = ["new_offers", "payout_upgrades"]
 
 
 # ── Pulse signal orchestrator ─────────────────────────────────────────────────
@@ -677,10 +683,11 @@ def _pulse_signal_enabled(key: str) -> bool:
 def _run_pulse_signals() -> dict:
     """
     Run all Pulse signals in parallel.  Each ClickHouse signal owns its own
-    connection — no shared state, no lock needed.  Local signals (new_offers)
-    share a pre-loaded offer snapshot.
-    Returns a dict with all signal keys.
-    Revenue tracking moved to the _revenue_tracker daemon (PR 25).
+    connection — no shared state, no lock needed.
+
+    Returns a dict with all signal keys.  Applies the proactive fatigue budget:
+    at most one of {new_offers, payout_upgrades} is non-empty per run
+    (priority order: new_offers → payout_upgrades).
     """
     from scout_agent import _get_ch_client
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -688,16 +695,16 @@ def _run_pulse_signals() -> dict:
     signals: dict = {
         "cap_alerts": [], "velocity_shifts": [], "overnight_events": [],
         "ghost_campaigns": [], "fill_rate": [], "opportunities": [],
-        "new_offers": [],
+        "seasonal": [], "new_offers": [], "payout_upgrades": [],
     }
 
     _signal_fns = [
-        ("cap_alerts",         _pulse_signal_cap),
-        ("velocity_shifts",    _pulse_signal_velocity),
-        ("overnight_events",   _pulse_signal_overnight),
-        ("ghost_campaigns",    _pulse_signal_ghost),
-        ("fill_rate",          _pulse_signal_fill_rate),
-        ("opportunities",      _pulse_signal_opportunities),
+        ("cap_alerts",      _pulse_signal_cap),
+        ("velocity_shifts", _pulse_signal_velocity),
+        ("overnight_events",_pulse_signal_overnight),
+        ("ghost_campaigns", _pulse_signal_ghost),
+        ("fill_rate",       _pulse_signal_fill_rate),
+        ("opportunities",   _pulse_signal_opportunities),
     ]
 
     def _run_one(key, fn):
@@ -712,6 +719,13 @@ def _run_pulse_signals() -> dict:
                 signals[key] = result
             except Exception as e:
                 log.warning(f"Pulse {futures[future]} signal failed unexpectedly: {e}")
+
+    # Fatigue budget: emit at most one proactive section per pulse
+    # Priority: new_offers → seasonal → payout_upgrades
+    active = next((k for k in _PROACTIVE_SIGNAL_PRIORITY if signals.get(k)), None)
+    for k in _PROACTIVE_SIGNAL_PRIORITY:
+        if k != active:
+            signals[k] = []
 
     return signals
 
@@ -1219,7 +1233,6 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
         or signals.get("ghost_campaigns")
         or signals.get("fill_rate")
         or signals.get("opportunities")
-        or signals.get("new_offers")
     )
     # Force pulse always routes to #scout-qa; normal pulse uses _route_channel
     channel = _route_channel("pulse", force=force)
@@ -1354,7 +1367,6 @@ def _proactive_pulse(web: WebClient) -> None:
                     or signals.get("ghost_campaigns")
                     or signals.get("fill_rate")
                     or signals.get("opportunities")
-                    or signals.get("new_offers")
                 )
                 channel = _route_channel("pulse")
                 if has_content:
