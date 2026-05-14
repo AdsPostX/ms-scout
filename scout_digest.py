@@ -450,8 +450,8 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     if not force and offer_id in rejected:
         payout_data = payout_cache.get(offer_id, {})
         try:
-            current = float(payout_data.get("payout") or 0)
-            old     = float(rejected[offer_id].get("payout_at_action") or 0)
+            current = _parse_payout(payout_data.get("payout"))
+            old     = _parse_payout(rejected[offer_id].get("payout_at_action"))
         except (ValueError, TypeError):
             return None
         if old <= 0 or (current - old) / old < 0.15:
@@ -461,10 +461,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     # over scraper-normalised _payout_num where available.
     # MaxBounty/FlexOffers won't be in payout_cache — fall back to offer fields directly.
     payout_data = payout_cache.get(offer_id, {})
-    try:
-        cache_payout = float(payout_data.get("payout") or 0)
-    except (ValueError, TypeError):
-        cache_payout = 0.0
+    cache_payout = _parse_payout(payout_data.get("payout"))
 
     enriched = dict(offer)
     if cache_payout > 0:
@@ -527,17 +524,11 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
     category    = (offer.get("category") or "").strip()
     geo         = offer.get("geo", "")
 
-    try:
-        cache_payout = float(payout_data.get("payout") or 0)
-    except (ValueError, TypeError):
-        cache_payout = 0.0
+    cache_payout = _parse_payout(payout_data.get("payout"))
 
     # Fall back to offer's own _payout_num for networks not in payout_cache (MaxBounty, FlexOffers)
     if cache_payout == 0:
-        try:
-            cache_payout = float(offer.get("_payout_num") or 0)
-        except (ValueError, TypeError):
-            cache_payout = 0.0
+        cache_payout = _parse_payout(offer.get("_payout_num"))
 
     # Normalize payout type from cache or offer fields
     raw_ptype   = payout_data.get("payout_type", "") or offer.get("_payout_type_norm", "")
@@ -722,11 +713,8 @@ def build_digest_blocks(
             geo          = geo_raw if geo_raw.lower() not in _NON_GEO_VALUES else ""
             tracking_url = offer.get("tracking_url", "")
 
-            try:
-                payout_num = float(payout_data.get("payout") or offer.get("_payout_num") or 0)
-                payout_str = _format_payout(payout_num, payout_type)
-            except (ValueError, TypeError):
-                payout_num, payout_str = 0.0, "Rate TBD"
+            payout_num = _parse_payout(payout_data.get("payout") or offer.get("_payout_num"))
+            payout_str = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
 
             # One-line offer summary — first sentence of description, max 80 chars.
             # Strip newlines: a \n inside the italic field breaks the closing underscore
@@ -841,6 +829,16 @@ def _sourcing_signal_enabled(key: str) -> bool:
     return key not in disabled
 
 
+def _parse_payout(val) -> float:
+    """Parse a payout value that may carry a '$' prefix (e.g. '$7.20' → 7.20)."""
+    if not val:
+        return 0.0
+    try:
+        return float(str(val).strip().lstrip("$").strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _nth_weekday(year: int, month: int, n: int, weekday: int) -> date:
     """
     Return the nth occurrence of weekday (0=Mon … 6=Sun) in month/year.
@@ -918,7 +916,7 @@ def _sourcing_signal_seasonal(offers: list) -> list:
                 matching.append(o)
 
         if matching:
-            matching.sort(key=lambda x: float(x.get("payout") or 0), reverse=True)
+            matching.sort(key=lambda x: _parse_payout(x.get("payout")), reverse=True)
             results.append({
                 "event_name":  event_name,
                 "days_until":  days_until,
@@ -1012,7 +1010,7 @@ def _sourcing_signal_payout_upgrades(offers: list) -> list:
             and o.get("fit_tier") in ("PRIME", "STRONG")
         ]
         for m in matches:
-            inv_gross   = float(m.get("payout") or 0)
+            inv_gross   = _parse_payout(m.get("payout"))
             inv_net_est = inv_gross * _GROSS_TO_NET_FACTOR
             delta       = inv_net_est - (avg_net_payout or 0)
             payout_type = (m.get("payout_type") or "").upper() or "CPA"
@@ -1059,7 +1057,7 @@ def _sourcing_signal_new_offers(offers: list) -> list:
         if ts >= cutoff:
             new_offers.append(o)
 
-    new_offers.sort(key=lambda x: float(x.get("payout") or 0), reverse=True)
+    new_offers.sort(key=lambda x: _parse_payout(x.get("payout")), reverse=True)
     return new_offers[:5]
 
 
@@ -1089,38 +1087,16 @@ def _run_sourcing_signals(offers: list) -> dict:
 
 
 def _build_sourcing_intel_blocks(signals: dict) -> list:
-    """Build Block Kit blocks for the winning sourcing signal. Returns [] if nothing fired."""
+    """Build Block Kit offer cards for the winning sourcing signal. Returns [] if nothing fired.
+
+    new_offers / seasonal → rich per-offer cards (image + payout + geo + context + buttons).
+    payout_upgrades → plain mrkdwn text (different data shape; references running campaigns).
+    Max 3 cards per section to keep visual density appropriate.
+    """
     blocks: list = []
 
-    if signals.get("new_offers"):
-        lines = [":new: *New PRIME/STRONG offers in the last 48h*"]
-        for o in signals["new_offers"]:
-            lines.append(
-                f">  {o.get('offer_name') or o.get('advertiser', '?')} · "
-                f"${o.get('payout')} {(o.get('payout_type') or '').upper()} · "
-                f"{o.get('network', '?')} · {o.get('fit_tier', '')}"
-            )
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-
-    elif signals.get("seasonal"):
-        evt     = signals["seasonal"][0]  # fatigue budget: max 1 event
-        days    = evt["days_until"]
-        cnt     = evt["offer_count"]
-        day_str = f"{days} day{'s' if days != 1 else ''}"
-        offer_lines = "\n".join(
-            f">  • {o.get('advertiser') or o.get('offer_name', '?')} · "
-            f"${o.get('payout')} {(o.get('payout_type') or '').upper()} · "
-            f"{o.get('network', '?')}"
-            for o in evt["top_offers"]
-        )
-        blocks.append({"type": "section", "text": {"type": "mrkdwn",
-            "text": (
-                f":calendar: *{evt['event_name']} in {day_str}* — "
-                f"{cnt} PRIME/STRONG offer{'s' if cnt != 1 else ''} available\n"
-                + offer_lines
-            )}})
-
-    elif signals.get("payout_upgrades"):
+    # ── payout_upgrades: plain mrkdwn (different data shape — not offer-inventory cards) ──
+    if signals.get("payout_upgrades") and not signals.get("new_offers") and not signals.get("seasonal"):
         lines = [":moneybag: *Payout upgrades worth checking* _(est. net after ~30% margin)_"]
         for u in signals["payout_upgrades"]:
             lines.append(
@@ -1129,6 +1105,104 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
                 f" (est. ~${u['inventory_net_est']:.2f} net, +${u['delta_net_est']:.2f})"
             )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        return blocks
+
+    # ── Determine active signal + header ──────────────────────────────────────────
+    active_offers: list = []
+    header_text: str = ""
+    context_fn = None  # callable(offer) -> str
+
+    if signals.get("new_offers"):
+        active_offers = signals["new_offers"][:3]
+        header_text   = ":new: *New PRIME/STRONG offers in the last 48h*"
+        context_fn    = lambda o: (
+            f"_{_parse_payout(o.get('payout')):.2f} {(o.get('payout_type') or '').upper()}"
+            f" · {o.get('fit_tier', 'PRIME')} tier · first seen in last 48h_"
+        )
+
+    elif signals.get("seasonal"):
+        evt           = signals["seasonal"][0]
+        day_str       = f"{evt['days_until']} day{'s' if evt['days_until'] != 1 else ''}"
+        active_offers = evt["top_offers"][:3]
+        header_text   = (
+            f":calendar: *{evt['event_name']} in {day_str}*"
+            f" — {evt['offer_count']} PRIME/STRONG offer{'s' if evt['offer_count'] != 1 else ''}"
+        )
+        context_fn    = lambda o: (
+            f"_{(o.get('category') or '').title() or (o.get('payout_type') or '').upper()}"
+            f" · {(o.get('payout_type') or '').upper()} ${_parse_payout(o.get('payout')):.2f}_"
+        )
+
+    if not active_offers:
+        return blocks
+
+    # ── Header + divider ──────────────────────────────────────────────────────────
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
+    blocks.append({"type": "divider"})
+
+    # ── Per-offer cards ───────────────────────────────────────────────────────────
+    for o in active_offers:
+        offer_id    = o.get("offer_id") or o.get("offer_name", "")
+        advertiser  = o.get("advertiser") or o.get("offer_name") or "Unknown"
+        summary     = (o.get("description") or "")[:80]
+        payout_num  = _parse_payout(o.get("payout"))
+        payout_type = (o.get("payout_type") or "").upper()
+        payout_str  = f"${payout_num:.2f} {payout_type}" if payout_num else "Rate TBD"
+        geo         = o.get("geo") or o.get("country") or ""
+        network     = o.get("network", "")
+        img_url     = o.get("image_url") or o.get("creative_url") or ""
+        why         = context_fn(o) if context_fn else ""
+
+        action_value = json.dumps({
+            "offer_id":    offer_id,
+            "offer_name":  advertiser,
+            "network":     network,
+            "payout":      payout_num,
+            "payout_type": payout_type,
+            "source":      "sourcing_signal",
+        }, separators=(",", ":"))
+
+        left_text  = f"*{advertiser}*\n_{summary}_" if summary else f"*{advertiser}*"
+        right_text = f"*{payout_str}*\n{geo}" if geo else f"*{payout_str}*"
+
+        offer_block: dict = {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": left_text},
+                {"type": "mrkdwn", "text": right_text},
+            ],
+        }
+        if img_url and img_url.startswith("http"):
+            offer_block["accessory"] = {
+                "type":      "image",
+                "image_url": img_url,
+                "alt_text":  advertiser,
+            }
+
+        blocks += [
+            offer_block,
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": why}]},
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type":      "button",
+                        "text":      {"type": "plain_text", "text": "✓  Add to Draft", "emoji": True},
+                        "style":     "primary",
+                        "action_id": "scout_draft_add",
+                        "value":     action_value,
+                    },
+                    {
+                        "type":      "button",
+                        "text":      {"type": "plain_text", "text": "✕  Skip"},
+                        "style":     "danger",
+                        "action_id": "scout_draft_skip",
+                        "value":     action_value,
+                    },
+                ],
+            },
+            {"type": "divider"},
+        ]
 
     return blocks
 
