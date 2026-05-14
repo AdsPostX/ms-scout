@@ -897,6 +897,59 @@ def _handle_reject(action: dict, payload: dict, web: WebClient):
     )
     log.info(f"Rejected: {advertiser} ({offer_id}) by {user_id}")
 
+def _handle_draft_add(action: dict, payload: dict, web: WebClient):
+    """Log sourcing-intel offer to feedback log tagged source=sourcing_signal. DM the operator."""
+    try:
+        offer = json.loads(action.get("value", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        offer = {}
+
+    user_id = (payload.get("user") or {}).get("id", "")
+    _feedback_log_row({
+        "action":       "draft_add",
+        "offer_id":     offer.get("offer_id", ""),
+        "offer_name":   offer.get("offer_name", ""),
+        "network":      offer.get("network", ""),
+        "payout":       offer.get("payout"),
+        "payout_type":  offer.get("payout_type", ""),
+        "source":       offer.get("source", "sourcing_signal"),
+        "slack_user_id": user_id,
+    })
+    if user_id:
+        try:
+            web.chat_postMessage(
+                channel=user_id,
+                text=(
+                    f":white_check_mark: Added *{offer.get('offer_name', 'offer')}* to draft — "
+                    f"once the queue page launches, it'll appear there for final review before going live."
+                ),
+            )
+        except Exception as e:
+            log.warning(f"[sourcing] draft_add DM failed for {user_id}: {e}")
+    log.info(f"[sourcing] draft_add: {offer.get('offer_name')} by {user_id}")
+
+
+def _handle_draft_skip(action: dict, payload: dict, web: WebClient):
+    """Silently log sourcing-intel skip. No DM."""
+    try:
+        offer = json.loads(action.get("value", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        offer = {}
+
+    user_id = (payload.get("user") or {}).get("id", "")
+    _feedback_log_row({
+        "action":       "draft_skip",
+        "offer_id":     offer.get("offer_id", ""),
+        "offer_name":   offer.get("offer_name", ""),
+        "network":      offer.get("network", ""),
+        "payout":       offer.get("payout"),
+        "payout_type":  offer.get("payout_type", ""),
+        "source":       offer.get("source", "sourcing_signal"),
+        "slack_user_id": user_id,
+    })
+    log.info(f"[sourcing] draft_skip: {offer.get('offer_name')} by {user_id}")
+
+
 def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     """User clicked a suggestion button — run it as a Scout query in the same thread."""
     channel   = (payload.get("channel") or {}).get("id", "")
@@ -1063,6 +1116,13 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         return
     if action_id == "scout_reject":
         _handle_reject(action, payload, web)
+        return
+    # ── Sourcing intel "Add to Draft" / "Skip" buttons ───────────────────────
+    elif action_id == "scout_draft_add":
+        _handle_draft_add(action, payload, web)
+        return
+    elif action_id == "scout_draft_skip":
+        _handle_draft_skip(action, payload, web)
         return
     # ── Brief "Add to Queue" button (from @Scout build a brief for X) ─────────
     if action_id == "scout_brief_queue":

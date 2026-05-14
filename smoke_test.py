@@ -1819,6 +1819,186 @@ def test_sourcing_signals_in_scout_digest_not_scout_bot():
     return True, "All sourcing signals on scout_digest, none on scout_bot ✓"
 
 
+# ── PR I: first_seen backfill tests (clean_offers) ───────────────────────────
+
+@test("first_seen_backfill_uses_last_verified_from_snapshot")
+def test_first_seen_backfill_uses_last_verified_from_snapshot():
+    """Offer without first_seen but with last_verified in snapshot → first_seen = last_verified.
+
+    Calls clean_offers() against a real (temp) snapshot file so the actual cache-loading
+    + fallback codepath is exercised.
+    Regression guard: before this fix, all pre-PR87 offers got first_seen = date_scraped (today)
+    and appeared as 'new' simultaneously on the first post-PR87 scrape.
+    """
+    import offer_scraper, json, pathlib
+
+    old_verified = "2026-05-10T08:00:00+00:00"  # snapshot's last_verified — a few days ago
+
+    snapshot_path = pathlib.Path(offer_scraper.__file__).parent / "data" / "offers_latest.json"
+    orig_data = snapshot_path.read_text() if snapshot_path.exists() else None
+
+    snapshot_fixture = json.dumps([{
+        "network": "CJ", "offer_id": "test-backfill-001",
+        "last_verified": old_verified,
+        # No first_seen — simulates a pre-PR87 offer
+    }])
+    raw_offer = {
+        "network": "CJ", "offer_id": "test-backfill-001",
+        "offer_name": "Test Backfill Offer", "advertiser": "TestCo",
+        "payout": "5.00", "payout_type": "CPA", "status": "Active",
+        "date_scraped": "2026-05-15",
+    }
+
+    try:
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text(snapshot_fixture)
+        cleaned = offer_scraper.clean_offers([raw_offer])
+    finally:
+        if orig_data is not None:
+            snapshot_path.write_text(orig_data)
+        elif snapshot_path.exists():
+            snapshot_path.unlink()
+
+    if not cleaned:
+        return False, "clean_offers returned empty list — offer may have been filtered out"
+    got = cleaned[0].get("first_seen", "")
+    if got != old_verified:
+        return False, f"Expected first_seen={old_verified!r} (from last_verified backfill); got {got!r}"
+    return True, f"clean_offers backfills first_seen from snapshot last_verified ({old_verified}) ✓"
+
+
+@test("first_seen_immutable_when_already_set")
+def test_first_seen_immutable_when_already_set():
+    """Offer with existing first_seen in snapshot → first_seen unchanged across rescrapes.
+
+    Calls clean_offers() against a real (temp) snapshot file.
+    """
+    import offer_scraper, json, pathlib
+
+    original_first_seen = "2026-04-01T12:00:00+00:00"
+
+    snapshot_path = pathlib.Path(offer_scraper.__file__).parent / "data" / "offers_latest.json"
+    orig_data = snapshot_path.read_text() if snapshot_path.exists() else None
+
+    snapshot_fixture = json.dumps([{
+        "network": "MaxBounty", "offer_id": "mb-immutable-001",
+        "first_seen":    original_first_seen,
+        "last_verified": "2026-05-14T08:00:00+00:00",
+    }])
+    raw_offer = {
+        "network": "MaxBounty", "offer_id": "mb-immutable-001",
+        "offer_name": "ImmutableTest", "advertiser": "ImmutableCo",
+        "payout": "5.00", "payout_type": "CPA", "status": "Active",
+        "date_scraped": "2026-05-15",
+    }
+
+    try:
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text(snapshot_fixture)
+        cleaned = offer_scraper.clean_offers([raw_offer])
+    finally:
+        if orig_data is not None:
+            snapshot_path.write_text(orig_data)
+        elif snapshot_path.exists():
+            snapshot_path.unlink()
+
+    if not cleaned:
+        return False, "clean_offers returned empty list"
+    got = cleaned[0].get("first_seen", "")
+    if got != original_first_seen:
+        return False, f"first_seen must be immutable; expected {original_first_seen!r}, got {got!r}"
+    return True, f"first_seen unchanged across rescrapes ({original_first_seen}) ✓"
+
+
+# ── PR H: Rich sourcing card rendering tests ──────────────────────────────────
+
+@test("sourcing_cards_new_offers_renders_card_format")
+def test_sourcing_cards_new_offers_renders_card_format():
+    """new_offers signal renders Block Kit section cards, not plain mrkdwn list."""
+    import scout_digest
+    now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    offers  = [
+        {"offer_name": "TestOffer", "advertiser": "TestCo", "payout": "$8.00",
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "CJ",
+         "first_seen": now_iso},
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks  = scout_digest._build_sourcing_intel_blocks(signals)
+    # Must have a section block with 'fields' (card format) — not a single mrkdwn text block
+    card_blocks = [b for b in blocks if b.get("type") == "section" and "fields" in b]
+    if not card_blocks:
+        return False, f"Expected Block Kit card with 'fields'; got block types: {[b.get('type') for b in blocks]}"
+    # Must have action buttons
+    action_blocks = [b for b in blocks if b.get("type") == "actions"]
+    if not action_blocks:
+        return False, "Expected actions block with Add to Draft / Skip buttons"
+    button_ids = [e.get("action_id") for b in action_blocks for e in b.get("elements", [])]
+    if "scout_draft_add" not in button_ids or "scout_draft_skip" not in button_ids:
+        return False, f"Expected scout_draft_add and scout_draft_skip; got {button_ids}"
+    return True, "new_offers renders rich Block Kit cards with Add to Draft / Skip buttons ✓"
+
+
+@test("sourcing_cards_payout_upgrades_plain_mrkdwn")
+def test_sourcing_cards_payout_upgrades_plain_mrkdwn():
+    """payout_upgrades renders as plain mrkdwn (different data shape — no card format)."""
+    import scout_digest
+    upgrades = [{"advertiser": "AT&T", "payout_type": "CPL", "current_net_payout": 2.00,
+                 "inventory_gross_payout": 6.00, "inventory_net_est": 4.20,
+                 "network": "CJ", "delta_net_est": 2.20, "offer_name": "AT&T Wireless"}]
+    signals = {"new_offers": [], "seasonal": [], "payout_upgrades": upgrades}
+    blocks  = scout_digest._build_sourcing_intel_blocks(signals)
+    # Must be a plain text section (no 'fields'), not a card
+    card_blocks = [b for b in blocks if b.get("type") == "section" and "fields" in b]
+    if card_blocks:
+        return False, "payout_upgrades should NOT render as card blocks (wrong data shape)"
+    mrkdwn_blocks = [b for b in blocks if b.get("type") == "section" and "text" in b]
+    if not mrkdwn_blocks:
+        return False, "payout_upgrades should render as plain mrkdwn section"
+    return True, "payout_upgrades renders as plain mrkdwn, not card format ✓"
+
+
+@test("sourcing_cards_no_double_dollar_sign")
+def test_sourcing_cards_no_double_dollar_sign():
+    """Payout display uses _parse_payout — no double $ (e.g. '$8.00 CPL' not '$8.00 $ CPL')."""
+    import scout_digest
+    now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    offers  = [
+        {"offer_name": "FlowerOffer", "advertiser": "1800Flowers", "payout": "$8.50",
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "FlexOffers",
+         "first_seen": now_iso},
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks  = scout_digest._build_sourcing_intel_blocks(signals)
+    all_text = " ".join(
+        str(f.get("text", "")) for b in blocks
+        for f in (b.get("fields") or [b.get("text", {})])
+    )
+    if "$ CPL" in all_text or "$ PER" in all_text or "$$" in all_text:
+        return False, f"Double dollar sign found in output: {all_text[:200]}"
+    if "$8.50" not in all_text:
+        return False, f"Expected '$8.50' in payout display; got: {all_text[:200]}"
+    return True, "Payout display is '$8.50 CPL' with no double dollar sign ✓"
+
+
+@test("sourcing_cards_max_3_offers")
+def test_sourcing_cards_max_3_offers():
+    """sourcing section caps at 3 offer cards even when 5 offers are provided."""
+    import scout_digest
+    now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    offers  = [
+        {"offer_name": f"Offer{i}", "advertiser": f"Adv{i}", "payout": f"${5 + i}.00",
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "CJ",
+         "first_seen": now_iso}
+        for i in range(5)
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks  = scout_digest._build_sourcing_intel_blocks(signals)
+    action_blocks = [b for b in blocks if b.get("type") == "actions"]
+    if len(action_blocks) != 3:
+        return False, f"Expected exactly 3 offer cards; got {len(action_blocks)} action blocks"
+    return True, "Max 3 offer cards enforced (exactly 3 shown) ✓"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
