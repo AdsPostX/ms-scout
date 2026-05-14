@@ -1383,7 +1383,7 @@ def _format_pulse_blocks(
             cnt  = evt["offer_count"]
             day_str = f"{days} day{'s' if days != 1 else ''}"
             header_ctx = (
-                f"{cnt} PRIME/STRONG offer{'s' if cnt != 1 else ''} available · "
+                f"{cnt} PRIME/STRONG offer{'s' if cnt != 1 else ''} available "
                 f"{day_str} away"
             )
             blocks.extend(_build_signal_header(

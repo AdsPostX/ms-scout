@@ -733,6 +733,23 @@ _SEASONAL_CALENDAR = [
 _PROACTIVE_SIGNAL_PRIORITY = ["new_offers", "seasonal", "payout_upgrades"]
 
 
+def _parse_payout(val) -> float:
+    """Parse a payout value into a float, returning 0.0 on any failure.
+
+    Handles numeric types as-is and strings like "$12.00", "1,500", or "N/A"
+    by stripping currency symbols and commas before conversion.
+    """
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        cleaned = str(val).replace("$", "").replace(",", "").strip()
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _pulse_signal_seasonal(ch, offers: list) -> list:
     """Check for upcoming seasonal opportunities in the pre-loaded offer inventory.
 
@@ -781,7 +798,7 @@ def _pulse_signal_seasonal(ch, offers: list) -> list:
                 matching.append(o)
 
         if matching:
-            matching.sort(key=lambda x: float(x.get("payout") or 0), reverse=True)
+            matching.sort(key=lambda x: _parse_payout(x.get("payout")), reverse=True)
             results.append({
                 "event_name":  event_name,
                 "days_until":  days_until,
