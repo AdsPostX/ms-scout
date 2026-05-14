@@ -1374,37 +1374,25 @@ def _format_pulse_blocks(
             ),
         }]})
 
-    # ── Seasonal radar ────────────────────────────────────────────────────
-    seasonal = signals.get("seasonal", [])
-    if seasonal:
+    new_offers = signals.get("new_offers", [])
+    if new_offers:
         blocks.append({"type": "divider"})
-        for evt in seasonal[:1]:  # fatigue budget: max 1 event per pulse
-            days = evt["days_until"]
-            cnt  = evt["offer_count"]
-            day_str = f"{days} day{'s' if days != 1 else ''}"
-            header_ctx = (
-                f"{cnt} PRIME/STRONG offer{'s' if cnt != 1 else ''} available "
-                f"{day_str} away"
-            )
-            blocks.extend(_build_signal_header(
-                ":calendar:",
-                f"Seasonal Radar — {evt['event_name']}",
-                header_ctx,
-            ))
-            for o in evt["top_offers"][:3]:  # cap at 3 — upstream already limits, defensive slice
-                name = o.get("advertiser") or o.get("offer_name") or "?"
-                payout_val = o.get("payout", "?")
-                payout_type = (o.get("payout_type") or "").upper()
-                network = o.get("network") or "?"
-                left_body = f"${payout_val} {payout_type}"
-                right_body = f"*Network*\n{network}"
-                blocks.extend(_build_item_card(name, left_body, right_body))
+        blocks.extend(_build_signal_header(":new:", "New PRIME Offers", "Added in the last 48h"))
+        for o in new_offers[:5]:
+            name = o.get("offer_name") or o.get("advertiser") or "?"
+            payout_val = o.get("payout", "?")
+            payout_type = (o.get("payout_type") or "").upper()
+            network = o.get("network") or "?"
+            fit_tier = o.get("fit_tier") or "?"
+            left_body = f"${payout_val} {payout_type}"
+            right_body = f"*Network*\n{network}"
+            blocks.extend(_build_item_card(name, left_body, right_body, context=fit_tier))
 
     # ── Change I: zero-signal all-clear ──────────────────────────────────
     _has_signals = bool(
         ghost_camps or fill_rate or regular_downs or urgent_caps or ups
         or (opportunities and today_d.weekday() == 0)
-        or seasonal
+        or new_offers
     )
     if not _has_signals:
         blocks.append({"type": "context", "elements": [
