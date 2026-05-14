@@ -1391,7 +1391,7 @@ def _format_pulse_blocks(
                 f"Seasonal Radar — {evt['event_name']}",
                 header_ctx,
             ))
-            for o in evt["top_offers"]:
+            for o in evt["top_offers"][:3]:  # cap at 3 — upstream already limits, defensive slice
                 name = o.get("advertiser") or o.get("offer_name") or "?"
                 payout_val = o.get("payout", "?")
                 payout_type = (o.get("payout_type") or "").upper()
