@@ -1119,7 +1119,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
     context_fn = None        # callable(offer) -> str
 
     if signals.get("new_offers"):
-        active_offers = signals["new_offers"][:3]
+        active_offers = signals["new_offers"]
         signal_label  = "new in last 48h"
 
         def context_fn(o):  # noqa: E301
@@ -1131,7 +1131,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
     elif signals.get("seasonal"):
         evt           = signals["seasonal"][0]
         day_str       = f"{evt['days_until']}d"
-        active_offers = evt["top_offers"][:3]
+        active_offers = evt["top_offers"]
         signal_label  = f"{evt['event_name']} in {day_str}"
 
         def context_fn(o):  # noqa: E301
@@ -1165,10 +1165,11 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             "elements": [{"type": "mrkdwn", "text": f"_{count} offer{plural} · {signal_label}_"}],
         })
 
-        # ── Per-offer cards ───────────────────────────────────────────────────────
-        for o in net_offers:
+        # ── Per-offer cards (max 3 per network section) ──────────────────────────
+        for o in net_offers[:3]:
             offer_id    = o.get("offer_id") or o.get("offer_name", "")
-            advertiser  = o.get("advertiser") or o.get("offer_name") or "Unknown"
+            offer_name  = o.get("offer_name", "")
+            advertiser  = o.get("advertiser") or offer_name or "Unknown"
             # Use mini_description (purpose-built 120-char teaser) with whitespace-collapsed fallback
             summary     = o.get("mini_description") or " ".join((o.get("description") or "").split())[:120]
             payout_num  = _parse_payout(o.get("payout"))
@@ -1184,7 +1185,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
 
             action_value = json.dumps({
                 "offer_id":    offer_id,
-                "offer_name":  advertiser,
+                "offer_name":  offer_name,
                 "network":     network,
                 "payout":      payout_num,
                 "payout_type": payout_type,
