@@ -870,13 +870,16 @@ def _handle_draft_add(action: dict, payload: dict, web: WebClient):
         "slack_user_id": user_id,
     })
     if user_id:
-        web.chat_postMessage(
-            channel=user_id,
-            text=(
-                f":white_check_mark: Added *{offer.get('offer_name', 'offer')}* to draft — "
-                f"once the queue page launches, it'll appear there for final review before going live."
-            ),
-        )
+        try:
+            web.chat_postMessage(
+                channel=user_id,
+                text=(
+                    f":white_check_mark: Added *{offer.get('offer_name', 'offer')}* to draft — "
+                    f"once the queue page launches, it'll appear there for final review before going live."
+                ),
+            )
+        except Exception as e:
+            log.warning(f"[sourcing] draft_add DM failed for {user_id}: {e}")
     log.info(f"[sourcing] draft_add: {offer.get('offer_name')} by {user_id}")
 
 
@@ -1069,10 +1072,10 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         _handle_reject(action, payload, web)
         return
     # ── Sourcing intel "Add to Draft" / "Skip" buttons ───────────────────────
-    if action_id == "scout_draft_add":
+    elif action_id == "scout_draft_add":
         _handle_draft_add(action, payload, web)
         return
-    if action_id == "scout_draft_skip":
+    elif action_id == "scout_draft_skip":
         _handle_draft_skip(action, payload, web)
         return
     # ── Brief "Add to Queue" button (from @Scout build a brief for X) ─────────

@@ -713,7 +713,10 @@ def build_digest_blocks(
             geo          = geo_raw if geo_raw.lower() not in _NON_GEO_VALUES else ""
             tracking_url = offer.get("tracking_url", "")
 
-            payout_num = _parse_payout(payout_data.get("payout") or offer.get("_payout_num"))
+            payout_num = (
+                _parse_payout(payout_data.get("payout"))
+                or _parse_payout(offer.get("_payout_num"))
+            )
             payout_str = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
 
             # One-line offer summary — first sentence of description, max 80 chars.
@@ -1144,10 +1147,11 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
     for o in active_offers:
         offer_id    = o.get("offer_id") or o.get("offer_name", "")
         advertiser  = o.get("advertiser") or o.get("offer_name") or "Unknown"
-        summary     = (o.get("description") or "")[:80]
+        # Collapse newlines/whitespace before wrapping in Slack italic (_..._)
+        summary     = " ".join((o.get("description") or "").split())[:80]
         payout_num  = _parse_payout(o.get("payout"))
         payout_type = (o.get("payout_type") or "").upper()
-        payout_str  = f"${payout_num:.2f} {payout_type}" if payout_num else "Rate TBD"
+        payout_str  = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
         geo         = o.get("geo") or o.get("country") or ""
         network     = o.get("network", "")
         img_url     = o.get("image_url") or o.get("creative_url") or ""

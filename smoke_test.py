@@ -1825,72 +1825,88 @@ def test_sourcing_signals_in_scout_digest_not_scout_bot():
 def test_first_seen_backfill_uses_last_verified_from_snapshot():
     """Offer without first_seen but with last_verified in snapshot → first_seen = last_verified.
 
-    Tests the cache-loading + fallback logic added in PR I.
+    Calls clean_offers() against a real (temp) snapshot file so the actual cache-loading
+    + fallback codepath is exercised.
     Regression guard: before this fix, all pre-PR87 offers got first_seen = date_scraped (today)
     and appeared as 'new' simultaneously on the first post-PR87 scrape.
     """
+    import offer_scraper, json, pathlib
+
     old_verified = "2026-05-10T08:00:00+00:00"  # snapshot's last_verified — a few days ago
-    today        = "2026-05-15"                   # simulated date_scraped (today)
 
-    # Simulate what the snapshot-loading block in clean_offers() now builds
-    snapshot_offers = [
-        {
-            "network": "CJ",
-            "offer_id": "test-backfill-001",
-            "last_verified": old_verified,
-            # No first_seen — simulates a pre-PR87 offer in the snapshot
-        }
-    ]
-    first_seen_cache:    dict = {}
-    last_verified_cache: dict = {}
-    for _o in snapshot_offers:
-        _k = (_o.get("network", ""), _o.get("offer_id", "") or _o.get("title", ""))
-        if _o.get("first_seen"):
-            first_seen_cache[_k] = _o["first_seen"]
-        if _o.get("last_verified"):
-            last_verified_cache[_k] = _o["last_verified"]
+    snapshot_path = pathlib.Path(offer_scraper.__file__).parent / "data" / "offers_latest.json"
+    orig_data = snapshot_path.read_text() if snapshot_path.exists() else None
 
-    # Simulate the first_seen assignment from the loop
-    offer_key = ("CJ", "test-backfill-001")
-    resolved = (
-        first_seen_cache.get(offer_key)
-        or last_verified_cache.get(offer_key)
-        or today
-    )
-    if resolved != old_verified:
-        return False, f"Expected backfill = last_verified ({old_verified}); got {resolved} (today={today})"
-    return True, f"first_seen backfill = last_verified from snapshot, not today's date ✓"
+    snapshot_fixture = json.dumps([{
+        "network": "CJ", "offer_id": "test-backfill-001",
+        "last_verified": old_verified,
+        # No first_seen — simulates a pre-PR87 offer
+    }])
+    raw_offer = {
+        "network": "CJ", "offer_id": "test-backfill-001",
+        "offer_name": "Test Backfill Offer", "advertiser": "TestCo",
+        "payout": "5.00", "payout_type": "CPA", "status": "Active",
+        "date_scraped": "2026-05-15",
+    }
+
+    try:
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text(snapshot_fixture)
+        cleaned = offer_scraper.clean_offers([raw_offer])
+    finally:
+        if orig_data is not None:
+            snapshot_path.write_text(orig_data)
+        elif snapshot_path.exists():
+            snapshot_path.unlink()
+
+    if not cleaned:
+        return False, "clean_offers returned empty list — offer may have been filtered out"
+    got = cleaned[0].get("first_seen", "")
+    if got != old_verified:
+        return False, f"Expected first_seen={old_verified!r} (from last_verified backfill); got {got!r}"
+    return True, f"clean_offers backfills first_seen from snapshot last_verified ({old_verified}) ✓"
 
 
 @test("first_seen_immutable_when_already_set")
 def test_first_seen_immutable_when_already_set():
-    """Offer with existing first_seen in snapshot → first_seen unchanged across rescrapes."""
+    """Offer with existing first_seen in snapshot → first_seen unchanged across rescrapes.
+
+    Calls clean_offers() against a real (temp) snapshot file.
+    """
+    import offer_scraper, json, pathlib
+
     original_first_seen = "2026-04-01T12:00:00+00:00"
-    existing_offer = {
-        "network": "MaxBounty",
-        "offer_id": "mb-immutable-001",
-        "offer_name": "ImmutableTest",
-        "payout": "5.00",
-        "payout_type": "CPA",
-        "status": "Active",
+
+    snapshot_path = pathlib.Path(offer_scraper.__file__).parent / "data" / "offers_latest.json"
+    orig_data = snapshot_path.read_text() if snapshot_path.exists() else None
+
+    snapshot_fixture = json.dumps([{
+        "network": "MaxBounty", "offer_id": "mb-immutable-001",
         "first_seen":    original_first_seen,
         "last_verified": "2026-05-14T08:00:00+00:00",
+    }])
+    raw_offer = {
+        "network": "MaxBounty", "offer_id": "mb-immutable-001",
+        "offer_name": "ImmutableTest", "advertiser": "ImmutableCo",
+        "payout": "5.00", "payout_type": "CPA", "status": "Active",
+        "date_scraped": "2026-05-15",
     }
 
-    # Simulate the cache logic: existing first_seen must survive into the next scrape
-    first_seen_cache:    dict = {}
-    last_verified_cache: dict = {}
-    for _o in [existing_offer]:
-        _k = (_o.get("network", ""), _o.get("offer_id", "") or _o.get("title", ""))
-        if _o.get("first_seen"):
-            first_seen_cache[_k] = _o["first_seen"]
-        if _o.get("last_verified"):
-            last_verified_cache[_k] = _o["last_verified"]
+    try:
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text(snapshot_fixture)
+        cleaned = offer_scraper.clean_offers([raw_offer])
+    finally:
+        if orig_data is not None:
+            snapshot_path.write_text(orig_data)
+        elif snapshot_path.exists():
+            snapshot_path.unlink()
 
-    offer_key = ("MaxBounty", "mb-immutable-001")
-    resolved = first_seen_cache.get(offer_key) or last_verified_cache.get(offer_key) or "2026-05-15"
-    if resolved != original_first_seen:
-        return False, f"first_seen must be immutable; expected {original_first_seen}, got {resolved}"
+    if not cleaned:
+        return False, "clean_offers returned empty list"
+    got = cleaned[0].get("first_seen", "")
+    if got != original_first_seen:
+        return False, f"first_seen must be immutable; expected {original_first_seen!r}, got {got!r}"
     return True, f"first_seen unchanged across rescrapes ({original_first_seen}) ✓"
 
 
@@ -1978,9 +1994,9 @@ def test_sourcing_cards_max_3_offers():
     signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
     blocks  = scout_digest._build_sourcing_intel_blocks(signals)
     action_blocks = [b for b in blocks if b.get("type") == "actions"]
-    if len(action_blocks) > 3:
-        return False, f"Expected ≤3 offer cards; got {len(action_blocks)} action blocks"
-    return True, f"Max 3 offer cards enforced ({len(action_blocks)} shown) ✓"
+    if len(action_blocks) != 3:
+        return False, f"Expected exactly 3 offer cards; got {len(action_blocks)} action blocks"
+    return True, f"Max 3 offer cards enforced (exactly 3 shown) ✓"
 
 
 if __name__ == "__main__":
