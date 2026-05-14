@@ -82,6 +82,52 @@ _FEEDBACK_PS_LINE = (
     "First time? That's all you have to do._"
 )
 
+# ── Part 9 — Smart 👎 handler: clarification detection ───────────────────────
+_CLARIFICATION_PHRASES: tuple = (
+    "can you confirm",
+    "are you asking",
+    "i want to confirm",
+    "do you mean",
+    "could you clarify",
+    "which do you mean",
+    "which publisher",
+    "which one do you mean",
+)
+
+
+def _is_clarification_response(text: str) -> bool:
+    """True only when Scout's response is primarily a clarifying question.
+
+    Requires all three conditions to avoid false positives:
+      1. Contains a clarification phrase
+      2. Ends with a question mark
+      3. Is short (<300 chars) — excludes long factual answers with trailing
+         confirmation questions like "Is this the breakdown you needed?"
+    """
+    lower = text.lower().strip()
+    has_phrase = any(phrase in lower for phrase in _CLARIFICATION_PHRASES)
+    if not has_phrase:
+        return False
+    return lower.rstrip().endswith("?") and len(text) < 300
+
+
+def _already_retried(msg_ts: str) -> bool:
+    """True if this message already triggered a down_retry — prevents infinite retry loop."""
+    if not _FEEDBACK_LOG.exists():
+        return False
+    try:
+        with _FEEDBACK_LOG.open() as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                    if row.get("message_ts") == msg_ts and row.get("rating") == "down_retry":
+                        return True
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return False
+
 
 def _load_ps_seen() -> None:
     """Populate the in-memory PS-seen set from the feedback log on first use."""
@@ -95,7 +141,7 @@ def _load_ps_seen() -> None:
                 except json.JSONDecodeError:
                     continue
                 u = row.get("user")
-                if u and row.get("rating") in ("ps_shown", "up", "down"):
+                if u and row.get("rating") in ("ps_shown", "up", "down", "down_retry"):
                     _FEEDBACK_PS_SEEN.add(u)
     except Exception as e:
         log.warning(f"[feedback] could not preload PS-seen set: {e}")
@@ -1533,16 +1579,55 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             # First reaction also closes the PS nudge for this user
             _FEEDBACK_PS_SEEN.add(rater_id)
             if rating == "down":
-                try:
-                    web.chat_postMessage(
-                        channel=ch_id,
-                        thread_ts=parent_ts or msg_ts,
-                        text=("Got it — Sidd will review. In the meantime: "
-                              "`@Scout remember <correct fact>` if you can phrase the fix."),
-                        unfurl_links=False,
-                    )
-                except Exception as e:
-                    log.warning(f"[feedback] threaded down-vote reply failed: {e}")
+                # Part 9: smart 👎 — clarification responses get a direct-answer retry;
+                # factual errors get "Sidd will review" so a human closes the loop.
+                if (not _already_retried(msg_ts)
+                        and _is_clarification_response(answer_text)
+                        and question_text):
+                    try:
+                        original_user_id = event.get("item_user", rater_id)
+                        retry_msg = (
+                            question_text.strip()
+                            + "\n\n[Retry: answer directly using your best interpretation. "
+                              "Do not ask for clarification.]"
+                        )
+                        retry_result = ask(retry_msg, user_id=original_user_id)
+                        retry_text = (
+                            retry_result.text
+                            if hasattr(retry_result, "text")
+                            else str(retry_result)
+                        )
+                        reply = web.chat_postMessage(
+                            channel=ch_id,
+                            thread_ts=parent_ts or msg_ts,
+                            text=retry_text,
+                            unfurl_links=False,
+                        )
+                        # Seed 👍/👎 on the retry reply so the user can rate it too
+                        retry_ts = reply.get("ts", "")
+                        _seed_feedback_reactions(web, ch_id, retry_ts)
+                        _feedback_log_row({
+                            "user":             rater_id,
+                            "message_ts":       msg_ts,
+                            "retry_message_ts": retry_ts,
+                            "channel":          ch_id,
+                            "question":         question_text,
+                            "answer":           answer_text,
+                            "rating":           "down_retry",
+                        })
+                    except Exception as e:
+                        log.warning(f"[feedback] clarification retry failed: {e}")
+                else:
+                    try:
+                        web.chat_postMessage(
+                            channel=ch_id,
+                            thread_ts=parent_ts or msg_ts,
+                            text=("Got it — Sidd will review. In the meantime: "
+                                  "`@Scout remember <correct fact>` if you can phrase the fix."),
+                            unfurl_links=False,
+                        )
+                    except Exception as e:
+                        log.warning(f"[feedback] threaded down-vote reply failed: {e}")
         except Exception as e:
             log.warning(f"[feedback] reaction handler failed: {e}")
         return
