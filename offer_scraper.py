@@ -988,16 +988,21 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
     if ms_index is None:
         ms_index = {"by_impact_id": {}, "by_name": {}}
 
-    # Build first_seen cache from existing snapshot — preserved across scrape runs.
+    # Build first_seen / last_verified caches from existing snapshot.
     # first_seen is set once on an offer's first appearance and never updated.
+    # last_verified is used as a backfill for pre-PR87 offers that have no first_seen —
+    # prevents all offers appearing "new" simultaneously on the first post-PR87 scrape.
     _snapshot = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
-    _first_seen_cache: dict = {}
+    _first_seen_cache:    dict = {}
+    _last_verified_cache: dict = {}
     if _snapshot.exists():
         try:
             for _o in json.loads(_snapshot.read_text()):
                 _key = (_o.get("network", ""), _o.get("offer_id", "") or _o.get("title", ""))
                 if _o.get("first_seen"):
                     _first_seen_cache[_key] = _o["first_seen"]
+                if _o.get("last_verified"):
+                    _last_verified_cache[_key] = _o["last_verified"]
         except (json.JSONDecodeError, OSError) as e:
             log.warning(f"first_seen cache load failed: {e} ({_snapshot})")
 
@@ -1029,11 +1034,14 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
         normalized["fit_tier"]      = _compute_fit_tier(normalized)
         _now_utc = datetime.now(timezone.utc)
         normalized["last_verified"] = normalized.get("date_scraped") or _now_utc.date().isoformat()
-        # first_seen: set once on first appearance — pull from cache if this offer already existed
+        # first_seen: set once on first appearance — pull from cache if this offer already existed.
+        # Fallback order: existing first_seen → snapshot's last_verified (1-3 days old, avoids
+        # false-new flood) → date_scraped (today, for genuinely new offers) → now.
         _offer_key = (normalized.get("network", ""), normalized.get("offer_id", "") or normalized.get("title", ""))
         _date_scraped = normalized.get("date_scraped", "")
         normalized["first_seen"] = (
             _first_seen_cache.get(_offer_key)
+            or _last_verified_cache.get(_offer_key)
             or _date_scraped
             or _now_utc.isoformat()
         )
