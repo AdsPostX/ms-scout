@@ -14,7 +14,6 @@ import random
 import re
 import threading
 import time
-from datetime import date
 
 import requests
 
@@ -675,62 +674,9 @@ def _pulse_signal_enabled(key: str) -> bool:
     return key not in disabled
 
 
-# ── Proactive pulse: seasonal radar ──────────────────────────────────────────
-
-def _nth_weekday(year: int, month: int, n: int, weekday: int) -> date:
-    """Return the nth occurrence of weekday (Mon=0 … Sun=6) in month/year.
-
-    Examples:
-        _nth_weekday(2026, 5, 2, 6)  → 2nd Sunday in May 2026 → Mother's Day
-        _nth_weekday(2026, 6, 3, 6)  → 3rd Sunday in June 2026 → Father's Day
-        _nth_weekday(2026, 11, 4, 3) → 4th Thursday in November 2026 → Thanksgiving
-    """
-    from datetime import date, timedelta
-    first = date(year, month, 1)
-    delta = (weekday - first.weekday()) % 7
-    return first + timedelta(days=delta) + timedelta(weeks=n - 1)
-
-
-# Each entry: (name, verticals, window_days, date_fn)
-# date_fn(year) → date.  Fixed holidays use a lambda; floating ones use _nth_weekday.
-# Weekday constants: Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
-_SEASONAL_CALENDAR = [
-    # Fixed-date holidays
-    ("Valentine's Day",   ["jewelry", "flowers", "gifts", "dining"],           21,
-        lambda y: __import__("datetime").date(y, 2, 14)),
-    ("St. Patrick's Day", ["dining", "entertainment"],                          7,
-        lambda y: __import__("datetime").date(y, 3, 17)),
-    ("Tax Day",           ["finance", "tax", "software"],                      21,
-        lambda y: __import__("datetime").date(y, 4, 15)),
-    ("4th of July",       ["travel", "retail", "sports"],                      10,
-        lambda y: __import__("datetime").date(y, 7, 4)),
-    ("Halloween",         ["entertainment", "retail"],                         14,
-        lambda y: __import__("datetime").date(y, 10, 31)),
-    ("Black Friday",      ["retail", "electronics", "shopping"],               21,
-        lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=1)),
-    ("Cyber Monday",      ["retail", "electronics", "software"],               21,
-        lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=4)),
-    ("Christmas/Holiday", ["gifts", "travel", "retail", "experiences"],        30,
-        lambda y: __import__("datetime").date(y, 12, 25)),
-    ("New Year's",        ["travel", "fitness", "health"],                     14,
-        lambda y: __import__("datetime").date(y, 12, 31)),
-    # Floating holidays — computed correctly for any year
-    ("MLK Day Weekend",   ["travel", "leisure"],                               14,
-        lambda y: _nth_weekday(y, 1, 3, 0)),    # 3rd Monday in January
-    ("Mother's Day",      ["flowers", "gifts", "jewelry", "experiences"],      21,
-        lambda y: _nth_weekday(y, 5, 2, 6)),    # 2nd Sunday in May
-    ("Father's Day",      ["golf", "sports", "tools", "experiences", "gifts"], 21,
-        lambda y: _nth_weekday(y, 6, 3, 6)),    # 3rd Sunday in June
-    ("Labor Day Weekend", ["travel", "leisure", "retail"],                     14,
-        lambda y: _nth_weekday(y, 9, 1, 0)),    # 1st Monday in September
-    ("Thanksgiving",      ["travel", "retail", "food"],                        14,
-        lambda y: _nth_weekday(y, 11, 4, 3)),   # 4th Thursday in November
-    ("Back to School",    ["education", "software", "retail", "electronics"],  30,
-        lambda y: __import__("datetime").date(y, 8, 25)),  # Fixed anchor ~Aug 25
-]
-
 # Proactive signal priority (fatigue budget: max 1 per pulse)
-_PROACTIVE_SIGNAL_PRIORITY = ["new_offers", "seasonal", "payout_upgrades"]
+# Seasonal events surface via scout_digest._sourcing_signal_seasonal, not the daily pulse.
+_PROACTIVE_SIGNAL_PRIORITY = ["new_offers", "payout_upgrades"]
 
 
 def _parse_payout(val) -> float:
@@ -748,67 +694,6 @@ def _parse_payout(val) -> float:
         return float(cleaned)
     except (ValueError, TypeError):
         return 0.0
-
-
-def _pulse_signal_seasonal(ch, offers: list) -> list:
-    """Check for upcoming seasonal opportunities in the pre-loaded offer inventory.
-
-    Returns a list of dicts (one per upcoming event that has PRIME/STRONG matching
-    offers) sorted by days_until ascending.  Returns [] if the kill switch is set.
-
-    ch is accepted but unused — the function is pure local (no ClickHouse).
-    """
-    if not _pulse_signal_enabled("seasonal"):
-        return []
-
-    from datetime import date as _date
-
-    today = _date.today()
-    results = []
-
-    for event_name, verticals, window_days, date_fn in _SEASONAL_CALENDAR:
-        try:
-            event_date = date_fn(today.year)
-        except Exception as e:
-            log.warning(f"seasonal date_fn failed for {event_name} {today.year}: {e}")
-            continue
-
-        days_until = (event_date - today).days
-        if days_until < 0:
-            # Event passed this year — check next year (e.g. Dec pulse sees Jan events)
-            try:
-                event_date = date_fn(today.year + 1)
-                days_until = (event_date - today).days
-            except Exception as e:
-                log.warning(f"seasonal date_fn failed for {event_name} {today.year + 1}: {e}")
-                continue
-
-        if not (0 <= days_until <= window_days):
-            continue
-
-        # Scan pre-loaded offers for matching verticals (PRIME/STRONG only)
-        matching = []
-        for o in offers:
-            tier = o.get("fit_tier", "STANDARD")
-            if tier not in ("PRIME", "STRONG"):
-                continue
-            cat = (o.get("category") or "").lower()
-            name = (o.get("offer_name") or o.get("advertiser") or "").lower()
-            if any(v in cat or v in name for v in verticals):
-                matching.append(o)
-
-        if matching:
-            matching.sort(key=lambda x: _parse_payout(x.get("payout")), reverse=True)
-            results.append({
-                "event_name":  event_name,
-                "days_until":  days_until,
-                "offer_count": len(matching),
-                "top_offers":  matching[:3],
-                "verticals":   verticals,
-            })
-
-    results.sort(key=lambda x: x["days_until"])
-    return results
 
 
 # ── Pulse signal orchestrator ─────────────────────────────────────────────────
@@ -846,12 +731,10 @@ def _run_pulse_signals() -> dict:
         ("ghost_campaigns", _pulse_signal_ghost),
         ("fill_rate",       _pulse_signal_fill_rate),
         ("opportunities",   _pulse_signal_opportunities),
-        # Local signals — accept ch (unused) to match _run_one signature
-        ("seasonal",        lambda ch: _pulse_signal_seasonal(ch, offers)),
     ]
 
     # Local signals run from offer snapshot — no ClickHouse connection needed
-    _LOCAL_SIGNALS = {"seasonal", "new_offers", "payout_upgrades"}
+    _LOCAL_SIGNALS = {"new_offers", "payout_upgrades"}
 
     def _run_one(key, fn):
         ch = None if key in _LOCAL_SIGNALS else _get_ch_client()
