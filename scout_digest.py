@@ -834,7 +834,7 @@ def _parse_payout(val) -> float:
     if not val:
         return 0.0
     try:
-        return float(str(val).lstrip("$").strip())
+        return float(str(val).strip().lstrip("$").strip())
     except (ValueError, TypeError):
         return 0.0
 
