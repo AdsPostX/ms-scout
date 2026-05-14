@@ -450,8 +450,8 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     if not force and offer_id in rejected:
         payout_data = payout_cache.get(offer_id, {})
         try:
-            current = float(payout_data.get("payout") or 0)
-            old     = float(rejected[offer_id].get("payout_at_action") or 0)
+            current = _parse_payout(payout_data.get("payout"))
+            old     = _parse_payout(rejected[offer_id].get("payout_at_action"))
         except (ValueError, TypeError):
             return None
         if old <= 0 or (current - old) / old < 0.15:
@@ -461,10 +461,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     # over scraper-normalised _payout_num where available.
     # MaxBounty/FlexOffers won't be in payout_cache — fall back to offer fields directly.
     payout_data = payout_cache.get(offer_id, {})
-    try:
-        cache_payout = float(payout_data.get("payout") or 0)
-    except (ValueError, TypeError):
-        cache_payout = 0.0
+    cache_payout = _parse_payout(payout_data.get("payout"))
 
     enriched = dict(offer)
     if cache_payout > 0:
@@ -527,17 +524,11 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
     category    = (offer.get("category") or "").strip()
     geo         = offer.get("geo", "")
 
-    try:
-        cache_payout = float(payout_data.get("payout") or 0)
-    except (ValueError, TypeError):
-        cache_payout = 0.0
+    cache_payout = _parse_payout(payout_data.get("payout"))
 
     # Fall back to offer's own _payout_num for networks not in payout_cache (MaxBounty, FlexOffers)
     if cache_payout == 0:
-        try:
-            cache_payout = float(offer.get("_payout_num") or 0)
-        except (ValueError, TypeError):
-            cache_payout = 0.0
+        cache_payout = _parse_payout(offer.get("_payout_num"))
 
     # Normalize payout type from cache or offer fields
     raw_ptype   = payout_data.get("payout_type", "") or offer.get("_payout_type_norm", "")
@@ -722,11 +713,8 @@ def build_digest_blocks(
             geo          = geo_raw if geo_raw.lower() not in _NON_GEO_VALUES else ""
             tracking_url = offer.get("tracking_url", "")
 
-            try:
-                payout_num = float(payout_data.get("payout") or offer.get("_payout_num") or 0)
-                payout_str = _format_payout(payout_num, payout_type)
-            except (ValueError, TypeError):
-                payout_num, payout_str = 0.0, "Rate TBD"
+            payout_num = _parse_payout(payout_data.get("payout") or offer.get("_payout_num"))
+            payout_str = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
 
             # One-line offer summary — first sentence of description, max 80 chars.
             # Strip newlines: a \n inside the italic field breaks the closing underscore
@@ -841,6 +829,16 @@ def _sourcing_signal_enabled(key: str) -> bool:
     return key not in disabled
 
 
+def _parse_payout(val) -> float:
+    """Parse a payout value that may carry a '$' prefix (e.g. '$7.20' → 7.20)."""
+    if not val:
+        return 0.0
+    try:
+        return float(str(val).strip().lstrip("$").strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _nth_weekday(year: int, month: int, n: int, weekday: int) -> date:
     """
     Return the nth occurrence of weekday (0=Mon … 6=Sun) in month/year.
@@ -918,7 +916,7 @@ def _sourcing_signal_seasonal(offers: list) -> list:
                 matching.append(o)
 
         if matching:
-            matching.sort(key=lambda x: float(x.get("payout") or 0), reverse=True)
+            matching.sort(key=lambda x: _parse_payout(x.get("payout")), reverse=True)
             results.append({
                 "event_name":  event_name,
                 "days_until":  days_until,
@@ -1012,7 +1010,7 @@ def _sourcing_signal_payout_upgrades(offers: list) -> list:
             and o.get("fit_tier") in ("PRIME", "STRONG")
         ]
         for m in matches:
-            inv_gross   = float(m.get("payout") or 0)
+            inv_gross   = _parse_payout(m.get("payout"))
             inv_net_est = inv_gross * _GROSS_TO_NET_FACTOR
             delta       = inv_net_est - (avg_net_payout or 0)
             payout_type = (m.get("payout_type") or "").upper() or "CPA"
@@ -1059,7 +1057,7 @@ def _sourcing_signal_new_offers(offers: list) -> list:
         if ts >= cutoff:
             new_offers.append(o)
 
-    new_offers.sort(key=lambda x: float(x.get("payout") or 0), reverse=True)
+    new_offers.sort(key=lambda x: _parse_payout(x.get("payout")), reverse=True)
     return new_offers[:5]
 
 
