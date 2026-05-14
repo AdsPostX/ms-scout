@@ -933,6 +933,7 @@ absolute — only the confidence tier flexes here.
 
 17. FREE-FORM DATA QUERY — any analytical question requiring custom SQL not covered by other intents
     Signals: "show me", "give me a breakdown", "list all", "how many", "run-rate", "daily average", "which campaigns end", "what's the cap for", "payout for X on Y", "breakdown by placement", "full funnel metrics", "today's revenue", "performance by [dimension]"
+    LITERAL METRIC RULE: if the question states a metric in plain English ('per click', 'per mille', 'per lead', 'per install', 'cost per acquisition', 'fill rate', 'click-through rate', 'CTR'), use that metric directly in SQL. Do NOT ask for disambiguation. The words in the question are the spec.
     → Write SQL using the DATA DICTIONARY. run_sql_query(sql=..., description=...).
     Common patterns from real usage:
     - "breakdown [publisher] by placement over last N days" → GROUP BY placement, full funnel (sessions → impressions → clicks → conversions)
@@ -1184,6 +1185,7 @@ revenue_today — "how is revenue today", "how are we doing today", "how we look
 
 sql_query — any analytical question requiring custom SQL not covered by other intents
    Signals: "show me", "give me a breakdown", "list all", "how many", "run-rate", "daily average", "which campaigns end", "what's the cap for", "payout for X on Y", "breakdown by placement", "full funnel metrics", "performance by [dimension]"
+   LITERAL METRIC RULE: if the question states a metric in plain English ('per click', 'per mille', 'per lead', 'per install', 'cost per acquisition', 'fill rate', 'click-through rate', 'CTR'), use that metric directly in SQL. Do NOT ask for disambiguation. The words in the question are the spec.
    → Write SQL using the DATA DICTIONARY. run_sql_query(sql=..., description=...).
    Common patterns from real usage:
    - "breakdown [publisher] by placement over last N days" → GROUP BY placement, full funnel (sessions → impressions → clicks → conversions)
