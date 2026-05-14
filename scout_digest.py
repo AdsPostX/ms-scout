@@ -21,7 +21,7 @@ import os
 import pathlib
 import re
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -835,13 +835,34 @@ _QUALIFIER_WORDS = frozenset({
 _MATCH_STOP_WORDS = frozenset({"the", "and", "inc", "llc", "ltd", "corp", "co", "via"})
 
 
+def _normalize_payout_type(val: str | None) -> str:
+    """Normalize raw inventory payout_type strings to canonical ClickHouse values.
+
+    Maps varied raw strings to one of: "CPA", "CPL", "CPS". Returns "" for None/empty.
+    """
+    if not val:
+        return ""
+    v = val.strip().upper()
+    # CPL variants
+    if v in ("CPL", "PER LEAD", "$ PER LEAD"):
+        return "CPL"
+    # CPS variants
+    if v in ("CPS", "% OF SALE", "REVENUE SHARE", "REV SHARE"):
+        return "CPS"
+    # CPA variants (catch-all for cost-per-action)
+    if v in ("CPA", "PER SALE", "$ PER SALE", "FLAT", "FIXED"):
+        return "CPA"
+    # Unknown — return as-is uppercased so the caller can still compare
+    return v
+
+
 def _sourcing_signal_enabled(key: str) -> bool:
     """Return False when key is in SCOUT_DISABLED_SOURCING_SIGNALS env var."""
     disabled = {s.strip() for s in os.getenv("SCOUT_DISABLED_SOURCING_SIGNALS", "").split(",") if s.strip()}
     return key not in disabled
 
 
-def _nth_weekday(year: int, month: int, n: int, weekday: int) -> "date":
+def _nth_weekday(year: int, month: int, n: int, weekday: int) -> date:
     """
     Return the nth occurrence of weekday (0=Mon … 6=Sun) in month/year.
     n=1 → first occurrence, n=2 → second, etc.
@@ -851,13 +872,11 @@ def _nth_weekday(year: int, month: int, n: int, weekday: int) -> "date":
         _nth_weekday(2026, 6, 3, 6)  → 3rd Sunday in June 2026 → Father's Day (June 21)
         _nth_weekday(2026, 11, 4, 3) → 4th Thursday in Nov 2026 → Thanksgiving (Nov 26)
     """
-    from datetime import date as _date
-    first = _date(year, month, 1)
+    first = date(year, month, 1)
     # days until first occurrence of weekday
     delta = (weekday - first.weekday()) % 7
-    first_occurrence = _date(year, month, first.day + delta)
+    first_occurrence = date(year, month, first.day + delta)
     # advance by (n-1) weeks
-    from datetime import timedelta
     return first_occurrence + timedelta(weeks=n - 1)
 
 
@@ -888,9 +907,7 @@ def _sourcing_signal_seasonal(offers: list) -> list:
     if not _sourcing_signal_enabled("seasonal"):
         return []
 
-    from datetime import date as _date, timedelta
-
-    today = _date.today()
+    today = date.today()
     results = []
 
     for event_name, verticals, window_days, date_fn in _SEASONAL_CALENDAR:
@@ -1007,7 +1024,7 @@ def _sourcing_signal_payout_upgrades(offers: list) -> list:
         matches = [
             o for o in offers
             if _fuzzy_name_match(adv_name, o.get("advertiser") or o.get("offer_name") or "")
-            and (o.get("payout_type") or "").upper() == payout_type.upper()
+            and payout_type.upper() == _normalize_payout_type(o.get("payout_type"))
             and o.get("fit_tier") in ("PRIME", "STRONG")
         ]
         for m in matches:
@@ -1041,9 +1058,7 @@ def _sourcing_signal_new_offers(offers: list) -> list:
     if not _sourcing_signal_enabled("new_offers"):
         return []
 
-    from datetime import datetime as _dt, timezone
-
-    cutoff = _dt.now(timezone.utc).timestamp() - (48 * 3600)
+    cutoff = datetime.now(timezone.utc).timestamp() - (48 * 3600)
 
     new_offers = []
     for o in offers:
@@ -1053,7 +1068,7 @@ def _sourcing_signal_new_offers(offers: list) -> list:
         if not fs:
             continue  # predates first_seen field — skip
         try:
-            ts = _dt.fromisoformat(fs.replace("Z", "+00:00")).timestamp()
+            ts = datetime.fromisoformat(fs.replace("Z", "+00:00")).timestamp()
         except Exception:
             continue
         if ts >= cutoff:
@@ -1065,20 +1080,26 @@ def _sourcing_signal_new_offers(offers: list) -> list:
 
 def _run_sourcing_signals(offers: list) -> dict:
     """
-    Run all 3 sourcing signals against the offer inventory.
+    Run sourcing signals lazily in priority order against the offer inventory.
     Applies fatigue budget: emit at most ONE section per digest post.
     Priority: new_offers → seasonal → payout_upgrades.
+    Stops evaluating as soon as a non-empty result is found.
     """
-    signals = {
-        "new_offers":       _sourcing_signal_new_offers(offers),
-        "seasonal":         _sourcing_signal_seasonal(offers),
-        "payout_upgrades":  _sourcing_signal_payout_upgrades(offers),
+    _signal_fns: dict = {
+        "new_offers":      _sourcing_signal_new_offers,
+        "seasonal":        _sourcing_signal_seasonal,
+        "payout_upgrades": _sourcing_signal_payout_upgrades,
     }
-    # Fatigue budget: highest-priority non-empty signal wins; zero out the rest
-    active = next((k for k in _SOURCING_SIGNAL_PRIORITY if signals.get(k)), None)
-    for k in _SOURCING_SIGNAL_PRIORITY:
-        if k != active:
-            signals[k] = []
+    signals: dict = {}
+    found = False
+    for key in _SOURCING_SIGNAL_PRIORITY:
+        if found:
+            signals[key] = []
+        else:
+            result = _signal_fns[key](offers)
+            signals[key] = result
+            if result:
+                found = True
     return signals
 
 
