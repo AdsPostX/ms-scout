@@ -1996,7 +1996,7 @@ def test_sourcing_cards_max_3_offers():
     action_blocks = [b for b in blocks if b.get("type") == "actions"]
     if len(action_blocks) != 3:
         return False, f"Expected exactly 3 offer cards; got {len(action_blocks)} action blocks"
-    return True, f"Max 3 offer cards enforced (exactly 3 shown) ✓"
+    return True, "Max 3 offer cards enforced (exactly 3 shown) ✓"
 
 
 if __name__ == "__main__":

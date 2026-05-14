@@ -1118,10 +1118,12 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
     if signals.get("new_offers"):
         active_offers = signals["new_offers"][:3]
         header_text   = ":new: *New PRIME/STRONG offers in the last 48h*"
-        context_fn    = lambda o: (
-            f"_{_parse_payout(o.get('payout')):.2f} {(o.get('payout_type') or '').upper()}"
-            f" · {o.get('fit_tier', 'PRIME')} tier · first seen in last 48h_"
-        )
+
+        def context_fn(o):  # noqa: E301
+            return (
+                f"_{_parse_payout(o.get('payout')):.2f} {(o.get('payout_type') or '').upper()}"
+                f" · {o.get('fit_tier', 'PRIME')} tier · first seen in last 48h_"
+            )
 
     elif signals.get("seasonal"):
         evt           = signals["seasonal"][0]
@@ -1131,10 +1133,12 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             f":calendar: *{evt['event_name']} in {day_str}*"
             f" — {evt['offer_count']} PRIME/STRONG offer{'s' if evt['offer_count'] != 1 else ''}"
         )
-        context_fn    = lambda o: (
-            f"_{(o.get('category') or '').title() or (o.get('payout_type') or '').upper()}"
-            f" · {(o.get('payout_type') or '').upper()} ${_parse_payout(o.get('payout')):.2f}_"
-        )
+
+        def context_fn(o):  # noqa: E301
+            return (
+                f"_{(o.get('category') or '').title() or (o.get('payout_type') or '').upper()}"
+                f" · {(o.get('payout_type') or '').upper()} ${_parse_payout(o.get('payout')):.2f}_"
+            )
 
     if not active_offers:
         return blocks
