@@ -14,6 +14,7 @@ import random
 import re
 import threading
 import time
+from datetime import date
 
 import requests
 
@@ -676,7 +677,7 @@ def _pulse_signal_enabled(key: str) -> bool:
 
 # ── Proactive pulse: seasonal radar ──────────────────────────────────────────
 
-def _nth_weekday(year: int, month: int, n: int, weekday: int) -> "date":
+def _nth_weekday(year: int, month: int, n: int, weekday: int) -> date:
     """Return the nth occurrence of weekday (Mon=0 … Sun=6) in month/year.
 
     Examples:
@@ -706,9 +707,9 @@ _SEASONAL_CALENDAR = [
     ("Halloween",         ["entertainment", "retail"],                         14,
         lambda y: __import__("datetime").date(y, 10, 31)),
     ("Black Friday",      ["retail", "electronics", "shopping"],               21,
-        lambda y: __import__("datetime").date(y, 11, 29)),
+        lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=1)),
     ("Cyber Monday",      ["retail", "electronics", "software"],               21,
-        lambda y: __import__("datetime").date(y, 12, 2)),
+        lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=4)),
     ("Christmas/Holiday", ["gifts", "travel", "retail", "experiences"],        30,
         lambda y: __import__("datetime").date(y, 12, 25)),
     ("New Year's",        ["travel", "fitness", "health"],                     14,
@@ -751,7 +752,8 @@ def _pulse_signal_seasonal(ch, offers: list) -> list:
     for event_name, verticals, window_days, date_fn in _SEASONAL_CALENDAR:
         try:
             event_date = date_fn(today.year)
-        except Exception:
+        except Exception as e:
+            log.warning(f"seasonal date_fn failed for {event_name} {today.year}: {e}")
             continue
 
         days_until = (event_date - today).days
@@ -760,7 +762,8 @@ def _pulse_signal_seasonal(ch, offers: list) -> list:
             try:
                 event_date = date_fn(today.year + 1)
                 days_until = (event_date - today).days
-            except Exception:
+            except Exception as e:
+                log.warning(f"seasonal date_fn failed for {event_name} {today.year + 1}: {e}")
                 continue
 
         if not (0 <= days_until <= window_days):
@@ -830,8 +833,11 @@ def _run_pulse_signals() -> dict:
         ("seasonal",        lambda ch: _pulse_signal_seasonal(ch, offers)),
     ]
 
+    # Local signals run from offer snapshot — no ClickHouse connection needed
+    _LOCAL_SIGNALS = {"seasonal", "new_offers", "payout_upgrades"}
+
     def _run_one(key, fn):
-        ch = _get_ch_client()
+        ch = None if key in _LOCAL_SIGNALS else _get_ch_client()
         return key, fn(ch)
 
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="pulse") as pool:
@@ -1356,6 +1362,9 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
         or signals.get("ghost_campaigns")
         or signals.get("fill_rate")
         or signals.get("opportunities")
+        or signals.get("seasonal")
+        or signals.get("new_offers")
+        or signals.get("payout_upgrades")
     )
     # Force pulse always routes to #scout-qa; normal pulse uses _route_channel
     channel = _route_channel("pulse", force=force)
@@ -1490,6 +1499,9 @@ def _proactive_pulse(web: WebClient) -> None:
                     or signals.get("ghost_campaigns")
                     or signals.get("fill_rate")
                     or signals.get("opportunities")
+                    or signals.get("seasonal")
+                    or signals.get("new_offers")
+                    or signals.get("payout_upgrades")
                 )
                 channel = _route_channel("pulse")
                 if has_content:
