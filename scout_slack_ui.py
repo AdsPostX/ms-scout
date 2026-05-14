@@ -1374,25 +1374,52 @@ def _format_pulse_blocks(
             ),
         }]})
 
-    new_offers = signals.get("new_offers", [])
-    if new_offers:
+    # ── Seasonal radar ────────────────────────────────────────────────────
+    seasonal = signals.get("seasonal", [])
+    if seasonal:
         blocks.append({"type": "divider"})
-        blocks.extend(_build_signal_header(":new:", "New PRIME Offers", "Added in the last 48h"))
-        for o in new_offers[:5]:
-            name = o.get("offer_name") or o.get("advertiser") or "?"
-            payout_val = o.get("payout", "?")
-            payout_type = (o.get("payout_type") or "").upper()
-            network = o.get("network") or "?"
-            fit_tier = o.get("fit_tier") or "?"
-            left_body = f"${payout_val} {payout_type}"
-            right_body = f"*Network*\n{network}"
-            blocks.extend(_build_item_card(name, left_body, right_body, context=fit_tier))
+        for evt in seasonal[:1]:  # fatigue budget: max 1 event per pulse
+            days = evt.get("days_until", 0)
+            cnt  = evt.get("offer_count", 0)
+            day_str = f"{days} day{'s' if days != 1 else ''}"
+            offer_lines = "\n".join(
+                f">  • {o.get('advertiser') or o.get('offer_name', '?')} · "
+                f"${o.get('payout', '?')} {(o.get('payout_type') or '').upper()} · "
+                f"{o.get('network', '?')}"
+                for o in evt.get("top_offers", [])[:3]
+            )
+            event_name = evt.get("event_name", "Upcoming event")
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": (
+                    f":calendar: *{event_name} in {day_str}* — "
+                    f"{cnt} PRIME/STRONG offer{'s' if cnt != 1 else ''} available\n"
+                    + offer_lines
+                )}})
+
+    payout_upgrades = signals.get("payout_upgrades", [])
+    if payout_upgrades:
+        blocks.append({"type": "divider"})
+        lines = [":moneybag: *Payout upgrades worth checking* _(est. net after ~30% margin)_"]
+        for u in payout_upgrades:
+            adv = u.get("advertiser", "?")
+            cur = u.get("current_net_payout", 0.0) or 0.0
+            p_type = u.get("payout_type", "")
+            network = u.get("network", "?")
+            gross = u.get("inventory_gross_payout", 0.0) or 0.0
+            net_est = u.get("inventory_net_est", 0.0) or 0.0
+            delta = u.get("delta_net_est", 0.0) or 0.0
+            lines.append(
+                f">  {adv} — running ${cur:.2f} {p_type} net"
+                f" · {network} has ${gross:.2f} gross"
+                f" (est. ~${net_est:.2f} net, +${delta:.2f})"
+            )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
 
     # ── Change I: zero-signal all-clear ──────────────────────────────────
     _has_signals = bool(
         ghost_camps or fill_rate or regular_downs or urgent_caps or ups
         or (opportunities and today_d.weekday() == 0)
-        or new_offers
+        or seasonal or payout_upgrades
     )
     if not _has_signals:
         blocks.append({"type": "context", "elements": [
