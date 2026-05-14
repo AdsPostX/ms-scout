@@ -1382,18 +1382,23 @@ def _format_pulse_blocks(
             days = evt["days_until"]
             cnt  = evt["offer_count"]
             day_str = f"{days} day{'s' if days != 1 else ''}"
-            offer_lines = "\n".join(
-                f">  • {o.get('advertiser') or o.get('offer_name', '?')} · "
-                f"${o.get('payout', '?')} {(o.get('payout_type') or '').upper()} · "
-                f"{o.get('network', '?')}"
-                for o in evt["top_offers"]
+            header_ctx = (
+                f"{cnt} PRIME/STRONG offer{'s' if cnt != 1 else ''} available · "
+                f"{day_str} away"
             )
-            blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": (
-                    f":calendar: *{evt['event_name']} in {day_str}* — "
-                    f"{cnt} PRIME/STRONG offer{'s' if cnt != 1 else ''} available\n"
-                    + offer_lines
-                )}})
+            blocks.extend(_build_signal_header(
+                ":calendar:",
+                f"Seasonal Radar — {evt['event_name']}",
+                header_ctx,
+            ))
+            for o in evt["top_offers"]:
+                name = o.get("advertiser") or o.get("offer_name") or "?"
+                payout_val = o.get("payout", "?")
+                payout_type = (o.get("payout_type") or "").upper()
+                network = o.get("network") or "?"
+                left_body = f"${payout_val} {payout_type}"
+                right_body = f"*Network*\n{network}"
+                blocks.extend(_build_item_card(name, left_body, right_body))
 
     # ── Change I: zero-signal all-clear ──────────────────────────────────
     _has_signals = bool(
