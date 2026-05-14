@@ -1674,33 +1674,24 @@ def test_sourcing_payout_upgrades_empty_offers():
     return True, "Empty offers → [] ✓"
 
 
-@test("sourcing_payout_upgrades_payout_type_mismatch")
-def test_sourcing_payout_upgrades_payout_type_mismatch():
-    """Filtering logic: CPL-running advertiser does NOT match CPS inventory offer."""
-    # Test the filtering logic inside _sourcing_signal_payout_upgrades directly:
-    # same advertiser, but running CPL and inventory has CPS → payout_type filter rejects it.
+@test("sourcing_payout_upgrades_payout_type_from_offer")
+def test_sourcing_payout_upgrades_payout_type_from_offer():
+    """payout_type in upgrade result comes from the offer inventory, not the CH row.
+    CH query no longer returns payout_type (column doesn't exist in conversions).
+    """
     from scout_digest import _fuzzy_name_match
-    # CH says AT&T is running at CPL
-    running_payout_type = "CPL"
-    # Inventory has AT&T at CPS
-    offers = [{"advertiser": "AT&T", "payout_type": "CPS", "payout": "10.00", "fit_tier": "PRIME"}]
+    # AT&T in inventory has CPL payout_type — name match should succeed
+    offers = [{"advertiser": "AT&T", "payout_type": "CPL", "payout": "10.00", "fit_tier": "PRIME"}]
     matches = [
         o for o in offers
         if _fuzzy_name_match("AT&T", o.get("advertiser") or "")
-        and (o.get("payout_type") or "").upper() == running_payout_type  # CPL required, CPS offered
+        and o.get("fit_tier") in ("PRIME", "STRONG")
     ]
-    if matches:
-        return False, f"CPS offer should not match CPL requirement; got {matches}"
-    # Positive case: same type → should match
-    offers_cpl = [{"advertiser": "AT&T", "payout_type": "CPL", "payout": "10.00", "fit_tier": "PRIME"}]
-    matches_cpl = [
-        o for o in offers_cpl
-        if _fuzzy_name_match("AT&T", o.get("advertiser") or "")
-        and (o.get("payout_type") or "").upper() == "CPL"
-    ]
-    if not matches_cpl:
-        return False, "CPL offer should match CPL requirement"
-    return True, "Payout type filter: CPL≠CPS, CPL=CPL ✓"
+    if not matches:
+        return False, "AT&T offer should match via fuzzy name"
+    if matches[0].get("payout_type") != "CPL":
+        return False, f"payout_type should come from offer; got {matches[0].get('payout_type')}"
+    return True, "payout_type sourced from offer inventory ✓"
 
 
 @test("sourcing_payout_upgrades_gap_vs_gap_insurance")

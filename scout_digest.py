@@ -979,16 +979,22 @@ def _sourcing_signal_payout_upgrades(offers: list) -> list:
         return []
 
     try:
+        # adv_name lives in from_airbyte_campaigns; adpx_conversionsdetails has no advertiser column.
+        # Join on campaign_id = id (cast to UInt64 to match types).
+        # payout_type is also not in conversions — group by adv_name only.
         rows = ch.query("""
             SELECT
-                adv_name,
-                payout_type,
-                avg(toFloat64OrNull(payout)) AS avg_net_payout
-            FROM default.adpx_conversionsdetails
-            PREWHERE toYYYYMM(created_at) >= toYYYYMM(now() - INTERVAL 30 DAY)
-            WHERE created_at >= now() - INTERVAL 30 DAY
-              AND payout_type IN ('CPA', 'CPL', 'CPS')
-            GROUP BY adv_name, payout_type
+                c.adv_name,
+                avg(toFloat64OrNull(cv.payout)) AS avg_net_payout
+            FROM default.adpx_conversionsdetails cv
+            INNER JOIN (
+                SELECT toUInt64(id) AS id, adv_name
+                FROM default.from_airbyte_campaigns
+                WHERE adv_name IS NOT NULL AND id IS NOT NULL
+            ) c ON cv.campaign_id = c.id
+            PREWHERE toYYYYMM(cv.created_at) >= toYYYYMM(now() - INTERVAL 30 DAY)
+            WHERE cv.created_at >= now() - INTERVAL 30 DAY
+            GROUP BY c.adv_name
             HAVING avg_net_payout > 0 AND count() >= 5
             ORDER BY count() DESC
             LIMIT 100
@@ -1001,19 +1007,19 @@ def _sourcing_signal_payout_upgrades(offers: list) -> list:
         return []
 
     upgrades = []
-    for adv_name, payout_type, avg_net_payout in rows:
+    for adv_name, avg_net_payout in rows:
         if not adv_name:
             continue
         matches = [
             o for o in offers
             if _fuzzy_name_match(adv_name, o.get("advertiser") or o.get("offer_name") or "")
-            and (o.get("payout_type") or "").upper() == payout_type.upper()
             and o.get("fit_tier") in ("PRIME", "STRONG")
         ]
         for m in matches:
             inv_gross   = float(m.get("payout") or 0)
             inv_net_est = inv_gross * _GROSS_TO_NET_FACTOR
             delta       = inv_net_est - (avg_net_payout or 0)
+            payout_type = (m.get("payout_type") or "").upper() or "CPA"
             if delta >= _MIN_UPGRADE_DELTA:
                 upgrades.append({
                     "advertiser":            adv_name,
@@ -1026,10 +1032,10 @@ def _sourcing_signal_payout_upgrades(offers: list) -> list:
                     "delta_net_est":         delta,
                 })
 
-    # Deduplicate: same advertiser + payout_type, keep best delta
+    # Deduplicate: same advertiser, keep best delta
     seen: dict = {}
     for u in upgrades:
-        key = (u["advertiser"].lower(), u["payout_type"])
+        key = u["advertiser"].lower()
         if key not in seen or u["delta_net_est"] > seen[key]["delta_net_est"]:
             seen[key] = u
 
