@@ -995,11 +995,11 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
     if _snapshot.exists():
         try:
             for _o in json.loads(_snapshot.read_text()):
-                _key = (_o.get("network", ""), _o.get("offer_id", "") or _o.get("offer_name", ""))
+                _key = (_o.get("network", ""), _o.get("offer_id", "") or _o.get("title", ""))
                 if _o.get("first_seen"):
                     _first_seen_cache[_key] = _o["first_seen"]
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning(f"first_seen cache load failed: {e} ({_snapshot})")
 
     cleaned = []
     for o in offers:
@@ -1029,11 +1029,16 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
         normalized["fit_tier"]      = _compute_fit_tier(normalized)
         normalized["last_verified"] = normalized.get("date_scraped") or datetime.today().strftime("%Y-%m-%d")
         # first_seen: set once on first appearance — pull from cache if this offer already existed
-        _offer_key = (normalized.get("network", ""), normalized.get("offer_id", "") or normalized.get("offer_name", ""))
+        _offer_key = (normalized.get("network", ""), normalized.get("offer_id", "") or normalized.get("title", ""))
+        _date_scraped = normalized.get("date_scraped", "")
+        _first_seen_fallback = (
+            _date_scraped
+            if _date_scraped and ("T" in _date_scraped or len(_date_scraped) > 10)
+            else datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
         normalized["first_seen"]   = (
             _first_seen_cache.get(_offer_key)
-            or normalized.get("date_scraped")
-            or datetime.today().strftime("%Y-%m-%dT%H:%M:%SZ")
+            or _first_seen_fallback
         )
         cleaned.append(normalized)
     return cleaned
