@@ -1378,7 +1378,7 @@ def test_new_offers_max_results():
     result = _pulse_signal_new_offers(ch=None, offers=offers)
     if len(result) > 5:
         return False, f"Result should be capped at 5, got {len(result)}"
-    return True, f"Result correctly capped at 5 (had 8 qualifying offers)"
+    return True, "Result correctly capped at 5 (had 8 qualifying offers)"
 
 
 @test("new_offers_signal_uses_first_seen_not_last_verified_regression")

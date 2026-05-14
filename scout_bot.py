@@ -706,7 +706,14 @@ def _pulse_signal_new_offers(ch, offers: list) -> list:
         if ts >= cutoff:
             new_offers.append(o)
 
-    new_offers.sort(key=lambda x: float(x.get("payout") or 0), reverse=True)
+    def _safe_payout(x: dict) -> float:
+        try:
+            return float(x.get("payout") or 0)
+        except (TypeError, ValueError) as e:
+            log.warning(f"[new_offers] non-numeric payout for offer {x.get('id') or x.get('offer_name')!r}: {e}")
+            return 0.0
+
+    new_offers.sort(key=_safe_payout, reverse=True)
     return new_offers[:5]
 
 
@@ -1266,6 +1273,7 @@ def _run_pulse_once(web: WebClient, force: bool = False) -> None:
         or signals.get("ghost_campaigns")
         or signals.get("fill_rate")
         or signals.get("opportunities")
+        or signals.get("new_offers")
     )
     # Force pulse always routes to #scout-qa; normal pulse uses _route_channel
     channel = _route_channel("pulse", force=force)
@@ -1400,6 +1408,7 @@ def _proactive_pulse(web: WebClient) -> None:
                     or signals.get("ghost_campaigns")
                     or signals.get("fill_rate")
                     or signals.get("opportunities")
+                    or signals.get("new_offers")
                 )
                 channel = _route_channel("pulse")
                 if has_content:
