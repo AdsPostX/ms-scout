@@ -816,6 +816,317 @@ def build_digest_blocks(
     return blocks
 
 
+# ── Sourcing intelligence signals ──────────────────────────────────────────────
+# These signals run inside post_digest() and append ONE proactive sourcing
+# section to the #scout-offers digest.  They are NOT operational pulse signals.
+# Pulse = what's wrong with what's running (#revenue-operations).
+# Sourcing = what you should be running next (#scout-offers).
+
+_SOURCING_SIGNAL_PRIORITY = ["new_offers", "seasonal", "payout_upgrades"]
+
+_GROSS_TO_NET_FACTOR: float = 0.70   # ~30% MS margin; adjust if rev-share changes
+_MIN_UPGRADE_DELTA:   float = 1.00   # at least $1 net improvement to surface
+
+# Tokens that signal a meaningfully different advertiser entity ("Gap" ≠ "Gap Insurance")
+_QUALIFIER_WORDS = frozenset({
+    "insurance", "capital", "financial", "mortgage", "credit", "loans",
+    "legal", "medical", "health", "realty", "properties", "banking", "fund",
+})
+_MATCH_STOP_WORDS = frozenset({"the", "and", "inc", "llc", "ltd", "corp", "co", "via"})
+
+
+def _sourcing_signal_enabled(key: str) -> bool:
+    """Return False when key is in SCOUT_DISABLED_SOURCING_SIGNALS env var."""
+    disabled = {s.strip() for s in os.getenv("SCOUT_DISABLED_SOURCING_SIGNALS", "").split(",") if s.strip()}
+    return key not in disabled
+
+
+def _nth_weekday(year: int, month: int, n: int, weekday: int) -> "date":
+    """
+    Return the nth occurrence of weekday (0=Mon … 6=Sun) in month/year.
+    n=1 → first occurrence, n=2 → second, etc.
+
+    Examples:
+        _nth_weekday(2026, 5, 2, 6)  → 2nd Sunday in May 2026  → Mother's Day (May 10)
+        _nth_weekday(2026, 6, 3, 6)  → 3rd Sunday in June 2026 → Father's Day (June 21)
+        _nth_weekday(2026, 11, 4, 3) → 4th Thursday in Nov 2026 → Thanksgiving (Nov 26)
+    """
+    from datetime import date as _date
+    first = _date(year, month, 1)
+    # days until first occurrence of weekday
+    delta = (weekday - first.weekday()) % 7
+    first_occurrence = _date(year, month, first.day + delta)
+    # advance by (n-1) weeks
+    from datetime import timedelta
+    return first_occurrence + timedelta(weeks=n - 1)
+
+
+# date_fn(year) → date.  Fixed holidays use a lambda; floating ones use _nth_weekday.
+_SEASONAL_CALENDAR = [
+    # Fixed-date holidays
+    ("Valentine's Day",   ["jewelry", "flowers", "gifts", "dining"],             21, lambda y: __import__("datetime").date(y, 2, 14)),
+    ("St. Patrick's Day", ["dining", "entertainment"],                            7, lambda y: __import__("datetime").date(y, 3, 17)),
+    ("Tax Day",           ["finance", "tax", "software"],                        21, lambda y: __import__("datetime").date(y, 4, 15)),
+    ("4th of July",       ["travel", "retail", "sports"],                        10, lambda y: __import__("datetime").date(y, 7,  4)),
+    ("Halloween",         ["entertainment", "retail"],                           14, lambda y: __import__("datetime").date(y, 10, 31)),
+    ("Black Friday",      ["retail", "electronics", "shopping"],                 21, lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=1)),   # day after 4th Thursday
+    ("Cyber Monday",      ["retail", "electronics", "software"],                 21, lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=4)),   # Monday after Black Friday
+    ("Christmas/Holiday", ["gifts", "travel", "retail", "experiences"],          30, lambda y: __import__("datetime").date(y, 12, 25)),
+    ("New Year's",        ["travel", "fitness", "health"],                       14, lambda y: __import__("datetime").date(y, 12, 31)),
+    # Floating holidays — computed correctly per year via _nth_weekday
+    ("MLK Day Weekend",   ["travel", "leisure"],                                 14, lambda y: _nth_weekday(y, 1, 3, 0)),   # 3rd Monday in Jan
+    ("Mother's Day",      ["flowers", "gifts", "jewelry", "experiences"],        21, lambda y: _nth_weekday(y, 5, 2, 6)),   # 2nd Sunday in May
+    ("Father's Day",      ["golf", "sports", "tools", "experiences", "gifts"],   21, lambda y: _nth_weekday(y, 6, 3, 6)),   # 3rd Sunday in June
+    ("Labor Day Weekend", ["travel", "leisure", "retail"],                       14, lambda y: _nth_weekday(y, 9, 1, 0)),   # 1st Monday in Sep
+    ("Thanksgiving Week", ["travel", "retail", "food"],                          14, lambda y: _nth_weekday(y, 11, 4, 3)),  # 4th Thursday in Nov
+    ("Back to School",    ["education", "software", "retail", "electronics"],    30, lambda y: __import__("datetime").date(y, 8, 25)),
+]
+
+
+def _sourcing_signal_seasonal(offers: list) -> list:
+    """Check for upcoming seasonal events and surface PRIME/STRONG offers in matching verticals."""
+    if not _sourcing_signal_enabled("seasonal"):
+        return []
+
+    from datetime import date as _date, timedelta
+
+    today = _date.today()
+    results = []
+
+    for event_name, verticals, window_days, date_fn in _SEASONAL_CALENDAR:
+        try:
+            event_date = date_fn(today.year)
+        except Exception:
+            continue
+
+        days_until = (event_date - today).days
+        if days_until < 0:
+            # try next year
+            try:
+                event_date = date_fn(today.year + 1)
+                days_until = (event_date - today).days
+            except Exception:
+                continue
+
+        if not (0 <= days_until <= window_days):
+            continue
+
+        matching = []
+        for o in offers:
+            tier = o.get("fit_tier", "STANDARD")
+            if tier not in ("PRIME", "STRONG"):
+                continue
+            cat  = (o.get("category") or "").lower()
+            name = (o.get("offer_name") or "").lower()
+            if any(v in cat or v in name for v in verticals):
+                matching.append(o)
+
+        if matching:
+            matching.sort(key=lambda x: float(x.get("payout") or 0), reverse=True)
+            results.append({
+                "event_name":  event_name,
+                "days_until":  days_until,
+                "offer_count": len(matching),
+                "top_offers":  matching[:3],
+                "verticals":   verticals,
+            })
+
+    return results
+
+
+def _fuzzy_name_match(a: str, b: str) -> bool:
+    """
+    Word-boundary advertiser name match with qualifier-word guard.
+    'Gap' does NOT match 'Gap Insurance'. 'AT&T' DOES match 'AT&T Wireless'.
+    """
+    import re as _re
+
+    def _clean(s: str) -> frozenset:
+        return frozenset(
+            t for t in _re.split(r"[^a-z0-9]+", s.lower())
+            if len(t) >= 2 and t not in _MATCH_STOP_WORDS
+        )
+
+    ca, cb = _clean(a), _clean(b)
+    if not ca or not cb:
+        return False
+    if ca == cb:
+        return True
+    shorter, longer = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+    if not shorter.issubset(longer):
+        return False
+    extra = longer - shorter
+    return not (extra & _QUALIFIER_WORDS)
+
+
+def _sourcing_signal_payout_upgrades(offers: list) -> list:
+    """
+    Detect advertisers where offer inventory has a better payout vs. what's running.
+    Inventory gross payout × GROSS_TO_NET_FACTOR vs ClickHouse net payout.
+    Only surfaces upgrades >= _MIN_UPGRADE_DELTA after normalization.
+    """
+    if not offers:
+        return []
+
+    if not _sourcing_signal_enabled("payout_upgrades"):
+        return []
+
+    try:
+        from scout_agent import _get_ch_client
+        ch = _get_ch_client()
+    except Exception as e:
+        log.warning(f"[sourcing] payout_upgrades: could not get CH client: {e}")
+        return []
+
+    try:
+        rows = ch.query("""
+            SELECT
+                adv_name,
+                payout_type,
+                avg(toFloat64OrNull(payout)) AS avg_net_payout
+            FROM default.adpx_conversionsdetails
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM(now() - INTERVAL 30 DAY)
+            WHERE created_at >= now() - INTERVAL 30 DAY
+              AND payout_type IN ('CPA', 'CPL', 'CPS')
+            GROUP BY adv_name, payout_type
+            HAVING avg_net_payout > 0 AND count() >= 5
+            ORDER BY count() DESC
+            LIMIT 100
+        """).result_rows
+    except Exception as e:
+        log.warning(f"[sourcing] payout_upgrades query failed: {e}")
+        return []
+
+    if not rows:
+        return []
+
+    upgrades = []
+    for adv_name, payout_type, avg_net_payout in rows:
+        if not adv_name:
+            continue
+        matches = [
+            o for o in offers
+            if _fuzzy_name_match(adv_name, o.get("advertiser") or o.get("offer_name") or "")
+            and (o.get("payout_type") or "").upper() == payout_type.upper()
+            and o.get("fit_tier") in ("PRIME", "STRONG")
+        ]
+        for m in matches:
+            inv_gross   = float(m.get("payout") or 0)
+            inv_net_est = inv_gross * _GROSS_TO_NET_FACTOR
+            delta       = inv_net_est - (avg_net_payout or 0)
+            if delta >= _MIN_UPGRADE_DELTA:
+                upgrades.append({
+                    "advertiser":            adv_name,
+                    "payout_type":           payout_type,
+                    "current_net_payout":    avg_net_payout,
+                    "inventory_gross_payout": inv_gross,
+                    "inventory_net_est":     inv_net_est,
+                    "network":               m.get("network", ""),
+                    "offer_name":            m.get("offer_name", ""),
+                    "delta_net_est":         delta,
+                })
+
+    # Deduplicate: same advertiser + payout_type, keep best delta
+    seen: dict = {}
+    for u in upgrades:
+        key = (u["advertiser"].lower(), u["payout_type"])
+        if key not in seen or u["delta_net_est"] > seen[key]["delta_net_est"]:
+            seen[key] = u
+
+    return sorted(seen.values(), key=lambda x: x["delta_net_est"], reverse=True)[:5]
+
+
+def _sourcing_signal_new_offers(offers: list) -> list:
+    """Surface PRIME/STRONG offers that first appeared in inventory in the last 48 hours."""
+    if not _sourcing_signal_enabled("new_offers"):
+        return []
+
+    from datetime import datetime as _dt, timezone
+
+    cutoff = _dt.now(timezone.utc).timestamp() - (48 * 3600)
+
+    new_offers = []
+    for o in offers:
+        if o.get("fit_tier") not in ("PRIME", "STRONG"):
+            continue
+        fs = o.get("first_seen", "")
+        if not fs:
+            continue  # predates first_seen field — skip
+        try:
+            ts = _dt.fromisoformat(fs.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if ts >= cutoff:
+            new_offers.append(o)
+
+    new_offers.sort(key=lambda x: float(x.get("payout") or 0), reverse=True)
+    return new_offers[:5]
+
+
+def _run_sourcing_signals(offers: list) -> dict:
+    """
+    Run all 3 sourcing signals against the offer inventory.
+    Applies fatigue budget: emit at most ONE section per digest post.
+    Priority: new_offers → seasonal → payout_upgrades.
+    """
+    signals = {
+        "new_offers":       _sourcing_signal_new_offers(offers),
+        "seasonal":         _sourcing_signal_seasonal(offers),
+        "payout_upgrades":  _sourcing_signal_payout_upgrades(offers),
+    }
+    # Fatigue budget: highest-priority non-empty signal wins; zero out the rest
+    active = next((k for k in _SOURCING_SIGNAL_PRIORITY if signals.get(k)), None)
+    for k in _SOURCING_SIGNAL_PRIORITY:
+        if k != active:
+            signals[k] = []
+    return signals
+
+
+def _build_sourcing_intel_blocks(signals: dict) -> list:
+    """Build Block Kit blocks for the winning sourcing signal. Returns [] if nothing fired."""
+    blocks: list = []
+
+    if signals.get("new_offers"):
+        lines = [":new: *New PRIME/STRONG offers in the last 48h*"]
+        for o in signals["new_offers"]:
+            lines.append(
+                f">  {o.get('offer_name') or o.get('advertiser', '?')} · "
+                f"${o.get('payout')} {(o.get('payout_type') or '').upper()} · "
+                f"{o.get('network', '?')} · {o.get('fit_tier', '')}"
+            )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+
+    elif signals.get("seasonal"):
+        evt     = signals["seasonal"][0]  # fatigue budget: max 1 event
+        days    = evt["days_until"]
+        cnt     = evt["offer_count"]
+        day_str = f"{days} day{'s' if days != 1 else ''}"
+        offer_lines = "\n".join(
+            f">  • {o.get('advertiser') or o.get('offer_name', '?')} · "
+            f"${o.get('payout')} {(o.get('payout_type') or '').upper()} · "
+            f"{o.get('network', '?')}"
+            for o in evt["top_offers"]
+        )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+            "text": (
+                f":calendar: *{evt['event_name']} in {day_str}* — "
+                f"{cnt} PRIME/STRONG offer{'s' if cnt != 1 else ''} available\n"
+                + offer_lines
+            )}})
+
+    elif signals.get("payout_upgrades"):
+        lines = [":moneybag: *Payout upgrades worth checking* _(est. net after ~30% margin)_"]
+        for u in signals["payout_upgrades"]:
+            lines.append(
+                f">  {u['advertiser']} — running ${u['current_net_payout']:.2f} {u['payout_type']} net"
+                f" · {u['network']} has ${u['inventory_gross_payout']:.2f} gross"
+                f" (est. ~${u['inventory_net_est']:.2f} net, +${u['delta_net_est']:.2f})"
+            )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+
+    return blocks
+
+
 # ── Offer loader ───────────────────────────────────────────────────────────────
 
 def _load_offers() -> list:
@@ -1042,6 +1353,19 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
             {"type": "divider"},
         ]
     blocks = new_block + blocks
+
+    # ── Sourcing intelligence section (appended after offer list) ─────────────
+    # Runs 3 signals against the full offer inventory (not just this week's
+    # selected offers).  Fatigue budget: at most ONE proactive section per post.
+    # Priority: new_offers → seasonal → payout_upgrades.
+    try:
+        all_offers_flat = _load_offers()
+        sourcing_signals = _run_sourcing_signals(all_offers_flat)
+        sourcing_blocks  = _build_sourcing_intel_blocks(sourcing_signals)
+        if sourcing_blocks:
+            blocks = blocks + [{"type": "divider"}] + sourcing_blocks
+    except Exception as _e:
+        log.warning(f"[digest] sourcing intelligence failed (non-fatal): {_e}")
 
     fallback = f"🎯 Scout Signal — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
 

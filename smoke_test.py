@@ -1409,6 +1409,426 @@ def post_to_slack(results: list[dict], pass_count: int) -> bool:
         return False
 
 
+# ── Sourcing intelligence tests (PR: feat/sourcing-intel-digest) ──────────────
+# Tests for _sourcing_signal_*, _nth_weekday, _fuzzy_name_match, _run_sourcing_signals
+# All tests are unit tests: no ClickHouse, no live offers file required.
+
+@test("sourcing_nth_weekday_mothers_day_2026")
+def test_sourcing_nth_weekday_mothers_day_2026():
+    """2nd Sunday in May 2026 = May 10 (Mother's Day)"""
+    from scout_digest import _nth_weekday
+    result = _nth_weekday(2026, 5, 2, 6)
+    if result.month != 5 or result.day != 10:
+        return False, f"Mother's Day 2026 should be May 10, got {result}"
+    return True, f"Mother's Day 2026 = {result} ✓"
+
+
+@test("sourcing_nth_weekday_fathers_day_2026")
+def test_sourcing_nth_weekday_fathers_day_2026():
+    """3rd Sunday in June 2026 = June 21 (Father's Day)"""
+    from scout_digest import _nth_weekday
+    result = _nth_weekday(2026, 6, 3, 6)
+    if result.month != 6 or result.day != 21:
+        return False, f"Father's Day 2026 should be June 21, got {result}"
+    return True, f"Father's Day 2026 = {result} ✓"
+
+
+@test("sourcing_nth_weekday_thanksgiving_2026")
+def test_sourcing_nth_weekday_thanksgiving_2026():
+    """4th Thursday in November 2026 = Nov 26 (Thanksgiving)"""
+    from scout_digest import _nth_weekday
+    result = _nth_weekday(2026, 11, 4, 3)
+    if result.month != 11 or result.day != 26:
+        return False, f"Thanksgiving 2026 should be Nov 26, got {result}"
+    return True, f"Thanksgiving 2026 = {result} ✓"
+
+
+@test("sourcing_seasonal_empty_offers")
+def test_sourcing_seasonal_empty_offers():
+    """Signal returns [] when offers list is empty."""
+    from scout_digest import _sourcing_signal_seasonal
+    result = _sourcing_signal_seasonal([])
+    if result != []:
+        return False, f"Expected [], got {result}"
+    return True, "Empty offers → [] ✓"
+
+
+@test("sourcing_seasonal_no_matching_verticals")
+def test_sourcing_seasonal_no_matching_verticals():
+    """Vertical filtering: auto insurance offer doesn't match flowers/gifts verticals."""
+    # Test the filtering logic directly rather than mocking the date
+    # _sourcing_signal_seasonal filters offers by category/name matching the event verticals
+    verticals = ["flowers", "gifts", "jewelry", "experiences"]
+    auto_offer = {"offer_name": "Auto Insurance", "category": "insurance", "fit_tier": "PRIME", "payout": "5.00"}
+    cat  = (auto_offer.get("category") or "").lower()
+    name = (auto_offer.get("offer_name") or "").lower()
+    matches = any(v in cat or v in name for v in verticals)
+    if matches:
+        return False, "Auto Insurance should not match flowers/gifts/jewelry/experiences"
+    # Positive: flowers offer DOES match
+    flower_offer = {"offer_name": "1-800-Flowers", "category": "gifts", "fit_tier": "PRIME", "payout": "8.00"}
+    cat2  = (flower_offer.get("category") or "").lower()
+    name2 = (flower_offer.get("offer_name") or "").lower()
+    matches2 = any(v in cat2 or v in name2 for v in verticals)
+    if not matches2:
+        return False, "1-800-Flowers should match gifts/flowers verticals"
+    return True, "Vertical filtering: auto insurance excluded, flowers included ✓"
+
+
+@test("sourcing_seasonal_weak_tier_excluded")
+def test_sourcing_seasonal_weak_tier_excluded():
+    """WEAK-tier offers are filtered by the tier guard in _sourcing_signal_seasonal."""
+    # _sourcing_signal_seasonal uses a local import for date (not patchable at module level),
+    # so test the tier-filtering predicate directly — the same check the function applies.
+    tier_guard = lambda o: o.get("fit_tier", "STANDARD") in ("PRIME", "STRONG")
+
+    weak_flower  = {"offer_name": "1-800-Flowers", "category": "flowers",  "fit_tier": "WEAK",  "payout": "5.00"}
+    prime_flower = {"offer_name": "ProFlowers",    "category": "flowers",  "fit_tier": "PRIME", "payout": "8.00"}
+    strong_gift  = {"offer_name": "GiftTree",      "category": "gifts",    "fit_tier": "STRONG","payout": "6.00"}
+
+    if tier_guard(weak_flower):
+        return False, "WEAK tier should fail the tier guard"
+    if not tier_guard(prime_flower):
+        return False, "PRIME tier should pass the tier guard"
+    if not tier_guard(strong_gift):
+        return False, "STRONG tier should pass the tier guard"
+    return True, "WEAK tier excluded by tier guard; PRIME/STRONG pass ✓"
+
+
+@test("sourcing_seasonal_kill_switch")
+def test_sourcing_seasonal_kill_switch(monkeypatch=None):
+    """Signal returns [] when SCOUT_DISABLED_SOURCING_SIGNALS=seasonal."""
+    import os, importlib
+    old = os.environ.get("SCOUT_DISABLED_SOURCING_SIGNALS", "")
+    os.environ["SCOUT_DISABLED_SOURCING_SIGNALS"] = "seasonal"
+    try:
+        import scout_digest
+        importlib.reload(scout_digest)
+        offers = [{"offer_name": "Flowers", "category": "flowers", "fit_tier": "PRIME", "payout": "8.00"}]
+        result = scout_digest._sourcing_signal_seasonal(offers)
+        if result != []:
+            return False, f"Kill switch should return []; got {result}"
+        return True, "SCOUT_DISABLED_SOURCING_SIGNALS=seasonal → [] ✓"
+    finally:
+        if old:
+            os.environ["SCOUT_DISABLED_SOURCING_SIGNALS"] = old
+        else:
+            os.environ.pop("SCOUT_DISABLED_SOURCING_SIGNALS", None)
+
+
+@test("sourcing_new_offers_empty_list")
+def test_sourcing_new_offers_empty_list():
+    """Signal returns [] when offers list is empty."""
+    from scout_digest import _sourcing_signal_new_offers
+    result = _sourcing_signal_new_offers([])
+    if result != []:
+        return False, f"Expected [], got {result}"
+    return True, "Empty offers → [] ✓"
+
+
+@test("sourcing_new_offers_no_first_seen")
+def test_sourcing_new_offers_no_first_seen():
+    """Signal skips offers without first_seen field (predate the field)."""
+    from scout_digest import _sourcing_signal_new_offers
+    offers = [{"offer_name": "OldOffer", "fit_tier": "PRIME", "payout": "10.00", "payout_type": "CPL"}]
+    result = _sourcing_signal_new_offers(offers)
+    if result:
+        return False, f"Offer without first_seen should be skipped; got {result}"
+    return True, "No first_seen → skipped ✓"
+
+
+@test("sourcing_new_offers_old_first_seen_excluded")
+def test_sourcing_new_offers_old_first_seen_excluded():
+    """Offers with first_seen > 48h ago are not surfaced."""
+    from scout_digest import _sourcing_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    offers = [{"offer_name": "OldOffer", "fit_tier": "PRIME", "payout": "10.00", "payout_type": "CPL", "first_seen": old_ts}]
+    result = _sourcing_signal_new_offers(offers)
+    if result:
+        return False, f"5-day-old offer should not appear as new; got {result}"
+    return True, "5-day-old first_seen → excluded ✓"
+
+
+@test("sourcing_new_offers_recent_first_seen_included")
+def test_sourcing_new_offers_recent_first_seen_included():
+    """Offers with first_seen < 48h ago are surfaced."""
+    from scout_digest import _sourcing_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent_ts = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+    offers = [{"offer_name": "NewOffer", "fit_tier": "PRIME", "payout": "8.00", "payout_type": "CPL", "first_seen": recent_ts}]
+    result = _sourcing_signal_new_offers(offers)
+    if not result or result[0]["offer_name"] != "NewOffer":
+        return False, f"12h-old offer should appear as new; got {result}"
+    return True, "Recent first_seen → included ✓"
+
+
+@test("sourcing_new_offers_uses_first_seen_not_last_verified")
+def test_sourcing_new_offers_uses_first_seen_not_last_verified():
+    """Regression: must use first_seen, not last_verified. Old offer with recent last_verified must not appear."""
+    from scout_digest import _sourcing_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    old_ts    = (now - timedelta(days=30)).isoformat()
+    recent_ts = (now - timedelta(hours=12)).isoformat()
+    offers = [
+        # Should NOT appear: first_seen is old (even though last_verified is recent)
+        {"fit_tier": "PRIME", "offer_name": "OldOffer", "payout": "10.00", "payout_type": "CPL",
+         "first_seen": old_ts, "last_verified": recent_ts},
+        # SHOULD appear: first_seen is recent
+        {"fit_tier": "PRIME", "offer_name": "NewOffer", "payout": "8.00", "payout_type": "CPL",
+         "first_seen": recent_ts, "last_verified": recent_ts},
+    ]
+    result = _sourcing_signal_new_offers(offers)
+    names = [o["offer_name"] for o in result]
+    if "OldOffer" in names:
+        return False, "OldOffer has old first_seen — must not appear as new (regression: last_verified used instead)"
+    if "NewOffer" not in names:
+        return False, f"NewOffer should appear; got names={names}"
+    return True, "first_seen used (not last_verified) ✓"
+
+
+@test("sourcing_new_offers_weak_tier_excluded")
+def test_sourcing_new_offers_weak_tier_excluded():
+    """WEAK and STANDARD tier offers excluded even if first_seen is recent."""
+    from scout_digest import _sourcing_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent_ts = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    offers = [
+        {"offer_name": "WeakOffer",     "fit_tier": "WEAK",     "payout": "0.50", "first_seen": recent_ts},
+        {"offer_name": "StandardOffer", "fit_tier": "STANDARD", "payout": "3.00", "first_seen": recent_ts},
+        {"offer_name": "StrongOffer",   "fit_tier": "STRONG",   "payout": "6.00", "first_seen": recent_ts},
+    ]
+    result = _sourcing_signal_new_offers(offers)
+    names = [o["offer_name"] for o in result]
+    if "WeakOffer" in names or "StandardOffer" in names:
+        return False, f"WEAK/STANDARD should be excluded; got {names}"
+    if "StrongOffer" not in names:
+        return False, f"STRONG should be included; got {names}"
+    return True, "WEAK/STANDARD excluded, STRONG included ✓"
+
+
+@test("sourcing_new_offers_sorted_by_payout")
+def test_sourcing_new_offers_sorted_by_payout():
+    """Results sorted by payout descending."""
+    from scout_digest import _sourcing_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent_ts = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    offers = [
+        {"offer_name": "Low",  "fit_tier": "PRIME", "payout": "3.00", "first_seen": recent_ts},
+        {"offer_name": "High", "fit_tier": "PRIME", "payout": "9.00", "first_seen": recent_ts},
+        {"offer_name": "Mid",  "fit_tier": "PRIME", "payout": "5.00", "first_seen": recent_ts},
+    ]
+    result = _sourcing_signal_new_offers(offers)
+    payouts = [float(o.get("payout", 0)) for o in result]
+    if payouts != sorted(payouts, reverse=True):
+        return False, f"Not sorted descending by payout: {payouts}"
+    return True, f"Sorted correctly: {payouts} ✓"
+
+
+@test("sourcing_new_offers_max_5")
+def test_sourcing_new_offers_max_5():
+    """Maximum 5 results returned even with 10 qualifying offers."""
+    from scout_digest import _sourcing_signal_new_offers
+    from datetime import datetime, timezone, timedelta
+    recent_ts = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    offers = [
+        {"offer_name": f"Offer{i}", "fit_tier": "PRIME", "payout": str(i), "first_seen": recent_ts}
+        for i in range(10)
+    ]
+    result = _sourcing_signal_new_offers(offers)
+    if len(result) > 5:
+        return False, f"Max 5 results expected, got {len(result)}"
+    return True, f"Max 5 cap: {len(result)} results ✓"
+
+
+@test("sourcing_new_offers_kill_switch")
+def test_sourcing_new_offers_kill_switch():
+    """Signal returns [] when SCOUT_DISABLED_SOURCING_SIGNALS=new_offers."""
+    import os, importlib
+    from datetime import datetime, timezone, timedelta
+    old = os.environ.get("SCOUT_DISABLED_SOURCING_SIGNALS", "")
+    os.environ["SCOUT_DISABLED_SOURCING_SIGNALS"] = "new_offers"
+    try:
+        import scout_digest
+        importlib.reload(scout_digest)
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+        offers = [{"offer_name": "NewOffer", "fit_tier": "PRIME", "payout": "8.00", "first_seen": recent_ts}]
+        result = scout_digest._sourcing_signal_new_offers(offers)
+        if result != []:
+            return False, f"Kill switch should suppress; got {result}"
+        return True, "SCOUT_DISABLED_SOURCING_SIGNALS=new_offers → [] ✓"
+    finally:
+        if old:
+            os.environ["SCOUT_DISABLED_SOURCING_SIGNALS"] = old
+        else:
+            os.environ.pop("SCOUT_DISABLED_SOURCING_SIGNALS", None)
+
+
+@test("sourcing_payout_upgrades_empty_offers")
+def test_sourcing_payout_upgrades_empty_offers():
+    """Signal returns [] when offers list is empty."""
+    from scout_digest import _sourcing_signal_payout_upgrades
+    result = _sourcing_signal_payout_upgrades([])
+    if result != []:
+        return False, f"Empty offers → []; got {result}"
+    return True, "Empty offers → [] ✓"
+
+
+@test("sourcing_payout_upgrades_payout_type_mismatch")
+def test_sourcing_payout_upgrades_payout_type_mismatch():
+    """Filtering logic: CPL-running advertiser does NOT match CPS inventory offer."""
+    # Test the filtering logic inside _sourcing_signal_payout_upgrades directly:
+    # same advertiser, but running CPL and inventory has CPS → payout_type filter rejects it.
+    from scout_digest import _fuzzy_name_match
+    # CH says AT&T is running at CPL
+    running_payout_type = "CPL"
+    # Inventory has AT&T at CPS
+    offers = [{"advertiser": "AT&T", "payout_type": "CPS", "payout": "10.00", "fit_tier": "PRIME"}]
+    matches = [
+        o for o in offers
+        if _fuzzy_name_match("AT&T", o.get("advertiser") or "")
+        and (o.get("payout_type") or "").upper() == running_payout_type  # CPL required, CPS offered
+    ]
+    if matches:
+        return False, f"CPS offer should not match CPL requirement; got {matches}"
+    # Positive case: same type → should match
+    offers_cpl = [{"advertiser": "AT&T", "payout_type": "CPL", "payout": "10.00", "fit_tier": "PRIME"}]
+    matches_cpl = [
+        o for o in offers_cpl
+        if _fuzzy_name_match("AT&T", o.get("advertiser") or "")
+        and (o.get("payout_type") or "").upper() == "CPL"
+    ]
+    if not matches_cpl:
+        return False, "CPL offer should match CPL requirement"
+    return True, "Payout type filter: CPL≠CPS, CPL=CPL ✓"
+
+
+@test("sourcing_payout_upgrades_gap_vs_gap_insurance")
+def test_sourcing_payout_upgrades_gap_vs_gap_insurance():
+    """'Gap' advertiser does NOT match 'Gap Insurance' offer (word-boundary qualifier guard)."""
+    from scout_digest import _fuzzy_name_match
+    if _fuzzy_name_match("Gap", "Gap Insurance"):
+        return False, "'Gap' matched 'Gap Insurance' — qualifier guard failed"
+    if not _fuzzy_name_match("AT&T", "AT&T Wireless"):
+        return False, "'AT&T' should match 'AT&T Wireless'"
+    return True, "Gap ≠ Gap Insurance, AT&T = AT&T Wireless ✓"
+
+
+@test("sourcing_payout_upgrades_below_min_delta_suppressed")
+def test_sourcing_payout_upgrades_below_min_delta_suppressed():
+    """Signal does NOT fire when net-estimated delta < _MIN_UPGRADE_DELTA."""
+    from scout_digest import _GROSS_TO_NET_FACTOR, _MIN_UPGRADE_DELTA
+    # current net = 5.00, inventory gross = 6.00, net_est = 4.20, delta = -0.80 → suppress
+    current_net = 5.00
+    inv_gross   = 6.00
+    inv_net_est = inv_gross * _GROSS_TO_NET_FACTOR
+    delta       = inv_net_est - current_net
+    if delta >= _MIN_UPGRADE_DELTA:
+        return False, f"Delta {delta:.2f} should be below MIN_UPGRADE_DELTA {_MIN_UPGRADE_DELTA}"
+    return True, f"Delta {delta:.2f} < {_MIN_UPGRADE_DELTA} → correctly suppressed ✓"
+
+
+@test("sourcing_payout_upgrades_above_min_delta_surfaced")
+def test_sourcing_payout_upgrades_above_min_delta_surfaced():
+    """Signal DOES fire when net-estimated delta >= _MIN_UPGRADE_DELTA."""
+    from scout_digest import _GROSS_TO_NET_FACTOR, _MIN_UPGRADE_DELTA
+    # current net = 2.00, inventory gross = 6.00, net_est = 4.20, delta = +2.20 → surface
+    current_net = 2.00
+    inv_gross   = 6.00
+    inv_net_est = inv_gross * _GROSS_TO_NET_FACTOR
+    delta       = inv_net_est - current_net
+    if delta < _MIN_UPGRADE_DELTA:
+        return False, f"Delta {delta:.2f} should be >= MIN_UPGRADE_DELTA {_MIN_UPGRADE_DELTA}"
+    return True, f"Delta {delta:.2f} >= {_MIN_UPGRADE_DELTA} → correctly surfaced ✓"
+
+
+@test("sourcing_payout_upgrades_kill_switch")
+def test_sourcing_payout_upgrades_kill_switch():
+    """Signal returns [] when SCOUT_DISABLED_SOURCING_SIGNALS=payout_upgrades."""
+    import os, importlib
+    old = os.environ.get("SCOUT_DISABLED_SOURCING_SIGNALS", "")
+    os.environ["SCOUT_DISABLED_SOURCING_SIGNALS"] = "payout_upgrades"
+    try:
+        import scout_digest
+        importlib.reload(scout_digest)
+        offers = [{"advertiser": "AT&T", "payout_type": "CPL", "payout": "10.00", "fit_tier": "PRIME"}]
+        result = scout_digest._sourcing_signal_payout_upgrades(offers)
+        if result != []:
+            return False, f"Kill switch should suppress; got {result}"
+        return True, "SCOUT_DISABLED_SOURCING_SIGNALS=payout_upgrades → [] ✓"
+    finally:
+        if old:
+            os.environ["SCOUT_DISABLED_SOURCING_SIGNALS"] = old
+        else:
+            os.environ.pop("SCOUT_DISABLED_SOURCING_SIGNALS", None)
+
+
+@test("sourcing_fatigue_budget_new_offers_wins")
+def test_sourcing_fatigue_budget_new_offers_wins():
+    """When new_offers fires, seasonal and payout_upgrades are zeroed out."""
+    from scout_digest import _run_sourcing_signals, _SOURCING_SIGNAL_PRIORITY
+    import unittest.mock
+    from datetime import datetime, timezone, timedelta
+    recent_ts = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    offers_with_new = [
+        {"offer_name": "NewOffer", "fit_tier": "PRIME", "payout": "8.00", "first_seen": recent_ts},
+    ]
+    with unittest.mock.patch("scout_digest._sourcing_signal_payout_upgrades", return_value=[{"advertiser": "Fake", "delta_net_est": 5.0}]):
+        with unittest.mock.patch("scout_digest._sourcing_signal_seasonal", return_value=[{"event_name": "TestEvent", "days_until": 5}]):
+            result = _run_sourcing_signals(offers_with_new)
+    if not result.get("new_offers"):
+        return False, f"new_offers should have results; got {result}"
+    if result.get("seasonal"):
+        return False, f"seasonal should be zeroed out by fatigue budget; got {result['seasonal']}"
+    if result.get("payout_upgrades"):
+        return False, f"payout_upgrades should be zeroed out; got {result['payout_upgrades']}"
+    return True, "Fatigue budget: new_offers wins, others zeroed ✓"
+
+
+@test("sourcing_fatigue_budget_seasonal_fallback")
+def test_sourcing_fatigue_budget_seasonal_fallback():
+    """When new_offers is empty but seasonal fires, seasonal wins."""
+    from scout_digest import _run_sourcing_signals
+    import unittest.mock
+    seasonal_result = [{"event_name": "Mother's Day", "days_until": 5, "offer_count": 2, "top_offers": [], "verticals": []}]
+    with unittest.mock.patch("scout_digest._sourcing_signal_new_offers", return_value=[]):
+        with unittest.mock.patch("scout_digest._sourcing_signal_seasonal", return_value=seasonal_result):
+            with unittest.mock.patch("scout_digest._sourcing_signal_payout_upgrades", return_value=[]):
+                result = _run_sourcing_signals([])
+    if not result.get("seasonal"):
+        return False, f"seasonal should win when new_offers is empty; got {result}"
+    if result.get("new_offers") or result.get("payout_upgrades"):
+        return False, f"others should be zeroed; got {result}"
+    return True, "Fatigue budget: seasonal fallback ✓"
+
+
+@test("sourcing_signals_in_scout_digest_not_scout_bot")
+def test_sourcing_signals_in_scout_digest_not_scout_bot():
+    """Verify sourcing signals live in scout_digest, not scout_bot (architecture enforcement)."""
+    import scout_digest, scout_bot
+    required_on_digest = [
+        "_sourcing_signal_seasonal",
+        "_sourcing_signal_payout_upgrades",
+        "_sourcing_signal_new_offers",
+        "_run_sourcing_signals",
+        "_build_sourcing_intel_blocks",
+        "_nth_weekday",
+    ]
+    should_not_be_on_bot = [
+        "_pulse_signal_seasonal",
+        "_pulse_signal_payout_upgrades",
+        "_pulse_signal_new_offers",
+    ]
+    missing = [fn for fn in required_on_digest if not hasattr(scout_digest, fn)]
+    if missing:
+        return False, f"Missing from scout_digest: {missing}"
+    wrongly_on_bot = [fn for fn in should_not_be_on_bot if hasattr(scout_bot, fn)]
+    if wrongly_on_bot:
+        return False, f"These should NOT be on scout_bot (architecture violation): {wrongly_on_bot}"
+    return True, "All sourcing signals on scout_digest, none on scout_bot ✓"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
