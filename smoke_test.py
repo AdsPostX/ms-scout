@@ -1999,6 +1999,80 @@ def test_sourcing_cards_max_3_offers():
     return True, "Max 3 offer cards enforced (exactly 3 shown) ✓"
 
 
+@test("sourcing_cards_payout_type_normalized")
+def test_sourcing_cards_payout_type_normalized():
+    """Payout type must show 'CPL' not '$ PER LEAD' in sourcing cards."""
+    import scout_digest
+    now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    offers = [{"offer_name": "TestOffer", "advertiser": "TestAdv", "payout": "750.00",
+               "payout_type": "$ per lead", "fit_tier": "PRIME", "network": "maxbounty",
+               "first_seen": now_iso}]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    block_text = str(blocks)
+    if "$ PER LEAD" in block_text or "$ per lead" in block_text:
+        return False, f"Raw payout_type still present in output: {block_text[:200]}"
+    if "CPL" not in block_text:
+        return False, f"Expected 'CPL' in normalized output; got: {block_text[:200]}"
+    return True, "Payout type normalized: '$ per lead' → 'CPL' ✓"
+
+
+@test("sourcing_cards_network_header")
+def test_sourcing_cards_network_header():
+    """Each network group must have a 'header' block — not just a section header."""
+    import scout_digest
+    now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    offers = [
+        {"offer_name": "OfferA", "advertiser": "AdvA", "payout": "5.00",
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "maxbounty", "first_seen": now_iso},
+        {"offer_name": "OfferB", "advertiser": "AdvB", "payout": "8.00",
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "cj", "first_seen": now_iso},
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    header_blocks = [b for b in blocks if b.get("type") == "header"]
+    if len(header_blocks) < 2:
+        return False, f"Expected ≥2 header blocks (one per network); got {len(header_blocks)}"
+    return True, f"Network header blocks present: {len(header_blocks)} headers for 2 networks ✓"
+
+
+@test("sourcing_cards_uses_mini_description")
+def test_sourcing_cards_uses_mini_description():
+    """mini_description must be used when present (not truncated description)."""
+    import scout_digest
+    now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    offers = [{"offer_name": "TestOffer", "advertiser": "TestAdv", "payout": "5.00",
+               "payout_type": "CPL", "fit_tier": "PRIME", "network": "cj", "first_seen": now_iso,
+               "mini_description": "This is the mini teaser",
+               "description": "This is the much longer description that should NOT appear"}]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    block_text = str(blocks)
+    if "This is the mini teaser" not in block_text:
+        return False, "mini_description not found in card output"
+    if "much longer description" in block_text:
+        return False, "Fallback description used even though mini_description was present"
+    return True, "mini_description used in preference to description ✓"
+
+
+@test("sourcing_cards_tier_in_right_col")
+def test_sourcing_cards_tier_in_right_col():
+    """Tier badge (PRIME/STRONG) must appear in the right-column field text, not just context."""
+    import scout_digest
+    now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    offers = [{"offer_name": "TestOffer", "advertiser": "TestAdv", "payout": "5.00",
+               "payout_type": "CPL", "fit_tier": "PRIME", "network": "cj", "first_seen": now_iso}]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    section_blocks = [b for b in blocks if b.get("type") == "section" and b.get("fields")]
+    if not section_blocks:
+        return False, "No section blocks with fields found"
+    right_col = section_blocks[0]["fields"][1]["text"]
+    if "PRIME" not in right_col:
+        return False, f"PRIME tier not in right column field text: '{right_col}'"
+    return True, f"Tier badge 'PRIME' present in right column: '{right_col}' ✓"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
