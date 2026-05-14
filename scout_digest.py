@@ -21,7 +21,7 @@ import os
 import pathlib
 import re
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -841,7 +841,7 @@ def _sourcing_signal_enabled(key: str) -> bool:
     return key not in disabled
 
 
-def _nth_weekday(year: int, month: int, n: int, weekday: int) -> "date":
+def _nth_weekday(year: int, month: int, n: int, weekday: int) -> date:
     """
     Return the nth occurrence of weekday (0=Mon … 6=Sun) in month/year.
     n=1 → first occurrence, n=2 → second, etc.
@@ -851,35 +851,33 @@ def _nth_weekday(year: int, month: int, n: int, weekday: int) -> "date":
         _nth_weekday(2026, 6, 3, 6)  → 3rd Sunday in June 2026 → Father's Day (June 21)
         _nth_weekday(2026, 11, 4, 3) → 4th Thursday in Nov 2026 → Thanksgiving (Nov 26)
     """
-    from datetime import date as _date
-    first = _date(year, month, 1)
+    first = date(year, month, 1)
     # days until first occurrence of weekday
     delta = (weekday - first.weekday()) % 7
-    first_occurrence = _date(year, month, first.day + delta)
+    first_occurrence = date(year, month, first.day + delta)
     # advance by (n-1) weeks
-    from datetime import timedelta
     return first_occurrence + timedelta(weeks=n - 1)
 
 
 # date_fn(year) → date.  Fixed holidays use a lambda; floating ones use _nth_weekday.
 _SEASONAL_CALENDAR = [
     # Fixed-date holidays
-    ("Valentine's Day",   ["jewelry", "flowers", "gifts", "dining"],             21, lambda y: __import__("datetime").date(y, 2, 14)),
-    ("St. Patrick's Day", ["dining", "entertainment"],                            7, lambda y: __import__("datetime").date(y, 3, 17)),
-    ("Tax Day",           ["finance", "tax", "software"],                        21, lambda y: __import__("datetime").date(y, 4, 15)),
-    ("4th of July",       ["travel", "retail", "sports"],                        10, lambda y: __import__("datetime").date(y, 7,  4)),
-    ("Halloween",         ["entertainment", "retail"],                           14, lambda y: __import__("datetime").date(y, 10, 31)),
-    ("Black Friday",      ["retail", "electronics", "shopping"],                 21, lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=1)),   # day after 4th Thursday
-    ("Cyber Monday",      ["retail", "electronics", "software"],                 21, lambda y: _nth_weekday(y, 11, 4, 3) + __import__("datetime").timedelta(days=4)),   # Monday after Black Friday
-    ("Christmas/Holiday", ["gifts", "travel", "retail", "experiences"],          30, lambda y: __import__("datetime").date(y, 12, 25)),
-    ("New Year's",        ["travel", "fitness", "health"],                       14, lambda y: __import__("datetime").date(y, 12, 31)),
+    ("Valentine's Day",   ["jewelry", "flowers", "gifts", "dining"],             21, lambda y: date(y, 2, 14)),
+    ("St. Patrick's Day", ["dining", "entertainment"],                            7, lambda y: date(y, 3, 17)),
+    ("Tax Day",           ["finance", "tax", "software"],                        21, lambda y: date(y, 4, 15)),
+    ("4th of July",       ["travel", "retail", "sports"],                        10, lambda y: date(y, 7,  4)),
+    ("Halloween",         ["entertainment", "retail"],                           14, lambda y: date(y, 10, 31)),
+    ("Black Friday",      ["retail", "electronics", "shopping"],                 21, lambda y: _nth_weekday(y, 11, 4, 3) + timedelta(days=1)),   # day after 4th Thursday
+    ("Cyber Monday",      ["retail", "electronics", "software"],                 21, lambda y: _nth_weekday(y, 11, 4, 3) + timedelta(days=4)),   # Monday after Black Friday
+    ("Christmas/Holiday", ["gifts", "travel", "retail", "experiences"],          30, lambda y: date(y, 12, 25)),
+    ("New Year's",        ["travel", "fitness", "health"],                       14, lambda y: date(y, 12, 31)),
     # Floating holidays — computed correctly per year via _nth_weekday
     ("MLK Day Weekend",   ["travel", "leisure"],                                 14, lambda y: _nth_weekday(y, 1, 3, 0)),   # 3rd Monday in Jan
     ("Mother's Day",      ["flowers", "gifts", "jewelry", "experiences"],        21, lambda y: _nth_weekday(y, 5, 2, 6)),   # 2nd Sunday in May
     ("Father's Day",      ["golf", "sports", "tools", "experiences", "gifts"],   21, lambda y: _nth_weekday(y, 6, 3, 6)),   # 3rd Sunday in June
     ("Labor Day Weekend", ["travel", "leisure", "retail"],                       14, lambda y: _nth_weekday(y, 9, 1, 0)),   # 1st Monday in Sep
     ("Thanksgiving Week", ["travel", "retail", "food"],                          14, lambda y: _nth_weekday(y, 11, 4, 3)),  # 4th Thursday in Nov
-    ("Back to School",    ["education", "software", "retail", "electronics"],    30, lambda y: __import__("datetime").date(y, 8, 25)),
+    ("Back to School",    ["education", "software", "retail", "electronics"],    30, lambda y: date(y, 8, 25)),
 ]
 
 
@@ -888,9 +886,7 @@ def _sourcing_signal_seasonal(offers: list) -> list:
     if not _sourcing_signal_enabled("seasonal"):
         return []
 
-    from datetime import date as _date, timedelta
-
-    today = _date.today()
+    today = date.today()
     results = []
 
     for event_name, verticals, window_days, date_fn in _SEASONAL_CALENDAR:
@@ -1047,9 +1043,7 @@ def _sourcing_signal_new_offers(offers: list) -> list:
     if not _sourcing_signal_enabled("new_offers"):
         return []
 
-    from datetime import datetime as _dt, timezone
-
-    cutoff = _dt.now(timezone.utc).timestamp() - (48 * 3600)
+    cutoff = datetime.now(timezone.utc).timestamp() - (48 * 3600)
 
     new_offers = []
     for o in offers:
@@ -1059,7 +1053,7 @@ def _sourcing_signal_new_offers(offers: list) -> list:
         if not fs:
             continue  # predates first_seen field — skip
         try:
-            ts = _dt.fromisoformat(fs.replace("Z", "+00:00")).timestamp()
+            ts = datetime.fromisoformat(fs.replace("Z", "+00:00")).timestamp()
         except Exception:
             continue
         if ts >= cutoff:
@@ -1071,20 +1065,26 @@ def _sourcing_signal_new_offers(offers: list) -> list:
 
 def _run_sourcing_signals(offers: list) -> dict:
     """
-    Run all 3 sourcing signals against the offer inventory.
+    Run sourcing signals lazily in priority order against the offer inventory.
     Applies fatigue budget: emit at most ONE section per digest post.
     Priority: new_offers → seasonal → payout_upgrades.
+    Stops evaluating as soon as a non-empty result is found.
     """
-    signals = {
-        "new_offers":       _sourcing_signal_new_offers(offers),
-        "seasonal":         _sourcing_signal_seasonal(offers),
-        "payout_upgrades":  _sourcing_signal_payout_upgrades(offers),
+    _signal_fns: dict = {
+        "new_offers":      _sourcing_signal_new_offers,
+        "seasonal":        _sourcing_signal_seasonal,
+        "payout_upgrades": _sourcing_signal_payout_upgrades,
     }
-    # Fatigue budget: highest-priority non-empty signal wins; zero out the rest
-    active = next((k for k in _SOURCING_SIGNAL_PRIORITY if signals.get(k)), None)
-    for k in _SOURCING_SIGNAL_PRIORITY:
-        if k != active:
-            signals[k] = []
+    signals: dict = {}
+    found = False
+    for key in _SOURCING_SIGNAL_PRIORITY:
+        if found:
+            signals[key] = []
+        else:
+            result = _signal_fns[key](offers)
+            signals[key] = result
+            if result:
+                found = True
     return signals
 
 
