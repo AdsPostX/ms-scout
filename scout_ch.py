@@ -252,11 +252,11 @@ def _query_intraday_revenue_by_publisher(ch, total_result: dict) -> list[dict]:
         "traffic"        — zero sessions today (no upstream traffic)
         "fill_rate"      — sessions present, zero impressions (offers not serving)
         "ghost_campaign" — impressions > ghost_min, revenue = $0 (postback broken)
-        "cvr_drop"       — impressions + revenue, but CVR < 50% of historical
-        "normal"         — within expected variance (filtered out of returned list)
+        "revenue_down"   — revenue below expected with no single dominant signal
 
-    Only publishers with abs(delta) >= publisher_min_delta AND root_cause != "normal"
-    are included. Cap at 5. Sorted by abs(delta) descending.
+    Only publishers with abs(delta) >= publisher_min_delta are included (all tagged
+    publishers are returned — there is no "normal" filter value). Cap at 5. Sorted
+    by abs(delta) descending.
 
     Note on publisher key mismatch: impressions use `pid` (string), sessions/conversions
     use `user_id` (numeric). We query them separately and align via mv_adpx_users.
