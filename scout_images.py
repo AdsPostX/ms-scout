@@ -134,14 +134,13 @@ def _save_image_cache(cache: dict) -> None:
         _IMAGE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = _IMAGE_CACHE_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(cache, indent=2))
-        import os; os.replace(tmp, _IMAGE_CACHE_PATH)
+        os.replace(tmp, _IMAGE_CACHE_PATH)
     except Exception as e:
         log.debug(f"image cache save failed: {e}")
 
 
 def _cached_external_images(advertiser: str) -> dict | None:
     """Return cached {hero_url, icon_url} if fresh (< 7 days). None if stale or missing."""
-    from datetime import datetime, timezone, timedelta
     cache = _load_image_cache()
     key = advertiser.lower().strip()
     entry = cache.get(key)
@@ -159,7 +158,6 @@ def _cached_external_images(advertiser: str) -> dict | None:
 
 
 def _store_image_cache(advertiser: str, hero_url: str, icon_url: str) -> None:
-    from datetime import datetime, timezone
     cache = _load_image_cache()
     cache[advertiser.lower().strip()] = {
         "hero_url": hero_url,

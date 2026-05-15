@@ -344,8 +344,7 @@ WHERE user_id > 0
         base_rows  = ch.query(baseline_sql, parameters={"min_days": min_days}).result_rows
         names_rows = ch.query(names_sql).result_rows
     except Exception as e:
-        import logging as _log
-        _log.getLogger("scout_agent").warning(f"_query_intraday_revenue_by_publisher query failed: {e}")
+        log.warning(f"_query_intraday_revenue_by_publisher query failed: {e}")
         return []
 
     # Build lookup dicts
