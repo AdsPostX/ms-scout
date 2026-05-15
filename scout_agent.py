@@ -4024,7 +4024,11 @@ def _validate_sql_query(sql: str) -> list:
 
     sql_upper = sql.upper()
     has_prewhere = bool(_re_v.search(r"\bPREWHERE\b", sql_upper))
-    has_created_at = bool(_re_v.search(r"\bCREATED_AT\b", sql_upper))
+    # Only treat created_at as a date filter when it appears in a PREWHERE/WHERE
+    # clause — references in SELECT columns or ORDER BY don't filter rows.
+    has_created_at = bool(
+        _re_v.search(r"\b(?:PREWHERE|WHERE)\b[\s\S]*?\bCREATED_AT\b", sql_upper)
+    )
     has_limit = bool(_re_v.search(r"\bLIMIT\b", sql_upper))
 
     for table in _LARGE_TABLES:

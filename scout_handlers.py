@@ -623,7 +623,7 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     # _generate_offer_copy, _queue_copy_enrichment) sees a uniform shape regardless of
     # origin. PR #105 unified the dispatch — this unifies the data contract.
     raw_category = offer.get("category", "") or ""
-    offer["category"] = raw_category.split(",")[0].strip()
+    offer["category"] = str(raw_category).split(",")[0].strip()
     # Origin tag — distinguishes queue-approved vs sourcing-approved for the internal
     # activation API. Default to queue-approved when the upstream builder didn't tag it.
     offer["source"] = "sourcing-approved" if offer.get("source") == "sourcing_signal" else "queue-approved"

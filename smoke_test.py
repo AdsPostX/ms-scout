@@ -2356,9 +2356,9 @@ def test_sourcing_category_multi_value_shows_first_value_only():
     return True, f"Multi-value category shows first value only: {offer_context_texts[0]!r} ✓"
 
 
-@test("b5_export_surface_importable_from_scout_agent")
-def test_b5_export_surface():
-    """B5 re-export surface guard.
+@test("export_surface_importable_from_scout_agent")
+def test_export_surface_importable_from_scout_agent():
+    """Re-export surface guard (B5 prerequisite).
 
     Before scout_agent.py is split into smaller modules, this test pins the
     exact set of symbols that downstream callers (e.g. scout_digest's deferred

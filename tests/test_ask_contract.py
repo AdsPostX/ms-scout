@@ -135,6 +135,18 @@ class TestValidateSqlQuery(unittest.TestCase):
         self.assertEqual(_validate_sql_query(""), [])
         self.assertEqual(_validate_sql_query(None), [])  # type: ignore[arg-type]
 
+    def test_created_at_in_select_only_does_not_satisfy_date_filter(self):
+        # Regression: an earlier draft used `\bCREATED_AT\b` anywhere in the SQL,
+        # which matched the SELECT column list and silently suppressed the
+        # "no date filter" warning. The scoped pattern must only count
+        # created_at when it appears in PREWHERE/WHERE.
+        sql = "SELECT created_at FROM adpx_tracked_clicks LIMIT 10"
+        warnings = _validate_sql_query(sql)
+        self.assertTrue(
+            any("no date filter" in w and "adpx_tracked_clicks" in w for w in warnings),
+            f"date-filter warning missing — created_at in SELECT must not count, got {warnings!r}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
