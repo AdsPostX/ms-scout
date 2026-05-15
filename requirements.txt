@@ -1,8 +1,10 @@
-requests
-google-api-python-client
-google-auth-oauthlib
-python-dotenv
-clickhouse-connect
-anthropic
-slack-sdk
-pytz
+requests~=2.32
+google-api-python-client~=2.193
+google-auth-oauthlib~=1.3
+python-dotenv~=1.2
+clickhouse-connect~=0.15
+anthropic~=0.97
+slack-sdk~=3.41
+pytz~=2026.1
+# Transitive via google-api-core; pinned floor to keep ≥5.29.6 (GHSA-7gcm-g887-7qv7 / CVE-2026-0994).
+protobuf>=5.29.6,<7.0

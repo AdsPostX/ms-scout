@@ -1,0 +1,24 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "scout_agent", "scout_bot", "scout_handlers", "scout_slack_ui",
+    "scout_state", "scout_types", "scout_notion", "scout_digest", "queries"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.coverage.run]
+source = ["scout_agent", "scout_bot", "scout_handlers", "scout_notion", "scout_digest", "scout_state", "queries"]
+omit = ["tests/*", "smoke_test.py"]
+
+[tool.coverage.report]
+show_missing = true

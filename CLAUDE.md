@@ -70,6 +70,8 @@ Before marking any Scout PR complete, verify ALL of the following:
 - [ ] No "Action: run X" or "Action required" messages added to user-facing Slack output unless the action requires genuine human judgment
 - [ ] Signal Map updated if a new signal was added or an existing one changed
 - [ ] Known Debt updated: resolved items removed, new deferred items added
+- [ ] Delete the worktree after the PR is merged (`git worktree remove <path>`)
+- [ ] Local main fast-forwarded (`git pull --ff-only origin main`) before next PR baseline
 
 **Enforcement:** `smoke_test.py` is not wired to CI. Until it is, running it and pasting the output is the gate. "It's a small change" is how the last 3 production breaks happened.
 
