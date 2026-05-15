@@ -185,7 +185,12 @@ class TestHarvesterAutoWriteGate(unittest.TestCase):
 
 
 class TestFeedbackHelpers(unittest.TestCase):
-    """Part 3.6 — feedback_log writing + PS-nudge state."""
+    """Part 3.6 — feedback_log writing.
+
+    Note: _maybe_append_ps is intentionally a no-op since PR #115 — the P.S.
+    nudge is now delivered via _build_feedback_buttons on every response.
+    Tests for the text-append path were removed when the behavior was retired.
+    """
 
     def setUp(self):
         import scout_handlers
@@ -193,28 +198,11 @@ class TestFeedbackHelpers(unittest.TestCase):
         self.feedback_path = pathlib.Path(self.tmp.name) / "feedback_log.jsonl"
         self._orig_path = scout_handlers._FEEDBACK_LOG
         scout_handlers._FEEDBACK_LOG = self.feedback_path
-        scout_handlers._FEEDBACK_PS_SEEN.clear()
 
     def tearDown(self):
         import scout_handlers
         scout_handlers._FEEDBACK_LOG = self._orig_path
-        scout_handlers._FEEDBACK_PS_SEEN.clear()
         self.tmp.cleanup()
-
-    def test_maybe_append_ps_fires_once_per_user(self):
-        from scout_handlers import _maybe_append_ps
-        first = _maybe_append_ps("U1", "answer")
-        second = _maybe_append_ps("U1", "answer")
-        self.assertIn("tap 👍", first)
-        self.assertEqual(second, "answer")  # no PS on the second call
-
-    def test_maybe_append_ps_writes_ps_shown_row(self):
-        from scout_handlers import _maybe_append_ps
-        _maybe_append_ps("U2", "answer")
-        rows = [json.loads(l) for l in self.feedback_path.read_text().splitlines()]
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["rating"], "ps_shown")
-        self.assertEqual(rows[0]["user"], "U2")
 
     def test_feedback_log_row_appends_ts(self):
         from scout_handlers import _feedback_log_row
@@ -222,6 +210,12 @@ class TestFeedbackHelpers(unittest.TestCase):
         row = json.loads(self.feedback_path.read_text().splitlines()[0])
         self.assertEqual(row["user"], "U3")
         self.assertIn("ts", row)
+
+    def test_maybe_append_ps_is_passthrough(self):
+        """_maybe_append_ps returns text unchanged — PS is now in feedback buttons."""
+        from scout_handlers import _maybe_append_ps
+        self.assertEqual(_maybe_append_ps("U1", "answer"), "answer")
+        self.assertEqual(_maybe_append_ps("U1", "answer"), "answer")
 
 
 if __name__ == "__main__":
