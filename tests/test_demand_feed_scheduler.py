@@ -51,6 +51,7 @@ def _run_one_cycle(tmp_dir: Path, now_dt: datetime) -> MagicMock:
     with patch.object(dm, "_run", mock_run), \
          patch.object(dm, "_now_chicago", return_value=now_dt), \
          patch.object(dm, "_alert_slack"), \
+         patch.object(dm, "_start_http_server"), \
          patch("time.sleep", side_effect=_fake_sleep):
         try:
             dm.main()
