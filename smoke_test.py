@@ -60,23 +60,67 @@ def test(name: str):
 
 @test("Anthropic API — model auth")
 def test_anthropic():
+    """Validate the Anthropic client wiring without hitting the network.
+
+    B1d: replaces the live messages.create() probe with a mock so smoke runs
+    fast and offline-clean. We still verify:
+      • ANTHROPIC_API_KEY is set in env,
+      • the Anthropic client class instantiates,
+      • a Message-shaped response carries the expected attributes.
+    """
+    import types
+    from unittest.mock import patch
+
     import anthropic
+
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         return False, "ANTHROPIC_API_KEY not set"
-    client = anthropic.Anthropic(api_key=api_key)
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+    except Exception as e:
+        return False, f"Anthropic client failed to instantiate: {e}"
+
+    # Synthetic Message-shaped response (matches anthropic.types.Message surface
+    # we actually read: .content list of blocks with .type/.text, .model,
+    # .stop_reason, .role).
+    def _fake_block(text: str):
+        return types.SimpleNamespace(type="text", text=text)
+
+    def _fake_message(model: str):
+        return types.SimpleNamespace(
+            id="msg_smoke_fake",
+            type="message",
+            role="assistant",
+            model=model,
+            stop_reason="end_turn",
+            content=[_fake_block("pong")],
+        )
+
     for model in ("claude-haiku-4-5", "claude-sonnet-4-6"):
-        try:
-            resp = client.messages.create(
-                model=model, max_tokens=5,
-                messages=[{"role": "user", "content": "ping"}]
-            )
-            if resp.content:
-                return True, f"Both models reachable ({model} ✓)"
-            return False, f"{model} returned empty response"
-        except Exception as e:
-            return False, f"{model} failed: {e}"
-    return False, "No models tested"
+        with patch.object(
+            client.messages, "create", return_value=_fake_message(model)
+        ) as mocked:
+            try:
+                resp = client.messages.create(
+                    model=model, max_tokens=5,
+                    messages=[{"role": "user", "content": "ping"}]
+                )
+            except Exception as e:
+                return False, f"{model} mocked call raised: {e}"
+
+        if not mocked.called:
+            return False, f"{model}: messages.create mock was not invoked"
+        if not getattr(resp, "content", None):
+            return False, f"{model}: mocked response missing .content"
+        first = resp.content[0]
+        if getattr(first, "type", None) != "text" or not getattr(first, "text", ""):
+            return False, f"{model}: mocked response content block malformed"
+        if getattr(resp, "model", None) != model:
+            return False, f"{model}: mocked response missing .model attribute"
+
+    return True, "Anthropic client wiring OK (mocked — no network) ✓"
 
 
 # ── Test 3: Entity overrides ──────────────────────────────────────────────────
@@ -2310,6 +2354,57 @@ def test_sourcing_category_multi_value_shows_first_value_only():
     if "Business Services" not in combined:
         return False, f"Expected 'Business Services' (first value only) in context, got: {combined!r}"
     return True, f"Multi-value category shows first value only: {offer_context_texts[0]!r} ✓"
+
+
+@test("b5_export_surface_importable_from_scout_agent")
+def test_b5_export_surface():
+    """B5 re-export surface guard.
+
+    Before scout_agent.py is split into smaller modules, this test pins the
+    exact set of symbols that downstream callers (e.g. scout_digest's deferred
+    in-function imports of _scrape_og_image) rely on being importable from
+    `scout_agent`. If any symbol disappears or is renamed during the split,
+    this test fails with a clear name — catching what unit tests miss because
+    those deferred imports only fire at call time.
+    """
+    expected = [
+        # Infra
+        "_get_ch_client",
+        "_run_parallel",
+        # ClickHouse query helpers
+        "_query_ghost_campaigns",
+        "_query_revenue_baseline",
+        "_query_intraday_revenue_total",
+        "_query_intraday_revenue_by_publisher",
+        "_query_advertiser_rpm_context",
+        # Image helpers
+        "_scrape_og_image",
+        "_clearbit_domain",
+        "_google_favicon",
+        "_app_store_icon",
+        "_validate_image_url",
+        "_load_image_cache",
+        "_save_image_cache",
+        "_cached_external_images",
+        "_store_image_cache",
+        "_ms_cdn_image",
+    ]
+    try:
+        import scout_agent
+    except Exception as e:
+        return False, f"scout_agent failed to import: {e}"
+
+    missing = [name for name in expected if not hasattr(scout_agent, name)]
+    if missing:
+        return False, f"Missing from scout_agent (extraction surface broken): {missing}"
+
+    not_callable = [
+        name for name in expected if not callable(getattr(scout_agent, name))
+    ]
+    if not_callable:
+        return False, f"Surface symbols present but not callable: {not_callable}"
+
+    return True, f"All {len(expected)} extraction-surface symbols importable & callable ✓"
 
 
 if __name__ == "__main__":
