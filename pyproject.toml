@@ -17,7 +17,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 
 [tool.coverage.run]
-source = ["scout_agent", "scout_bot", "scout_handlers", "scout_notion", "scout_digest"]
+source = ["scout_agent", "scout_bot", "scout_handlers", "scout_notion", "scout_digest", "scout_state", "queries"]
 omit = ["tests/*", "smoke_test.py"]
 
 [tool.coverage.report]

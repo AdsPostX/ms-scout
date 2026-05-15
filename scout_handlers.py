@@ -625,8 +625,15 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     raw_category = offer.get("category", "") or ""
     offer["category"] = str(raw_category).split(",")[0].strip()
     # Origin tag — distinguishes queue-approved vs sourcing-approved for the internal
-    # activation API. Default to queue-approved when the upstream builder didn't tag it.
-    offer["source"] = "sourcing-approved" if offer.get("source") == "sourcing_signal" else "queue-approved"
+    # activation API. Normalize first (casing/whitespace, None-safe) and accept either
+    # the raw upstream token ("sourcing_signal") or the already-canonical form so a
+    # re-entrant call doesn't silently misclassify a sourcing offer as queue-approved.
+    raw_source = str(offer.get("source") or "").strip().lower()
+    offer["source"] = (
+        "sourcing-approved"
+        if raw_source in {"sourcing_signal", "sourcing-approved"}
+        else "queue-approved"
+    )
 
     offer_id   = offer.get("offer_id", "")
     advertiser = offer.get("advertiser", "")
