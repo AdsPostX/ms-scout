@@ -63,6 +63,12 @@ QUEUE_LIST_URL = f"https://www.notion.so/{_QUEUE_DB_ID}" if _QUEUE_DB_ID else "h
 # Stop-words for fuzzy name matching
 _STOP_WORDS = {"the", "and", "for", "inc", "llc", "corp", "ltd", "co", "via"}
 
+# Description filtering / truncation
+_SENTENCE_END        = re.compile(r'(?<=[.!?])\s')
+_BAD_SUMMARIES       = frozenset({"default", "n/a", "tbd", "none", "null", ""})
+_SUMMARY_TRUNCATE_LEN     = 78   # max chars for main-digest offer summary
+_ALT_SUMMARY_TRUNCATE_LEN = 120  # max chars for sourcing-intel description teaser
+
 # ── Post-transaction context fit ───────────────────────────────────────────────
 # MS shows offers at the moment a user completes a transaction — high-intent,
 # low-friction offers work. B2B tools, legal services, and complex purchases don't.
@@ -573,7 +579,7 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
         elif payout_type == "CPS":
             fit_reason = " · requires purchase — higher post-transaction friction"
         payout_display = _format_payout(cache_payout, payout_type) if cache_payout else _display_payout_type(payout_type)
-        parts.append(f"{payout_display}{fit_reason}" if payout_display else "New offer — no MS history yet")
+        parts.append(fit_reason.lstrip(" ·") if fit_reason else "New offer — no MS history yet")
 
     # ── Inventory gap — only surface when category is genuinely empty ────────
     # "complements X in the Y slot" is too noisy — word-overlap matching is loose
@@ -680,6 +686,8 @@ def build_digest_blocks(
         net = o.get("network", "")
         network_totals[net] = network_totals.get(net, 0) + 1
 
+    from scout_agent import _network_portal_url as _portal_url  # local import avoids circular dep
+
     # Render each network as its own section with a proper header block.
     # Uses module-level _DIGEST_NETWORKS — single source for the 9-network list.
     for network in _DIGEST_NETWORKS:
@@ -719,17 +727,15 @@ def build_digest_blocks(
             )
             payout_str = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
 
-            # One-line offer summary — first sentence of description, max 80 chars.
-            # Strip newlines: a \n inside the italic field breaks the closing underscore
-            # onto a new line, causing description text to bleed outside the italic span.
             raw_desc   = " ".join((offer.get("description") or "").strip().split())
-            first_sent = raw_desc.split(".")[0].strip()
-            # Guard: if summary repeats the advertiser name, fall back to category
+            first_sent = _SENTENCE_END.split(raw_desc, maxsplit=1)[0].strip()
+            if first_sent.lower().strip(" .") in _BAD_SUMMARIES:
+                first_sent = ""
             if first_sent.lower().strip(" .") == advertiser.lower().strip(" ."):
                 first_sent = ""
             if not first_sent and category and category.lower() not in {"other", "uncategorized", ""}:
                 first_sent = category
-            offer_summary = (first_sent[:78] + "…") if len(first_sent) > 78 else first_sent
+            offer_summary = first_sent[:_SUMMARY_TRUNCATE_LEN].rsplit(" ", 1)[0] + "…" if len(first_sent) > _SUMMARY_TRUNCATE_LEN else first_sent
 
             why = build_why_text(offer, payout_cache, ms_campaigns, benchmarks, adjusted_rpm=_score)
 
@@ -745,55 +751,87 @@ def build_digest_blocks(
                 "description":  offer.get("description", ""),
             })
 
-            # Offer card: 2-col fields + optional thumbnail on the right
-            # Left col: advertiser name + one-line italic summary (omitted if blank)
-            # Right col: payout + geo (geo omitted if non-geographic placeholder value)
-            left_text  = f"*{advertiser}*\n_{offer_summary}_" if offer_summary else f"*{advertiser}*"
-            right_text = f"*{payout_str}*\n{geo}" if geo else f"*{payout_str}*"
-            img_url = (offer_images or {}).get(offer_id, "")
-            offer_block: dict = {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": left_text},
-                    {"type": "mrkdwn", "text": right_text},
-                ],
-            }
-            if img_url and img_url.startswith("http"):
-                offer_block["accessory"] = {
-                    "type": "image",
-                    "image_url": img_url,
-                    "alt_text": advertiser,
-                }
-
-            blocks += [
-                offer_block,
-                {
-                    "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": why}],
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
-                            "style": "primary",
-                            "action_id": "scout_approve",
-                            "value": action_value,
-                        },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "✕  Skip"},
-                        "style": "danger",
-                        "action_id": "scout_reject",
-                        "value": action_value,
-                    },
-                ],
-            },
-            {"type": "divider"},
-        ]
+            img_url    = (offer_images or {}).get(offer_id, "")
+            why_plain  = re.sub(r'[*_]', '', why)
+            portal_url = _portal_url(network, offer_id)
+            blocks    += _build_offer_card_blocks(
+                advertiser, offer_summary, payout_str, geo,
+                tier_badge="", img_url=img_url,
+                why=why_plain, action_value=action_value,
+                network_portal_url=portal_url,
+            )
 
     return blocks
+
+
+def _build_offer_card_blocks(
+    advertiser:         str,
+    offer_summary:      str,
+    payout_str:         str,
+    geo:                str,
+    tier_badge:         str,
+    img_url:            str,
+    why:                str,
+    action_value:       str,
+    network_portal_url: str = "",
+) -> list[dict]:
+    """Shared card renderer — returns [offer_block, rationale_block, actions_block, divider]."""
+    left_text  = f"*{advertiser}*\n_{offer_summary}_" if offer_summary else f"*{advertiser}*"
+    right_text = f"*{payout_str}*{tier_badge}\n{geo}" if geo else f"*{payout_str}*{tier_badge}"
+
+    offer_block: dict = {
+        "type": "section",
+        "fields": [
+            {"type": "mrkdwn", "text": left_text},
+            {"type": "mrkdwn", "text": right_text},
+        ],
+    }
+    if img_url and img_url.startswith("http"):
+        offer_block["accessory"] = {
+            "type":      "image",
+            "image_url": img_url,
+            "alt_text":  advertiser,
+        }
+
+    rationale_block = {
+        "type": "rich_text",
+        "elements": [
+            {
+                "type": "rich_text_quote",
+                "elements": [{"type": "text", "text": why}],
+            }
+        ],
+    }
+
+    action_elements = [
+        {
+            "type":      "button",
+            "text":      {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
+            "style":     "primary",
+            "action_id": "scout_approve",
+            "value":     action_value,
+        },
+        {
+            "type":      "button",
+            "text":      {"type": "plain_text", "text": "✕  Skip"},
+            "action_id": "scout_reject",
+            "value":     action_value,
+        },
+    ]
+    if network_portal_url:
+        action_elements.append({
+            "type":      "button",
+            "text":      {"type": "plain_text", "text": "↗ View"},
+            "url":       network_portal_url,
+            "action_id": "scout_view_offer",
+        })
+
+    return [
+        offer_block,
+        rationale_block,
+        {"type": "actions", "elements": action_elements},
+        {"type": "divider"},
+    ]
 
 
 # ── Sourcing intelligence signals ──────────────────────────────────────────────
@@ -1140,6 +1178,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
     Max 2 cards per network section to keep visual density appropriate.
     """
     from collections import defaultdict
+    from scout_agent import _network_portal_url as _portal_url  # local import avoids circular dep
 
     blocks: list = []
 
@@ -1217,10 +1256,8 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             offer_id    = o.get("offer_id") or o.get("offer_name", "")
             offer_name  = _clean_offer_name(o.get("offer_name", ""))
             advertiser  = _clean_offer_name(o.get("advertiser") or o.get("offer_name", "") or "Unknown")
-            # Use mini_description (purpose-built 120-char teaser) with whitespace-collapsed fallback.
-            # Add ellipsis when truncating so the operator knows the description was cut.
-            _desc_raw = " ".join((o.get("description") or "").split())
-            _desc_trunc = (_desc_raw[:120] + "…") if len(_desc_raw) > 120 else _desc_raw
+            _desc_raw   = " ".join((o.get("description") or "").split())
+            _desc_trunc = _desc_raw[:_ALT_SUMMARY_TRUNCATE_LEN].rsplit(" ", 1)[0] + "…" if len(_desc_raw) > _ALT_SUMMARY_TRUNCATE_LEN else _desc_raw
             summary     = o.get("mini_description") or _desc_trunc
             payout_num  = _parse_payout(o.get("payout"))
             # Fix: use _normalize_payout_type() not .upper() — converts "$ per lead" → "CPL" etc.
@@ -1248,48 +1285,14 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
                 "source":       "sourcing_signal",
             }, separators=(",", ":"))
 
-            left_text  = f"*{advertiser}*\n_{summary}_" if summary else f"*{advertiser}*"
-            # Fix: tier badge inline with payout in right column
-            right_text = f"*{payout_str}*{tier_badge}\n{geo}" if geo else f"*{payout_str}*{tier_badge}"
-
-            offer_block: dict = {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": left_text},
-                    {"type": "mrkdwn", "text": right_text},
-                ],
-            }
-            if img_url and img_url.startswith("http"):
-                offer_block["accessory"] = {
-                    "type":      "image",
-                    "image_url": img_url,
-                    "alt_text":  advertiser,
-                }
-
-            blocks += [
-                offer_block,
-                {"type": "context", "elements": [{"type": "mrkdwn", "text": why}]},
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type":      "button",
-                            "text":      {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
-                            "style":     "primary",
-                            "action_id": "scout_approve",
-                            "value":     action_value,
-                        },
-                        {
-                            "type":      "button",
-                            "text":      {"type": "plain_text", "text": "✕  Skip"},
-                            "style":     "danger",
-                            "action_id": "scout_reject",
-                            "value":     action_value,
-                        },
-                    ],
-                },
-                {"type": "divider"},
-            ]
+            why_plain  = re.sub(r'[*_]', '', why)
+            portal_url = _portal_url(network, str(offer_id))
+            blocks    += _build_offer_card_blocks(
+                advertiser, summary, payout_str, geo,
+                tier_badge=tier_badge, img_url=img_url,
+                why=why_plain, action_value=action_value,
+                network_portal_url=portal_url,
+            )
 
     return blocks
 
@@ -1514,6 +1517,11 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
             {"type": "context", "elements": [{"type": "mrkdwn", "text": new_names}]},
             {"type": "divider"},
         ]
+    elif is_force:
+        new_block = [
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": "_Forced digest — showing all pipeline offers_"}]},
+            {"type": "divider"},
+        ]
     else:
         new_block = [
             {"type": "context", "elements": [{"type": "mrkdwn", "text": "No new offers this week — all offers already in your pipeline."}]},
@@ -1530,11 +1538,19 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
         sourcing_signals = _run_sourcing_signals(all_offers_flat)
         sourcing_blocks  = _build_sourcing_intel_blocks(sourcing_signals)
         if sourcing_blocks:
-            blocks = blocks + [{"type": "divider"}] + sourcing_blocks
+            sourcing_intro = [
+                {"type": "divider"},
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": ":bulb: *Sourcing Intelligence* — proactive signals from Scout"}]},
+            ]
+            blocks = blocks + sourcing_intro + sourcing_blocks
     except Exception as _e:
         log.warning(f"[digest] sourcing intelligence failed (non-fatal): {_e}")
 
-    fallback = f"🎯 Scout Signal — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
+    fallback = (
+        f"🎯 Scout Signal — {run_date} (forced): {total_selected} offers across {len(offers_by_network)} networks"
+        if is_force else
+        f"🎯 Scout Signal — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
+    )
 
     if dry_run:
         print(json.dumps(blocks, indent=2))
