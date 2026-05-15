@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from zoneinfo import ZoneInfo
 from types import MappingProxyType
 from typing import Mapping, Optional
 import anthropic
@@ -5721,7 +5722,13 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     channel_ctx     = _get_channel_context(user_message)
     corrections_ctx = _get_corrections_context()
     caller_ctx      = f"[Caller Slack user_id: {user_id}]\n" if user_id else ""
-    prefix = caller_ctx + channel_ctx + corrections_ctx
+    # Inject current CT date/time so the model never guesses "today" from UTC.
+    _now_ct = datetime.now(ZoneInfo("America/Chicago"))
+    date_ctx = (
+        f"[Current date: {_now_ct.strftime('%A, %B %-d, %Y')} (America/Chicago); "
+        f"current time: {_now_ct.strftime('%-I:%M%p CT').lower()}]\n"
+    )
+    prefix = date_ctx + caller_ctx + channel_ctx + corrections_ctx
     effective_message = (prefix + user_message) if prefix else user_message
     messages = list(history or []) + [{"role": "user", "content": effective_message}]
     # List of brief results — append each draft_campaign_brief call result.
