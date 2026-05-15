@@ -1010,6 +1010,7 @@ def _build_feedback_buttons(query_hash: str) -> list:
 #   _build_signal_header(emoji, title, context="") → list[dict]
 #   _build_item_card(name, left_body, right_body="", context="") → list[dict]
 #   _build_action_row(buttons) → dict
+#   _build_monitor_alert_blocks(emoji, title, items, cta_query) → all silent monitors + revenue tracker
 #
 # Prohibited patterns:
 #   ❌  "  ·  ".join([items])          — use one card per item
@@ -1084,6 +1085,26 @@ def _build_publisher_card(
     if flag_count >= 4:
         context_parts.append(f"_flagged {flag_count}d_")
     return _build_item_card(name, left, right, "  \n".join(context_parts))
+
+
+def _build_monitor_alert_blocks(
+    emoji: str,
+    title: str,
+    items: list[str],
+    cta_query: str = "",
+) -> tuple[str, list[dict]]:
+    """Canonical Block Kit alert for all silent monitors and revenue tracker."""
+    fallback = f"{emoji} {title}"
+    blocks: list[dict] = [*_build_signal_header(emoji, title)]
+    if items:
+        bullet_text = "\n".join(f"• {item}" for item in items[:8])
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": bullet_text}})
+    if cta_query:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"_`@Scout {cta_query}` for the full breakdown_"}],
+        })
+    return fallback, blocks
 
 
 def _format_pulse_blocks(
