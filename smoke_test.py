@@ -1914,7 +1914,7 @@ def test_first_seen_immutable_when_already_set():
 
 @test("sourcing_cards_new_offers_renders_card_format")
 def test_sourcing_cards_new_offers_renders_card_format():
-    """new_offers signal renders Block Kit section cards, not plain mrkdwn list."""
+    """new_offers signal renders Block Kit section cards with unified scout_approve / scout_reject buttons."""
     import scout_digest
     now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
     offers  = [
@@ -1928,14 +1928,16 @@ def test_sourcing_cards_new_offers_renders_card_format():
     card_blocks = [b for b in blocks if b.get("type") == "section" and "fields" in b]
     if not card_blocks:
         return False, f"Expected Block Kit card with 'fields'; got block types: {[b.get('type') for b in blocks]}"
-    # Must have action buttons
+    # Must have action buttons using the unified action_ids (not legacy scout_draft_*)
     action_blocks = [b for b in blocks if b.get("type") == "actions"]
     if not action_blocks:
-        return False, "Expected actions block with Add to Draft / Skip buttons"
+        return False, "Expected actions block with Add to Queue / Skip buttons"
     button_ids = [e.get("action_id") for b in action_blocks for e in b.get("elements", [])]
-    if "scout_draft_add" not in button_ids or "scout_draft_skip" not in button_ids:
-        return False, f"Expected scout_draft_add and scout_draft_skip; got {button_ids}"
-    return True, "new_offers renders rich Block Kit cards with Add to Draft / Skip buttons ✓"
+    if "scout_draft_add" in button_ids or "scout_draft_skip" in button_ids:
+        return False, "Legacy scout_draft_add/skip found — sourcing cards must use scout_approve/scout_reject"
+    if "scout_approve" not in button_ids or "scout_reject" not in button_ids:
+        return False, f"Expected scout_approve and scout_reject; got {button_ids}"
+    return True, "new_offers renders rich Block Kit cards with unified scout_approve / scout_reject buttons ✓"
 
 
 @test("sourcing_cards_payout_upgrades_plain_mrkdwn")
@@ -2038,7 +2040,9 @@ def test_sourcing_cards_network_header():
 
 @test("sourcing_cards_uses_mini_description")
 def test_sourcing_cards_uses_mini_description():
-    """mini_description must be used when present (not truncated description)."""
+    """mini_description must appear in the visible card fields (not truncated description).
+    Note: description still appears in the button action_value for the Notion pipeline —
+    so we check section block fields, not the raw str(blocks) representation."""
     import scout_digest
     now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
     offers = [{"offer_name": "TestOffer", "advertiser": "TestAdv", "payout": "5.00",
@@ -2047,12 +2051,22 @@ def test_sourcing_cards_uses_mini_description():
                "description": "This is the much longer description that should NOT appear"}]
     signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
     blocks = scout_digest._build_sourcing_intel_blocks(signals)
-    block_text = str(blocks)
-    if "This is the mini teaser" not in block_text:
-        return False, "mini_description not found in card output"
-    if "much longer description" in block_text:
-        return False, "Fallback description used even though mini_description was present"
-    return True, "mini_description used in preference to description ✓"
+    # Check only section.fields (visible card text), not actions blocks (which carry description
+    # in the action_value JSON for the Notion pipeline — same as build_digest_blocks does).
+    visible_text_parts = []
+    for b in blocks:
+        if b.get("type") == "section":
+            for f in (b.get("fields") or []):
+                if isinstance(f, dict):
+                    visible_text_parts.append(f.get("text", ""))
+            if b.get("text"):
+                visible_text_parts.append(b["text"].get("text", ""))
+    visible = " ".join(visible_text_parts)
+    if "This is the mini teaser" not in visible:
+        return False, f"mini_description not found in visible card fields: {visible!r}"
+    if "much longer description" in visible:
+        return False, f"Fallback description appeared in visible fields even though mini_description was present: {visible!r}"
+    return True, "mini_description used in visible card fields ✓"
 
 
 @test("sourcing_cards_tier_in_right_col")
@@ -2205,6 +2219,97 @@ def test_sourcing_context_line_shows_age_not_tier():
     if "PRIME" in combined or "STRONG" in combined:
         return False, f"Tier badge found in context line (should only be in right column): '{combined}'"
     return True, f"Context line shows age/category, no tier badge: {offer_context_texts[0]!r} ✓"
+
+
+@test("cold_start_guard_fires_on_any_dominant_date_not_only_today")
+def test_cold_start_guard_fires_on_any_dominant_date_not_only_today():
+    """Cold-start guard must fire when >80% of PRIME offers share YESTERDAY's first_seen date.
+    The guard originally checked today's date — failed in production after midnight UTC when
+    the bulk seed happened the prior calendar day."""
+    import scout_digest
+    from datetime import datetime, timezone, timedelta
+    yesterday_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    # 5 offers all seeded yesterday (not today) → still cold-start
+    offers = [
+        {"offer_name": f"Offer{i}", "advertiser": f"Adv{i}", "payout": str(i + 1),
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "maxbounty", "first_seen": yesterday_iso}
+        for i in range(5)
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    context_texts = [
+        el.get("text", "")
+        for b in blocks if b.get("type") == "context"
+        for el in (b.get("elements") or [])
+        if isinstance(el, dict) and el.get("type") == "mrkdwn"
+    ]
+    combined = " ".join(context_texts)
+    if "new in last 48h" in combined:
+        return False, f"Guard missed yesterday's bulk seed — 'new in last 48h' shown instead of 'top PRIME': {combined!r}"
+    if "top PRIME" not in combined:
+        return False, f"Expected 'top PRIME' when all offers seeded yesterday, got: {combined!r}"
+    return True, "Cold-start guard fires on yesterday's bulk seed date, not only today ✓"
+
+
+@test("sourcing_count_in_context_line_matches_rendered_cards")
+def test_sourcing_count_in_context_line_matches_rendered_cards():
+    """Context line '2 offers · top PRIME' must reflect the RENDERED count (2), not the raw network total (4).
+    Pre-cap: count was set before slicing net_offers[:2], causing '4 offers' with only 2 cards rendered."""
+    import scout_digest
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
+    # 4 offers from one network — per-network cap = 2, context must say "2"
+    offers = [
+        {"offer_name": f"Offer{i}", "advertiser": f"Adv{i}", "payout": str(10 - i),
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "maxbounty", "first_seen": now_iso}
+        for i in range(4)
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    context_texts = [
+        el.get("text", "")
+        for b in blocks if b.get("type") == "context"
+        for el in (b.get("elements") or [])
+        if isinstance(el, dict) and el.get("type") == "mrkdwn"
+    ]
+    combined = " ".join(context_texts)
+    if "4 offer" in combined:
+        return False, f"Context line shows '4 offers' but only 2 cards render (pre-cap bug): {combined!r}"
+    if "2 offer" not in combined:
+        return False, f"Expected '2 offer' in context (rendered count), got: {combined!r}"
+    return True, "Context line count matches rendered card count (2, not raw total 4) ✓"
+
+
+@test("sourcing_category_multi_value_shows_first_value_only")
+def test_sourcing_category_multi_value_shows_first_value_only():
+    """Category field 'Business Services, Marketing' must show only 'Business Services' in the context line."""
+    import scout_digest
+    from datetime import datetime, timezone, timedelta
+    old_iso = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    offers = [
+        {"offer_name": "MultiCatOffer", "advertiser": "MultiCatAdv", "payout": "5.00",
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "cj",
+         "category": "Business Services, Marketing", "first_seen": old_iso}
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    offer_context_texts = []
+    for b in blocks:
+        if b.get("type") != "context":
+            continue
+        for el in (b.get("elements") or []):
+            if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                text = el.get("text", "")
+                if "Business" in text:
+                    offer_context_texts.append(text)
+    if not offer_context_texts:
+        return False, "No context line containing category text found"
+    combined = " ".join(offer_context_texts)
+    if "Marketing" in combined:
+        return False, f"Multi-value category leaked into context — 'Marketing' should be stripped: {combined!r}"
+    if "Business Services" not in combined:
+        return False, f"Expected 'Business Services' (first value only) in context, got: {combined!r}"
+    return True, f"Multi-value category shows first value only: {offer_context_texts[0]!r} ✓"
 
 
 if __name__ == "__main__":

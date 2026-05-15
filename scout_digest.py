@@ -1089,21 +1089,23 @@ def _clean_offer_name(name: str) -> str:
 
 
 def _is_cold_start(offers: list) -> bool:
-    """Return True when >80% of PRIME offers share today's first_seen date.
+    """Return True when >80% of PRIME offers share the same first_seen date.
 
-    Indicates the offer inventory was bulk-seeded in a single scrape run and the
-    'new in last 48h' label would be misleading. Only PRIME offers are counted —
-    STRONG offers are lower-signal and shouldn't drive the cold-start decision.
+    Uses the most-common first_seen date (not today specifically) so the guard
+    fires even when the bulk seed happened yesterday — e.g. scraper ran 2026-05-14,
+    today is 2026-05-15, guard must still detect the cold-start condition.
+    Only PRIME offers are counted — STRONG offers are lower-signal.
     """
-    from datetime import datetime as _dt, timezone as _tz
+    from collections import Counter
 
     prime = [o for o in offers if o.get("fit_tier") == "PRIME" and o.get("first_seen")]
     if not prime:
         return False
-    # Use UTC date — first_seen timestamps are stored as UTC ISO strings
-    today_str = _dt.now(_tz.utc).date().isoformat()
-    today_count = sum(1 for o in prime if (o.get("first_seen") or "")[:10] == today_str)
-    return today_count / len(prime) > 0.8
+    date_counts: Counter = Counter((o.get("first_seen") or "")[:10] for o in prime if (o.get("first_seen") or "")[:10])
+    if not date_counts:
+        return False
+    _, most_common_count = date_counts.most_common(1)[0]
+    return most_common_count / len(prime) > 0.8
 
 
 def _days_in_inventory(o: dict) -> str:
@@ -1164,7 +1166,8 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
         signal_label  = "top PRIME" if cold_start else "new in last 48h"
 
         def context_fn(o):  # noqa: E301
-            cat = (o.get("category") or "").strip()
+            # Use only the first category value (field may be "Business Services, Marketing")
+            cat = (o.get("category") or "").split(",")[0].strip()
             age = _days_in_inventory(o)
             parts = [p for p in [cat, age] if p]
             return f"_{' · '.join(parts)}_" if parts else ""
@@ -1176,7 +1179,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
         signal_label  = f"{evt['event_name']} in {day_str}"
 
         def context_fn(o):  # noqa: E301
-            cat   = (o.get("category") or "").strip()
+            cat   = (o.get("category") or "").split(",")[0].strip()
             tier  = o.get("fit_tier") or ""
             parts = [p for p in [cat, tier] if p]
             label = f"{evt['event_name']} in {day_str}"
@@ -1195,7 +1198,8 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
     for network, net_offers in by_network.items():
         emoji = _NETWORK_EMOJI.get(network, "•")
         label = _NETWORK_LABEL.get(network, network.title())
-        count = len(net_offers)
+        # Use the rendered count (after cap), not pre-cap total, so context line is accurate
+        count = min(len(net_offers), 2)
         plural = "s" if count != 1 else ""
 
         # Network header + count context
@@ -1213,8 +1217,11 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             offer_id    = o.get("offer_id") or o.get("offer_name", "")
             offer_name  = _clean_offer_name(o.get("offer_name", ""))
             advertiser  = _clean_offer_name(o.get("advertiser") or o.get("offer_name", "") or "Unknown")
-            # Use mini_description (purpose-built 120-char teaser) with whitespace-collapsed fallback
-            summary     = o.get("mini_description") or " ".join((o.get("description") or "").split())[:120]
+            # Use mini_description (purpose-built 120-char teaser) with whitespace-collapsed fallback.
+            # Add ellipsis when truncating so the operator knows the description was cut.
+            _desc_raw = " ".join((o.get("description") or "").split())
+            _desc_trunc = (_desc_raw[:120] + "…") if len(_desc_raw) > 120 else _desc_raw
+            summary     = o.get("mini_description") or _desc_trunc
             payout_num  = _parse_payout(o.get("payout"))
             # Fix: use _normalize_payout_type() not .upper() — converts "$ per lead" → "CPL" etc.
             payout_type = _normalize_payout_type(o.get("payout_type") or "")
@@ -1226,13 +1233,19 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             tier_badge  = f"  _{tier}_" if tier else ""
             why         = context_fn(o) if context_fn else ""
 
+            # Action value matches build_digest_blocks() contract so _handle_approve()
+            # can process sourcing-signal approvals through the same pipeline (Notion write,
+            # AI copy, record_approval). "source" is extra metadata the handler ignores.
             action_value = json.dumps({
-                "offer_id":    offer_id,
-                "offer_name":  offer_name,
-                "network":     network,
-                "payout":      payout_num,
-                "payout_type": payout_type,
-                "source":      "sourcing_signal",
+                "offer_id":     offer_id,
+                "advertiser":   advertiser,
+                "payout":       str(payout_num or ""),
+                "payout_type":  payout_type,
+                "category":     (o.get("category") or "").split(",")[0].strip(),
+                "geo":          geo,
+                "tracking_url": o.get("tracking_url") or o.get("deep_link_url") or "",
+                "description":  o.get("description", ""),
+                "source":       "sourcing_signal",
             }, separators=(",", ":"))
 
             left_text  = f"*{advertiser}*\n_{summary}_" if summary else f"*{advertiser}*"
@@ -1261,16 +1274,16 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
                     "elements": [
                         {
                             "type":      "button",
-                            "text":      {"type": "plain_text", "text": "✓  Add to Draft", "emoji": True},
+                            "text":      {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
                             "style":     "primary",
-                            "action_id": "scout_draft_add",
+                            "action_id": "scout_approve",
                             "value":     action_value,
                         },
                         {
                             "type":      "button",
                             "text":      {"type": "plain_text", "text": "✕  Skip"},
                             "style":     "danger",
-                            "action_id": "scout_draft_skip",
+                            "action_id": "scout_reject",
                             "value":     action_value,
                         },
                     ],
