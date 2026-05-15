@@ -5727,17 +5727,20 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     # caller's Slack timezone differs, append their local time as a second line
     # so the model correctly interprets natural language like "this afternoon".
     _now_ct = datetime.now(ZoneInfo("America/Chicago"))
+    _ct_date_str = f"{_now_ct.strftime('%A, %B')} {_now_ct.day}, {_now_ct.year}"
+    _ct_time_str = _now_ct.strftime("%I:%M%p").lstrip("0").lower()
     date_ctx = (
-        f"[Business date: {_now_ct.strftime('%A, %B %-d, %Y')} (America/Chicago) — "
+        f"[Business date: {_ct_date_str} (America/Chicago) — "
         f"all revenue/data reporting uses this date; "
-        f"current CT time: {_now_ct.strftime('%-I:%M%p CT').lower()}]\n"
+        f"current CT time: {_ct_time_str} ct]\n"
     )
     if user_tz and user_tz != "America/Chicago":
         try:
             _now_user = datetime.now(ZoneInfo(user_tz))
             _tz_abbr = _now_user.strftime("%Z")
+            _user_time_str = _now_user.strftime("%I:%M%p").lstrip("0").lower()
             date_ctx += (
-                f"[Requester's local time: {_now_user.strftime('%-I:%M%p').lower()} "
+                f"[Requester's local time: {_user_time_str} "
                 f"{_tz_abbr} ({user_tz}) — use this when interpreting relative "
                 f"time references like 'this morning', 'tonight', '5pm']\n"
             )
