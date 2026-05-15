@@ -616,6 +616,18 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
         log.warning("scout_approve: could not parse action value")
         return
 
+    # Normalize payload across the two call paths (offer-queue cards vs sourcing-signal
+    # cards in scout_digest.py). The sourcing builder already splits category on commas
+    # and tags `source: "sourcing_signal"`; the offer-queue builder does not. Apply the
+    # same normalization here so _write_to_notion_queue (and downstream body text,
+    # _generate_offer_copy, _queue_copy_enrichment) sees a uniform shape regardless of
+    # origin. PR #105 unified the dispatch — this unifies the data contract.
+    raw_category = offer.get("category", "") or ""
+    offer["category"] = raw_category.split(",")[0].strip()
+    # Origin tag — distinguishes queue-approved vs sourcing-approved for the internal
+    # activation API. Default to queue-approved when the upstream builder didn't tag it.
+    offer["source"] = "sourcing-approved" if offer.get("source") == "sourcing_signal" else "queue-approved"
+
     offer_id   = offer.get("offer_id", "")
     advertiser = offer.get("advertiser", "")
     payout     = offer.get("payout", "")
