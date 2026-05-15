@@ -375,15 +375,8 @@ WHERE user_id > 0
             root_cause = "fill_rate"
         elif revenue_today == 0 and impressions_today > ghost_min_impr:
             root_cause = "ghost_campaign"
-        elif (conv_expected > 0 and impressions_today > cvr_min_impr
-              and conv_today / max(impressions_today, 1) < (conv_expected / max(revenue_expected / max(delta, 1), 1)) * 0.5):
-            # Simple CVR proxy: today's conv/impr vs historical conv_expected/revenue_expected ratio
-            root_cause = "cvr_drop"
         else:
-            root_cause = "normal"
-
-        if root_cause == "normal":
-            continue  # within variance, not the cause
+            root_cause = "revenue_down"
 
         results.append({
             "publisher_id":       pub_id,

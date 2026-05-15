@@ -780,8 +780,8 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
     _ROOT_LABELS = {
         "ghost_campaign": "impressions ✓, $0 revenue → ghost campaign",
         "fill_rate":      "zero impressions → fill rate or cap hit",
-        "cvr_drop":       "CVR collapsed vs historical → CVR anomaly",
         "traffic":        "zero sessions → no upstream traffic",
+        "revenue_down":   "revenue below expected, specific cause unclear",
     }
 
     if publishers:

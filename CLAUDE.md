@@ -92,7 +92,7 @@ Before marking any Scout PR complete, verify ALL of the following:
 | Health heartbeat (PR 15c) | `_run_health_heartbeat()` in `scout_bot.py` | Background daemon every 30 min | Calls `_compute_health_status()` + standalone CH ping. CH ping affects HEARTBEAT only — never the HTTP `/health` probe (Render must not restart on CH outage). Posts one Slack alert on transition to degraded after `_HEALTH_CONSECUTIVE_THRESHOLD` consecutive bad checks; one recovery alert on return to ok. PR 16c: `_run_startup_smoke_test()` also fires a one-shot CH ping right after smoke posts so the 35-min warmup window is no longer a blind spot. |
 | Benchmarks warmer (PR 19a) | `_benchmarks_warmer()` in `scout_bot.py` | Background daemon every 30 min | Keeps `_BENCHMARKS` populated in memory by calling `_get_benchmarks()` on a schedule. Boot-time warm happens in `_run_startup_smoke_test()`. `get_scout_status()` self-heals stale/missing benchmarks before reporting. Result: status check never reports "not loaded" except in real CH outage scenarios. |
 | Queue pipeline status (PR 23) | `_fetch_notion_queue_items()` in `scout_notion.py` | `get_queue_status()` agent tool + `app_home_opened` Home tab + `/scout-queue` slash command | TTL-cached (30s module-level). Returns `None` on Notion error, `[]` on empty. Callers distinguish: None → "unavailable", [] → "clear". Three surfaces share one render path: `_build_queue_card()` in `scout_slack_ui.py`. |
-| Revenue tracker (PR 25) | Phase 1: `_query_intraday_revenue_total(ch)` + Phase 2: `_query_intraday_revenue_by_publisher(ch, total)` in `scout_agent.py` | `_revenue_tracker` daemon in `scout_bot.py` only — no agent tool (use `sql_query` for ad-hoc revenue questions) | Weekdays at 3pm CT: Phase 1 checks if projected full-day revenue < 70% of 8-week same-weekday median. Phase 2 (only when Phase 1 trips): per-publisher decomposition with root cause tagging (ghost_campaign / fill_rate / cvr_drop / traffic). Posts once per calendar day to #revenue-operations. State: `last_revenue_alert_date` in `pulse_state.json`. Thresholds: `revenue_tracker_check_hour_ct`, `revenue_tracker_publisher_min_delta`, `revenue_tracker_ghost_min_impressions`, `revenue_tracker_cvr_min_impressions` in `scout_thresholds.json`. |
+| Revenue tracker (PR 25) | Phase 1: `_query_intraday_revenue_total(ch)` + Phase 2: `_query_intraday_revenue_by_publisher(ch, total)` in `scout_agent.py` | `_revenue_tracker` daemon in `scout_bot.py` only — no agent tool (use `sql_query` for ad-hoc revenue questions) | Weekdays at 3pm CT: Phase 1 checks if projected full-day revenue < 70% of 8-week same-weekday median. Phase 2 (only when Phase 1 trips): per-publisher decomposition with root cause tagging (ghost_campaign / fill_rate / revenue_down / traffic). Posts once per calendar day to #revenue-operations. State: `last_revenue_alert_date` in `pulse_state.json`. Thresholds: `revenue_tracker_check_hour_ct`, `revenue_tracker_publisher_min_delta`, `revenue_tracker_ghost_min_impressions`, `revenue_tracker_cvr_min_impressions` in `scout_thresholds.json`. |
 | Pulse diff snapshot (PR 24a) | `_snapshot_keys()` + `signal_consecutive_days` in `scout_bot.py` | `_run_pulse_once()` attaches `_diff_meta` to every signal item; `_format_pulse_blocks()` uses `is_new` / `consecutive_days` for 🆕/↔ rendering | State persisted in `pulse_state.json` as `signal_snapshot` (sets of item keys) + `signal_consecutive_days` (counters). Force runs (to `#scout-qa`) also compute diff but do NOT write snapshot — so scheduled 8am state is never overwritten by ad-hoc runs. |
 
 ---
@@ -314,11 +314,31 @@ Always return plain Python dicts — let the caller decide how to format for Sla
 
 ## Known Debt
 
-Items deferred from review pipelines (PR 15 reviews + ps-lens hardcoding audit, Apr 2026).
-Surfaced automatically at session start via the Session Start Protocol above.
+Items deferred from review pipelines. Surfaced automatically at session start via the Session
+Start Protocol above.
 
 When you start a Scout task, scan this list for items the task touches. If you ship a fix,
 remove the item in the same PR. New deferred items go here, not into gstack files.
+
+Ordering: priority and blast radius — highest first.
+
+---
+
+### P2 — Silent failures (nobody knows until humans notice)
+
+**[Cleanup — paired with smoke cleanup] Anthropic API auth check needs a live replacement before it can be removed from `smoke_test.py`.** Currently the only way Scout notices an Anthropic key revocation is the boot smoke test. If that test is removed without a replacement, Scout silently 401s on every @mention. Required: add a 1-token Anthropic completion ping to `_compute_health_status()` (or a daemon similar to `_run_health_heartbeat` if rate-limit is a concern) BEFORE removing it from `smoke_test.py`. Same PR.
+
+---
+
+### P3 — Data integrity risks (stale data leads to wrong queries or inconsistent state)
+
+**[Future] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. `scout_agent.py` SYSTEM_PROMPT lines ~820-900.
+
+**[Future — PR 25] `get_demand_queue_status()` consolidation** — still reads from local `launched_offers.json`; `get_queue_status()` (PR 23) now reads from Notion. Two sources of truth for queue state. `get_demand_queue_status` could be narrowed further or removed once Notion is the sole source.
+
+---
+
+### P4 — Missing coverage (no current breakage, just blind spots)
 
 **[Action — Vamsee] 5 affiliate networks need API credentials on Render to actually fetch offers** — Scout has scraper code for ShareASale, Rakuten, AWIN, Tune (HasOffers), and Everflow but they all silently `return []` when their env vars aren't set. PR 18 trimmed `SUPPORTED_NETWORKS` and `_DIGEST_NETWORKS_FALLBACK` from 9 → 4 to be honest about coverage. To re-enable each network: set the env vars on Render, then add the network back to `SUPPORTED_NETWORKS` (`scout_agent.py`) and `_DIGEST_NETWORKS_FALLBACK` (`scout_digest.py`). `_NETWORK_LABEL` and `_NETWORK_EMOJI` already have all 9 entries — no edit needed there.
 
@@ -329,23 +349,9 @@ Env var checklist:
 - Tune (per-instance for KASHKICK/BROWNBOOTS/ADACTION/REVOFFERS/ADBLOOM/SUCCESSFUL_MEDIA): `TUNE_<NAME>_NETWORK_ID` + `TUNE_<NAME>_API_KEY`
 - Everflow (per-instance for GIDDYUP/ACCIOADS/KLAYMEDIA/CREDITCOM/MWKCONSULTING/PAWZITIVITY/ARAGONPREMIUM): `EVERFLOW_<NAME>_API_KEY` + `EVERFLOW_<NAME>_BASE_URL`
 
-**[Resolved by PR 19] `from_airbyte_campaigns.categories` is NULL — but data is in `c.tags`.** Original framing was wrong (claimed needed upstream fix). Verified Apr 2026: the column is genuinely NULL across all 4,816 rows, BUT real category data lives in `c.tags` as a JSON array. PR 19 rewrites `queries.performance_benchmarks_raw()` to parse tags via `arrayFilter(t -> NOT startsWith(lower(t), 'internal-'), JSONExtract(coalesce(c.tags, '[]'), 'Array(String)'))` — drops `internal-*` system tags (network/channel metadata), keeps real categories. Result: 25+ categories with usable sample sizes light up Tier 2/3 benchmarks. Same pattern applies to `publisher_top_categories()`. SYSTEM_PROMPT DATA DICTIONARY updated with the same SQL pattern so the LLM ad-hoc `run_sql_query` path uses tags too.
+---
 
-**[New schema-deps pattern — PR 19] Boot-time validation against `system.columns`.** `scout_agent._SCHEMA_DEPS` is a list of `(table, column, must_have_data)` tuples for the columns Scout reads. `_validate_schema_deps(ch)` runs on startup (wired into `_run_startup_smoke_test()` in scout_bot.py), confirms each column exists, and (where `must_have_data=True`) confirms it has at least 100 non-null rows. Violations post to #scout-qa. Catches the "Scout reads a column with no data" class of silent failure that bit us with `categories`. When you add a new ClickHouse query to Scout, add the columns it reads to `_SCHEMA_DEPS`. The threshold lives in `_SCHEMA_DEPS_MIN_ROWS` (=100).
-
-**[Resolved by PR 22] Cleanup — smoke test compliance + boot card redesign** — 14 PR-numbered tests renamed to behavior names, 4 runtime probes deleted (CH/offers/Slack/Notion all covered by heartbeat), `format_slack_blocks()` redesigned to 2-block summary card on all-pass and capped failure list on fail, 5 renderer unit tests added, name validator added at `@test()` decorator (fails at import time on PR-numbered names).
-
-**[Resolved by PR 23] Renderer tests migrated from smoke_test.py to tests/test_boot_card.py** — 5 `unittest.TestCase` tests now in `tests/` directory. Run with `python3 -m unittest discover -s tests -p "test_*.py" -v`. Smoke suite reduced by 5 tests (now 40); new boot invariant `get_queue_status_tool_registered_with_all_contract_pieces` added.
-
-**[Cleanup — paired migration with smoke cleanup] Anthropic API auth check needs a replacement home before it can be deleted from `smoke_test.py`.** Currently the only place Scout would notice an Anthropic API key revocation is the smoke test at boot. If we delete the smoke check without adding a replacement, Scout silently 401s on every @mention until a human notices. Required: add an Anthropic ping (a 1-token completion call) to `_compute_health_status()` (or as a daemon similar to `_run_health_heartbeat` if rate-limit concerns) BEFORE removing it from `smoke_test.py`. Same PR.
-
-**[Future] Signal thresholds in `scout_bot.py` SQL queries are still decorative** — PR 18 wired the `digest` and `health` sections of `config/scout_thresholds.json` to actually drive behavior. The `signals` section (fill_rate_min_sessions_7d, ghost_recency_hours, velocity ±%, cap_alert_pct) is surfaced by `@Scout config` but the SQL queries that use them in `_run_pulse_signals()` and `_query_*` functions still hardcode the literal numbers (e.g. `HAVING sessions_7d > 5000`, `> 48 HOUR`). Editing the JSON for those keys is a no-op until each query is parameterised. Wire them via ClickHouse parameter binding when next touching those queries.
-
-**[Future] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. `scout_agent.py` SYSTEM_PROMPT lines ~820-900.
-
-**[Future] `@test()` category system deferred** — PR 22 added a name validator that rejects PR-numbered test names at import time. The remaining structural gap is test *body* contents: a developer could write `@test("legit-name")` and still call `_get_ch_client()` inside, adding a runtime probe invisibly. The fix is a `category` parameter on `@test` (`"code" | "runtime" | "config"`) with the renderer filtering by category. Deferred because: (a) all 4 current runtime probes are deleted in PR 22, so the risk is absent; (b) adding the parameter requires tagging all ~39 existing tests; (c) it doesn't structurally prevent body-level violations anyway — code review remains the gate. Revisit if runtime probes re-accumulate.
-
-**[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. SYSTEM_PROMPT line ~430 still requires a manual edit when a network is added or removed. This was intentional — converting the 4300-line SYSTEM_PROMPT to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
+### P5 — Future features (deferred by design, no current breakage)
 
 **[Future — PR 24c] CVR anomaly detection** — Ghost pattern (`impressions > 0, revenue = 0`) applied to conversion rate: fire when `cvr_yesterday < 50% of cvr_7d AND payout > $50`. New shared `_query_cvr_anomaly(ch)` in `scout_agent.py`. Truist case: 2% → 0.75% CVR × $325 CPA = $5-6K miss. New thresholds: `cvr_anomaly_drop_pct`, `cvr_anomaly_min_payout`, `cvr_anomaly_min_impressions_7d` (all in `scout_thresholds.json` but not wired yet). Depends on PR 24a diff mechanism for suppression.
 
@@ -353,6 +359,28 @@ Env var checklist:
 
 **[Future — PR 25] Slack Canvas as ambient pipeline board** — `conversations.canvases.create` + `canvases.edit` APIs allow a pinned always-visible canvas in #revenue-operations showing live queue status. Higher value than Slack Lists (no scope gap, simpler write API, shared visibility). Spike before any Slack Lists re-attempt.
 
-**[Future — PR 25] `get_demand_queue_status()` consolidation** — still reads from local `launched_offers.json`; `get_queue_status()` (PR 23) now reads from Notion. The two tools serve different purposes (Notion pipeline view vs ClickHouse impression check), but `get_demand_queue_status` could be narrowed further or removed once Notion becomes the sole source of truth for queue state.
-
 **[Future — PR 25] Slack write-back from queue card** — `views.push` for drill-down from Home tab offer row → push detail view with approve/reject. `reminders.add` for Scout nudging ops when an offer is stuck in "Awaiting Entry" >48h. Both require PR 23 (queue read path) to ship first.
+
+---
+
+### P6 — Minor cleanup (no functional impact)
+
+**[Future] `@test()` category system deferred** — PR 22 added a name validator that rejects PR-numbered test names at import time. The remaining structural gap is test *body* contents: a developer could write `@test("legit-name")` and still call `_get_ch_client()` inside, adding a runtime probe invisibly. The fix is a `category` parameter on `@test` (`"code" | "runtime" | "config"`) with the renderer filtering by category. Deferred because: (a) all 4 current runtime probes are deleted in PR 22, so the risk is absent; (b) adding the parameter requires tagging all ~39 existing tests; (c) code review remains the gate. Revisit if runtime probes re-accumulate.
+
+**[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. SYSTEM_PROMPT line ~430 still requires a manual edit when a network is added or removed. This was intentional — converting the 4300-line SYSTEM_PROMPT to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
+
+---
+
+### Resolved (historical record)
+
+**[Resolved by PR #124] CVR root cause misclassification** — `_get_daily_revenue_anomaly()` in `scout_ch.py` was comparing `conv_today / impressions` (~0.001–0.01) against `conv_expected / (revenue_expected / delta) * 0.5` (~0.5) — different units, always true, so every soft-revenue publisher was labelled `cvr_drop`. Deleted the broken `elif` block, replaced with `else: root_cause = "revenue_down"`. Removed `cvr_drop` from `_ROOT_LABELS` in `scout_bot.py`, added `"revenue_down": "revenue below expected, specific cause unclear"`. Signal Map updated: root cause tags now `ghost_campaign / fill_rate / revenue_down / traffic`.
+
+**[Resolved by PRs #116-121 session] Signal thresholds now wired** — Prior item claimed the `signals` section of `config/scout_thresholds.json` was decorative (editing JSON was a no-op). Verified May 2026: cap, velocity (down/up), and fill rate thresholds ARE wired to actual SQL/logic in `scout_bot.py` (`_CAP_ALERT_PCT:282`, `_VELOCITY_*:337`, `_FILL_RATE_MIN_SESSIONS_7D:593`). Ghost threshold is wired via `scout_ch.py:67` (reads `SCOUT_THRESHOLDS` directly — the `_GHOST_RECENCY_HOURS` variable in `scout_bot.py:194` is dead code but the actual behavior is driven by config). Editing the JSON now takes effect for all 5 thresholds.
+
+**[Resolved by PR 23] Renderer tests migrated from smoke_test.py to tests/test_boot_card.py** — 5 `unittest.TestCase` tests now in `tests/` directory. Run with `python3 -m unittest discover -s tests -p "test_*.py" -v`. Smoke suite reduced by 5 tests (now 40); new boot invariant `get_queue_status_tool_registered_with_all_contract_pieces` added.
+
+**[Resolved by PR 22] Cleanup — smoke test compliance + boot card redesign** — 14 PR-numbered tests renamed to behavior names, 4 runtime probes deleted (CH/offers/Slack/Notion all covered by heartbeat), `format_slack_blocks()` redesigned to 2-block summary card on all-pass and capped failure list on fail, 5 renderer unit tests added, name validator added at `@test()` decorator (fails at import time on PR-numbered names).
+
+**[New schema-deps pattern — PR 19] Boot-time validation against `system.columns`.** `scout_agent._SCHEMA_DEPS` is a list of `(table, column, must_have_data)` tuples for the columns Scout reads. `_validate_schema_deps(ch)` runs on startup (wired into `_run_startup_smoke_test()` in scout_bot.py), confirms each column exists, and (where `must_have_data=True`) confirms it has at least 100 non-null rows. Violations post to #scout-qa. When you add a new ClickHouse query to Scout, add the columns it reads to `_SCHEMA_DEPS`. The threshold lives in `_SCHEMA_DEPS_MIN_ROWS` (=100).
+
+**[Resolved by PR 19] `from_airbyte_campaigns.categories` is NULL — but data is in `c.tags`.** Original framing was wrong (claimed needed upstream fix). Verified Apr 2026: the column is genuinely NULL across all 4,816 rows, BUT real category data lives in `c.tags` as a JSON array. PR 19 rewrites `queries.performance_benchmarks_raw()` to parse tags via `arrayFilter(t -> NOT startsWith(lower(t), 'internal-'), JSONExtract(coalesce(c.tags, '[]'), 'Array(String)'))` — drops `internal-*` system tags, keeps real categories. 25+ categories now light up Tier 2/3 benchmarks.
