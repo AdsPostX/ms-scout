@@ -2231,26 +2231,25 @@ def test_sourcing_context_line_shows_age_not_tier():
     ]
     signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
     blocks = scout_digest._build_sourcing_intel_blocks(signals)
-    # Find context blocks that are per-offer (contain age-style text), skip network-count contexts
-    offer_context_texts = []
-    for b in blocks:
-        if b.get("type") != "context":
-            continue
-        for el in (b.get("elements") or []):
-            if isinstance(el, dict) and el.get("type") == "mrkdwn":
-                text = el.get("text", "")
-                if "ago" in text or "today" in text:
-                    offer_context_texts.append(text)
-    if not offer_context_texts:
-        # It's OK if age is "today" and that didn't match — check for any context with category
+    # Find rich_text_quote blocks that are per-offer (contain age-style or category text)
+    def _extract_rich_text_quote_texts(blocks):
+        texts = []
         for b in blocks:
-            if b.get("type") != "context":
+            if b.get("type") != "rich_text":
                 continue
             for el in (b.get("elements") or []):
-                if isinstance(el, dict) and el.get("type") == "mrkdwn":
-                    text = el.get("text", "")
-                    if "Software" in text:
-                        offer_context_texts.append(text)
+                if el.get("type") != "rich_text_quote":
+                    continue
+                for leaf in (el.get("elements") or []):
+                    if leaf.get("type") == "text":
+                        texts.append(leaf.get("text", ""))
+        return texts
+
+    offer_context_texts = [t for t in _extract_rich_text_quote_texts(blocks)
+                           if "ago" in t or "today" in t]
+    if not offer_context_texts:
+        offer_context_texts = [t for t in _extract_rich_text_quote_texts(blocks)
+                               if "Software" in t]
     if not offer_context_texts:
         return False, "No per-offer context line found with age or category text"
     combined = " ".join(offer_context_texts)
@@ -2333,13 +2332,14 @@ def test_sourcing_category_multi_value_shows_first_value_only():
     blocks = scout_digest._build_sourcing_intel_blocks(signals)
     offer_context_texts = []
     for b in blocks:
-        if b.get("type") != "context":
+        if b.get("type") != "rich_text":
             continue
         for el in (b.get("elements") or []):
-            if isinstance(el, dict) and el.get("type") == "mrkdwn":
-                text = el.get("text", "")
-                if "Business" in text:
-                    offer_context_texts.append(text)
+            if el.get("type") != "rich_text_quote":
+                continue
+            for leaf in (el.get("elements") or []):
+                if leaf.get("type") == "text" and "Business" in leaf.get("text", ""):
+                    offer_context_texts.append(leaf["text"])
     if not offer_context_texts:
         return False, "No context line containing category text found"
     combined = " ".join(offer_context_texts)
