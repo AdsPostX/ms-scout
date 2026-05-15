@@ -1663,8 +1663,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         ch_id  = item.get("channel", "")
         msg_ts = item.get("ts", "")
         try:
-            replies = web.conversations_replies(channel=ch_id, ts=msg_ts, limit=1).get("messages", [{}])
-            scout_msg = replies[0] if replies else {}
+            # reactions.get fetches the exact reacted-to message by ts, whether
+            # it's a channel root or a thread reply — conversations_replies only
+            # works with the thread root ts and silently misses replies.
+            react_resp = web.reactions_get(channel=ch_id, timestamp=msg_ts, full=True)
+            scout_msg  = react_resp.get("message", {})
             if not scout_msg.get("bot_id"):
                 return  # only count reactions on Scout's own messages
             answer_text = scout_msg.get("text", "")[:1000]
@@ -2265,11 +2268,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             response_text     = _sanitize_slack(response_text)[:3000]
             content_blocks    = _text_to_blocks(response_text)
             suggestion_blocks = _build_suggestion_buttons(suggestions)
+            feedback_blocks   = _build_feedback_buttons(msg_ts)
             # No elapsed-time footer in DMs — the reaction disappearing IS the signal
             _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=response_text,
-                blocks=[*content_blocks, *suggestion_blocks],
+                blocks=[*content_blocks, *suggestion_blocks, *feedback_blocks],
                 unfurl_links=False,
             )
             _seed_feedback_reactions(web, channel, _post.get("ts", ""))
@@ -2404,11 +2408,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         response_text     = _sanitize_slack(response_text)[:3000]
         content_blocks    = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
+        feedback_blocks   = _build_feedback_buttons(_placeholder_ts)
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
             text=response_text,
-            blocks=[*content_blocks, *suggestion_blocks,
+            blocks=[*content_blocks, *suggestion_blocks, *feedback_blocks,
                     {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
         )
         _seed_feedback_reactions(web, channel, _placeholder_ts)
