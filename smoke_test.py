@@ -1934,7 +1934,7 @@ def test_sourcing_cards_new_offers_renders_card_format():
         return False, "Expected actions block with Add to Queue / Skip buttons"
     button_ids = [e.get("action_id") for b in action_blocks for e in b.get("elements", [])]
     if "scout_draft_add" in button_ids or "scout_draft_skip" in button_ids:
-        return False, f"Legacy scout_draft_add/skip found — sourcing cards must use scout_approve/scout_reject"
+        return False, "Legacy scout_draft_add/skip found — sourcing cards must use scout_approve/scout_reject"
     if "scout_approve" not in button_ids or "scout_reject" not in button_ids:
         return False, f"Expected scout_approve and scout_reject; got {button_ids}"
     return True, "new_offers renders rich Block Kit cards with unified scout_approve / scout_reject buttons ✓"
