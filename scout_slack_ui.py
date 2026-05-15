@@ -601,7 +601,7 @@ def _build_opportunity_cards(offers: list, thread_ts: str = "") -> list:
         if detail_str:
             text += f"\n_{detail_str}_"
 
-        icon_url = offer.get("icon_url", "")
+        icon_url = offer.get("icon_url", "") or offer.get("hero_url", "")
         section: dict = {"type": "section", "text": {"type": "mrkdwn", "text": text}}
         if icon_url and icon_url.startswith("http"):
             section["accessory"] = {"type": "image", "image_url": icon_url, "alt_text": advertiser}
