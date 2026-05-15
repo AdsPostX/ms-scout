@@ -127,7 +127,11 @@ def _get_user_tz(web: WebClient, user_id: str) -> str:
 
 
 def _already_retried(msg_ts: str) -> bool:
-    """True if this message already triggered a down_retry — prevents infinite retry loop."""
+    """True if this message already triggered a down_retry — prevents infinite retry loop.
+
+    Checks both message_ts (original question) and retry_message_ts (the retry
+    reply) so that 👎-ing the retry itself doesn't spawn a second retry loop.
+    """
     if not _FEEDBACK_LOG.exists():
         return False
     try:
@@ -135,7 +139,9 @@ def _already_retried(msg_ts: str) -> bool:
             for line in fh:
                 try:
                     row = json.loads(line)
-                    if row.get("message_ts") == msg_ts and row.get("rating") == "down_retry":
+                    if row.get("rating") != "down_retry":
+                        continue
+                    if row.get("message_ts") == msg_ts or row.get("retry_message_ts") == msg_ts:
                         return True
                 except json.JSONDecodeError:
                     continue
@@ -210,14 +216,20 @@ def _retry_with_hint(web: WebClient, channel: str, msg_ts: str,
         answer_text = scout_msg.get("text", "")[:1000]
         parent_ts = scout_msg.get("thread_ts") or ""
         question_text = ""
-        if parent_ts and parent_ts != msg_ts:
+        if parent_ts:
             try:
-                parent_replies = web.conversations_replies(
-                    channel=channel, ts=parent_ts, limit=1
-                ).get("messages", [{}])
-                parent = parent_replies[0] if parent_replies else {}
-                if not parent.get("bot_id"):
-                    question_text = parent.get("text", "")[:500]
+                # Walk all thread messages to find the last non-bot message
+                # that precedes msg_ts — this is what the user actually asked,
+                # not necessarily the thread-root opening message.
+                thread_msgs = web.conversations_replies(
+                    channel=channel, ts=parent_ts, limit=50
+                ).get("messages", [])
+                for m in reversed(thread_msgs):
+                    if m.get("ts", "") >= msg_ts:
+                        continue  # skip the Scout reply itself and anything after
+                    if not m.get("bot_id") and m.get("text", "").strip():
+                        question_text = m["text"][:500]
+                        break
             except Exception:
                 pass
         if not question_text:
