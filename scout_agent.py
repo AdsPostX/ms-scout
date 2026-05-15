@@ -241,8 +241,8 @@ def _load_entity_overrides() -> dict:
                     if (entry or {}).get("added_by", "") != "harvester"
                 }
             return raw
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("_load_entity_overrides swallowed: %s", e)
     return {"publishers": {}, "advertisers": {}}
 
 
@@ -270,15 +270,15 @@ def _get_corrections_context() -> str:
         if _TEAM_CORRECTIONS_PATH.exists():
             data = json.loads(_TEAM_CORRECTIONS_PATH.read_text())
             corrections += [c for c in data.get("corrections", []) if c.get("confidence") == "high"]
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("_get_corrections_context team_corrections swallowed: %s", e)
     try:
         # Runtime corrections (accumulated from team feedback via @Scout learn)
         if _LEARNINGS_PATH.exists():
             data = json.loads(_LEARNINGS_PATH.read_text())
             corrections += [c for c in data.get("corrections", []) if c.get("confidence") == "high"]
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("_get_corrections_context learnings swallowed: %s", e)
     # Entity overrides (publisher + advertiser notes recorded by the team via @Scout)
     # Plan v3 §3.5: emit provenance (added_by + added date) inline so the LLM can
     # cite "[learned from <user> on <date>]" when it surfaces an override fact.
@@ -292,8 +292,8 @@ def _get_corrections_context() -> str:
             prov = f" [learned from {data.get('added_by','?')} on {data.get('added','?')}]"
             corrections.append({"confidence": "high",
                                  "correction": f"Advertiser {adv}: {data['note']}{prov}"})
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("_get_corrections_context overrides swallowed: %s", e)
     if not corrections:
         return ""
     lines = [f"- {c['correction']}" for c in corrections[-16:]]
@@ -345,7 +345,8 @@ def _get_channel_context(query: str) -> str:
             + "\n".join(parts)
             + "\n\n"
         )
-    except Exception:
+    except Exception as e:
+        log.debug("_get_channel_context swallowed: %s", e)
         return ""
 
 
@@ -1370,6 +1371,7 @@ Rules:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CLICKHOUSE DATA DICTIONARY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Schema last audited: 2026-05-14
 
 ── CRITICAL TYPE RULES — read before writing any SQL ────────────────────────────────────────────
 
@@ -1387,14 +1389,17 @@ CLICKHOUSE DATA DICTIONARY
 
 adpx_sdk_sessions [460M] — one row per SDK session (user visit to confirmation page)
   SORT: (user_id, created_at, id) | JOIN KEY: session_id (String UUID) | id (UInt64) = row key only
-  MATERIALIZED: placement, country, state, city, zipcode, version, nexos, os, device
+  MATERIALIZED: placement, country, state, city, zipcode, version, nexos
   COLS: user_id (UInt64, publisher), pub_user_id (loyalty member), is_offerwall, is_embedded, is_mou,
-    subid, tags (Array), source, browser, fingerprint, parent_session_id, conversions (pre-computed)
+    subid, tags (Array), source, browser, os, device, fingerprint, parent_session_id,
+    conversions (UInt32 pre-computed)
 
 adpx_impressions_details [582M] — one row per offer impression
   SORT: (pid, campaign_id, created_at, id) | pid (String) = publisher ID (NOT user_id)
   Join to users: i.pid = toString(u.id)
-  COLS: session_id (join key), campaign_id, offer_id, position (carousel slot 1/2/3)
+  COLS: session_id (join key), campaign_id (UInt64), oid (String offer id — NOT offer_id),
+    position (Int32 carousel slot 1/2/3), subid, ip, location, device, browser, os, user_agent,
+    fingerprint, parent_session_id, is_offerwall, is_mou, is_embedded
 
 adpx_tracked_clicks [17M] — one row per carousel click
   SORT: (user_id, campaign_id, created_at, id)
@@ -2483,7 +2488,8 @@ def _scrape_og_image(url: str) -> str:
         parser = _OGParser()
         parser.feed(html)
         return parser.og_image
-    except Exception:
+    except Exception as e:
+        log.debug("_scrape_og_image swallowed: %s", e)
         return ""
 
 
@@ -2658,7 +2664,8 @@ def _validate_image_url(url: str) -> bool:
         )
         with urllib.request.urlopen(req, timeout=3) as r:
             return "image" in r.headers.get("Content-Type", "")
-    except Exception:
+    except Exception as e:
+        log.debug("_validate_image_url swallowed: %s", e)
         return False
 
 
@@ -2674,7 +2681,8 @@ def _load_image_cache() -> dict:
         try:
             if _IMAGE_CACHE_PATH.exists():
                 _image_cache_mem = json.loads(_IMAGE_CACHE_PATH.read_text())
-        except Exception:
+        except Exception as e:
+            log.debug("_load_image_cache swallowed: %s", e)
             _image_cache_mem = {}
         _image_cache_loaded = True
     return _image_cache_mem
@@ -2703,7 +2711,8 @@ def _cached_external_images(advertiser: str) -> dict | None:
         cached_at = datetime.fromisoformat(cached_at_str).replace(tzinfo=timezone.utc)
         if (datetime.now(timezone.utc) - cached_at).days >= _IMAGE_CACHE_TTL_DAYS:
             return None  # stale
-    except Exception:
+    except Exception as e:
+        log.debug("_cached_external_images swallowed: %s", e)
         return None
     return entry
 
@@ -3151,8 +3160,8 @@ def _load_launched_offers_state() -> dict:
     try:
         if _LAUNCHED_OFFERS_PATH.exists():
             return json.loads(_LAUNCHED_OFFERS_PATH.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("_load_launched_offers_state swallowed: %s", e)
     return {}
 
 
@@ -3161,8 +3170,8 @@ def _load_pulse_state_local() -> dict:
     try:
         if _PULSE_STATE_PATH.exists():
             return json.loads(_PULSE_STATE_PATH.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("_load_pulse_state_local swallowed: %s", e)
     return {}
 
 
@@ -3209,7 +3218,8 @@ def get_scout_config() -> dict:
         try:
             from scout_digest import _DIGEST_NETWORKS as _live_networks  # type: ignore
             live_networks = list(_live_networks)
-        except Exception:
+        except Exception as e:
+            log.debug("get_scout_config live_networks swallowed: %s", e)
             live_networks = []
 
         return {
@@ -3308,7 +3318,8 @@ def get_demand_queue_status() -> dict:
             try:
                 approved_dt = datetime.fromisoformat(approved_at_str.replace("Z", "+00:00"))
                 days_queued = (datetime.now(_tz.utc) - approved_dt).days
-            except Exception:
+            except Exception as e:
+                log.debug("get_demand_queue_status approved_at parse swallowed: %s", e)
                 days_queued = 0
 
         result_items.append({
@@ -3497,8 +3508,8 @@ def get_advertiser_revenue_projection(
                         f"Campaign {cid}: ${float(mb):,.0f} monthly budget cap"
                     )
                     monthly_cap_total = (monthly_cap_total or 0) + float(mb)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("_fetch_cap_data swallowed: %s", e)
 
     # ── Step 3: Projection ────────────────────────────────────────────────────
     total_revenue_30d     = sum(r[4] for r in baseline_rows)
@@ -3817,11 +3828,13 @@ def get_campaign_status(advertiser_name: str) -> dict:
             entity, change_type_raw, old_data_str, new_data_str, created_at, user_type, user_role = row
             try:
                 old_data = _json.loads(old_data_str) if old_data_str else {}
-            except Exception:
+            except Exception as e:
+                log.debug("get_campaign_status old_data parse swallowed: %s", e)
                 old_data = {}
             try:
                 new_data = _json.loads(new_data_str) if new_data_str else {}
-            except Exception:
+            except Exception as e:
+                log.debug("get_campaign_status new_data parse swallowed: %s", e)
                 new_data = {}
 
             # Determine change type
@@ -3985,6 +3998,48 @@ def get_perkswall_engagement(
         return {"error": str(e), "publisher_name": publisher_name, "publisher_id": publisher_id}
 
 
+_LARGE_TABLES = (
+    "adpx_sdk_sessions",
+    "adpx_impressions_details",
+    "adpx_tracked_clicks",
+    "adpx_conversionsdetails",
+)
+
+
+def _validate_sql_query(sql: str) -> list:
+    """
+    Lightweight safety validator for run_sql_query.
+
+    Returns a list of warning strings (empty = clean). NEVER blocks execution —
+    callers should log the warnings but proceed. Heuristics:
+      - References a large table without PREWHERE → warn
+      - References a large table without any created_at filter → warn
+      - Lacks any LIMIT clause → warn
+    """
+    import re as _re_v
+
+    warnings: list = []
+    if not sql or not isinstance(sql, str):
+        return warnings
+
+    sql_upper = sql.upper()
+    has_prewhere = bool(_re_v.search(r"\bPREWHERE\b", sql_upper))
+    has_created_at = bool(_re_v.search(r"\bCREATED_AT\b", sql_upper))
+    has_limit = bool(_re_v.search(r"\bLIMIT\b", sql_upper))
+
+    for table in _LARGE_TABLES:
+        if _re_v.search(r"\b" + _re_v.escape(table) + r"\b", sql, _re_v.IGNORECASE):
+            if not has_prewhere:
+                warnings.append(f"missing PREWHERE on large table: {table}")
+            if not has_created_at:
+                warnings.append(f"no date filter on large table: {table}")
+
+    if not has_limit:
+        warnings.append("no LIMIT clause")
+
+    return warnings
+
+
 def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
     """
     Execute an arbitrary SELECT query against ClickHouse.
@@ -4001,6 +4056,11 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
             "error": "Only SELECT queries are allowed. No INSERT, UPDATE, DELETE, DROP, etc.",
             "sql": sql_stripped,
         }
+
+    # Safety gate — log warnings for queries hitting large tables without filters.
+    # Logs only — does NOT block execution.
+    for _warning in _validate_sql_query(sql_stripped):
+        log.warning("sql_query safety: %s", _warning)
 
     # Inject LIMIT if not present
     sql_upper = sql_stripped.upper()
@@ -4880,8 +4940,8 @@ def get_usage_report(requesting_user_id: str = "") -> str:
             continue
         try:
             records.append(_json.loads(line))
-        except Exception:
-            pass  # skip malformed lines
+        except Exception as e:
+            log.debug("get_usage_report malformed line swallowed: %s", e)
     now = datetime.utcnow()  # naive UTC to match stored timestamps (utcnow().isoformat())
     cutoff_7d  = now - timedelta(days=7)
     cutoff_30d = now - timedelta(days=30)
@@ -4979,8 +5039,8 @@ def forget_entity_note(entity_name: str, entity_type: str,
                 "by_user_id": _caller_user_id or "",
                 "permalink": _caller_permalink or "",
             }) + "\n")
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("forget_entity_note audit swallowed: %s", e)
 
     return (f":wastebasket: Forgot the note about *{entity_name}* ({entity_type}). "
             f"Was: _{dropped.get('note','(no note)')}_")
@@ -5759,7 +5819,8 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
             if sugg_match:
                 try:
                     suggestions = json.loads(sugg_match.group(1))
-                except Exception:
+                except Exception as e:
+                    log.debug("ask suggestions parse swallowed: %s", e)
                     suggestions = []
                 text = text[:sugg_match.start()].rstrip()
 
