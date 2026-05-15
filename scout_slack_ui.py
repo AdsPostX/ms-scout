@@ -982,6 +982,7 @@ def _build_feedback_buttons(query_hash: str) -> list:
                     "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
                     "action_id": "scout_feedback_bad",
                     "value": query_hash,
+                    "style": "danger",
                 },
                 {
                     "type": "button",
