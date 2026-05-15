@@ -64,8 +64,10 @@ QUEUE_LIST_URL = f"https://www.notion.so/{_QUEUE_DB_ID}" if _QUEUE_DB_ID else "h
 _STOP_WORDS = {"the", "and", "for", "inc", "llc", "corp", "ltd", "co", "via"}
 
 # Description filtering / truncation
-_SENTENCE_END  = re.compile(r'(?<=[.!?])\s')
-_BAD_SUMMARIES = frozenset({"default", "n/a", "tbd", "none", "null", ""})
+_SENTENCE_END        = re.compile(r'(?<=[.!?])\s')
+_BAD_SUMMARIES       = frozenset({"default", "n/a", "tbd", "none", "null", ""})
+_SUMMARY_TRUNCATE_LEN     = 78   # max chars for main-digest offer summary
+_ALT_SUMMARY_TRUNCATE_LEN = 120  # max chars for sourcing-intel description teaser
 
 # ── Post-transaction context fit ───────────────────────────────────────────────
 # MS shows offers at the moment a user completes a transaction — high-intent,
@@ -733,7 +735,7 @@ def build_digest_blocks(
                 first_sent = ""
             if not first_sent and category and category.lower() not in {"other", "uncategorized", ""}:
                 first_sent = category
-            offer_summary = first_sent[:78].rsplit(" ", 1)[0] + "…" if len(first_sent) > 78 else first_sent
+            offer_summary = first_sent[:_SUMMARY_TRUNCATE_LEN].rsplit(" ", 1)[0] + "…" if len(first_sent) > _SUMMARY_TRUNCATE_LEN else first_sent
 
             why = build_why_text(offer, payout_cache, ms_campaigns, benchmarks, adjusted_rpm=_score)
 
@@ -1255,7 +1257,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             offer_name  = _clean_offer_name(o.get("offer_name", ""))
             advertiser  = _clean_offer_name(o.get("advertiser") or o.get("offer_name", "") or "Unknown")
             _desc_raw   = " ".join((o.get("description") or "").split())
-            _desc_trunc = _desc_raw[:120].rsplit(" ", 1)[0] + "…" if len(_desc_raw) > 120 else _desc_raw
+            _desc_trunc = _desc_raw[:_ALT_SUMMARY_TRUNCATE_LEN].rsplit(" ", 1)[0] + "…" if len(_desc_raw) > _ALT_SUMMARY_TRUNCATE_LEN else _desc_raw
             summary     = o.get("mini_description") or _desc_trunc
             payout_num  = _parse_payout(o.get("payout"))
             # Fix: use _normalize_payout_type() not .upper() — converts "$ per lead" → "CPL" etc.
@@ -1544,7 +1546,11 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
     except Exception as _e:
         log.warning(f"[digest] sourcing intelligence failed (non-fatal): {_e}")
 
-    fallback = f"🎯 Scout Signal — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
+    fallback = (
+        f"🎯 Scout Signal — {run_date} (forced): {total_selected} offers across {len(offers_by_network)} networks"
+        if is_force else
+        f"🎯 Scout Signal — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
+    )
 
     if dry_run:
         print(json.dumps(blocks, indent=2))
