@@ -1977,7 +1977,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                              text=f":hourglass_flowing_sand: Running `{monitor_name}` monitor now — results will follow...")
         def _run(_fn=fn, _ch=channel, _t=thread_ts):
             try:
-                _fn(web, _ch)
+                _fn(web, _ch, _t)
             except Exception as e:
                 log.error(f"[force {monitor_name}] failed: {e}", exc_info=True)
                 web.chat_postMessage(channel=_ch, thread_ts=_t, text=f":x: Force `{monitor_name}` failed: {e}")
