@@ -1089,16 +1089,15 @@ def _clean_offer_name(name: str) -> str:
 
 
 def _is_cold_start(offers: list) -> bool:
-    """Return True when >80% of PRIME/STRONG offers share today's first_seen date.
+    """Return True when >80% of PRIME offers share today's first_seen date.
 
     Indicates the offer inventory was bulk-seeded in a single scrape run and the
-    'new in last 48h' label would be misleading.
+    'new in last 48h' label would be misleading. Only PRIME offers are counted —
+    STRONG offers are lower-signal and shouldn't drive the cold-start decision.
     """
-    from datetime import date as _date
-
     from datetime import datetime as _dt, timezone as _tz
 
-    prime = [o for o in offers if o.get("fit_tier") in ("PRIME", "STRONG") and o.get("first_seen")]
+    prime = [o for o in offers if o.get("fit_tier") == "PRIME" and o.get("first_seen")]
     if not prime:
         return False
     # Use UTC date — first_seen timestamps are stored as UTC ISO strings
@@ -1187,9 +1186,11 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
         return blocks
 
     # ── Group by network for header-per-network layout ────────────────────────────
+    # Normalize key to lowercase to prevent "CJ" vs "cj" creating separate buckets
     by_network: dict = defaultdict(list)
     for o in active_offers:
-        by_network[o.get("network") or "unknown"].append(o)
+        net_key = (o.get("network") or "unknown").strip().lower()
+        by_network[net_key].append(o)
 
     for network, net_offers in by_network.items():
         emoji = _NETWORK_EMOJI.get(network, "•")
