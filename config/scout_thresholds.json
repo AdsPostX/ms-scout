@@ -24,7 +24,16 @@
     "revenue_tracker_check_hour_ct": 14,
     "revenue_tracker_publisher_min_delta": 500,
     "revenue_tracker_ghost_min_impressions": 100,
-    "revenue_tracker_cvr_min_impressions": 500
+    "revenue_tracker_cvr_min_impressions": 500,
+    "pulse_legacy_enabled": false,
+    "cap_monitor_enabled": false,
+    "cap_monitor_check_hour_ct": 9,
+    "velocity_down_monitor_enabled": false,
+    "velocity_down_monitor_check_hour_ct": 9,
+    "ghost_monitor_enabled": false,
+    "ghost_monitor_check_hour_ct": 9,
+    "fill_monitor_enabled": false,
+    "fill_monitor_check_hour_ct": 9
   },
   "health": {
     "offer_staleness_hours": 30,

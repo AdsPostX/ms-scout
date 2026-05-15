@@ -173,6 +173,52 @@ def _save_revenue_alert_date(date_str: str) -> None:
     _save_pulse_state(state)
 
 
+# ── Per-monitor alert state ───────────────────────────────────────────────────
+# Each silent monitor (cap, velocity_down, ghost, fill) gets its own state key in
+# pulse_state.json so the first fire of the day doesn't suppress the others.
+# Without separate keys, all four monitors would share `last_revenue_alert_date`
+# and only the first one to fire on a given day would post.
+
+def _load_cap_alert_state() -> str | None:
+    return _load_pulse_state().get("last_cap_alert_date")
+
+
+def _save_cap_alert_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_cap_alert_date"] = date_str
+    _save_pulse_state(state)
+
+
+def _load_velocity_down_alert_state() -> str | None:
+    return _load_pulse_state().get("last_velocity_down_alert_date")
+
+
+def _save_velocity_down_alert_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_velocity_down_alert_date"] = date_str
+    _save_pulse_state(state)
+
+
+def _load_ghost_alert_state() -> str | None:
+    return _load_pulse_state().get("last_ghost_alert_date")
+
+
+def _save_ghost_alert_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_ghost_alert_date"] = date_str
+    _save_pulse_state(state)
+
+
+def _load_fill_alert_state() -> str | None:
+    return _load_pulse_state().get("last_fill_alert_date")
+
+
+def _save_fill_alert_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_fill_alert_date"] = date_str
+    _save_pulse_state(state)
+
+
 # ── Pulse state ────────────────────────────────────────────────────────────────
 
 def _load_pulse_state() -> dict:

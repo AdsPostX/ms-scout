@@ -674,6 +674,20 @@ def _pulse_signal_enabled(key: str) -> bool:
     return key not in disabled
 
 
+def _monitor_enabled(key: str) -> bool:
+    """Return True if the silent monitor `key` is opted in via config.
+
+    Monitors are opt-in by default (False) — flip
+    SCOUT_THRESHOLDS["signals"][f"{key}_monitor_enabled"] to true in
+    config/scout_thresholds.json once validated.
+
+    Distinct from _pulse_signal_enabled (env-var, opt-out) — monitors are a
+    different concern (post-only-on-anomaly daemons replacing the pulse digest).
+    """
+    from scout_agent import SCOUT_THRESHOLDS
+    return bool(SCOUT_THRESHOLDS.get("signals", {}).get(f"{key}_monitor_enabled", False))
+
+
 # Proactive signal priority (fatigue budget: max 1 per pulse)
 _PROACTIVE_SIGNAL_PRIORITY = ["new_offers", "payout_upgrades"]
 
@@ -877,6 +891,238 @@ def _revenue_tracker(web, ch) -> None:
 
         except Exception as e:
             log.error(f"[revenue-tracker] Fatal crash — restarting in 30s: {e}", exc_info=True)
+            _time.sleep(30)
+
+
+# ── Silent per-signal monitors (decomposed pulse) ────────────────────────────
+# Each monitor mirrors the _revenue_tracker shape:
+#   outer restart wrapper + inner 5-min poll loop
+#   feature flag via _monitor_enabled(<key>) — opt-in, default False
+#   fire window: target hour CT ± 10 minutes (configurable via
+#     SCOUT_THRESHOLDS["signals"][f"{key}_monitor_check_hour_ct"], default 9)
+#   idempotent per calendar day via _load/_save_<key>_alert_state in scout_state
+#   silent unless the underlying signal returns non-empty
+# These replace the daily 8am _proactive_pulse — alert only when there's
+# something to act on, not "all 6 signals nominal" digests.
+
+
+def _format_cap_alert(rows: list) -> str:
+    lines = [":warning: *Cap alert — advertisers approaching monthly budget*\n"]
+    for r in rows[:8]:
+        adv     = r.get("adv_name", "Unknown")
+        cap_pct = r.get("cap_pct", 0)
+        rev_mtd = r.get("revenue_mtd", 0)
+        cap     = r.get("monthly_cap", 0)
+        dtc     = r.get("days_to_cap", 0)
+        dr      = r.get("days_remaining", 0)
+        lines.append(
+            f"• *{adv}*: *{cap_pct:.0f}%* of cap · "
+            f"${rev_mtd:,.0f} / ${cap:,.0f} · "
+            f"~{dtc:.0f}d to cap vs {dr}d remaining"
+        )
+    lines.append("\nRun `@Scout cap alerts` for the full breakdown.")
+    return "\n".join(lines)
+
+
+def _format_velocity_down_alert(rows: list) -> str:
+    downs = [v for v in rows if v.get("direction") == "down"]
+    if not downs:
+        return ""
+    lines = [":chart_with_downwards_trend: *Revenue velocity — publishers tracking down*\n"]
+    for v in downs[:5]:
+        name      = v.get("publisher_name", "Unknown")
+        rev_30d   = v.get("revenue_30d", 0)
+        rev_7d_a  = v.get("revenue_7d_ann", 0)
+        pct       = v.get("pct_delta", 0)
+        lines.append(
+            f"• *{name}*: 7d annualized *${rev_7d_a:,.0f}* vs 30d *${rev_30d:,.0f}* "
+            f"({pct:+.0f}%)"
+        )
+        hyp = v.get("hypothesis", "")
+        if hyp:
+            lines.append(f"  {hyp}")
+    lines.append("\nRun `@Scout velocity` for the full breakdown.")
+    return "\n".join(lines)
+
+
+def _format_ghost_alert(rows: list) -> str:
+    lines = [":ghost: *Ghost campaigns — impressions without revenue*\n"]
+    for r in rows[:8]:
+        adv     = r.get("adv_name", "Unknown")
+        imp_7d  = r.get("impressions_7d", 0)
+        imp_2d  = r.get("impressions_2d", 0)
+        lines.append(f"• *{adv}*: {imp_7d:,} impressions in 7d · {imp_2d:,} in 2d")
+    lines.append("\nRun `@Scout ghost campaigns` for the full breakdown.")
+    return "\n".join(lines)
+
+
+def _format_fill_alert(rows: list) -> str:
+    lines = [":droplet: *Low fill rate — publishers with significant unfilled sessions*\n"]
+    for r in rows[:5]:
+        name    = r.get("publisher_name", "Unknown")
+        fill    = r.get("fill_rate_pct", 0)
+        missed  = r.get("missed_sessions", 0)
+        sess    = r.get("sessions_7d", 0)
+        lines.append(
+            f"• *{name}*: *{fill:.0f}%* fill · "
+            f"{missed:,} missed of {sess:,} sessions/7d"
+        )
+    lines.append("\nRun `@Scout fill rate` for the full breakdown.")
+    return "\n".join(lines)
+
+
+def _cap_monitor(web) -> None:
+    """Silent monitor: cap proximity alert.
+
+    Daily check at the configured CT hour (default 9am). Fires once per day if
+    any advertiser is past the cap_alert_pct threshold. See _run_with_web.
+    """
+    from scout_state import _load_cap_alert_state, _save_cap_alert_date
+
+    def _signal_with_web(ch):
+        return _pulse_signal_cap(ch)
+
+    _run_with_web(
+        web,
+        monitor_name="cap-monitor",
+        config_key="cap",
+        signal_fn=_signal_with_web,
+        format_fn=_format_cap_alert,
+        load_state_fn=_load_cap_alert_state,
+        save_state_fn=_save_cap_alert_date,
+    )
+
+
+def _velocity_down_monitor(web) -> None:
+    """Silent monitor: publisher revenue velocity tracking down.
+
+    Filters _pulse_signal_velocity to direction='down' only — up-shifts are
+    informational, not actionable. Daily check at 9am CT (configurable).
+    """
+    from scout_state import _load_velocity_down_alert_state, _save_velocity_down_alert_date
+
+    def _signal_down_only(ch):
+        rows = _pulse_signal_velocity(ch)
+        return [v for v in rows if v.get("direction") == "down"]
+
+    _run_with_web(
+        web,
+        monitor_name="velocity-down-monitor",
+        config_key="velocity_down",
+        signal_fn=_signal_down_only,
+        format_fn=_format_velocity_down_alert,
+        load_state_fn=_load_velocity_down_alert_state,
+        save_state_fn=_save_velocity_down_alert_date,
+    )
+
+
+def _ghost_monitor(web) -> None:
+    """Silent monitor: ghost campaigns (impressions without revenue past
+    ghost_recency_hours). Daily check at 9am CT (configurable)."""
+    from scout_state import _load_ghost_alert_state, _save_ghost_alert_date
+
+    _run_with_web(
+        web,
+        monitor_name="ghost-monitor",
+        config_key="ghost",
+        signal_fn=_pulse_signal_ghost,
+        format_fn=_format_ghost_alert,
+        load_state_fn=_load_ghost_alert_state,
+        save_state_fn=_save_ghost_alert_date,
+    )
+
+
+def _fill_monitor(web) -> None:
+    """Silent monitor: publishers with low fill rate (<15% over 7d on
+    post-tx placements). Daily check at 9am CT (configurable)."""
+    from scout_state import _load_fill_alert_state, _save_fill_alert_date
+
+    _run_with_web(
+        web,
+        monitor_name="fill-monitor",
+        config_key="fill",
+        signal_fn=_pulse_signal_fill_rate,
+        format_fn=_format_fill_alert,
+        load_state_fn=_load_fill_alert_state,
+        save_state_fn=_save_fill_alert_date,
+    )
+
+
+def _run_with_web(
+    web,
+    *,
+    monitor_name: str,
+    config_key: str,
+    signal_fn,
+    format_fn,
+    load_state_fn,
+    save_state_fn,
+    channel_topic: str = "revenue",
+) -> None:
+    """Generic silent monitor daemon body.
+
+    Mirrors _revenue_tracker: outer restart wrapper + inner 5-min poll loop +
+    feature flag + fire-window check + per-day idempotency. Each monitor wraps
+    this with its own state helpers, signal_fn, and format_fn.
+    """
+    import time as _time
+    import pytz
+    from datetime import datetime as _dt
+    from scout_agent import _get_ch_client
+
+    while True:  # outer restart wrapper
+        try:
+            CT_TZ   = pytz.timezone("America/Chicago")
+            channel = _route_channel(channel_topic)
+            tag     = f"[{monitor_name}]"
+
+            while True:  # inner poll loop
+                _time.sleep(300)
+                try:
+                    if not _monitor_enabled(config_key):
+                        continue
+
+                    from scout_agent import SCOUT_THRESHOLDS as _ST
+                    check_hour = int(
+                        _ST.get("signals", {}).get(
+                            f"{config_key}_monitor_check_hour_ct", 9
+                        )
+                    )
+
+                    now_ct = _dt.now(CT_TZ)
+                    if not (now_ct.hour == check_hour and now_ct.minute < 10):
+                        continue
+
+                    today_str = now_ct.date().isoformat()
+                    if load_state_fn() == today_str:
+                        continue
+
+                    try:
+                        results = signal_fn(_get_ch_client())
+                    except Exception as e:
+                        log.warning(f"{tag} signal query failed: {e}")
+                        save_state_fn(today_str)
+                        continue
+
+                    if not results:
+                        save_state_fn(today_str)
+                        log.info(f"{tag} no anomalies — staying silent.")
+                        continue
+
+                    msg = format_fn(results)
+                    if not msg:
+                        save_state_fn(today_str)
+                        continue
+
+                    web.chat_postMessage(channel=channel, text=msg)
+                    save_state_fn(today_str)
+                    log.info(f"{tag} posted alert for {today_str} ({len(results)} items).")
+
+                except Exception as e:
+                    log.warning(f"{tag} unexpected error: {e}")
+
+        except Exception as e:
+            log.error(f"{tag} fatal crash — restarting in 30s: {e}", exc_info=True)
             _time.sleep(30)
 
 
@@ -2291,10 +2537,24 @@ def main():
     _start_daemon(_check_stale_queue,     name="stale-queue-checker", args=(web_client,))
     _start_daemon(_performance_recap,     name="perf-recap",          args=(web_client,))
     _start_daemon(_cleanup_state,         name="state-cleanup")
-    if _PULSE_ENABLED:
+    # Legacy daily-digest pulse — retired in favor of silent per-signal monitors
+    # below. Gated by SCOUT_THRESHOLDS["signals"]["pulse_legacy_enabled"] so it
+    # can be flipped back on for one release if a monitor regresses.
+    from scout_agent import SCOUT_THRESHOLDS as _ST_BOOT
+    _pulse_legacy = bool(_ST_BOOT.get("signals", {}).get("pulse_legacy_enabled", False))
+    if _PULSE_ENABLED and _pulse_legacy:
         _start_daemon(_proactive_pulse,   name="proactive-pulse",     args=(web_client,))
     else:
-        log.info("[pulse] disabled via PULSE_ENABLED=false — skipping pulse thread")
+        log.info("[pulse] daily digest retired — silent per-signal monitors active "
+                 "(set signals.pulse_legacy_enabled=true to re-enable)")
+
+    # Silent per-signal monitors — alert only when the underlying signal fires.
+    # Each is opt-in via SCOUT_THRESHOLDS["signals"][f"{key}_monitor_enabled"]
+    # in config/scout_thresholds.json (default False).
+    _start_daemon(_cap_monitor,           name="cap-monitor",           args=(web_client,))
+    _start_daemon(_velocity_down_monitor, name="velocity-down-monitor", args=(web_client,))
+    _start_daemon(_ghost_monitor,         name="ghost-monitor",         args=(web_client,))
+    _start_daemon(_fill_monitor,          name="fill-monitor",          args=(web_client,))
     _start_daemon(_nightly_harvest,       name="context-harvest")
     _start_daemon(_notion_watcher_loop,   name="notion-watcher",      args=(web_client,))
     _start_daemon(_copy_coalescer_loop,   name="copy-coalescer")
