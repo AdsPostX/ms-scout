@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from zoneinfo import ZoneInfo
 from types import MappingProxyType
 from typing import Mapping, Optional
 import anthropic
@@ -5689,7 +5690,7 @@ def _select_model(user_message: str) -> str:
 
 
 def ask(user_message: str, history: list | None = None, user_id: str = "",
-        permalink: str = "") -> AskResult:
+        permalink: str = "", user_tz: str = "") -> AskResult:
     """
     Send a message to Scout and get a response.
     history: optional list of prior {"role": "user"/"assistant", "content": str} messages
@@ -5721,7 +5722,31 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     channel_ctx     = _get_channel_context(user_message)
     corrections_ctx = _get_corrections_context()
     caller_ctx      = f"[Caller Slack user_id: {user_id}]\n" if user_id else ""
-    prefix = caller_ctx + channel_ctx + corrections_ctx
+    # Inject current CT date/time so the model never guesses "today" from UTC.
+    # CT is the data anchor (all ClickHouse data is America/Chicago). If the
+    # caller's Slack timezone differs, append their local time as a second line
+    # so the model correctly interprets natural language like "this afternoon".
+    _now_ct = datetime.now(ZoneInfo("America/Chicago"))
+    _ct_date_str = f"{_now_ct.strftime('%A, %B')} {_now_ct.day}, {_now_ct.year}"
+    _ct_time_str = _now_ct.strftime("%I:%M%p").lstrip("0").lower()
+    date_ctx = (
+        f"[Business date: {_ct_date_str} (America/Chicago) — "
+        f"all revenue/data reporting uses this date; "
+        f"current CT time: {_ct_time_str} ct]\n"
+    )
+    if user_tz and user_tz != "America/Chicago":
+        try:
+            _now_user = datetime.now(ZoneInfo(user_tz))
+            _tz_abbr = _now_user.strftime("%Z")
+            _user_time_str = _now_user.strftime("%I:%M%p").lstrip("0").lower()
+            date_ctx += (
+                f"[Requester's local time: {_user_time_str} "
+                f"{_tz_abbr} ({user_tz}) — use this when interpreting relative "
+                f"time references like 'this morning', 'tonight', '5pm']\n"
+            )
+        except Exception:
+            pass  # unknown tz string — skip, CT context is still present
+    prefix = date_ctx + caller_ctx + channel_ctx + corrections_ctx
     effective_message = (prefix + user_message) if prefix else user_message
     messages = list(history or []) + [{"role": "user", "content": effective_message}]
     # List of brief results — append each draft_campaign_brief call result.
