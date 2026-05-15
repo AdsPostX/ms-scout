@@ -1083,8 +1083,10 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         header_text       = _sanitize_slack(response.text)
         offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
         suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
-        all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks,
-                             {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}]
+        feedback_blocks   = _build_feedback_buttons(_placeholder_ts_sg)
+        _sep              = [{"type": "divider"}] if suggestion_blocks else []
+        elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
+        all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks, elapsed_ctx]
         web.chat_update(
             channel=channel, ts=_placeholder_ts_sg,
             text=header_text or "Top opportunities",
@@ -1352,8 +1354,10 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
             header_text       = _sanitize_slack(response.text)
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
             suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
-            all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks,
-                                 {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}]
+            feedback_blocks   = _build_feedback_buttons(_placeholder_ts_ah)
+            _sep              = [{"type": "divider"}] if suggestion_blocks else []
+            elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
+            all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks, elapsed_ctx]
             web.chat_update(
                 channel=dm_channel, ts=_placeholder_ts_ah,
                 text=header_text or "Top opportunities",

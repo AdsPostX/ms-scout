@@ -2429,6 +2429,8 @@ def _format_offers(offers: list, benchmarks: dict) -> list[FormattedOffer]:
             "scout_score_rpm": score,
             "performance_context": perf_note,
             "risk_flag": _get_risk_flag(advertiser, category, o.get("description", "")),
+            "icon_url":  o.get("icon_url", ""),
+            "hero_url":  o.get("hero_url", ""),
         })
     return out
 
