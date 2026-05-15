@@ -780,8 +780,8 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
     _ROOT_LABELS = {
         "ghost_campaign": "impressions ✓, $0 revenue → ghost campaign",
         "fill_rate":      "zero impressions → fill rate or cap hit",
-        "cvr_drop":       "CVR collapsed vs historical → CVR anomaly",
         "traffic":        "zero sessions → no upstream traffic",
+        "revenue_down":   "revenue below expected, specific cause unclear",
     }
 
     if publishers:
@@ -804,8 +804,11 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
             items.append(f"Immediate: `@Scout ghost campaigns` — {top_pub} matches ghost detection criteria.")
         elif top_cause == "fill_rate":
             items.append(f"Immediate: `@Scout fill rate` — {top_pub} has zero impressions despite active sessions.")
-        elif top_cause == "cvr_drop":
-            items.append(f"Immediate: `@Scout {top_pub}` — CVR anomaly, check offer quality or postback tracking.")
+        elif top_cause == "revenue_down":
+            items.append(
+                f"Immediate: `@Scout {top_pub}` — revenue is below expected with no single dominant signal; "
+                f"check traffic, fill rate, and ghost-campaign indicators."
+            )
         elif top_cause == "traffic":
             items.append(f"Immediate: `@Scout {top_pub}` — no sessions; confirm SDK is sending traffic.")
     else:

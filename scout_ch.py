@@ -252,11 +252,11 @@ def _query_intraday_revenue_by_publisher(ch, total_result: dict) -> list[dict]:
         "traffic"        — zero sessions today (no upstream traffic)
         "fill_rate"      — sessions present, zero impressions (offers not serving)
         "ghost_campaign" — impressions > ghost_min, revenue = $0 (postback broken)
-        "cvr_drop"       — impressions + revenue, but CVR < 50% of historical
-        "normal"         — within expected variance (filtered out of returned list)
+        "revenue_down"   — revenue below expected with no single dominant signal
 
-    Only publishers with abs(delta) >= publisher_min_delta AND root_cause != "normal"
-    are included. Cap at 5. Sorted by abs(delta) descending.
+    Only publishers with abs(delta) >= publisher_min_delta are included (all tagged
+    publishers are returned — there is no "normal" filter value). Cap at 5. Sorted
+    by abs(delta) descending.
 
     Note on publisher key mismatch: impressions use `pid` (string), sessions/conversions
     use `user_id` (numeric). We query them separately and align via mv_adpx_users.
@@ -375,15 +375,8 @@ WHERE user_id > 0
             root_cause = "fill_rate"
         elif revenue_today == 0 and impressions_today > ghost_min_impr:
             root_cause = "ghost_campaign"
-        elif (conv_expected > 0 and impressions_today > cvr_min_impr
-              and conv_today / max(impressions_today, 1) < (conv_expected / max(revenue_expected / max(delta, 1), 1)) * 0.5):
-            # Simple CVR proxy: today's conv/impr vs historical conv_expected/revenue_expected ratio
-            root_cause = "cvr_drop"
         else:
-            root_cause = "normal"
-
-        if root_cause == "normal":
-            continue  # within variance, not the cause
+            root_cause = "revenue_down"
 
         results.append({
             "publisher_id":       pub_id,
