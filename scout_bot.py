@@ -45,7 +45,7 @@ from scout_state import (
     _update_benchmark_from_actuals,
 )
 from scout_handlers import (
-    _set_bot_user_id, _set_thread_state, _set_pulse_runner,
+    _set_bot_user_id, _set_thread_state, _set_pulse_runner, _set_force_monitor_fn,
     handle_event,
 )
 
@@ -1395,6 +1395,23 @@ def _snapshot_keys(sigs: dict) -> dict:
     return snap
 
 
+def _one_shot_monitor(web, channel: str, signal_fn, format_fn) -> None:
+    """Run a monitor signal query once and post the result to channel immediately.
+    Used by the force-trigger admin commands (@Scout force cap/velocity/ghost/fill).
+    """
+    from scout_agent import _get_ch_client
+    ch = _get_ch_client()
+    rows = signal_fn(ch)
+    if not rows:
+        web.chat_postMessage(channel=channel, text="No active signal — nothing to report right now.")
+        return
+    fallback, blocks = format_fn(rows)
+    if not fallback:
+        web.chat_postMessage(channel=channel, text="No active signal — nothing to report right now.")
+        return
+    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
+
+
 def _run_pulse_once(web: WebClient, force: bool = False) -> None:
     """
     Execute one pulse run immediately. If force=True, always routes to #scout-qa
@@ -2549,6 +2566,10 @@ def main():
     _set_bot_user_id(_BOT_USER_ID)
     _set_thread_state(_LAST_THREAD_PER_CHANNEL, _LAST_THREAD_LOCK)
     _set_pulse_runner(_run_pulse_once)
+    _set_force_monitor_fn("cap",      lambda web, ch: _one_shot_monitor(web, ch, _pulse_signal_cap, _format_cap_alert))
+    _set_force_monitor_fn("velocity", lambda web, ch: _one_shot_monitor(web, ch, _pulse_signal_velocity, _format_velocity_down_alert))
+    _set_force_monitor_fn("ghost",    lambda web, ch: _one_shot_monitor(web, ch, _pulse_signal_ghost, _format_ghost_alert))
+    _set_force_monitor_fn("fill",     lambda web, ch: _one_shot_monitor(web, ch, _pulse_signal_fill_rate, _format_fill_alert))
     socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
 
