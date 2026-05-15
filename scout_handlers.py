@@ -111,6 +111,21 @@ def _is_clarification_response(text: str) -> bool:
     return lower.rstrip().endswith("?") and len(text) < 300
 
 
+def _get_user_tz(web: WebClient, user_id: str) -> str:
+    """Return the Slack-profile timezone for user_id (e.g. 'America/New_York').
+
+    Falls back to '' on any error so callers can skip enrichment gracefully.
+    Empty string signals ask() to omit the user-local-time line.
+    """
+    if not user_id:
+        return ""
+    try:
+        info = web.users_info(user=user_id)
+        return info.get("user", {}).get("tz", "") or ""
+    except Exception:
+        return ""
+
+
 def _already_retried(msg_ts: str) -> bool:
     """True if this message already triggered a down_retry — prevents infinite retry loop."""
     if not _FEEDBACK_LOG.exists():
@@ -973,7 +988,8 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
 
     try:
         _t0 = time.monotonic()
-        response = ask(query, history=history, user_id=user_id)
+        response = ask(query, history=history, user_id=user_id,
+                       user_tz=_get_user_tz(web, user_id))
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
     except Exception as e:
@@ -1612,7 +1628,8 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                             + "\n\n[Retry: answer directly using your best interpretation. "
                               "Do not ask for clarification.]"
                         )
-                        retry_result = ask(retry_msg, user_id=original_user_id)
+                        retry_result = ask(retry_msg, user_id=original_user_id,
+                                           user_tz=_get_user_tz(web, original_user_id))
                         retry_text = (
                             retry_result.text
                             if hasattr(retry_result, "text")
@@ -2133,7 +2150,8 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         try:
             _t0 = time.monotonic()
             _permalink = _permalink_for(web, channel, msg_ts)
-            response = ask(query, history=history, user_id=user_id, permalink=_permalink)
+            response = ask(query, history=history, user_id=user_id, permalink=_permalink,
+                           user_tz=_get_user_tz(web, user_id))
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
             _tools_called = response.tools_called

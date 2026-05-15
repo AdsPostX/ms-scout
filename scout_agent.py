@@ -5690,7 +5690,7 @@ def _select_model(user_message: str) -> str:
 
 
 def ask(user_message: str, history: list | None = None, user_id: str = "",
-        permalink: str = "") -> AskResult:
+        permalink: str = "", user_tz: str = "") -> AskResult:
     """
     Send a message to Scout and get a response.
     history: optional list of prior {"role": "user"/"assistant", "content": str} messages
@@ -5723,11 +5723,26 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     corrections_ctx = _get_corrections_context()
     caller_ctx      = f"[Caller Slack user_id: {user_id}]\n" if user_id else ""
     # Inject current CT date/time so the model never guesses "today" from UTC.
+    # CT is the data anchor (all ClickHouse data is America/Chicago). If the
+    # caller's Slack timezone differs, append their local time as a second line
+    # so the model correctly interprets natural language like "this afternoon".
     _now_ct = datetime.now(ZoneInfo("America/Chicago"))
     date_ctx = (
-        f"[Current date: {_now_ct.strftime('%A, %B %-d, %Y')} (America/Chicago); "
-        f"current time: {_now_ct.strftime('%-I:%M%p CT').lower()}]\n"
+        f"[Business date: {_now_ct.strftime('%A, %B %-d, %Y')} (America/Chicago) — "
+        f"all revenue/data reporting uses this date; "
+        f"current CT time: {_now_ct.strftime('%-I:%M%p CT').lower()}]\n"
     )
+    if user_tz and user_tz != "America/Chicago":
+        try:
+            _now_user = datetime.now(ZoneInfo(user_tz))
+            _tz_abbr = _now_user.strftime("%Z")
+            date_ctx += (
+                f"[Requester's local time: {_now_user.strftime('%-I:%M%p').lower()} "
+                f"{_tz_abbr} ({user_tz}) — use this when interpreting relative "
+                f"time references like 'this morning', 'tonight', '5pm']\n"
+            )
+        except Exception:
+            pass  # unknown tz string — skip, CT context is still present
     prefix = date_ctx + caller_ctx + channel_ctx + corrections_ctx
     effective_message = (prefix + user_message) if prefix else user_message
     messages = list(history or []) + [{"role": "user", "content": effective_message}]
