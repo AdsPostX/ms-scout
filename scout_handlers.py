@@ -1984,16 +1984,20 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         threading.Thread(target=_run, daemon=True).start()
         return
 
-    # "force <unknown>" — catch any unrecognized force command before NLP gets it
-    if re.search(r'\bforce\b', lower):
+    # "force <unknown>" — catch any unrecognized force command before NLP gets it.
+    # Only fires when "force" is the first word (command-style); ignores mid-sentence uses.
+    if re.search(r'^\s*force\b', lower):
         _word_m = re.search(r'\bforce\s+(\S+)', lower)
         _unknown = f"`{_word_m.group(1)}`" if _word_m else "that command"
-        web.chat_postMessage(
-            channel=channel, thread_ts=thread_ts,
-            text=(f":x: {_unknown} isn't a force command I know. "
-                  f"Available: `force pulse`, `force signal`, `force cap`, "
-                  f"`force velocity`, `force ghost`, `force fill`."),
-        )
+        try:
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=(f":x: {_unknown} isn't a force command I know. "
+                      f"Available: `force pulse`, `force signal`, `force cap`, "
+                      f"`force velocity`, `force ghost`, `force fill`."),
+            )
+        except Exception as _fe:
+            log.warning(f"[force-unknown] failed to post error: {_fe} (channel={channel})")
         return
 
     # "QA yourself" / "self test" — run the QA suite with live per-question posting
