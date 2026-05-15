@@ -913,6 +913,7 @@ def _revenue_tracker(web, ch) -> None:
 
 
 def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for advertisers nearing monthly cap."""
     items = []
     for r in rows[:8]:
         adv     = r.get("adv_name", "Unknown")
@@ -935,6 +936,7 @@ def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
 
 
 def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for publishers with declining revenue velocity."""
     downs = [v for v in rows if v.get("direction") == "down"]
     if not downs:
         return ("", [])
@@ -961,6 +963,7 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
 
 
 def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for campaigns with impressions but no revenue."""
     items = []
     for r in rows[:8]:
         adv     = r.get("adv_name", "Unknown")
@@ -976,6 +979,7 @@ def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
 
 
 def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for publishers with low fill rate."""
     items = []
     for r in rows[:5]:
         name    = r.get("publisher_name", "Unknown")
