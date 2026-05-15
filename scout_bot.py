@@ -31,6 +31,7 @@ from scout_notion import (
     _notion_watcher_loop,
 )
 from scout_slack_ui import (
+    _build_monitor_alert_blocks,
     _format_pulse_blocks,
 )
 from scout_state import (
@@ -746,7 +747,7 @@ def _run_pulse_signals() -> dict:
 
 
 
-def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None) -> str:
+def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None) -> tuple[str, list[dict]]:
     """
     Format the proactive revenue alert message.
 
@@ -770,10 +771,10 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
     weekday    = total["weekday"]
     samples    = total["sample_days"]
 
-    lines = [
-        ":red_circle: *Revenue alert — today is tracking soft*\n",
+    # Body items (no header — _build_monitor_alert_blocks supplies it)
+    items = [
         f"Platform so far ({as_of}): *${today_rev:,.0f}* | projected: *${projected:,.0f}* | expected [{weekday}]: ~*${expected:,.0f}*",
-        f"Tracking at *{pct}%* of expected ({samples} same-weekday samples)\n",
+        f"Tracking at *{pct}%* of expected ({samples} same-weekday samples)",
     ]
 
     _ROOT_LABELS = {
@@ -784,7 +785,7 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
     }
 
     if publishers:
-        lines.append("*Where the gap is:*")
+        items.append("*Where the gap is:*")
         for p in publishers:
             name     = p.get("publisher_name") or f"pub {p.get('publisher_id', '?')}"
             pub_id   = p.get("publisher_id", "")
@@ -792,29 +793,34 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
             cause    = p.get("root_cause", "normal")
             label    = _ROOT_LABELS.get(cause, cause)
             id_str   = f" *(pub {pub_id})*" if pub_id else ""
-            lines.append(f"• {name}{id_str}: *−${abs(delta):,.0f}* below expected · {label}")
+            items.append(f"{name}{id_str}: *−${abs(delta):,.0f}* below expected · {label}")
 
-        lines.append("\nAll other publishers within normal range.")
+        items.append("All other publishers within normal range.")
 
         # Suggest a next step based on top root cause
         top_cause = publishers[0].get("root_cause", "normal")
         top_pub   = publishers[0].get("publisher_name", "")
         if top_cause == "ghost_campaign":
-            lines.append(f"\nImmediate: `@Scout ghost campaigns` — {top_pub} matches ghost detection criteria.")
+            items.append(f"Immediate: `@Scout ghost campaigns` — {top_pub} matches ghost detection criteria.")
         elif top_cause == "fill_rate":
-            lines.append(f"\nImmediate: `@Scout fill rate` — {top_pub} has zero impressions despite active sessions.")
+            items.append(f"Immediate: `@Scout fill rate` — {top_pub} has zero impressions despite active sessions.")
         elif top_cause == "cvr_drop":
-            lines.append(f"\nImmediate: `@Scout {top_pub}` — CVR anomaly, check offer quality or postback tracking.")
+            items.append(f"Immediate: `@Scout {top_pub}` — CVR anomaly, check offer quality or postback tracking.")
         elif top_cause == "traffic":
-            lines.append(f"\nImmediate: `@Scout {top_pub}` — no sessions; confirm SDK is sending traffic.")
+            items.append(f"Immediate: `@Scout {top_pub}` — no sessions; confirm SDK is sending traffic.")
     else:
-        lines.append(
+        items.append(
             "No single publisher accounts for the gap — revenue is spread-down across the platform.\n"
             "Likely causes: session volume drop, fill rate platform-wide, or a slow day.\n"
-            "\nRun `@Scout fill rate` to check publisher-level session health."
+            "Run `@Scout fill rate` to check publisher-level session health."
         )
 
-    return "\n".join(lines)
+    return _build_monitor_alert_blocks(
+        ":red_circle:",
+        "Revenue alert — today is tracking soft",
+        items,
+        "",
+    )
 
 
 def _revenue_tracker(web, ch) -> None:
@@ -881,8 +887,8 @@ def _revenue_tracker(web, ch) -> None:
                         log.warning(f"[revenue-tracker] Phase 2 query failed: {e}")
                         publishers = []
 
-                    msg = _format_revenue_alert(total, publishers)
-                    web.chat_postMessage(channel=channel, text=msg)
+                    fallback, blocks = _format_revenue_alert(total, publishers)
+                    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
                     _save_revenue_alert_date(today_str)
                     log.info(f"[revenue-tracker] Alert posted for {today_str} ({total['pct_of_expected']:.0f}% of expected).")
 
@@ -906,8 +912,9 @@ def _revenue_tracker(web, ch) -> None:
 # something to act on, not "all 6 signals nominal" digests.
 
 
-def _format_cap_alert(rows: list) -> str:
-    lines = [":warning: *Cap alert — advertisers approaching monthly budget*\n"]
+def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for advertisers nearing monthly cap."""
+    items = []
     for r in rows[:8]:
         adv     = r.get("adv_name", "Unknown")
         cap_pct = r.get("cap_pct", 0)
@@ -915,60 +922,80 @@ def _format_cap_alert(rows: list) -> str:
         cap     = r.get("monthly_cap", 0)
         dtc     = r.get("days_to_cap", 0)
         dr      = r.get("days_remaining", 0)
-        lines.append(
-            f"• *{adv}*: *{cap_pct:.0f}%* of cap · "
+        items.append(
+            f"*{adv}*: *{cap_pct:.0f}%* of cap · "
             f"${rev_mtd:,.0f} / ${cap:,.0f} · "
             f"~{dtc:.0f}d to cap vs {dr}d remaining"
         )
-    lines.append("\nRun `@Scout cap alerts` for the full breakdown.")
-    return "\n".join(lines)
+    return _build_monitor_alert_blocks(
+        ":warning:",
+        "Cap alert — advertisers approaching monthly budget",
+        items,
+        "cap alerts",
+    )
 
 
-def _format_velocity_down_alert(rows: list) -> str:
+def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for publishers with declining revenue velocity."""
     downs = [v for v in rows if v.get("direction") == "down"]
     if not downs:
-        return ""
-    lines = [":chart_with_downwards_trend: *Revenue velocity — publishers tracking down*\n"]
+        return ("", [])
+    items = []
     for v in downs[:5]:
         name      = v.get("publisher_name", "Unknown")
         rev_30d   = v.get("revenue_30d", 0)
         rev_7d_a  = v.get("revenue_7d_ann", 0)
         pct       = v.get("pct_delta", 0)
-        lines.append(
-            f"• *{name}*: 7d annualized *${rev_7d_a:,.0f}* vs 30d *${rev_30d:,.0f}* "
+        line = (
+            f"*{name}*: 7d annualized *${rev_7d_a:,.0f}* vs 30d *${rev_30d:,.0f}* "
             f"({pct:+.0f}%)"
         )
         hyp = v.get("hypothesis", "")
         if hyp:
-            lines.append(f"  {hyp}")
-    lines.append("\nRun `@Scout velocity` for the full breakdown.")
-    return "\n".join(lines)
+            line += f"\n  {hyp}"
+        items.append(line)
+    return _build_monitor_alert_blocks(
+        ":chart_with_downwards_trend:",
+        "Revenue velocity — publishers tracking down",
+        items,
+        "velocity",
+    )
 
 
-def _format_ghost_alert(rows: list) -> str:
-    lines = [":ghost: *Ghost campaigns — impressions without revenue*\n"]
+def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for campaigns with impressions but no revenue."""
+    items = []
     for r in rows[:8]:
         adv     = r.get("adv_name", "Unknown")
         imp_7d  = r.get("impressions_7d", 0)
         imp_2d  = r.get("impressions_2d", 0)
-        lines.append(f"• *{adv}*: {imp_7d:,} impressions in 7d · {imp_2d:,} in 2d")
-    lines.append("\nRun `@Scout ghost campaigns` for the full breakdown.")
-    return "\n".join(lines)
+        items.append(f"*{adv}*: {imp_7d:,} impressions in 7d · {imp_2d:,} in 2d")
+    return _build_monitor_alert_blocks(
+        ":ghost:",
+        "Ghost campaigns — impressions without revenue",
+        items,
+        "ghost campaigns",
+    )
 
 
-def _format_fill_alert(rows: list) -> str:
-    lines = [":droplet: *Low fill rate — publishers with significant unfilled sessions*\n"]
+def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for publishers with low fill rate."""
+    items = []
     for r in rows[:5]:
         name    = r.get("publisher_name", "Unknown")
         fill    = r.get("fill_rate_pct", 0)
         missed  = r.get("missed_sessions", 0)
         sess    = r.get("sessions_7d", 0)
-        lines.append(
-            f"• *{name}*: *{fill:.0f}%* fill · "
+        items.append(
+            f"*{name}*: *{fill:.0f}%* fill · "
             f"{missed:,} missed of {sess:,} sessions/7d"
         )
-    lines.append("\nRun `@Scout fill rate` for the full breakdown.")
-    return "\n".join(lines)
+    return _build_monitor_alert_blocks(
+        ":droplet:",
+        "Low fill rate — publishers with significant unfilled sessions",
+        items,
+        "fill rate",
+    )
 
 
 def _cap_monitor(web) -> None:
@@ -1109,12 +1136,12 @@ def _run_with_web(
                         log.info(f"{tag} no anomalies — staying silent.")
                         continue
 
-                    msg = format_fn(results)
-                    if not msg:
+                    fallback, blocks = format_fn(results)
+                    if not fallback:
                         save_state_fn(today_str)
                         continue
 
-                    web.chat_postMessage(channel=channel, text=msg)
+                    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
                     save_state_fn(today_str)
                     log.info(f"{tag} posted alert for {today_str} ({len(results)} items).")
 
