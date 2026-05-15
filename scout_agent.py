@@ -4016,23 +4016,21 @@ def _validate_sql_query(sql: str) -> list:
       - References a large table without any created_at filter → warn
       - Lacks any LIMIT clause → warn
     """
-    import re as _re_v
-
     warnings: list = []
     if not sql or not isinstance(sql, str):
         return warnings
 
     sql_upper = sql.upper()
-    has_prewhere = bool(_re_v.search(r"\bPREWHERE\b", sql_upper))
+    has_prewhere = bool(re.search(r"\bPREWHERE\b", sql_upper))
     # Only treat created_at as a date filter when it appears in a PREWHERE/WHERE
     # clause — references in SELECT columns or ORDER BY don't filter rows.
     has_created_at = bool(
-        _re_v.search(r"\b(?:PREWHERE|WHERE)\b[\s\S]*?\bCREATED_AT\b", sql_upper)
+        re.search(r"\b(?:PREWHERE|WHERE)\b[\s\S]*?\bCREATED_AT\b", sql_upper)
     )
-    has_limit = bool(_re_v.search(r"\bLIMIT\b", sql_upper))
+    has_limit = bool(re.search(r"\bLIMIT\b", sql_upper))
 
     for table in _LARGE_TABLES:
-        if _re_v.search(r"\b" + _re_v.escape(table) + r"\b", sql, _re_v.IGNORECASE):
+        if re.search(r"\b" + re.escape(table) + r"\b", sql, re.IGNORECASE):
             if not has_prewhere:
                 warnings.append(f"missing PREWHERE on large table: {table}")
             if not has_created_at:

@@ -31,6 +31,8 @@ import pathlib
 import re
 import sys
 import time
+import types
+from unittest.mock import patch
 
 from dotenv import load_dotenv
 
@@ -68,9 +70,6 @@ def test_anthropic():
       • the Anthropic client class instantiates,
       • a Message-shaped response carries the expected attributes.
     """
-    import types
-    from unittest.mock import patch
-
     import anthropic
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
