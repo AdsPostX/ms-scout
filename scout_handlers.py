@@ -181,19 +181,7 @@ def _feedback_log_row(row: dict) -> None:
 
 
 def _maybe_append_ps(user_id: str, text: str) -> str:
-    """Append the first-time-user P.S. nudge to the response text, exactly once per user.
-
-    Returns text unchanged for users who've already been shown the P.S. or rated before.
-    Records a `ps_shown` row in feedback_log.jsonl on first show.
-    """
-    if not user_id:
-        return text
-    _load_ps_seen()
-    if user_id in _FEEDBACK_PS_SEEN:
-        return text
-    _FEEDBACK_PS_SEEN.add(user_id)
-    _feedback_log_row({"user": user_id, "rating": "ps_shown"})
-    return text + _FEEDBACK_PS_LINE
+    return text
 
 
 def _retry_with_hint(web: WebClient, channel: str, msg_ts: str,
@@ -2269,11 +2257,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             content_blocks    = _text_to_blocks(response_text)
             suggestion_blocks = _build_suggestion_buttons(suggestions)
             feedback_blocks   = _build_feedback_buttons(msg_ts)
+            _sep              = [{"type": "divider"}] if suggestion_blocks else []
             # No elapsed-time footer in DMs — the reaction disappearing IS the signal
             _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=response_text,
-                blocks=[*content_blocks, *suggestion_blocks, *feedback_blocks],
+                blocks=[*content_blocks, *suggestion_blocks, *_sep, *feedback_blocks],
                 unfurl_links=False,
             )
             _seed_feedback_reactions(web, channel, _post.get("ts", ""))
@@ -2409,11 +2398,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         content_blocks    = _text_to_blocks(response_text)
         suggestion_blocks = _build_suggestion_buttons(suggestions)
         feedback_blocks   = _build_feedback_buttons(_placeholder_ts)
+        _sep              = [{"type": "divider"}] if suggestion_blocks else []
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
             text=response_text,
-            blocks=[*content_blocks, *suggestion_blocks, *feedback_blocks,
+            blocks=[*content_blocks, *suggestion_blocks, *_sep, *feedback_blocks,
                     {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
         )
         _seed_feedback_reactions(web, channel, _placeholder_ts)
