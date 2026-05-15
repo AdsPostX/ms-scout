@@ -127,7 +127,11 @@ def _get_user_tz(web: WebClient, user_id: str) -> str:
 
 
 def _already_retried(msg_ts: str) -> bool:
-    """True if this message already triggered a down_retry — prevents infinite retry loop."""
+    """True if this message already triggered a down_retry — prevents infinite retry loop.
+
+    Checks both message_ts (original question) and retry_message_ts (the retry
+    reply) so that 👎-ing the retry itself doesn't spawn a second retry loop.
+    """
     if not _FEEDBACK_LOG.exists():
         return False
     try:
@@ -135,7 +139,9 @@ def _already_retried(msg_ts: str) -> bool:
             for line in fh:
                 try:
                     row = json.loads(line)
-                    if row.get("message_ts") == msg_ts and row.get("rating") == "down_retry":
+                    if row.get("rating") != "down_retry":
+                        continue
+                    if row.get("message_ts") == msg_ts or row.get("retry_message_ts") == msg_ts:
                         return True
                 except json.JSONDecodeError:
                     continue
@@ -190,23 +196,91 @@ def _maybe_append_ps(user_id: str, text: str) -> str:
     return text + _FEEDBACK_PS_LINE
 
 
-def _seed_feedback_reactions(web: WebClient, channel: str, ts: str) -> None:
-    """Pre-seed 👍/👎 on Scout's own message so they show up as tappable affordances.
+def _retry_with_hint(web: WebClient, channel: str, msg_ts: str,
+                     rater_id: str, hint_kind: str) -> bool:
+    """Re-run ask() on the thread's original question with a steering hint.
 
-    Slack handler subtracts Scout's seed vote at read time (Scout's own reaction
-    counts as 0 by convention — see Part 3.6 in the adoption plan).
+    Posts the retry in-thread. Idempotent per msg_ts via _already_retried.
+    hint_kind:
+      'clarification' — model asked for clarification; force a direct answer
+      'retry'         — generic 👎; nudge toward a different angle
+    Returns True if a retry was posted, False if gated or fetch failed.
     """
-    if not channel or not ts:
-        return
-    for name in ("+1", "-1"):
-        try:
-            web.reactions_add(channel=channel, timestamp=ts, name=name)
-        except Exception as _e:
-            _msg = str(_e)
-            if "already_reacted" not in _msg:
-                # Log anything other than the benign already_reacted so we can
-                # catch missing reactions:write scope in Render logs.
-                log.warning(f"[feedback] reactions_add {name!r} failed: {_msg}")
+    if _already_retried(msg_ts):
+        return False
+    try:
+        replies = web.conversations_replies(channel=channel, ts=msg_ts, limit=1).get("messages", [{}])
+        scout_msg = replies[0] if replies else {}
+        if not scout_msg.get("bot_id"):
+            return False
+        answer_text = scout_msg.get("text", "")[:1000]
+        parent_ts = scout_msg.get("thread_ts") or ""
+        question_text = ""
+        if parent_ts:
+            try:
+                # Walk all thread messages to find the last non-bot message
+                # that precedes msg_ts — this is what the user actually asked,
+                # not necessarily the thread-root opening message.
+                thread_msgs = web.conversations_replies(
+                    channel=channel, ts=parent_ts, limit=50
+                ).get("messages", [])
+                for m in reversed(thread_msgs):
+                    if m.get("ts", "") >= msg_ts:
+                        continue  # skip the Scout reply itself and anything after
+                    if not m.get("bot_id") and m.get("text", "").strip():
+                        question_text = m["text"][:500]
+                        break
+            except Exception:
+                pass
+        if not question_text:
+            return False
+
+        if hint_kind == "clarification":
+            hint = (
+                "\n\n[Retry: answer directly using your best interpretation. "
+                "Do not ask for clarification.]"
+            )
+        else:
+            hint = (
+                "\n\n[Retry: previous answer was marked off. "
+                "Try a different angle — don't repeat the same reasoning.]"
+            )
+
+        retry_msg = question_text.strip() + hint
+        retry_result = ask(retry_msg, user_id=rater_id)
+        retry_text = (
+            retry_result.text
+            if hasattr(retry_result, "text")
+            else str(retry_result)
+        )
+        reply = web.chat_postMessage(
+            channel=channel,
+            thread_ts=parent_ts or msg_ts,
+            text=retry_text,
+            unfurl_links=False,
+        )
+        retry_ts = reply.get("ts", "")
+        _feedback_log_row({
+            "user":             rater_id,
+            "message_ts":       msg_ts,
+            "retry_message_ts": retry_ts,
+            "channel":          channel,
+            "question":         question_text,
+            "answer":           answer_text,
+            "rating":           "down_retry",
+        })
+        return True
+    except Exception as e:
+        log.warning(f"[feedback] retry failed: {e}")
+        return False
+
+
+def _seed_feedback_reactions(web: WebClient, channel: str, ts: str) -> None:
+    """No-op. Seeded 👍/👎 reactions made Scout look like it was voting on itself,
+    eroding trust in the affordance. Call sites kept for diff-stability; the
+    affordance is now Block Kit buttons + a microcopy line under each response.
+    """
+    return
 
 
 def _permalink_for(web: WebClient, channel: str, msg_ts: str) -> str:
@@ -1206,13 +1280,18 @@ def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
             "user":       user_id,
         })
         _save_learnings(learnings)
-        try:
-            web.chat_postEphemeral(
-                channel=channel, user=user_id, thread_ts=thread_ts,
-                text=":pencil: Got it — marked as off. Use :pencil2: *Correct this* to add the right answer so Scout remembers.",
-            )
-        except Exception:
-            pass
+        # Fire a retry on the underlying message so the button does real work,
+        # not just record the vote. Match the reaction-handler behavior.
+        fired = _retry_with_hint(web, channel, msg_ts, user_id, "retry")
+        if not fired:
+            try:
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id, thread_ts=thread_ts,
+                    text=("_Still off? Hit ✏️ *Correct this* or run "
+                          "`@Scout remember <correct fact>`._"),
+                )
+            except Exception:
+                pass
 
     elif action_id == "scout_feedback_correct":
         # Store a pending correction keyed by msg_ts — _handle_event will capture the follow-up reply
@@ -1576,13 +1655,8 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     # We log the user's rating and (for 👎) drop a threaded "remember" hint.
     if event.get("type") == "reaction_added" and event.get("reaction") in ("+1", "-1"):
         rater_id = event.get("user", "")
-        # Ignore Scout's own seed reactions (Scout's vote == 0 by convention)
-        try:
-            auth = web.auth_test()
-            if rater_id and rater_id == auth.get("user_id", ""):
-                return
-        except Exception:
-            pass
+        # Scout no longer seeds 👍/👎 on its own messages, so the
+        # "ignore Scout's own seed reactions" branch is gone.
         item = event.get("item", {})
         if item.get("type") != "message":
             return
@@ -1616,56 +1690,22 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             # First reaction also closes the PS nudge for this user
             _FEEDBACK_PS_SEEN.add(rater_id)
             if rating == "down":
-                # Part 9: smart 👎 — clarification responses get a direct-answer retry;
-                # factual errors get "Sidd will review" so a human closes the loop.
-                if (not _already_retried(msg_ts)
-                        and _is_clarification_response(answer_text)
-                        and question_text):
+                # Always retry on 👎 — gated only by _already_retried.
+                # Clarification responses get a direct-answer hint; everything
+                # else gets a "different angle" hint.
+                hint_kind = "clarification" if _is_clarification_response(answer_text) else "retry"
+                fired = _retry_with_hint(web, ch_id, msg_ts, rater_id, hint_kind)
+                if not fired:
+                    # Already retried, or no question text — point at the
+                    # correction affordance instead so the loop stays visible.
                     try:
-                        original_user_id = event.get("item_user", rater_id)
-                        retry_msg = (
-                            question_text.strip()
-                            + "\n\n[Retry: answer directly using your best interpretation. "
-                              "Do not ask for clarification.]"
-                        )
-                        retry_result = ask(retry_msg, user_id=original_user_id,
-                                           user_tz=_get_user_tz(web, original_user_id))
-                        retry_text = (
-                            retry_result.text
-                            if hasattr(retry_result, "text")
-                            else str(retry_result)
-                        )
-                        reply = web.chat_postMessage(
-                            channel=ch_id,
-                            thread_ts=parent_ts or msg_ts,
-                            text=retry_text,
-                            unfurl_links=False,
-                        )
-                        # Seed 👍/👎 on the retry reply so the user can rate it too
-                        retry_ts = reply.get("ts", "")
-                        _seed_feedback_reactions(web, ch_id, retry_ts)
-                        _feedback_log_row({
-                            "user":             rater_id,
-                            "message_ts":       msg_ts,
-                            "retry_message_ts": retry_ts,
-                            "channel":          ch_id,
-                            "question":         question_text,
-                            "answer":           answer_text,
-                            "rating":           "down_retry",
-                        })
-                    except Exception as e:
-                        log.warning(f"[feedback] clarification retry failed: {e}")
-                else:
-                    try:
-                        web.chat_postMessage(
-                            channel=ch_id,
-                            thread_ts=parent_ts or msg_ts,
-                            text=("Got it — Sidd will review. In the meantime: "
-                                  "`@Scout remember <correct fact>` if you can phrase the fix."),
-                            unfurl_links=False,
+                        web.chat_postEphemeral(
+                            channel=ch_id, user=rater_id, thread_ts=parent_ts or msg_ts,
+                            text=("_Still off? Hit ✏️ *Correct this* or run "
+                                  "`@Scout remember <correct fact>`._"),
                         )
                     except Exception as e:
-                        log.warning(f"[feedback] threaded down-vote reply failed: {e}")
+                        log.warning(f"[feedback] correction pointer failed: {e}")
         except Exception as e:
             log.warning(f"[feedback] reaction handler failed: {e}")
         return
