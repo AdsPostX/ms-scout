@@ -793,17 +793,6 @@ def build_digest_blocks(
             {"type": "divider"},
         ]
 
-    blocks.append({
-        "type": "context",
-        "elements": [{
-            "type": "mrkdwn",
-            "text": (
-                f"_<{QUEUE_LIST_URL}|Demand Queue> · @Scout to research any offer or find gaps · "
-                f"Scoring sharpens as campaign offer IDs are linked in the platform_"
-            ),
-        }],
-    })
-
     return blocks
 
 
@@ -1089,13 +1078,64 @@ def _run_sourcing_signals(offers: list) -> dict:
     return signals
 
 
+def _clean_offer_name(name: str) -> str:
+    """Strip trailing '- TYPE (GEO)' metadata suffixes from offer display names.
+
+    Example: 'signNow - E-Signature Solution - CPS (WW)' → 'signNow - E-Signature Solution'
+    Requires a ' - ' separator so abbreviations inside names (e.g. 'AT&T') are unaffected.
+    """
+    cleaned = re.sub(r"\s*-\s*[A-Z]{2,10}(?:\s*\([A-Z,]+\))?\s*$", "", (name or "").strip())
+    return cleaned.strip() or (name or "").strip()
+
+
+def _is_cold_start(offers: list) -> bool:
+    """Return True when >80% of PRIME offers share today's first_seen date.
+
+    Indicates the offer inventory was bulk-seeded in a single scrape run and the
+    'new in last 48h' label would be misleading. Only PRIME offers are counted —
+    STRONG offers are lower-signal and shouldn't drive the cold-start decision.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    prime = [o for o in offers if o.get("fit_tier") == "PRIME" and o.get("first_seen")]
+    if not prime:
+        return False
+    # Use UTC date — first_seen timestamps are stored as UTC ISO strings
+    today_str = _dt.now(_tz.utc).date().isoformat()
+    today_count = sum(1 for o in prime if (o.get("first_seen") or "")[:10] == today_str)
+    return today_count / len(prime) > 0.8
+
+
+def _days_in_inventory(o: dict) -> str:
+    """Return human-readable age of an offer since first_seen ('2d ago', 'today', etc.).
+
+    Returns '' when first_seen is absent or unparseable — callers must handle empty string.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    fs = o.get("first_seen", "")
+    if not fs:
+        return ""
+    try:
+        ts = _dt.fromisoformat(fs.replace("Z", "+00:00"))
+        days = (_dt.now(_tz.utc) - ts).days
+        if days == 0:
+            return "today"
+        elif days == 1:
+            return "1d ago"
+        else:
+            return f"{days}d ago"
+    except Exception:
+        return ""
+
+
 def _build_sourcing_intel_blocks(signals: dict) -> list:
     """Build Block Kit offer cards for the winning sourcing signal. Returns [] if nothing fired.
 
     new_offers / seasonal → rich per-offer cards grouped by network, with image, normalized
     payout type, tier badge, mini_description, and Add-to-Draft / Skip buttons.
     payout_upgrades → plain mrkdwn text (different data shape; references running campaigns).
-    Max 3 cards per section to keep visual density appropriate.
+    Max 2 cards per network section to keep visual density appropriate.
     """
     from collections import defaultdict
 
@@ -1120,13 +1160,14 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
 
     if signals.get("new_offers"):
         active_offers = signals["new_offers"]
-        signal_label  = "new in last 48h"
+        cold_start    = _is_cold_start(active_offers)
+        signal_label  = "top PRIME" if cold_start else "new in last 48h"
 
         def context_fn(o):  # noqa: E301
-            cat   = (o.get("category") or "").strip()
-            tier  = o.get("fit_tier") or ""
-            parts = [p for p in [cat, tier] if p]
-            return f"_{' · '.join(parts)} · new in last 48h_" if parts else "_new in last 48h_"
+            cat = (o.get("category") or "").strip()
+            age = _days_in_inventory(o)
+            parts = [p for p in [cat, age] if p]
+            return f"_{' · '.join(parts)}_" if parts else ""
 
     elif signals.get("seasonal"):
         evt           = signals["seasonal"][0]
@@ -1145,9 +1186,11 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
         return blocks
 
     # ── Group by network for header-per-network layout ────────────────────────────
+    # Normalize key to lowercase to prevent "CJ" vs "cj" creating separate buckets
     by_network: dict = defaultdict(list)
     for o in active_offers:
-        by_network[o.get("network") or "unknown"].append(o)
+        net_key = (o.get("network") or "unknown").strip().lower()
+        by_network[net_key].append(o)
 
     for network, net_offers in by_network.items():
         emoji = _NETWORK_EMOJI.get(network, "•")
@@ -1165,11 +1208,11 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             "elements": [{"type": "mrkdwn", "text": f"_{count} offer{plural} · {signal_label}_"}],
         })
 
-        # ── Per-offer cards (max 3 per network section) ──────────────────────────
-        for o in net_offers[:3]:
+        # ── Per-offer cards (max 2 per network section) ──────────────────────────
+        for o in net_offers[:2]:
             offer_id    = o.get("offer_id") or o.get("offer_name", "")
-            offer_name  = o.get("offer_name", "")
-            advertiser  = o.get("advertiser") or offer_name or "Unknown"
+            offer_name  = _clean_offer_name(o.get("offer_name", ""))
+            advertiser  = _clean_offer_name(o.get("advertiser") or o.get("offer_name", "") or "Unknown")
             # Use mini_description (purpose-built 120-char teaser) with whitespace-collapsed fallback
             summary     = o.get("mini_description") or " ".join((o.get("description") or "").split())[:120]
             payout_num  = _parse_payout(o.get("payout"))

@@ -1994,9 +1994,9 @@ def test_sourcing_cards_max_3_offers():
     signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
     blocks  = scout_digest._build_sourcing_intel_blocks(signals)
     action_blocks = [b for b in blocks if b.get("type") == "actions"]
-    if len(action_blocks) != 3:
-        return False, f"Expected exactly 3 offer cards; got {len(action_blocks)} action blocks"
-    return True, "Max 3 offer cards enforced (exactly 3 shown) ✓"
+    if len(action_blocks) != 2:
+        return False, f"Expected exactly 2 offer cards (per-network cap); got {len(action_blocks)} action blocks"
+    return True, "Per-network cap enforced: 2 offer cards shown for single-network batch ✓"
 
 
 @test("sourcing_cards_payout_type_normalized")
@@ -2071,6 +2071,140 @@ def test_sourcing_cards_tier_in_right_col():
     if "PRIME" not in right_col:
         return False, f"PRIME tier not in right column field text: '{right_col}'"
     return True, f"Tier badge 'PRIME' present in right column: '{right_col}' ✓"
+
+
+@test("digest_footer_has_no_demand_queue_text")
+def test_digest_footer_has_no_demand_queue_text():
+    """build_digest_blocks() must not include the removed Demand Queue footer context block."""
+    import scout_digest
+    # Minimal mock: build_digest_blocks needs offers_by_network dict; pass empty to get minimal output
+    import datetime as _datetime
+    blocks = scout_digest.build_digest_blocks(
+        {}, {}, [], {}, _datetime.date.today().isoformat()
+    )
+    combined_text = " ".join(
+        el.get("text", "")
+        for b in blocks
+        for el in (b.get("elements") or [])
+        if isinstance(el, dict)
+    )
+    # Also check plain section text fields
+    combined_text += " ".join(
+        (b.get("text") or {}).get("text", "")
+        for b in blocks
+        if b.get("type") == "section"
+    )
+    if "Demand Queue" in combined_text:
+        return False, "Found 'Demand Queue' text in digest blocks — footer was not removed"
+    return True, "No 'Demand Queue' text in digest blocks ✓"
+
+
+@test("sourcing_cards_per_network_cap_at_two")
+def test_sourcing_cards_per_network_cap_at_two():
+    """With 4 offers from one network, only 2 should render (per-network cap = 2)."""
+    import scout_digest
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
+    offers = [
+        {"offer_name": f"Offer{i}", "advertiser": f"Adv{i}", "payout": str(10 - i),
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "maxbounty", "first_seen": now_iso}
+        for i in range(4)
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    # Count section blocks with fields (one per rendered offer card)
+    offer_cards = [b for b in blocks if b.get("type") == "section" and b.get("fields")]
+    if len(offer_cards) > 2:
+        return False, f"Expected ≤2 offer cards for one network, got {len(offer_cards)}"
+    return True, f"Per-network cap enforced: {len(offer_cards)} card(s) rendered ✓"
+
+
+@test("offer_name_suffix_stripped_from_display")
+def test_offer_name_suffix_stripped_from_display():
+    """_clean_offer_name() strips trailing '- TYPE (GEO)' metadata suffixes."""
+    import scout_digest
+    cases = [
+        ("signNow - E-Signature Solution - CPS (WW)", "signNow - E-Signature Solution"),
+        ("SomeOffer - CPL (US)", "SomeOffer"),
+        ("AT&T Wireless", "AT&T Wireless"),          # no suffix — unchanged
+        ("Simple Offer - CPA (CA,US)", "Simple Offer"),
+        ("", ""),
+    ]
+    for raw, expected in cases:
+        result = scout_digest._clean_offer_name(raw)
+        if result != expected:
+            return False, f"_clean_offer_name({raw!r}) = {result!r}, expected {expected!r}"
+    return True, f"All {len(cases)} offer name suffix cases cleaned correctly ✓"
+
+
+@test("cold_start_label_when_all_offers_seeded_today")
+def test_cold_start_label_when_all_offers_seeded_today():
+    """When >80% of PRIME offers share today's first_seen, context shows 'top PRIME' not 'new in last 48h'."""
+    import scout_digest
+    from datetime import date, datetime, timezone
+    today_iso = datetime.now(timezone.utc).isoformat()
+    # 5 offers all first_seen today → cold start
+    offers = [
+        {"offer_name": f"Offer{i}", "advertiser": f"Adv{i}", "payout": str(i + 1),
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "maxbounty", "first_seen": today_iso}
+        for i in range(5)
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    # The per-network count context block should say 'top PRIME', not 'new in last 48h'
+    context_texts = [
+        el.get("text", "")
+        for b in blocks if b.get("type") == "context"
+        for el in (b.get("elements") or [])
+        if isinstance(el, dict) and el.get("type") == "mrkdwn"
+    ]
+    combined = " ".join(context_texts)
+    if "new in last 48h" in combined:
+        return False, f"Found 'new in last 48h' during cold-start — should say 'top PRIME'. Context: {combined!r}"
+    if "top PRIME" not in combined:
+        return False, f"Expected 'top PRIME' in context during cold-start, got: {combined!r}"
+    return True, "Cold-start label shows 'top PRIME' instead of 'new in last 48h' ✓"
+
+
+@test("sourcing_context_line_shows_age_not_tier")
+def test_sourcing_context_line_shows_age_not_tier():
+    """Context line under each offer card shows category + age ('2d ago'), not the tier badge."""
+    import scout_digest
+    from datetime import datetime, timezone, timedelta
+    old_iso = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    offers = [
+        {"offer_name": "TestOffer", "advertiser": "TestAdv", "payout": "5.00",
+         "payout_type": "CPL", "fit_tier": "PRIME", "network": "cj",
+         "category": "Software", "first_seen": old_iso}
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+    blocks = scout_digest._build_sourcing_intel_blocks(signals)
+    # Find context blocks that are per-offer (contain age-style text), skip network-count contexts
+    offer_context_texts = []
+    for b in blocks:
+        if b.get("type") != "context":
+            continue
+        for el in (b.get("elements") or []):
+            if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                text = el.get("text", "")
+                if "ago" in text or "today" in text:
+                    offer_context_texts.append(text)
+    if not offer_context_texts:
+        # It's OK if age is "today" and that didn't match — check for any context with category
+        for b in blocks:
+            if b.get("type") != "context":
+                continue
+            for el in (b.get("elements") or []):
+                if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                    text = el.get("text", "")
+                    if "Software" in text:
+                        offer_context_texts.append(text)
+    if not offer_context_texts:
+        return False, "No per-offer context line found with age or category text"
+    combined = " ".join(offer_context_texts)
+    if "PRIME" in combined or "STRONG" in combined:
+        return False, f"Tier badge found in context line (should only be in right column): '{combined}'"
+    return True, f"Context line shows age/category, no tier badge: {offer_context_texts[0]!r} ✓"
 
 
 if __name__ == "__main__":
