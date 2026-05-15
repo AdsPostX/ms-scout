@@ -72,6 +72,12 @@ def _set_pulse_runner(fn) -> None:
     global _PULSE_RUNNER
     _PULSE_RUNNER = fn
 
+_FORCE_MONITOR_FNS: dict = {}
+
+def _set_force_monitor_fn(name: str, fn) -> None:
+    global _FORCE_MONITOR_FNS
+    _FORCE_MONITOR_FNS[name] = fn
+
 
 # ── Part 3.6 — 👍/👎 feedback loop ──────────────────────────────────────────
 _FEEDBACK_LOG = _DATA_DIR / "feedback_log.jsonl"
@@ -1951,6 +1957,27 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 web.chat_postMessage(channel=channel, thread_ts=thread_ts,
                                      text=f":x: Force signal failed: `{e}`")
         threading.Thread(target=_run_force_sniper, daemon=True).start()
+        return
+
+    # "force cap/velocity/ghost/fill" — admin one-shot monitor run
+    _FORCE_MON_PAT = re.compile(r'\bforce\s+(cap|velocity|ghost|fill)\b')
+    _m = _FORCE_MON_PAT.search(lower)
+    if _m:
+        monitor_name = _m.group(1)
+        fn = _FORCE_MONITOR_FNS.get(monitor_name)
+        if fn is None:
+            web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                 text=f":x: Force `{monitor_name}` not available — monitor runner not initialized.")
+            return
+        web.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                             text=f":hourglass_flowing_sand: Running `{monitor_name}` monitor now — results will follow...")
+        def _run(_fn=fn, _ch=channel, _t=thread_ts):
+            try:
+                _fn(web, _ch)
+            except Exception as e:
+                log.error(f"[force {monitor_name}] failed: {e}", exc_info=True)
+                web.chat_postMessage(channel=_ch, thread_ts=_t, text=f":x: Force `{monitor_name}` failed: {e}")
+        threading.Thread(target=_run, daemon=True).start()
         return
 
     # "QA yourself" / "self test" — run the QA suite with live per-question posting
