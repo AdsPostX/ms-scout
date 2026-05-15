@@ -2243,7 +2243,9 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             header_text       = _sanitize_slack(response.text)
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
             suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
-            all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks]
+            feedback_blocks   = _build_feedback_buttons(msg_ts)
+            _sep              = [{"type": "divider"}] if suggestion_blocks else []
+            all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks]
             _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=header_text or "Top opportunities",
@@ -2380,8 +2382,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         header_text       = _sanitize_slack(response.text)
         offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
         suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
+        feedback_blocks   = _build_feedback_buttons(_placeholder_ts)
+        _sep              = [{"type": "divider"}] if suggestion_blocks else []
         elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
-        all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, elapsed_ctx]
+        all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks, elapsed_ctx]
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
