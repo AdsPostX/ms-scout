@@ -967,20 +967,16 @@ def _build_help_blocks() -> list:
 
 def _build_feedback_buttons(query_hash: str) -> list:
     """
-    Adds 👍 / 👎 / ✏️ feedback buttons to Scout text responses.
-    query_hash: short identifier for the query (for learnings tracking).
+    Adds 👎 / ✏️ feedback buttons + microcopy to Scout text responses.
+
+    👍 was removed because no one mines positive signals operationally —
+    keeping it created noise without payoff. 👎 fires an automatic retry;
+    ✏️ captures a correction Scout remembers.
     """
     return [
         {
             "type": "actions",
             "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "👍 Accurate", "emoji": True},
-                    "action_id": "scout_feedback_good",
-                    "value": query_hash,
-                    "style": "primary",
-                },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
@@ -994,7 +990,14 @@ def _build_feedback_buttons(query_hash: str) -> list:
                     "value": query_hash,
                 },
             ],
-        }
+        },
+        {
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": "_React 👎 if this is off — I'll retry. Or hit ✏️ Correct this._",
+            }],
+        },
     ]
 
 # ── RENDERING CONTRACT ────────────────────────────────────────────────────────
