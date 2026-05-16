@@ -128,28 +128,75 @@ _SCOUT_THRESHOLDS_FALLBACK: dict = {
 
 
 def _load_thresholds() -> dict:
-    """Load Scout thresholds from config/scout_thresholds.json. Falls back on any error."""
+    """Load Scout thresholds: fallback ← config/scout_thresholds.json ← data/threshold_overrides.json.
+
+    Runtime overrides from the `set_threshold` agent tool are layered last, so they
+    win over the git-tracked config. Override file shape:
+      {"signals": {"cap_alert_pct": {"value": 80, "set_by": "U123", "set_at": "...", "reason": "..."}}}
+    """
     try:
         if not _SCOUT_THRESHOLDS_FILE.exists():
             log.warning(f"[config] {_SCOUT_THRESHOLDS_FILE} missing — using fallback thresholds")
-            return _SCOUT_THRESHOLDS_FALLBACK
-        loaded = json.loads(_SCOUT_THRESHOLDS_FILE.read_text())
-        # Drop the _doc key if present
-        loaded.pop("_doc", None)
-        # Merge with fallback so missing keys get sane defaults
-        merged = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
-        for section, values in loaded.items():
-            if section in merged and isinstance(values, dict):
-                merged[section].update(values)
-            else:
-                merged[section] = values
-        return merged
+            merged = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
+        else:
+            loaded = json.loads(_SCOUT_THRESHOLDS_FILE.read_text())
+            loaded.pop("_doc", None)
+            merged = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
+            for section, values in loaded.items():
+                if section in merged and isinstance(values, dict):
+                    merged[section].update(values)
+                else:
+                    merged[section] = values
     except Exception as e:
-        log.warning(f"[config] _load_thresholds() failed, using fallback: {e}")
-        return _SCOUT_THRESHOLDS_FALLBACK
+        log.warning(f"[config] _load_thresholds() failed on config file, using fallback: {e}")
+        merged = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
+
+    # Layer runtime overrides on top (lazy import — scout_state has no scout_agent dep)
+    try:
+        import scout_state
+        overrides = scout_state._load_threshold_overrides()
+        for section, keys in (overrides or {}).items():
+            if not isinstance(keys, dict):
+                continue
+            if section not in merged or not isinstance(merged[section], dict):
+                merged[section] = {}
+            for key, entry in keys.items():
+                if isinstance(entry, dict) and "value" in entry:
+                    merged[section][key] = entry["value"]
+    except Exception as e:
+        log.warning(f"[config] _load_thresholds() failed applying overrides: {e}")
+
+    return merged
 
 
 SCOUT_THRESHOLDS: dict = _load_thresholds()
+
+
+def _is_admin(user_id: str) -> bool:
+    """True if user_id is in SCOUT_THRESHOLD_ADMINS (comma-separated allowlist).
+
+    Falls back to SCOUT_ADMIN_USER_ID (single-admin legacy env) so existing admins
+    don't lose access. Empty user_id always returns False.
+    """
+    if not user_id:
+        return False
+    allow = {x.strip() for x in os.getenv("SCOUT_THRESHOLD_ADMINS", "").split(",") if x.strip()}
+    legacy = os.getenv("SCOUT_ADMIN_USER_ID", "").strip()
+    if legacy:
+        allow.add(legacy)
+    return user_id in allow
+
+
+# Force-monitor injection — scout_bot sets these at startup so the force_run_monitor
+# agent tool can invoke the same monitor lambdas that scout_handlers uses. None until
+# scout_bot.main() calls _set_force_monitor_ctx().
+_FORCE_MONITOR_CTX: dict = {"web": None, "ch_factory": None}
+
+
+def _set_force_monitor_ctx(web, ch_factory) -> None:
+    """Inject WebClient + ClickHouse factory so force_run_monitor can call monitor fns."""
+    _FORCE_MONITOR_CTX["web"] = web
+    _FORCE_MONITOR_CTX["ch_factory"] = ch_factory
 
 
 SNAPSHOT_PATH = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
@@ -1035,6 +1082,22 @@ absolute — only the confidence tier flexes here.
 34. ADVERTISER REVENUE TRENDS — "which advertisers are trending up/down", "advertiser revenue trends", "Capital One revenue vs historical", "who dropped advertiser-side revenue"
     → get_advertiser_revenue_trends().
     Same format as Intent 33 but use adv_name and conversions_actual instead of sessions.
+
+35. LIST THRESHOLDS / OVERRIDES — "list thresholds", "show overrides", "what's currently overridden", "show me current threshold values", "are any thresholds overridden", "show threshold overrides"
+    → list_thresholds(section=optional). Returns merged values (fallback ⊕ config ⊕ overrides) with `source` tag per key.
+    Format as a compact card grouped by section; mark overridden keys with :pencil2: and show the override value next to the config baseline.
+
+36. THRESHOLD HISTORY — "threshold history", "who changed [key]", "when was [threshold] changed", "show changelog for [key]", "audit thresholds", "history of [section.key]"
+    → get_threshold_history(key=optional, limit=10). Returns recent changelog entries with actor, prior, new, reason, timestamp.
+    Render as a short timeline; one line per entry. If no key specified, show 10 most recent across all keys.
+
+37. SET THRESHOLD — "set [key] to [value]", "change [threshold] to [N]", "override [key] = [N] because [reason]", "raise/lower [threshold] to [N]", "tune [key] to [N]"
+    → set_threshold(section, key, value, reason). REQUIRES admin (gated by SCOUT_THRESHOLD_ADMINS). On success, confirm prior → new value, echo the reason, and note the change is live (reloaded in-process).
+    If the user is not an admin, return the denial message verbatim — do not retry, do not suggest a workaround.
+
+38. FORCE-RUN MONITOR — "force run [monitor]", "run pulse now", "trigger ghost monitor", "fire revenue tracker", "run [signal] monitor now", "force [monitor]"
+    → force_run_monitor(monitor_name). REQUIRES admin. Valid names: "cap", "velocity", "ghost", "fill" (registered monitors).
+    Echo "Triggered [monitor] — results posted to #scout-qa" on success; report status verbatim on failure.
 
 DEFAULT: Unclear intent → Intent 13. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
@@ -2407,6 +2470,89 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "list_thresholds",
+        "description": (
+            "Return all active Scout monitor thresholds plus override metadata. "
+            "Use when: 'what are the current thresholds', 'list scout thresholds', "
+            "'show me threshold overrides', 'which thresholds have been changed', "
+            "'what's the current cap_alert_pct', 'show monitor settings'."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_threshold_history",
+        "description": (
+            "Return recent threshold-change events from the changelog. "
+            "Optional 'key' filter (e.g. 'signals.cap_alert_pct') and 'limit' (default 50). "
+            "Use when: 'who changed the threshold', 'threshold history', 'why is X set to Y', "
+            "'when did we tune the cap alert', 'show changelog for fill_rate_min_sessions_7d'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Optional filter like 'signals.cap_alert_pct'. Omit for all changes.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max entries to return, newest first. Default 50, max 500.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "set_threshold",
+        "description": (
+            "Admin-only — requires SCOUT_THRESHOLD_ADMINS env match. "
+            "Write a runtime override for one Scout threshold; persisted to "
+            "data/threshold_overrides.json and reloaded immediately. Always require a reason. "
+            "Use when an admin says: 'change cap_alert_pct to 80', 'set the fill rate threshold to 3000', "
+            "'tune ghost_recency_hours to 72', 'lower velocity_down_threshold_pct to -30'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "section": {
+                    "type": "string",
+                    "description": "Top-level section in scout_thresholds.json (e.g. 'signals', 'digest', 'health').",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Threshold name within the section (e.g. 'cap_alert_pct').",
+                },
+                "value": {
+                    "description": "New value (number for numeric thresholds; type matches the config schema).",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the threshold is changing — recorded permanently in the changelog.",
+                },
+            },
+            "required": ["section", "key", "value", "reason"],
+        },
+    },
+    {
+        "name": "force_run_monitor",
+        "description": (
+            "Admin-only — requires SCOUT_THRESHOLD_ADMINS env match. "
+            "Run a silent-monitor signal immediately and post results to #scout-qa. "
+            "Use when an admin says: 'force run the cap monitor', 'rerun ghost detection now', "
+            "'test the fill rate alert', 'fire velocity monitor on demand', 'force run cvr'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "monitor": {
+                    "type": "string",
+                    "description": "Which monitor to fire (e.g. cap, velocity, ghost, fill, cvr, expiration, revenue).",
+                },
+            },
+            "required": ["monitor"],
+        },
+    },
 ]
 
 
@@ -3189,6 +3335,24 @@ def get_scout_config() -> dict:
             log.debug("get_scout_config live_networks swallowed: %s", e)
             live_networks = []
 
+        # Override metadata (PR-B): which thresholds have runtime overrides
+        overridden_keys: list[str] = []
+        last_override_at: str = ""
+        try:
+            import scout_state
+            ov = scout_state._load_threshold_overrides() or {}
+            for section, keys in ov.items():
+                if not isinstance(keys, dict):
+                    continue
+                for key, entry in keys.items():
+                    if isinstance(entry, dict) and "value" in entry:
+                        overridden_keys.append(f"{section}.{key}")
+                        ts = entry.get("set_at", "")
+                        if ts and ts > last_override_at:
+                            last_override_at = ts
+        except Exception as e:
+            log.debug("get_scout_config override metadata swallowed: %s", e)
+
         return {
             "thresholds": SCOUT_THRESHOLDS,
             "supported_networks": list(SUPPORTED_NETWORKS),
@@ -3199,11 +3363,177 @@ def get_scout_config() -> dict:
                 "opportunities_displayed": "Mondays only (computed daily)",
             },
             "config_file": str(_SCOUT_THRESHOLDS_FILE.relative_to(pathlib.Path(__file__).parent)),
+            "overridden_keys": overridden_keys,
+            "last_override_at": last_override_at,
             "data_quality": _data_quality_tier(days_of_data=999),  # config is static — N/A applies
         }
     except Exception as e:
         log.warning(f"get_scout_config failed: {e}")
         return {"error": str(e), "thresholds": _SCOUT_THRESHOLDS_FALLBACK}
+
+
+# ── Threshold control surface (PR-B) ─────────────────────────────────────────
+# Four tools the agent calls when admins ask Scout to tune monitor thresholds:
+#   list_thresholds        — read-only, anyone
+#   get_threshold_history  — read-only, anyone
+#   set_threshold          — admin-only (SCOUT_THRESHOLD_ADMINS)
+#   force_run_monitor      — admin-only
+
+def list_thresholds() -> dict:
+    """Return all active thresholds (after override merge) plus override metadata.
+
+    Anyone can call. Mirrors get_scout_config but trimmed to threshold concerns.
+    """
+    try:
+        import scout_state
+        ov = scout_state._load_threshold_overrides() or {}
+    except Exception as e:
+        log.warning(f"list_thresholds override read failed: {e}")
+        ov = {}
+
+    overridden: dict = {}
+    for section, keys in ov.items():
+        if not isinstance(keys, dict):
+            continue
+        for key, entry in keys.items():
+            if isinstance(entry, dict) and "value" in entry:
+                overridden[f"{section}.{key}"] = {
+                    "value": entry.get("value"),
+                    "set_by": entry.get("set_by", ""),
+                    "set_at": entry.get("set_at", ""),
+                    "reason": entry.get("reason", ""),
+                }
+
+    return {
+        "thresholds": SCOUT_THRESHOLDS,
+        "overridden": overridden,
+        "config_file": str(_SCOUT_THRESHOLDS_FILE.relative_to(pathlib.Path(__file__).parent)),
+        "override_file": "data/threshold_overrides.json",
+    }
+
+
+def get_threshold_history(key: str = "", limit: int = 50) -> dict:
+    """Return recent threshold change events from data/threshold_changelog.jsonl.
+
+    key: optional filter like 'signals.cap_alert_pct' — exact match against entry["key"].
+    limit: max entries (newest first). Default 50.
+    """
+    try:
+        import scout_state
+        entries = scout_state._read_threshold_changelog(limit=max(1, min(int(limit or 50), 500)),
+                                                       key=(key or None))
+        return {"entries": entries, "count": len(entries), "filter": key or "all"}
+    except Exception as e:
+        log.warning(f"get_threshold_history failed: {e}")
+        return {"error": str(e), "entries": [], "count": 0}
+
+
+def set_threshold(section: str = "", key: str = "", value=None, reason: str = "",
+                  _caller_user_id: str = "") -> dict:
+    """Admin-only: write a runtime override for one threshold and reload SCOUT_THRESHOLDS.
+
+    Override persists in data/threshold_overrides.json and is layered on top of
+    config/scout_thresholds.json at every _load_thresholds() call. The append-only
+    changelog records the actor, prior value, new value, and reason.
+    """
+    global SCOUT_THRESHOLDS
+    if not _is_admin(_caller_user_id):
+        return {"ok": False, "error": "not_admin",
+                "message": ":lock: Threshold changes are admin-only (set SCOUT_THRESHOLD_ADMINS)."}
+
+    section = (section or "").strip()
+    key = (key or "").strip()
+    if not section or not key:
+        return {"ok": False, "error": "missing_args",
+                "message": "section and key are required (e.g. section='signals', key='cap_alert_pct')."}
+    if value is None:
+        return {"ok": False, "error": "missing_value", "message": "value is required."}
+    if not reason or not reason.strip():
+        return {"ok": False, "error": "missing_reason",
+                "message": "reason is required so the changelog stays useful."}
+
+    # Capture prior value (post-override merge — what callers actually saw)
+    prior = SCOUT_THRESHOLDS.get(section, {}).get(key) if isinstance(SCOUT_THRESHOLDS.get(section), dict) else None
+
+    try:
+        import scout_state
+        overrides = scout_state._load_threshold_overrides() or {}
+        if section not in overrides or not isinstance(overrides[section], dict):
+            overrides[section] = {}
+        ts = datetime.now(timezone.utc).isoformat()
+        overrides[section][key] = {
+            "value": value,
+            "set_by": _caller_user_id or "unknown",
+            "set_at": ts,
+            "reason": reason.strip(),
+        }
+        scout_state._save_threshold_overrides(overrides)
+
+        scout_state._append_threshold_changelog({
+            "ts": ts,
+            "key": f"{section}.{key}",
+            "section": section,
+            "name": key,
+            "prior": prior,
+            "value": value,
+            "set_by": _caller_user_id or "unknown",
+            "reason": reason.strip(),
+            "action": "set",
+        })
+
+        # Reload module-level SCOUT_THRESHOLDS so this process sees the change
+        SCOUT_THRESHOLDS = _load_thresholds()
+
+        return {
+            "ok": True,
+            "section": section,
+            "key": key,
+            "prior": prior,
+            "value": value,
+            "set_by": _caller_user_id,
+            "set_at": ts,
+            "reason": reason.strip(),
+        }
+    except Exception as e:
+        log.warning(f"set_threshold failed: {e}")
+        return {"ok": False, "error": "write_failed", "message": str(e)}
+
+
+def force_run_monitor(monitor: str = "", _caller_user_id: str = "") -> dict:
+    """Admin-only: invoke any registered monitor immediately.
+
+    Uses the same lambda registry as scout_handlers' force commands.
+    Auto-discovers registered monitors so new _set_force_monitor_fn registrations
+    are available here without any code change.
+    """
+    if not _is_admin(_caller_user_id):
+        return {"ok": False, "error": "not_admin",
+                "message": ":lock: Force-run is admin-only (set SCOUT_THRESHOLD_ADMINS)."}
+
+    web = _FORCE_MONITOR_CTX.get("web")
+    ch_factory = _FORCE_MONITOR_CTX.get("ch_factory")
+    if web is None or ch_factory is None:
+        return {"ok": False, "error": "not_initialized",
+                "message": "Force-monitor context not injected yet — Scout still warming up."}
+
+    name = (monitor or "").strip().lower()
+    import scout_handlers
+    allowed = set(scout_handlers._FORCE_MONITOR_FNS.keys())
+    if name not in allowed:
+        return {"ok": False, "error": "unknown_monitor",
+                "message": f"monitor must be one of: {sorted(allowed)}"}
+
+    try:
+        fn = scout_handlers._FORCE_MONITOR_FNS.get(name)
+        if fn is None:
+            return {"ok": False, "error": "not_registered",
+                    "message": f"Monitor '{name}' not registered (scout_bot startup may have skipped it)."}
+        fn(web, ch_factory(), "")
+        return {"ok": True, "monitor": name, "by_user_id": _caller_user_id,
+                "message": f"Force-ran {name} monitor — results posted to #scout-qa."}
+    except Exception as e:
+        log.warning(f"force_run_monitor({name}) failed: {e}")
+        return {"ok": False, "error": "execution_failed", "message": str(e)}
 
 
 def get_queue_status() -> dict:
@@ -5280,6 +5610,10 @@ def run_self_qa() -> dict:
 
 TOOL_MAP["run_self_qa"] = run_self_qa
 TOOL_MAP["get_scout_config"] = get_scout_config
+TOOL_MAP["list_thresholds"] = list_thresholds
+TOOL_MAP["get_threshold_history"] = get_threshold_history
+TOOL_MAP["set_threshold"] = set_threshold
+TOOL_MAP["force_run_monitor"] = force_run_monitor
 
 
 def _run_tool(name: str, inputs: dict, _caller_user_id: str = "",
@@ -5296,6 +5630,10 @@ def _run_tool(name: str, inputs: dict, _caller_user_id: str = "",
     if name in {"record_entity_note", "forget_entity_note"}:
         inputs = {**inputs, "_caller_user_id": _caller_user_id,
                   "_caller_permalink": _caller_permalink}
+    # PR-B: admin-gated threshold control surface — inject caller identity so the
+    # tool can check SCOUT_THRESHOLD_ADMINS without the LLM supplying user_id.
+    if name in {"set_threshold", "force_run_monitor"}:
+        inputs = {**inputs, "_caller_user_id": _caller_user_id}
     return fn(**inputs)
 
 

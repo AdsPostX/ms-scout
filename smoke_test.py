@@ -2545,6 +2545,226 @@ def test_revenue_trend_wrappers_use_config_thresholds():
     return True, "both revenue trend wrappers pass config min_periods through to query ✓"
 
 
+@test("threshold_override_layers_on_top_of_config_with_in_process_reload")
+def test_threshold_override_layers():
+    """A runtime override should win over config/scout_thresholds.json.
+
+    Exercises the full three-layer merge: fallback → config → overrides.
+    set_threshold() must reload module-level SCOUT_THRESHOLDS so subsequent
+    reads see the new value without a restart.
+    """
+    import scout_agent, scout_state
+
+    overrides_path = scout_state._THRESHOLD_OVERRIDES_FILE
+    changelog_path = scout_state._THRESHOLD_CHANGELOG_FILE
+    backup_o = overrides_path.read_bytes() if overrides_path.exists() else None
+    backup_c = changelog_path.read_bytes() if changelog_path.exists() else None
+
+    try:
+        # Clean slate
+        if overrides_path.exists(): overrides_path.unlink()
+        if changelog_path.exists(): changelog_path.unlink()
+        scout_agent.SCOUT_THRESHOLDS = scout_agent._load_thresholds()
+
+        baseline = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        if baseline is None:
+            return False, "Expected signals.cap_alert_pct in config — got None"
+
+        target = baseline + 7
+        admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
+        os.environ["SCOUT_THRESHOLD_ADMINS"] = "UADMIN_TEST"
+        try:
+            result = scout_agent.set_threshold(
+                section="signals", key="cap_alert_pct", value=target,
+                reason="smoke test layering", _caller_user_id="UADMIN_TEST",
+            )
+        finally:
+            if admins: os.environ["SCOUT_THRESHOLD_ADMINS"] = admins
+            else: os.environ.pop("SCOUT_THRESHOLD_ADMINS", None)
+
+        if not result.get("ok"):
+            return False, f"set_threshold failed: {result}"
+
+        live = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        if live != target:
+            return False, f"In-process reload failed: expected {target}, got {live}"
+
+        return True, f"Override layered on top of config (baseline={baseline} → live={target}) ✓"
+    finally:
+        if backup_o is not None: overrides_path.write_bytes(backup_o)
+        elif overrides_path.exists(): overrides_path.unlink()
+        if backup_c is not None: changelog_path.write_bytes(backup_c)
+        elif changelog_path.exists(): changelog_path.unlink()
+        try:
+            import scout_agent as _sa
+            _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
+        except Exception as e:
+            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
+
+
+@test("set_threshold_denies_non_admin_callers")
+def test_set_threshold_admin_gate():
+    """Non-admin callers must be rejected; SCOUT_THRESHOLDS must not change."""
+    import scout_agent
+
+    admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
+    os.environ["SCOUT_THRESHOLD_ADMINS"] = "UADMIN_ONLY"
+    try:
+        before = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        result = scout_agent.set_threshold(
+            section="signals", key="cap_alert_pct", value=999,
+            reason="should be denied", _caller_user_id="UNOBODY",
+        )
+        if result.get("ok") or result.get("error") != "not_admin":
+            return False, f"Expected denial (ok=False, error=not_admin), got {result}"
+        after = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        if before != after:
+            return False, f"Denied call still mutated value: {before} → {after}"
+        return True, "Non-admin caller denied; SCOUT_THRESHOLDS unchanged ✓"
+    finally:
+        if admins: os.environ["SCOUT_THRESHOLD_ADMINS"] = admins
+        else: os.environ.pop("SCOUT_THRESHOLD_ADMINS", None)
+
+
+@test("set_threshold_appends_changelog_entry_with_actor_and_reason")
+def test_set_threshold_writes_changelog():
+    """Every successful set_threshold must append a JSONL line with actor + prior + new + reason."""
+    import scout_agent, scout_state
+
+    overrides_path = scout_state._THRESHOLD_OVERRIDES_FILE
+    changelog_path = scout_state._THRESHOLD_CHANGELOG_FILE
+    backup_o = overrides_path.read_bytes() if overrides_path.exists() else None
+    backup_c = changelog_path.read_bytes() if changelog_path.exists() else None
+
+    try:
+        if overrides_path.exists(): overrides_path.unlink()
+        if changelog_path.exists(): changelog_path.unlink()
+        scout_agent.SCOUT_THRESHOLDS = scout_agent._load_thresholds()
+
+        admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
+        os.environ["SCOUT_THRESHOLD_ADMINS"] = "UCHANGELOG"
+        try:
+            r = scout_agent.set_threshold(
+                section="signals", key="cap_alert_pct", value=88,
+                reason="audit-trail check", _caller_user_id="UCHANGELOG",
+            )
+        finally:
+            if admins: os.environ["SCOUT_THRESHOLD_ADMINS"] = admins
+            else: os.environ.pop("SCOUT_THRESHOLD_ADMINS", None)
+
+        if not r.get("ok"):
+            return False, f"set_threshold failed: {r}"
+
+        entries = scout_state._read_threshold_changelog(limit=5)
+        if not entries:
+            return False, "Changelog empty after successful set_threshold"
+        last = entries[0] if entries else {}
+        for field in ("set_by", "section", "key", "prior", "value", "reason", "ts"):
+            if field not in last:
+                return False, f"Changelog entry missing field: {field} — got keys {list(last.keys())}"
+        if last["set_by"] != "UCHANGELOG":
+            return False, f"set_by wrong: {last['set_by']}"
+        if last["reason"] != "audit-trail check":
+            return False, f"reason not persisted: {last['reason']}"
+        return True, f"Changelog appended with set_by={last['set_by']} reason={last['reason']!r} ✓"
+    finally:
+        if backup_o is not None: overrides_path.write_bytes(backup_o)
+        elif overrides_path.exists(): overrides_path.unlink()
+        if backup_c is not None: changelog_path.write_bytes(backup_c)
+        elif changelog_path.exists(): changelog_path.unlink()
+        try:
+            import scout_agent as _sa
+            _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
+        except Exception as e:
+            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
+
+
+@test("force_run_monitor_returns_not_initialized_when_context_missing")
+def test_force_run_monitor_graceful_without_ctx():
+    """Before scout_bot injects (web, ch_factory), force_run_monitor must fail gracefully."""
+    import scout_agent
+
+    saved = dict(scout_agent._FORCE_MONITOR_CTX)
+    scout_agent._FORCE_MONITOR_CTX["web"] = None
+    scout_agent._FORCE_MONITOR_CTX["ch_factory"] = None
+    try:
+        admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
+        os.environ["SCOUT_THRESHOLD_ADMINS"] = "UADMIN_FRM"
+        try:
+            r = scout_agent.force_run_monitor(
+                monitor="ghost", _caller_user_id="UADMIN_FRM",
+            )
+        finally:
+            if admins: os.environ["SCOUT_THRESHOLD_ADMINS"] = admins
+            else: os.environ.pop("SCOUT_THRESHOLD_ADMINS", None)
+        if r.get("ok") or r.get("error") != "not_initialized":
+            return False, f"Expected ok=False error=not_initialized when ctx missing, got {r}"
+        return True, "Returns not_initialized gracefully when scout_bot hasn't injected yet ✓"
+    finally:
+        scout_agent._FORCE_MONITOR_CTX.update(saved)
+
+
+@test("threshold_control_tools_registered_in_TOOLS_and_TOOL_MAP")
+def test_threshold_tools_registered():
+    """All 4 new tools must be present in both the TOOLS list and TOOL_MAP."""
+    import scout_agent
+
+    expected = ["list_thresholds", "get_threshold_history", "set_threshold", "force_run_monitor"]
+    tool_names = {t.get("name") for t in scout_agent.TOOLS}
+    missing_tools = [n for n in expected if n not in tool_names]
+    missing_map = [n for n in expected if n not in scout_agent.TOOL_MAP]
+    if missing_tools:
+        return False, f"Missing from TOOLS list: {missing_tools}"
+    if missing_map:
+        return False, f"Missing from TOOL_MAP: {missing_map}"
+    return True, f"All {len(expected)} threshold-control tools registered ✓"
+
+
+@test("get_scout_config_exposes_overridden_keys_and_last_override_at")
+def test_get_scout_config_shows_overrides():
+    """get_scout_config must surface override metadata so the team can see active overrides."""
+    import scout_agent, scout_state
+
+    overrides_path = scout_state._THRESHOLD_OVERRIDES_FILE
+    changelog_path = scout_state._THRESHOLD_CHANGELOG_FILE
+    backup_o = overrides_path.read_bytes() if overrides_path.exists() else None
+    backup_c = changelog_path.read_bytes() if changelog_path.exists() else None
+    try:
+        if overrides_path.exists(): overrides_path.unlink()
+        if changelog_path.exists(): changelog_path.unlink()
+        scout_agent.SCOUT_THRESHOLDS = scout_agent._load_thresholds()
+
+        admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
+        os.environ["SCOUT_THRESHOLD_ADMINS"] = "UCFG"
+        try:
+            scout_agent.set_threshold(
+                section="signals", key="cap_alert_pct", value=82,
+                reason="config visibility test", _caller_user_id="UCFG",
+            )
+        finally:
+            if admins: os.environ["SCOUT_THRESHOLD_ADMINS"] = admins
+            else: os.environ.pop("SCOUT_THRESHOLD_ADMINS", None)
+
+        cfg = scout_agent.get_scout_config()
+        if "overridden_keys" not in cfg:
+            return False, f"get_scout_config missing 'overridden_keys' — keys: {list(cfg.keys())}"
+        if "signals.cap_alert_pct" not in (cfg.get("overridden_keys") or []):
+            return False, f"signals.cap_alert_pct not in overridden_keys: {cfg.get('overridden_keys')}"
+        if not cfg.get("last_override_at"):
+            return False, "last_override_at empty after set_threshold"
+        return True, f"overridden_keys={cfg['overridden_keys']} last_override_at={cfg['last_override_at']} ✓"
+    finally:
+        if backup_o is not None: overrides_path.write_bytes(backup_o)
+        elif overrides_path.exists(): overrides_path.unlink()
+        if backup_c is not None: changelog_path.write_bytes(backup_c)
+        elif changelog_path.exists(): changelog_path.unlink()
+        try:
+            import scout_agent as _sa
+            _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
+        except Exception as e:
+            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

@@ -164,6 +164,8 @@ context_harvester.py    — Nightly Slack context extraction
 - `data/pulse_state.json` — runtime Pulse state; never manually edit publisher names without verifying in ClickHouse
 - `config/team_corrections.json` — static platform-wide facts (git-tracked), not for entity facts
 - `config/scout_thresholds.json` — Scout's tunable thresholds (PR 17a; loaded by `scout_agent._load_thresholds()` at startup). The `@Scout config` tool surfaces current values so the team can audit without reading source.
+- `data/threshold_overrides.json` — runtime threshold overrides written by `@Scout set ...` (admin-gated). Three-layer merge: fallback → `config/scout_thresholds.json` → `data/threshold_overrides.json` (overrides win). `set_threshold()` re-runs `_load_thresholds()` so changes go live in-process — no restart. Admin allowlist: `SCOUT_THRESHOLD_ADMINS` env var (comma-separated Slack user_ids).
+- `data/threshold_changelog.jsonl` — append-only audit log: one JSON line per `set_threshold` call with `ts`, `section`, `key`, `prior`, `value`, `set_by`, `reason`. Read via `get_threshold_history(key=optional, limit=N)`.
 
 ---
 
