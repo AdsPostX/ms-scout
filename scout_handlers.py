@@ -57,7 +57,6 @@ log = logging.getLogger("scout_handlers")
 _BOT_USER_ID: str = ""
 _LAST_THREAD_PER_CHANNEL: dict = {}
 _LAST_THREAD_LOCK = None  # threading.Lock, set by scout_bot
-_PULSE_RUNNER = None       # _run_pulse_once from scout_bot; injected to avoid circular import
 
 def _set_bot_user_id(uid: str) -> None:
     global _BOT_USER_ID
@@ -67,10 +66,6 @@ def _set_thread_state(per_channel: dict, lock) -> None:
     global _LAST_THREAD_PER_CHANNEL, _LAST_THREAD_LOCK
     _LAST_THREAD_PER_CHANNEL = per_channel
     _LAST_THREAD_LOCK = lock
-
-def _set_pulse_runner(fn) -> None:
-    global _PULSE_RUNNER
-    _PULSE_RUNNER = fn
 
 _FORCE_MONITOR_FNS: dict = {}
 
@@ -1895,26 +1890,6 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         )
         return
 
-    # "force pulse" — admin command to trigger the pulse immediately to #bot-qa
-    if re.search(r'\bforce\s+pulse\b', lower):
-        web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                             text=":hourglass_flowing_sand: Running pulse signals now — will post to #sidd-qa...")
-        def _run_force_pulse():
-            try:
-                if _PULSE_RUNNER is None:
-                    web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                         text=":x: Force pulse unavailable — pulse runner not initialized.")
-                    return
-                _PULSE_RUNNER(web, force=True)
-                web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text=":white_check_mark: Force pulse complete — check #sidd-qa.")
-            except Exception as e:
-                log.error(f"[force pulse] failed: {e}", exc_info=True)
-                web.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text=f":x: Force pulse failed: {e}")
-        threading.Thread(target=_run_force_pulse, daemon=True).start()
-        return
-
     # "force signal" / "force sniper" — run the offer digest immediately, posts to #bot-qa
     if re.search(r'\bforce\s+s(?:ignal|niper)\b', lower):
         web.chat_postMessage(channel=channel, thread_ts=thread_ts,
@@ -1993,7 +1968,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=(f":x: {_unknown} isn't a force command I know. "
-                      f"Available: `force pulse`, `force signal`, `force cap`, "
+                      f"Available: `force signal`, `force cap`, "
                       f"`force velocity`, `force ghost`, `force fill`."),
             )
         except Exception as _fe:
