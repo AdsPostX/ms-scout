@@ -219,6 +219,26 @@ def _save_fill_alert_date(date_str: str) -> None:
     _save_pulse_state(state)
 
 
+def _load_cvr_anomaly_alert_state() -> str | None:
+    return _load_pulse_state().get("last_cvr_anomaly_alert_date")
+
+
+def _save_cvr_anomaly_alert_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_cvr_anomaly_alert_date"] = date_str
+    _save_pulse_state(state)
+
+
+def _load_expiration_alert_state() -> str | None:
+    return _load_pulse_state().get("last_expiration_alert_date")
+
+
+def _save_expiration_alert_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_expiration_alert_date"] = date_str
+    _save_pulse_state(state)
+
+
 # ── Pulse state ────────────────────────────────────────────────────────────────
 
 def _load_pulse_state() -> dict:

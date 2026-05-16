@@ -32,6 +32,8 @@ from scout_ch import (  # noqa: F401 — backward compat re-exports
     _query_ghost_campaigns, _query_revenue_baseline,
     _query_intraday_revenue_total, _query_intraday_revenue_by_publisher,
     _query_advertiser_rpm_context,
+    _query_cvr_anomaly, _query_expiring_campaigns,
+    _query_publisher_revenue_trends, _query_advertiser_revenue_trends,
 )
 from scout_images import (  # noqa: F401 — backward compat re-exports
     _scrape_og_image, _clearbit_domain, _google_favicon, _app_store_icon,
@@ -399,6 +401,10 @@ _SCHEMA_DEPS: list[tuple[str, str, bool]] = [
     # Publisher resolution
     ("from_airbyte_users",          "id",                    True),
     ("from_airbyte_users",          "organization",          True),
+    # CVR anomaly + expiration monitors (PR-C)
+    ("adpx_conversionsdetails",     "payout",                True),
+    ("from_airbyte_campaigns",      "end_date",              False),  # NULL for open-ended campaigns
+    ("from_airbyte_campaigns",      "status",                True),
 ]
 
 _SCHEMA_DEPS_MIN_ROWS = 100  # threshold for must_have_data; below this fires alert
@@ -1010,6 +1016,26 @@ absolute — only the confidence tier flexes here.
       • *Health:* inventory staleness > {health.offer_staleness_hours}h · heartbeat every {health.heartbeat_interval_minutes}m · {health.heartbeat_consecutive_threshold}-check hysteresis
       _Source: {config_file} — edit + redeploy on Render to change._
 
+31. CVR ANOMALIES — "which campaigns dropped CVR", "conversion rate anomalies", "why are conversions down for X", "CVR drops", "postback issues", "stopped converting", "CVR regression"
+    → get_cvr_anomalies().
+    Format each row as: *{publisher_name} — {adv_name}*: CVR {cvr_yesterday:.2%} vs {cvr_7d:.2%} baseline ({delta_pct:+.0f}%) · {impressions_7d:,} impressions · ${payout_per_conversion:.0f} payout
+    Lead with total count. If empty: ":large_green_circle: No CVR anomalies detected."
+
+32. EXPIRING CAMPAIGNS — "what campaigns are expiring", "upcoming campaign endings", "campaigns ending this week", "expiration warnings", "renewal needed", "offers about to expire"
+    → get_expiring_campaigns().
+    Format each row as: *{adv_name}* — expires {end_date} ({days_remaining}d) · {impressions_7d:,} impressions · {publisher_count} publishers · ${revenue_7d:,.0f} revenue
+    Sort by days_remaining ascending. If empty: ":large_green_circle: No active campaigns expiring in the next {window_days} days."
+
+33. PUBLISHER REVENUE TRENDS — "which publishers are trending up/down", "revenue trends", "publisher revenue vs baseline", "who dropped revenue vs historical", "publisher performance trends"
+    → get_publisher_revenue_trends().
+    Group by trend: "down" publishers first, then "up", then "flat". Format each:
+      :red_circle: *{publisher_name}*: ${revenue_actual:,.0f} actual vs ${revenue_expected:,.0f} expected ({delta_pct:+.0f}%)
+    Lead with summary line: "N publishers tracked over {days}d: X down, Y up, Z flat."
+
+34. ADVERTISER REVENUE TRENDS — "which advertisers are trending up/down", "advertiser revenue trends", "Capital One revenue vs historical", "who dropped advertiser-side revenue"
+    → get_advertiser_revenue_trends().
+    Same format as Intent 33 but use adv_name and conversions_actual instead of sessions.
+
 DEFAULT: Unclear intent → Intent 13. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
 
@@ -1301,6 +1327,26 @@ why_entity_note — ALWAYS call this tool for provenance questions. Never answer
    Trigger phrases: "why do you think [X] about [entity]", "where did you learn [entity] does X", "who told you that about [entity]", "source for [entity]", "why do you think that about [entity]"
    → why_entity_note(entity_name=<name>) — entity_type optional; searches both publishers and advertisers if omitted.
    IMPORTANT: Call why_entity_note and return its output verbatim. Do NOT answer from your own memory of this conversation.
+
+cvr_anomalies — "which campaigns dropped CVR", "conversion rate anomalies", "why are conversions down for X", "CVR drops", "postback issues", "stopped converting", "CVR regression"
+   → get_cvr_anomalies().
+   Format each row: *{publisher_name} — {adv_name}*: CVR {cvr_yesterday:.2%} vs {cvr_7d:.2%} baseline ({delta_pct:+.0f}%) · {impressions_7d:,} impressions · ${payout_per_conversion:.0f} payout
+   Lead with total count. If empty: ":large_green_circle: No CVR anomalies detected."
+
+expiring_campaigns — "what campaigns are expiring", "upcoming campaign endings", "campaigns ending this week", "expiration warnings", "renewal needed", "offers about to expire"
+   → get_expiring_campaigns().
+   Format each row: *{adv_name}* — expires {end_date} ({days_remaining}d) · {impressions_7d:,} impressions · {publisher_count} publishers · ${revenue_7d:,.0f} revenue
+   Sort by days_remaining ascending. If empty: ":large_green_circle: No active campaigns expiring in the next {window_days} days."
+
+publisher_revenue_trends — "which publishers are trending up/down", "revenue trends", "publisher revenue vs baseline", "who dropped revenue vs historical", "publisher performance trends"
+   → get_publisher_revenue_trends().
+   Group by trend: "down" publishers first, then "up", then "flat". For each:
+     :red_circle: *{publisher_name}*: ${revenue_actual:,.0f} actual vs ${revenue_expected:,.0f} expected ({delta_pct:+.0f}%)
+   Lead with: "N publishers tracked over Xd: Y down, Z up, W flat."
+
+advertiser_revenue_trends — "which advertisers are trending up/down", "advertiser revenue trends", "{advertiser_name} revenue vs historical", "who dropped advertiser-side revenue"
+   → get_advertiser_revenue_trends().
+   Same format as publisher_revenue_trends but use adv_name and conversions_actual instead of sessions.
 
 DEFAULT (unclear/ambiguous input): route to open_prospecting. Call get_top_opportunities(). A confident answer to a slightly wrong interpretation is better than asking "what do you mean?"
 EXCEPTION: If the query clearly asks Scout to CHANGE something (pause, launch, adjust, create, modify, send) → apply the CAPABILITY BOUNDARY. Redirect to what you CAN show.
@@ -2260,6 +2306,104 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_cvr_anomalies",
+        "description": (
+            "Find publisher-campaign pairs where yesterday's conversion rate dropped significantly "
+            "vs. the 7-day baseline. CVR = conversions / impressions. "
+            "Only surfaces high-value campaigns (avg payout >= $50) with enough volume "
+            "(7d impressions >= 5000) to make the signal actionable. "
+            "Use when the team asks: 'which campaigns dropped CVR', 'conversion rate anomalies', "
+            "'why are conversions down for X', 'CVR drops', 'postback issues', "
+            "'which campaigns stopped converting', 'CVR regression'. "
+            "Returns publisher, campaign, CVR yesterday vs 7d average, delta %, and payout."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "min_impressions_7d": {
+                    "type": "integer",
+                    "description": "Minimum 7d impressions to include a campaign. Default: 5000.",
+                },
+                "min_payout": {
+                    "type": "number",
+                    "description": "Minimum avg payout per conversion in USD. Default: 50.",
+                },
+                "drop_pct": {
+                    "type": "number",
+                    "description": "Minimum CVR drop percentage to flag. Default: 30.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_expiring_campaigns",
+        "description": (
+            "Find active campaigns expiring within the next N days (default 7). "
+            "Includes last-7d impression volume, active publisher count, and revenue "
+            "so you can distinguish high-impact expirations from low-traffic ones. "
+            "Use when the team asks: 'what campaigns are expiring', 'upcoming campaign endings', "
+            "'campaigns ending this week', 'expiration warnings', 'renewal needed', "
+            "'which offers are about to expire', 'campaign end dates'. "
+            "Returns campaign, advertiser, end date, days remaining, impression/publisher/revenue activity."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "warning_days": {
+                    "type": "integer",
+                    "description": "Look-ahead window in days. Default: 7.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_publisher_revenue_trends",
+        "description": (
+            "Publisher revenue trends: compare each publisher's actual revenue over the last N days "
+            "against their historical median for the same period length (8 prior periods). "
+            "Uses period-median algorithm so the comparison is apples-to-apples (period vs period, "
+            "not daily average). "
+            "Use when the team asks: 'which publishers are trending up/down', 'revenue trends', "
+            "'publisher revenue vs baseline', 'which publishers improved this week', "
+            "'who dropped revenue vs historical', 'publisher performance trends'. "
+            "Returns publisher name, actual revenue, expected revenue, delta %, and trend direction."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "Period length in days. Default: 7.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_advertiser_revenue_trends",
+        "description": (
+            "Advertiser revenue trends: compare each advertiser's actual revenue over the last N days "
+            "against their historical median for the same period length (8 prior periods). "
+            "Aggregated across all publishers — cross-publisher view of advertiser performance. "
+            "Use when the team asks: 'which advertisers are trending up/down', 'advertiser revenue trends', "
+            "'Capital One revenue vs historical', 'which advertisers improved this week', "
+            "'advertiser performance compared to baseline', 'who dropped advertiser-side revenue'. "
+            "Returns advertiser name, actual revenue, expected revenue, delta %, and trend direction."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "Period length in days. Default: 7.",
+                },
+            },
             "required": [],
         },
     },
@@ -4857,6 +5001,106 @@ GROUP BY c.user_id
         }
 
 
+def get_cvr_anomalies(
+    min_impressions_7d: int = None,
+    min_payout: float = None,
+    drop_pct: float = None,
+) -> dict:
+    """
+    Find publisher-campaign pairs where yesterday's CVR dropped vs. 7d baseline.
+    Threshold defaults come from scout_thresholds.json; caller can override per-call.
+    """
+    try:
+        ch = _get_ch_client()
+        rows = _query_cvr_anomaly(
+            ch,
+            drop_pct=drop_pct,
+            min_payout=min_payout,
+            min_impressions_7d=min_impressions_7d,
+        )
+        if not rows:
+            return {"anomalies": [], "count": 0, "summary": "No CVR anomalies detected."}
+        return {
+            "anomalies": rows,
+            "count": len(rows),
+            "summary": f"{len(rows)} publisher-campaign pair(s) with significant CVR drops.",
+        }
+    except Exception as e:
+        log.exception("get_cvr_anomalies failed")
+        return {"error": str(e), "anomalies": []}
+
+
+def get_expiring_campaigns(warning_days: int = None) -> dict:
+    """
+    Find active campaigns expiring within the next N days.
+    Default window comes from scout_thresholds.json; caller can override.
+    """
+    try:
+        ch = _get_ch_client()
+        t = SCOUT_THRESHOLDS.get("signals", {})
+        window = int(warning_days if warning_days is not None else t.get("expiration_warning_days", 7))
+        rows = _query_expiring_campaigns(ch, warning_days=window)
+        if not rows:
+            return {"campaigns": [], "count": 0, "summary": f"No active campaigns expiring in the next {window} days."}
+        return {
+            "campaigns": rows,
+            "count": len(rows),
+            "window_days": window,
+            "summary": f"{len(rows)} active campaign(s) expiring within {window} days.",
+        }
+    except Exception as e:
+        log.exception("get_expiring_campaigns failed")
+        return {"error": str(e), "campaigns": []}
+
+
+def get_publisher_revenue_trends(days: int = 7) -> dict:
+    """
+    Publisher revenue trends: actual vs. historical median for the same period length.
+    """
+    try:
+        ch = _get_ch_client()
+        rows = _query_publisher_revenue_trends(ch, days=int(days))
+        if not rows:
+            return {"trends": [], "count": 0, "days": days, "summary": "No publisher revenue trend data available."}
+        down = [r for r in rows if r["trend"] == "down"]
+        up = [r for r in rows if r["trend"] == "up"]
+        return {
+            "trends": rows,
+            "count": len(rows),
+            "days": days,
+            "down_count": len(down),
+            "up_count": len(up),
+            "summary": f"{len(rows)} publishers with trend data: {len(down)} down, {len(up)} up.",
+        }
+    except Exception as e:
+        log.exception("get_publisher_revenue_trends failed")
+        return {"error": str(e), "trends": []}
+
+
+def get_advertiser_revenue_trends(days: int = 7) -> dict:
+    """
+    Advertiser revenue trends: actual vs. historical median, aggregated cross-publisher.
+    """
+    try:
+        ch = _get_ch_client()
+        rows = _query_advertiser_revenue_trends(ch, days=int(days))
+        if not rows:
+            return {"trends": [], "count": 0, "days": days, "summary": "No advertiser revenue trend data available."}
+        down = [r for r in rows if r["trend"] == "down"]
+        up = [r for r in rows if r["trend"] == "up"]
+        return {
+            "trends": rows,
+            "count": len(rows),
+            "days": days,
+            "down_count": len(down),
+            "up_count": len(up),
+            "summary": f"{len(rows)} advertisers with trend data: {len(down)} down, {len(up)} up.",
+        }
+    except Exception as e:
+        log.exception("get_advertiser_revenue_trends failed")
+        return {"error": str(e), "trends": []}
+
+
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
 TOOL_MAP = {
@@ -4890,6 +5134,10 @@ TOOL_MAP = {
     "why_entity_note": why_entity_note,
     "get_offers_for_publisher": get_offers_for_publisher,
     "get_pulse_summary": get_pulse_summary,
+    "get_cvr_anomalies": get_cvr_anomalies,
+    "get_expiring_campaigns": get_expiring_campaigns,
+    "get_publisher_revenue_trends": get_publisher_revenue_trends,
+    "get_advertiser_revenue_trends": get_advertiser_revenue_trends,
     "get_scout_config": None,   # registered below after function definition
     "run_self_qa": None,  # registered below after function definition
 }

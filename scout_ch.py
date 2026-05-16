@@ -462,3 +462,52 @@ def _query_advertiser_rpm_context(ch, adv_name: str) -> dict:
     except Exception as e:
         log.warning(f"_query_advertiser_rpm_context failed for {adv_name!r}: {e}")
         return {"has_history": False}
+
+
+def _query_cvr_anomaly(
+    ch,
+    drop_pct: float = None,
+    min_payout: float = None,
+    min_impressions_7d: int = None,
+) -> list[dict]:
+    """Thin wrapper — reads thresholds from config; per-call overrides take precedence."""
+    from scout_agent import SCOUT_THRESHOLDS
+    t = SCOUT_THRESHOLDS.get("signals", {})
+    return _q.cvr_anomaly(
+        ch,
+        drop_pct=float(drop_pct if drop_pct is not None else t.get("cvr_anomaly_drop_pct", 30)),
+        min_payout=float(min_payout if min_payout is not None else t.get("cvr_anomaly_min_payout", 50)),
+        min_impressions_7d=int(min_impressions_7d if min_impressions_7d is not None else t.get("cvr_anomaly_min_impressions_7d", 5000)),
+    )
+
+
+def _query_expiring_campaigns(ch, warning_days: int = None) -> list[dict]:
+    """Thin wrapper — reads warning_days from config; per-call override takes precedence."""
+    from scout_agent import SCOUT_THRESHOLDS
+    t = SCOUT_THRESHOLDS.get("signals", {})
+    return _q.expiring_campaigns(
+        ch,
+        warning_days=int(warning_days if warning_days is not None else t.get("expiration_warning_days", 7)),
+    )
+
+
+def _query_publisher_revenue_trends(ch, days: int = 7) -> list[dict]:
+    """Thin wrapper — reads min_periods from config and delegates to queries.publisher_revenue_trends()."""
+    from scout_agent import SCOUT_THRESHOLDS
+    t = SCOUT_THRESHOLDS.get("signals", {})
+    return _q.publisher_revenue_trends(
+        ch,
+        days=days,
+        min_periods=int(t.get("revenue_trend_min_periods", 4)),
+    )
+
+
+def _query_advertiser_revenue_trends(ch, days: int = 7) -> list[dict]:
+    """Thin wrapper — reads min_periods from config and delegates to queries.advertiser_revenue_trends()."""
+    from scout_agent import SCOUT_THRESHOLDS
+    t = SCOUT_THRESHOLDS.get("signals", {})
+    return _q.advertiser_revenue_trends(
+        ch,
+        days=days,
+        min_periods=int(t.get("revenue_trend_min_periods", 4)),
+    )
