@@ -1383,7 +1383,8 @@ adpx_conversionsdetails [1.7M] — one row per conversion
   CRITICAL: revenue, payout are STRINGS — always cast: toFloat64OrNull(revenue)
   COLS: session_id (join key), campaign_id, offer_id, revenue (String), payout (String),
     click_hash (String — join key to adpx_tracked_clicks; has TRAILING WHITESPACE — always trimBoth())
-  WARNING: conversionsdetails.pid is NOT the publisher user_id. Route through click_hash only.
+  WARNING: conversionsdetails.pid is NOT the publisher user_id — filtering by pid returns wrong results.
+    Filter by user_id (correct — in sort key) OR join via click_hash (for attribution-matched queries only).
   DOWNSTREAM LAG: extend conversion window +14 days beyond session end date.
 
 adpx_system_activity_logs [115K] — audit trail for dashboard changes
@@ -1412,8 +1413,11 @@ RULE 2: click_hash has trailing whitespace — trimBoth() REQUIRED on both sides
   Without it: join returns 0 rows, no error, silently missing all conversions.
 
 RULE 3: adpx_conversionsdetails.pid ≠ publisher user_id.
-  Never filter conversionsdetails by pid. Route via sdk_sessions → tracked_clicks → conversionsdetails.
+  Filter by user_id (correct — in sort key (user_id, campaign_id, created_at, id)) OR
+  join via click_hash for attribution-matched queries (linking specific click → conversion).
   ❌ Wrong: SELECT ... FROM adpx_conversionsdetails WHERE pid = {publisher_user_id}
+  ✅ Direct filter: SELECT ... FROM adpx_conversionsdetails WHERE user_id = {publisher_user_id}
+  ✅ Attribution join: ... JOIN adpx_conversionsdetails cd ON trimBoth(cd.click_hash) = trimBoth(c.click_hash)
 
 ── CONFIGURATION TABLES (Airbyte sync) ──────────────────────────────────────────────────
 
