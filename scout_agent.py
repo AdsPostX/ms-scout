@@ -5012,12 +5012,11 @@ def get_cvr_anomalies(
     """
     try:
         ch = _get_ch_client()
-        t = SCOUT_THRESHOLDS.get("signals", {})
-        rows = _q.cvr_anomaly(
+        rows = _query_cvr_anomaly(
             ch,
-            drop_pct=float(drop_pct if drop_pct is not None else t.get("cvr_anomaly_drop_pct", 30)),
-            min_payout=float(min_payout if min_payout is not None else t.get("cvr_anomaly_min_payout", 50)),
-            min_impressions_7d=int(min_impressions_7d if min_impressions_7d is not None else t.get("cvr_anomaly_min_impressions_7d", 5000)),
+            drop_pct=drop_pct,
+            min_payout=min_payout,
+            min_impressions_7d=min_impressions_7d,
         )
         if not rows:
             return {"anomalies": [], "count": 0, "summary": "No CVR anomalies detected."}
@@ -5040,7 +5039,7 @@ def get_expiring_campaigns(warning_days: int = None) -> dict:
         ch = _get_ch_client()
         t = SCOUT_THRESHOLDS.get("signals", {})
         window = int(warning_days if warning_days is not None else t.get("expiration_warning_days", 7))
-        rows = _q.expiring_campaigns(ch, warning_days=window)
+        rows = _query_expiring_campaigns(ch, warning_days=window)
         if not rows:
             return {"campaigns": [], "count": 0, "summary": f"No active campaigns expiring in the next {window} days."}
         return {
@@ -5060,11 +5059,7 @@ def get_publisher_revenue_trends(days: int = 7) -> dict:
     """
     try:
         ch = _get_ch_client()
-        rows = _q.publisher_revenue_trends(
-            ch,
-            days=int(days),
-            min_periods=int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_trend_min_periods", 4)),
-        )
+        rows = _query_publisher_revenue_trends(ch, days=int(days))
         if not rows:
             return {"trends": [], "count": 0, "days": days, "summary": "No publisher revenue trend data available."}
         down = [r for r in rows if r["trend"] == "down"]
@@ -5088,11 +5083,7 @@ def get_advertiser_revenue_trends(days: int = 7) -> dict:
     """
     try:
         ch = _get_ch_client()
-        rows = _q.advertiser_revenue_trends(
-            ch,
-            days=int(days),
-            min_periods=int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_trend_min_periods", 4)),
-        )
+        rows = _query_advertiser_revenue_trends(ch, days=int(days))
         if not rows:
             return {"trends": [], "count": 0, "days": days, "summary": "No advertiser revenue trend data available."}
         down = [r for r in rows if r["trend"] == "down"]

@@ -2482,6 +2482,117 @@ def test_new_monitor_state_helpers_present_in_scout_state():
     return True, f"All {len(required)} state helpers present and load functions callable ✓"
 
 
+@test("cvr_anomaly_wrapper_reads_thresholds_from_config_not_hardcoded")
+def test_cvr_anomaly_wrapper_uses_config_thresholds():
+    """_query_cvr_anomaly() must pass threshold values from SCOUT_THRESHOLDS to _q.cvr_anomaly,
+    not use hardcoded defaults. Verifies the monkey-patch pattern: changing config changes behavior.
+    """
+    import scout_ch
+    import scout_agent
+    captured = {}
+
+    def _fake_cvr_anomaly(ch, drop_pct, min_payout, min_impressions_7d):
+        captured["drop_pct"] = drop_pct
+        captured["min_payout"] = min_payout
+        captured["min_impressions_7d"] = min_impressions_7d
+        return []
+
+    original_thresholds = scout_agent.SCOUT_THRESHOLDS
+    original_q = scout_ch._q
+    try:
+        import types
+        fake_q = types.SimpleNamespace(cvr_anomaly=_fake_cvr_anomaly)
+        scout_ch._q = fake_q
+        scout_agent.SCOUT_THRESHOLDS = {
+            **original_thresholds,
+            "signals": {**original_thresholds.get("signals", {}),
+                        "cvr_anomaly_drop_pct": 99.0,
+                        "cvr_anomaly_min_payout": 999.0,
+                        "cvr_anomaly_min_impressions_7d": 12345},
+        }
+        scout_ch._query_cvr_anomaly(None)
+        if captured.get("drop_pct") != 99.0:
+            return False, f"drop_pct not read from config: got {captured.get('drop_pct')}"
+        if captured.get("min_payout") != 999.0:
+            return False, f"min_payout not read from config: got {captured.get('min_payout')}"
+        if captured.get("min_impressions_7d") != 12345:
+            return False, f"min_impressions_7d not read from config: got {captured.get('min_impressions_7d')}"
+    finally:
+        scout_agent.SCOUT_THRESHOLDS = original_thresholds
+        scout_ch._q = original_q
+    return True, "cvr_anomaly wrapper passes config thresholds through to query ✓"
+
+
+@test("expiration_wrapper_reads_warning_days_from_config_not_hardcoded")
+def test_expiration_wrapper_uses_config_thresholds():
+    """_query_expiring_campaigns() must pass warning_days from SCOUT_THRESHOLDS."""
+    import scout_ch
+    import scout_agent
+    captured = {}
+
+    def _fake_expiring(ch, warning_days):
+        captured["warning_days"] = warning_days
+        return []
+
+    original_thresholds = scout_agent.SCOUT_THRESHOLDS
+    original_q = scout_ch._q
+    try:
+        import types
+        fake_q = types.SimpleNamespace(expiring_campaigns=_fake_expiring)
+        scout_ch._q = fake_q
+        scout_agent.SCOUT_THRESHOLDS = {
+            **original_thresholds,
+            "signals": {**original_thresholds.get("signals", {}), "expiration_warning_days": 42},
+        }
+        scout_ch._query_expiring_campaigns(None)
+        if captured.get("warning_days") != 42:
+            return False, f"warning_days not read from config: got {captured.get('warning_days')}"
+    finally:
+        scout_agent.SCOUT_THRESHOLDS = original_thresholds
+        scout_ch._q = original_q
+    return True, "expiration wrapper passes config warning_days through to query ✓"
+
+
+@test("revenue_trend_wrappers_read_min_periods_from_config_not_hardcoded")
+def test_revenue_trend_wrappers_use_config_thresholds():
+    """Both revenue trend wrappers must pass min_periods from SCOUT_THRESHOLDS."""
+    import scout_ch
+    import scout_agent
+    captured = {}
+
+    def _fake_pub_trends(ch, days, min_periods):
+        captured["pub_min_periods"] = min_periods
+        return []
+
+    def _fake_adv_trends(ch, days, min_periods):
+        captured["adv_min_periods"] = min_periods
+        return []
+
+    original_thresholds = scout_agent.SCOUT_THRESHOLDS
+    original_q = scout_ch._q
+    try:
+        import types
+        fake_q = types.SimpleNamespace(
+            publisher_revenue_trends=_fake_pub_trends,
+            advertiser_revenue_trends=_fake_adv_trends,
+        )
+        scout_ch._q = fake_q
+        scout_agent.SCOUT_THRESHOLDS = {
+            **original_thresholds,
+            "signals": {**original_thresholds.get("signals", {}), "revenue_trend_min_periods": 99},
+        }
+        scout_ch._query_publisher_revenue_trends(None)
+        scout_ch._query_advertiser_revenue_trends(None)
+        if captured.get("pub_min_periods") != 99:
+            return False, f"publisher wrapper min_periods not from config: {captured.get('pub_min_periods')}"
+        if captured.get("adv_min_periods") != 99:
+            return False, f"advertiser wrapper min_periods not from config: {captured.get('adv_min_periods')}"
+    finally:
+        scout_agent.SCOUT_THRESHOLDS = original_thresholds
+        scout_ch._q = original_q
+    return True, "both revenue trend wrappers pass config min_periods through to query ✓"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

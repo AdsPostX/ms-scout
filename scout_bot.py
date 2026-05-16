@@ -1084,14 +1084,14 @@ def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
     for r in rows[:6]:
         pub      = r.get("publisher_name", "Unknown")
         adv      = r.get("adv_name", "Unknown")
-        cvr_7d   = r.get("cvr_7d", 0)
-        cvr_yd   = r.get("cvr_yesterday", 0)
-        delta    = r.get("delta_pct", 0)
-        payout   = r.get("payout_per_conversion", 0)
+        cvr_7d   = float(r.get("cvr_7d") or 0)
+        cvr_yd   = float(r.get("cvr_yesterday") or 0)
+        delta    = float(r.get("delta_pct") or 0)
+        payout   = float(r.get("payout_per_conversion") or 0)
         items.append(
             f"*{pub} — {adv}*: "
             f"CVR {cvr_yd:.2%} vs {cvr_7d:.2%} baseline "
-            f"({delta:+.0f}%) · ${payout:.0f} payout"
+            f"({delta:+.0f}%) - ${payout:.0f} payout"
         )
     return _build_monitor_alert_blocks(
         ":chart_with_downwards_trend:",
@@ -1112,8 +1112,8 @@ def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
         rev_7d   = r.get("revenue_7d", 0)
         imp_7d   = r.get("impressions_7d", 0)
         items.append(
-            f"*{adv}*: expires {end_date} ({days}d) · "
-            f"{pubs} publisher(s) · {imp_7d:,} impressions · ${rev_7d:,.0f} revenue/7d"
+            f"*{adv}*: expires {end_date} ({days}d) - "
+            f"{pubs} publisher(s), {imp_7d:,} impressions, ${rev_7d:,.0f} revenue/7d"
         )
     return _build_monitor_alert_blocks(
         ":hourglass_flowing_sand:",

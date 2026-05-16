@@ -1131,7 +1131,7 @@ def expiring_campaigns(ch, warning_days: int = 7) -> list[dict]:
                 dateDiff('day', today(), end_date)    AS days_remaining
             FROM from_airbyte_campaigns
             WHERE end_date BETWEEN today() AND today() + INTERVAL {warning_days: Int32} DAY
-              AND trim(status) = 'active'
+              AND trim(status) = 'Active'
               AND deleted_at IS NULL
         ),
         imp_agg AS (
@@ -1349,7 +1349,9 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
                 s.user_id                                              AS publisher_id,
                 toDate(cv.created_at, 'America/Chicago')              AS rev_date,
                 round(sum(toFloat64OrNull(cv.revenue)), 2)            AS daily_revenue,
-                intDiv(dateDiff('day', today() - INTERVAL {lookback: Int32} DAY, rev_date),
+                intDiv(dateDiff('day',
+                       toDate(now(), 'America/Chicago') - INTERVAL {lookback: Int32} DAY,
+                       rev_date),
                        {days: Int32}) + 1                              AS period_idx
             FROM adpx_conversionsdetails cv
             JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
@@ -1381,16 +1383,16 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
             FROM mv_adpx_users
         )
         SELECT
-            a.publisher_id,
-            coalesce(n.publisher_name, toString(a.publisher_id))       AS publisher_name,
-            a.revenue_actual,
+            b.publisher_id,
+            coalesce(n.publisher_name, toString(b.publisher_id))       AS publisher_name,
+            coalesce(a.revenue_actual, 0)                              AS revenue_actual,
             b.revenue_expected,
-            round((a.revenue_actual - b.revenue_expected) /
+            round((coalesce(a.revenue_actual, 0) - b.revenue_expected) /
                   nullIf(b.revenue_expected, 0) * 100, 1)              AS delta_pct,
-            a.sessions_actual
-        FROM actual a
-        JOIN baseline b ON b.publisher_id = a.publisher_id
-        LEFT JOIN names n ON n.publisher_id = a.publisher_id
+            coalesce(a.sessions_actual, 0)                             AS sessions_actual
+        FROM baseline b
+        LEFT JOIN actual a ON a.publisher_id = b.publisher_id
+        LEFT JOIN names n ON n.publisher_id = b.publisher_id
         ORDER BY delta_pct ASC
         """,
         parameters={
@@ -1449,7 +1451,9 @@ def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[d
                 c.adv_name,
                 toDate(cv.created_at, 'America/Chicago')              AS rev_date,
                 round(sum(toFloat64OrNull(cv.revenue)), 2)            AS daily_revenue,
-                intDiv(dateDiff('day', today() - INTERVAL {lookback: Int32} DAY, rev_date),
+                intDiv(dateDiff('day',
+                       toDate(now(), 'America/Chicago') - INTERVAL {lookback: Int32} DAY,
+                       rev_date),
                        {days: Int32}) + 1                              AS period_idx
             FROM adpx_conversionsdetails cv
             JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
@@ -1477,14 +1481,14 @@ def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[d
             HAVING period_count >= {min_periods: Int32}
         )
         SELECT
-            a.adv_name,
-            a.revenue_actual,
+            b.adv_name,
+            coalesce(a.revenue_actual, 0)                             AS revenue_actual,
             b.revenue_expected,
-            round((a.revenue_actual - b.revenue_expected) /
-                  nullIf(b.revenue_expected, 0) * 100, 1)              AS delta_pct,
-            a.conversions_actual
-        FROM actual a
-        JOIN baseline b ON b.adv_name = a.adv_name
+            round((coalesce(a.revenue_actual, 0) - b.revenue_expected) /
+                  nullIf(b.revenue_expected, 0) * 100, 1)             AS delta_pct,
+            coalesce(a.conversions_actual, 0)                         AS conversions_actual
+        FROM baseline b
+        LEFT JOIN actual a ON a.adv_name = b.adv_name
         ORDER BY delta_pct ASC
         """,
         parameters={
