@@ -174,7 +174,8 @@ When adding a new Scout capability, touch these files in this order:
 | Capability type | Files to touch |
 |---|---|
 | New agent tool (LLM-callable) | `scout_agent.py` (TOOLS list + function + SYSTEM_PROMPT) |
-| New monitor signal | `scout_agent.py` (shared `_query_*` function) + `scout_bot.py` (new `_pulse_signal_*` fn + daemon via `_start_daemon`) |
+| New monitor signal (monitor-only) | `scout_bot.py` (new `_pulse_signal_*` query fn + daemon via `_start_daemon`) — no `scout_agent.py` change needed |
+| New monitor signal (shared with agent) | `scout_agent.py` (shared `_query_*` function) + `scout_bot.py` (thin `_pulse_signal_*` wrapper + daemon via `_start_daemon`) — shared function only required when an agent tool also consumes the signal |
 | New Slack button handler | `scout_handlers.py` (handler) + `scout_slack_ui.py` (Block Kit card) |
 | New Notion page type | `scout_notion.py` (page builder) |
 | New state value | `scout_state.py` (load/save functions) |
