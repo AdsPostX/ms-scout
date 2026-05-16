@@ -314,7 +314,7 @@ Violating any one produces silently wrong counts — no SQL error, just wrong nu
 
 **Rule 2: `click_hash` needs `trimBoth()` on both sides** — trailing whitespace in prod data, zero rows without it.
 
-**Rule 3: `adpx_conversionsdetails.pid` ≠ publisher `user_id`** — never filter conversionsdetails by pid. Route via sdk_sessions → tracked_clicks → conversionsdetails.
+**Rule 3: `adpx_conversionsdetails.pid` ≠ publisher `user_id`** — filtering by `pid` returns wrong results. Filter by `user_id` (correct — in sort key `(user_id, campaign_id, created_at, id)`) OR join via `click_hash` for attribution-matched queries (linking a specific click to its conversion). The `click_hash` join is only required when you need per-click attribution, not for aggregate publisher metrics.
 
 These rules are also in the SYSTEM_PROMPT DATA DICTIONARY ("PUBLISHER-SCOPED QUERY RULES" section).
 
