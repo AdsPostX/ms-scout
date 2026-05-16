@@ -301,6 +301,25 @@ Always return plain Python dicts — let the caller decide how to format for Sla
 
 ---
 
+## ClickHouse Publisher Query Rules
+
+Three rules for any publisher-scoped metrics query. Discovered 2026-05-15 (WB Mason debugging).
+Violating any one produces silently wrong counts — no SQL error, just wrong numbers.
+
+**Rule 1: Anchor on `adpx_sdk_sessions.user_id`** — joining impressions→clicks fans out 20x.
+```sql
+-- Clicks: FROM adpx_tracked_clicks c JOIN adpx_sdk_sessions s ON c.session_id = s.session_id WHERE s.user_id = {uid}
+-- Revenue: ... JOIN adpx_conversionsdetails cd ON trimBoth(cd.click_hash) = trimBoth(c.click_hash)
+```
+
+**Rule 2: `click_hash` needs `trimBoth()` on both sides** — trailing whitespace in prod data, zero rows without it.
+
+**Rule 3: `adpx_conversionsdetails.pid` ≠ publisher `user_id`** — never filter conversionsdetails by pid. Route via sdk_sessions → tracked_clicks → conversionsdetails.
+
+These rules are also in the SYSTEM_PROMPT DATA DICTIONARY ("PUBLISHER-SCOPED QUERY RULES" section).
+
+---
+
 ## Known Data Quality Issues
 
 ### "Major Rocket Real Real" publisher name
