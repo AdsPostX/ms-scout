@@ -44,6 +44,7 @@ from scout_state import (
     _load_watchdog_state, _save_watchdog_state,
     _update_benchmark_from_actuals,
 )
+from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_handlers import (
     _set_bot_user_id, _set_thread_state, _set_force_monitor_fn,
     handle_event,
@@ -1348,6 +1349,27 @@ def _one_shot_monitor(web, channel: str, signal_fn, format_fn, thread_ts: str = 
     web.chat_postMessage(channel=channel, thread_ts=_ts, text=fallback, blocks=blocks)
 
 
+def _run_revenue_check_once(web, channel: str, thread_ts: str = "") -> None:
+    """Force-trigger the revenue tracker check once — bypasses time gate and daily state."""
+    from scout_agent import _get_ch_client, _query_intraday_revenue_total, _query_intraday_revenue_by_publisher
+    _ts = thread_ts or None
+    ch = _get_ch_client()
+    try:
+        total = _query_intraday_revenue_total(ch)
+    except Exception as e:
+        web.chat_postMessage(channel=channel, thread_ts=_ts, text=f":x: Revenue tracker Phase 1 query failed: {e}")
+        return
+    if total is None:
+        web.chat_postMessage(channel=channel, thread_ts=_ts, text=":white_check_mark: Revenue on pace — no alert would fire right now.")
+        return
+    try:
+        publishers = _query_intraday_revenue_by_publisher(ch, total)
+    except Exception:
+        publishers = []
+    fallback, blocks = _format_revenue_alert(total, publishers)
+    web.chat_postMessage(channel=channel, thread_ts=_ts, text=fallback, blocks=blocks)
+
+
 
 
 
@@ -2220,10 +2242,13 @@ def main():
     # Inject shared state into scout_handlers (avoids circular import — handlers don't import scout_bot)
     _set_bot_user_id(_BOT_USER_ID)
     _set_thread_state(_LAST_THREAD_PER_CHANNEL, _LAST_THREAD_LOCK)
-    _set_force_monitor_fn("cap",      lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_cap, _format_cap_alert, thread_ts=t))
-    _set_force_monitor_fn("velocity", lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_velocity, _format_velocity_down_alert, thread_ts=t))
-    _set_force_monitor_fn("ghost",    lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_ghost, _format_ghost_alert, thread_ts=t))
-    _set_force_monitor_fn("fill",     lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_fill_rate, _format_fill_alert, thread_ts=t))
+    _set_force_monitor_fn("cap",        lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_cap, _format_cap_alert, thread_ts=t))
+    _set_force_monitor_fn("velocity",   lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_velocity, _format_velocity_down_alert, thread_ts=t))
+    _set_force_monitor_fn("ghost",      lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_ghost, _format_ghost_alert, thread_ts=t))
+    _set_force_monitor_fn("fill",       lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_fill_rate, _format_fill_alert, thread_ts=t))
+    _set_force_monitor_fn("cvr",        lambda web, ch, t="": _one_shot_monitor(web, ch, _query_cvr_anomaly, _format_cvr_alert, thread_ts=t))
+    _set_force_monitor_fn("expiration", lambda web, ch, t="": _one_shot_monitor(web, ch, _query_expiring_campaigns, _format_expiration_alert, thread_ts=t))
+    _set_force_monitor_fn("revenue",    lambda web, ch, t="": _run_revenue_check_once(web, ch, t))
     # PR-B: inject web + CH factory so the force_run_monitor agent tool can call
     # the same monitor lambdas registered above.
     from scout_agent import _set_force_monitor_ctx as _set_fmc, _get_ch_client as _ch_factory

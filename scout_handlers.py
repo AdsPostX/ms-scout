@@ -1938,8 +1938,9 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         threading.Thread(target=_run_force_sniper, daemon=True).start()
         return
 
-    # "force cap/velocity/ghost/fill" — admin one-shot monitor run
-    _FORCE_MON_PAT = re.compile(r'\bforce\s+(cap|velocity|ghost|fill)\b')
+    # "force <monitor>" — admin one-shot monitor run; auto-discovers from registry
+    _names = "|".join(sorted(_FORCE_MONITOR_FNS.keys())) or "cap|velocity|ghost|fill"
+    _FORCE_MON_PAT = re.compile(rf'\bforce\s+({_names})\b')
     _m = _FORCE_MON_PAT.search(lower)
     if _m:
         monitor_name = _m.group(1)
@@ -1965,11 +1966,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         _word_m = re.search(r'\bforce\s+(\S+)', lower)
         _unknown = f"`{_word_m.group(1)}`" if _word_m else "that command"
         try:
+            _avail = " ".join(f"`force {n}`" for n in sorted(_FORCE_MONITOR_FNS.keys()))
             web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=(f":x: {_unknown} isn't a force command I know. "
-                      f"Available: `force signal`, `force cap`, "
-                      f"`force velocity`, `force ghost`, `force fill`."),
+                      f"Available: `force signal`, {_avail}."),
             )
         except Exception as _fe:
             log.warning(f"[force-unknown] failed to post error: {_fe} (channel={channel})")
