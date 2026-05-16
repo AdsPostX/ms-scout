@@ -3510,18 +3510,18 @@ def force_run_monitor(monitor: str = "", _caller_user_id: str = "") -> dict:
         return {"ok": False, "error": "not_admin",
                 "message": ":lock: Force-run is admin-only (set SCOUT_THRESHOLD_ADMINS)."}
 
+    web = _FORCE_MONITOR_CTX.get("web")
+    ch_factory = _FORCE_MONITOR_CTX.get("ch_factory")
+    if web is None or ch_factory is None:
+        return {"ok": False, "error": "not_initialized",
+                "message": "Force-monitor context not injected yet — Scout still warming up."}
+
     name = (monitor or "").strip().lower()
     import scout_handlers
     allowed = set(scout_handlers._FORCE_MONITOR_FNS.keys())
     if name not in allowed:
         return {"ok": False, "error": "unknown_monitor",
                 "message": f"monitor must be one of: {sorted(allowed)}"}
-
-    web = _FORCE_MONITOR_CTX.get("web")
-    ch_factory = _FORCE_MONITOR_CTX.get("ch_factory")
-    if web is None or ch_factory is None:
-        return {"ok": False, "error": "not_initialized",
-                "message": "Force-monitor context not injected yet — Scout still warming up."}
 
     try:
         fn = scout_handlers._FORCE_MONITOR_FNS.get(name)
