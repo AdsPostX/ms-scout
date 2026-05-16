@@ -2765,6 +2765,75 @@ def test_get_scout_config_shows_overrides():
             print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
 
 
+@test("cvr_expiration_revenue_force_commands_registered_in_main")
+def test_new_force_commands_registered():
+    """cvr, expiration, and revenue must be registered via _set_force_monitor_fn in main().
+
+    _set_force_monitor_fn populates _FORCE_MONITOR_FNS at startup — both the direct
+    regex path and force_run_monitor read from that dict. Without registration,
+    @Scout force cvr silently falls through to the NLP path.
+    Verified via source inspection (same pattern as daemon registration tests — the dict
+    is empty at import time, only populated when main() runs).
+    """
+    import pathlib
+    src = (pathlib.Path(__file__).parent / "scout_bot.py").read_text()
+    main_section = src.split("def main()")[1].split("\ndef ")[0]
+    missing = []
+    for name in ("cvr", "expiration", "revenue"):
+        if f'_set_force_monitor_fn("{name}"' not in main_section:
+            missing.append(name)
+    if missing:
+        return False, f"_set_force_monitor_fn not called for: {missing} in main()"
+    return True, "cvr, expiration, revenue all registered via _set_force_monitor_fn in main() ✓"
+
+
+@test("force_handlers_regex_derives_from_registry_not_hardcoded")
+def test_force_pattern_auto_discovers_from_registry():
+    """_FORCE_MON_PAT in handle_event must be built from _FORCE_MONITOR_FNS.keys().
+
+    Verified by source inspection: the regex construction line must reference
+    _FORCE_MONITOR_FNS.keys() rather than a hardcoded alternation string.
+    A hardcoded pattern would silently miss new monitors without raising an error.
+    """
+    import pathlib
+    src = (pathlib.Path(__file__).parent / "scout_handlers.py").read_text()
+    if "_FORCE_MONITOR_FNS.keys()" not in src:
+        return False, "_FORCE_MON_PAT does not derive from _FORCE_MONITOR_FNS.keys()"
+    if 'cap|velocity|ghost|fill' in src and "or" not in src[max(0, src.index('cap|velocity|ghost|fill')-50):src.index('cap|velocity|ghost|fill')+5]:
+        return False, "Hardcoded alternation still present without fallback guard"
+    return True, "_FORCE_MON_PAT derives from _FORCE_MONITOR_FNS.keys() ✓"
+
+
+@test("force_run_monitor_allowed_derives_from_registry_not_hardcoded")
+def test_force_run_monitor_allowed_from_registry():
+    """force_run_monitor must pass the allowed check for cvr/expiration/revenue.
+
+    If allowed were hardcoded to the original 4 names, these would return unknown_monitor
+    instead of not_initialized (ctx guard fires before allowed when ctx is missing).
+    """
+    import scout_agent
+    saved = dict(scout_agent._FORCE_MONITOR_CTX)
+    scout_agent._FORCE_MONITOR_CTX["web"] = None
+    scout_agent._FORCE_MONITOR_CTX["ch_factory"] = None
+    try:
+        import os
+        admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
+        os.environ["SCOUT_THRESHOLD_ADMINS"] = "UADMIN_REG"
+        try:
+            for name in ("cvr", "expiration", "revenue"):
+                r = scout_agent.force_run_monitor(monitor=name, _caller_user_id="UADMIN_REG")
+                if r.get("error") == "unknown_monitor":
+                    return False, f"'{name}' treated as unknown_monitor — allowed set may be hardcoded"
+                if r.get("error") != "not_initialized":
+                    return False, f"'{name}' returned unexpected error={r.get('error')!r}"
+        finally:
+            if admins: os.environ["SCOUT_THRESHOLD_ADMINS"] = admins
+            else: os.environ.pop("SCOUT_THRESHOLD_ADMINS", None)
+        return True, "cvr, expiration, revenue pass allowed check (not_initialized, not unknown_monitor) ✓"
+    finally:
+        scout_agent._FORCE_MONITOR_CTX.update(saved)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

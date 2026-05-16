@@ -68,6 +68,7 @@ Before marking any Scout PR complete, verify ALL of the following:
 - [ ] Import DAG unchanged: `grep -rn "from scout_bot import" scout_handlers.py` must return empty
 - [ ] Block Kit canonical primitives used in any new Pulse blocks (no naked `section.fields`, no NBSP padding `\xa0`, no `·` separators between items)
 - [ ] No "Action: run X" or "Action required" messages added to user-facing Slack output unless the action requires genuine human judgment
+- [ ] Any new monitor daemon has a `_set_force_monitor_fn("name", fn)` registration in `main()` — `_FORCE_MON_PAT` and `force_run_monitor` auto-discover from the registry; no other edits needed
 - [ ] Signal Map updated if a new signal was added or an existing one changed
 - [ ] Known Debt updated: resolved items removed, new deferred items added
 - [ ] Delete the worktree after the PR is merged (`git worktree remove <path>`)
@@ -176,8 +177,8 @@ When adding a new Scout capability, touch these files in this order:
 | Capability type | Files to touch |
 |---|---|
 | New agent tool (LLM-callable) | `scout_agent.py` (TOOLS list + function + SYSTEM_PROMPT) |
-| New monitor signal (monitor-only) | `scout_bot.py` (new `_pulse_signal_*` query fn + daemon via `_start_daemon`) — no `scout_agent.py` change needed |
-| New monitor signal (shared with agent) | `scout_agent.py` (shared `_query_*` function) + `scout_bot.py` (thin `_pulse_signal_*` wrapper + daemon via `_start_daemon`) — shared function only required when an agent tool also consumes the signal |
+| New monitor signal (monitor-only) | `scout_bot.py` (signal fn + daemon via `_start_daemon` + `_set_force_monitor_fn` registration in `main()`) — `_FORCE_MON_PAT` and `force_run_monitor` auto-discover; no other edits needed |
+| New monitor signal (shared with agent) | `scout_agent.py` (shared `_query_*` function) + `scout_bot.py` (thin wrapper + daemon via `_start_daemon` + `_set_force_monitor_fn` registration in `main()`) |
 | New Slack button handler | `scout_handlers.py` (handler) + `scout_slack_ui.py` (Block Kit card) |
 | New Notion page type | `scout_notion.py` (page builder) |
 | New state value | `scout_state.py` (load/save functions) |
