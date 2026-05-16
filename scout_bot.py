@@ -1078,6 +1078,91 @@ def _fill_monitor(web) -> None:
     )
 
 
+def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for publisher-campaign CVR drops."""
+    items = []
+    for r in rows[:6]:
+        pub      = r.get("publisher_name", "Unknown")
+        adv      = r.get("adv_name", "Unknown")
+        cvr_7d   = r.get("cvr_7d", 0)
+        cvr_yd   = r.get("cvr_yesterday", 0)
+        delta    = r.get("delta_pct", 0)
+        payout   = r.get("payout_per_conversion", 0)
+        items.append(
+            f"*{pub} — {adv}*: "
+            f"CVR {cvr_yd:.2%} vs {cvr_7d:.2%} baseline "
+            f"({delta:+.0f}%) · ${payout:.0f} payout"
+        )
+    return _build_monitor_alert_blocks(
+        ":chart_with_downwards_trend:",
+        "CVR anomalies — significant conversion rate drops since yesterday",
+        items,
+        "CVR anomalies",
+    )
+
+
+def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
+    """Return (fallback, blocks) Block Kit alert for campaigns expiring soon."""
+    items = []
+    for r in rows[:8]:
+        adv      = r.get("adv_name", "Unknown")
+        end_date = r.get("end_date", "?")
+        days     = r.get("days_remaining", 0)
+        pubs     = r.get("publisher_count", 0)
+        rev_7d   = r.get("revenue_7d", 0)
+        imp_7d   = r.get("impressions_7d", 0)
+        items.append(
+            f"*{adv}*: expires {end_date} ({days}d) · "
+            f"{pubs} publisher(s) · {imp_7d:,} impressions · ${rev_7d:,.0f} revenue/7d"
+        )
+    return _build_monitor_alert_blocks(
+        ":hourglass_flowing_sand:",
+        "Expiring campaigns — active campaigns ending within the alert window",
+        items,
+        "expiring campaigns",
+    )
+
+
+def _cvr_anomaly_monitor(web) -> None:
+    """Silent monitor: publisher-campaign pairs with significant CVR drops.
+
+    Daily check at 2am CT (configurable). Only fires on high-value campaigns
+    (avg payout >= $50) with sufficient volume (7d impressions >= 5000).
+    """
+    from scout_state import _load_cvr_anomaly_alert_state, _save_cvr_anomaly_alert_date
+    from scout_ch import _query_cvr_anomaly
+
+    _run_with_web(
+        web,
+        monitor_name="cvr-anomaly-monitor",
+        config_key="cvr_anomaly",
+        signal_fn=_query_cvr_anomaly,
+        format_fn=_format_cvr_alert,
+        load_state_fn=_load_cvr_anomaly_alert_state,
+        save_state_fn=_save_cvr_anomaly_alert_date,
+    )
+
+
+def _expiration_monitor(web) -> None:
+    """Silent monitor: active campaigns expiring within expiration_warning_days.
+
+    Daily check at 2am CT (configurable). Surfaces all active campaigns with
+    an end_date in the warning window so the team can coordinate renewals.
+    """
+    from scout_state import _load_expiration_alert_state, _save_expiration_alert_date
+    from scout_ch import _query_expiring_campaigns
+
+    _run_with_web(
+        web,
+        monitor_name="expiration-monitor",
+        config_key="expiration",
+        signal_fn=_query_expiring_campaigns,
+        format_fn=_format_expiration_alert,
+        load_state_fn=_load_expiration_alert_state,
+        save_state_fn=_save_expiration_alert_date,
+    )
+
+
 def _run_with_web(
     web,
     *,
@@ -2607,6 +2692,8 @@ def main():
     _start_daemon(_velocity_down_monitor, name="velocity-down-monitor", args=(web_client,))
     _start_daemon(_ghost_monitor,         name="ghost-monitor",         args=(web_client,))
     _start_daemon(_fill_monitor,          name="fill-monitor",          args=(web_client,))
+    _start_daemon(_cvr_anomaly_monitor,   name="cvr-anomaly-monitor",   args=(web_client,))
+    _start_daemon(_expiration_monitor,    name="expiration-monitor",    args=(web_client,))
     _start_daemon(_nightly_harvest,       name="context-harvest")
     _start_daemon(_notion_watcher_loop,   name="notion-watcher",      args=(web_client,))
     _start_daemon(_copy_coalescer_loop,   name="copy-coalescer")

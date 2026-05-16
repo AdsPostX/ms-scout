@@ -462,3 +462,47 @@ def _query_advertiser_rpm_context(ch, adv_name: str) -> dict:
     except Exception as e:
         log.warning(f"_query_advertiser_rpm_context failed for {adv_name!r}: {e}")
         return {"has_history": False}
+
+
+def _query_cvr_anomaly(ch) -> list[dict]:
+    """Thin wrapper — reads thresholds from config and delegates to queries.cvr_anomaly()."""
+    from scout_agent import SCOUT_THRESHOLDS
+    t = SCOUT_THRESHOLDS.get("signals", {})
+    return _q.cvr_anomaly(
+        ch,
+        drop_pct=float(t.get("cvr_anomaly_drop_pct", 30)),
+        min_payout=float(t.get("cvr_anomaly_min_payout", 50)),
+        min_impressions_7d=int(t.get("cvr_anomaly_min_impressions_7d", 5000)),
+    )
+
+
+def _query_expiring_campaigns(ch) -> list[dict]:
+    """Thin wrapper — reads warning_days from config and delegates to queries.expiring_campaigns()."""
+    from scout_agent import SCOUT_THRESHOLDS
+    t = SCOUT_THRESHOLDS.get("signals", {})
+    return _q.expiring_campaigns(
+        ch,
+        warning_days=int(t.get("expiration_warning_days", 7)),
+    )
+
+
+def _query_publisher_revenue_trends(ch, days: int = 7) -> list[dict]:
+    """Thin wrapper — reads min_periods from config and delegates to queries.publisher_revenue_trends()."""
+    from scout_agent import SCOUT_THRESHOLDS
+    t = SCOUT_THRESHOLDS.get("signals", {})
+    return _q.publisher_revenue_trends(
+        ch,
+        days=days,
+        min_periods=int(t.get("revenue_trend_min_periods", 4)),
+    )
+
+
+def _query_advertiser_revenue_trends(ch, days: int = 7) -> list[dict]:
+    """Thin wrapper — reads min_periods from config and delegates to queries.advertiser_revenue_trends()."""
+    from scout_agent import SCOUT_THRESHOLDS
+    t = SCOUT_THRESHOLDS.get("signals", {})
+    return _q.advertiser_revenue_trends(
+        ch,
+        days=days,
+        min_periods=int(t.get("revenue_trend_min_periods", 4)),
+    )

@@ -955,6 +955,235 @@ def revenue_opportunities(ch) -> list[dict]:
 
 
 # ===========================================================================
+# CVR anomaly detection
+# ===========================================================================
+
+def cvr_anomaly(
+    ch,
+    drop_pct: float = 30.0,
+    min_payout: float = 50.0,
+    min_impressions_7d: int = 5000,
+) -> list[dict]:
+    """
+    Publisher-campaign pairs where yesterday's CVR dropped significantly vs. 7d baseline.
+
+    CVR = conversions / impressions (impressions are the exposure unit, not clicks).
+    Only fires on high-value campaigns (avg_payout >= min_payout) with enough volume
+    (impressions_7d >= min_impressions_7d) to make the signal actionable.
+
+    Returns list of dicts with keys:
+        publisher_id (int), publisher_name (str), campaign_id (int), adv_name (str),
+        cvr_7d (float), cvr_yesterday (float), delta_pct (float),
+        impressions_7d (int), payout_per_conversion (float)
+    Raises on ClickHouse error — callers must catch.
+    """
+    rows = ch.query(
+        """
+        SELECT
+            publisher_id,
+            publisher_name,
+            campaign_id,
+            adv_name,
+            cvr_7d,
+            cvr_yesterday,
+            delta_pct,
+            impressions_7d,
+            payout_per_conversion
+        FROM (
+            WITH imp_7d AS (
+                SELECT
+                    s.user_id                         AS publisher_id,
+                    i.campaign_id                     AS campaign_id,
+                    count()                           AS impressions_7d
+                FROM adpx_impressions_details i
+                JOIN adpx_sdk_sessions s ON i.session_id = s.session_id
+                WHERE toYYYYMM(i.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
+                  AND i.created_at >= today() - INTERVAL 7 DAY
+                GROUP BY publisher_id, campaign_id
+                HAVING impressions_7d >= {min_impressions_7d: Int64}
+            ),
+            imp_yesterday AS (
+                SELECT
+                    s.user_id                         AS publisher_id,
+                    i.campaign_id                     AS campaign_id,
+                    count()                           AS impressions_yesterday
+                FROM adpx_impressions_details i
+                JOIN adpx_sdk_sessions s ON i.session_id = s.session_id
+                WHERE toYYYYMM(i.created_at) >= toYYYYMM(yesterday())
+                  AND i.created_at >= yesterday()
+                  AND i.created_at < today()
+                GROUP BY publisher_id, campaign_id
+            ),
+            conv_7d AS (
+                SELECT
+                    s.user_id                         AS publisher_id,
+                    cv.campaign_id                    AS campaign_id,
+                    count()                           AS conversions_7d,
+                    avg(toFloat64OrNull(cv.payout))   AS payout_per_conversion
+                FROM adpx_conversionsdetails cv
+                JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
+                WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
+                  AND cv.created_at >= today() - INTERVAL 7 DAY
+                GROUP BY publisher_id, campaign_id
+                HAVING payout_per_conversion >= {min_payout: Float64}
+            ),
+            conv_yesterday AS (
+                SELECT
+                    s.user_id                         AS publisher_id,
+                    cv.campaign_id                    AS campaign_id,
+                    count()                           AS conversions_yesterday
+                FROM adpx_conversionsdetails cv
+                JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
+                WHERE toYYYYMM(cv.created_at) >= toYYYYMM(yesterday())
+                  AND cv.created_at >= yesterday()
+                  AND cv.created_at < today()
+                GROUP BY publisher_id, campaign_id
+            ),
+            names AS (
+                SELECT
+                    id                                AS publisher_id,
+                    organization                      AS publisher_name
+                FROM mv_adpx_users
+            ),
+            campaigns AS (
+                SELECT
+                    id                                AS campaign_id,
+                    adv_name
+                FROM from_airbyte_campaigns
+                WHERE deleted_at IS NULL
+            )
+            SELECT
+                i7.publisher_id,
+                coalesce(n.publisher_name, toString(i7.publisher_id)) AS publisher_name,
+                toInt64(i7.campaign_id)                               AS campaign_id,
+                coalesce(ca.adv_name, '')                             AS adv_name,
+                round(coalesce(c7.conversions_7d, 0) /
+                      nullIf(i7.impressions_7d, 0), 6)                AS cvr_7d,
+                round(coalesce(cy.conversions_yesterday, 0) /
+                      nullIf(iy.impressions_yesterday, 0), 6)         AS cvr_yesterday,
+                round((cvr_yesterday - cvr_7d) /
+                      nullIf(cvr_7d, 0) * 100, 2)                    AS delta_pct,
+                i7.impressions_7d,
+                coalesce(c7.payout_per_conversion, 0)                 AS payout_per_conversion
+            FROM imp_7d i7
+            LEFT JOIN imp_yesterday iy
+                   ON iy.publisher_id = i7.publisher_id
+                  AND iy.campaign_id  = i7.campaign_id
+            LEFT JOIN conv_7d c7
+                   ON c7.publisher_id = i7.publisher_id
+                  AND c7.campaign_id  = i7.campaign_id
+            LEFT JOIN conv_yesterday cy
+                   ON cy.publisher_id = i7.publisher_id
+                  AND cy.campaign_id  = i7.campaign_id
+            LEFT JOIN names n ON n.publisher_id = i7.publisher_id
+            LEFT JOIN campaigns ca ON ca.campaign_id = toInt64(i7.campaign_id)
+            WHERE cvr_7d > 0
+        )
+        WHERE delta_pct <= -{drop_pct: Float64}
+        ORDER BY delta_pct ASC
+        """,
+        parameters={
+            "min_impressions_7d": int(min_impressions_7d),
+            "min_payout": float(min_payout),
+            "drop_pct": float(drop_pct),
+        },
+    ).result_rows
+    return [
+        {
+            "publisher_id": int(r[0]),
+            "publisher_name": r[1],
+            "campaign_id": int(r[2]),
+            "adv_name": r[3],
+            "cvr_7d": float(r[4] or 0),
+            "cvr_yesterday": float(r[5] or 0),
+            "delta_pct": float(r[6] or 0),
+            "impressions_7d": int(r[7] or 0),
+            "payout_per_conversion": float(r[8] or 0),
+        }
+        for r in rows
+    ]
+
+
+# ===========================================================================
+# Expiring campaigns
+# ===========================================================================
+
+def expiring_campaigns(ch, warning_days: int = 7) -> list[dict]:
+    """
+    Active campaigns expiring within warning_days days.
+
+    Includes last-7d impression/publisher activity and revenue so callers can
+    surface only campaigns that are actively generating revenue.
+
+    Returns list of dicts with keys:
+        campaign_id (int), adv_name (str), end_date (str, YYYY-MM-DD),
+        days_remaining (int), impressions_7d (int), publisher_count (int),
+        revenue_7d (float)
+    Raises on ClickHouse error — callers must catch.
+    """
+    rows = ch.query(
+        """
+        WITH expiring AS (
+            SELECT
+                id                                    AS campaign_id,
+                adv_name,
+                toString(end_date)                    AS end_date,
+                dateDiff('day', today(), end_date)    AS days_remaining
+            FROM from_airbyte_campaigns
+            WHERE end_date BETWEEN today() AND today() + INTERVAL {warning_days: Int32} DAY
+              AND trim(status) = 'active'
+              AND deleted_at IS NULL
+        ),
+        imp_agg AS (
+            SELECT
+                toInt64(i.campaign_id)                AS campaign_id,
+                count()                               AS impressions_7d,
+                count(DISTINCT s.user_id)             AS publisher_count
+            FROM adpx_impressions_details i
+            JOIN adpx_sdk_sessions s ON i.session_id = s.session_id
+            WHERE toYYYYMM(i.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
+              AND i.created_at >= today() - INTERVAL 7 DAY
+            GROUP BY campaign_id
+        ),
+        rev_agg AS (
+            SELECT
+                toInt64(cv.campaign_id)               AS campaign_id,
+                round(sum(toFloat64OrNull(cv.revenue)), 2) AS revenue_7d
+            FROM adpx_conversionsdetails cv
+            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
+              AND cv.created_at >= today() - INTERVAL 7 DAY
+            GROUP BY campaign_id
+        )
+        SELECT
+            e.campaign_id,
+            e.adv_name,
+            e.end_date,
+            e.days_remaining,
+            coalesce(ia.impressions_7d, 0)     AS impressions_7d,
+            coalesce(ia.publisher_count, 0)    AS publisher_count,
+            coalesce(ra.revenue_7d, 0)         AS revenue_7d
+        FROM expiring e
+        LEFT JOIN imp_agg ia ON ia.campaign_id = e.campaign_id
+        LEFT JOIN rev_agg ra ON ra.campaign_id = e.campaign_id
+        ORDER BY e.days_remaining ASC, revenue_7d DESC
+        """,
+        parameters={"warning_days": int(warning_days)},
+    ).result_rows
+    return [
+        {
+            "campaign_id": int(r[0]),
+            "adv_name": r[1],
+            "end_date": r[2],
+            "days_remaining": int(r[3]),
+            "impressions_7d": int(r[4] or 0),
+            "publisher_count": int(r[5] or 0),
+            "revenue_7d": float(r[6] or 0),
+        }
+        for r in rows
+    ]
+
+
+# ===========================================================================
 # Performance benchmarks (was: _load_performance_benchmarks)
 # ===========================================================================
 
@@ -1082,3 +1311,204 @@ def publisher_top_categories(ch, pub_id: int) -> list[str]:
         return [row[0] for row in rows if row[0]]
     except Exception:
         return []
+
+
+# ===========================================================================
+# Revenue trends (publisher and advertiser)
+# ===========================================================================
+
+def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[dict]:
+    """
+    Publisher revenue trends: actual revenue vs. historical median for the same period length.
+
+    Algorithm: divide history into sequential `days`-length windows, take the median of 8
+    such windows as the expected baseline, then compare the most-recent window (actual).
+    This avoids the semantic error of comparing a period total against a median of daily values.
+
+    Returns list of dicts with keys:
+        publisher_id (int), publisher_name (str),
+        revenue_actual (float), revenue_expected (float), delta_pct (float),
+        trend ("up" | "down" | "flat"), sessions_actual (int)
+    Raises on ClickHouse error — callers must catch.
+    """
+    rows = ch.query(
+        """
+        WITH actual AS (
+            SELECT
+                s.user_id                                              AS publisher_id,
+                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS revenue_actual,
+                count(DISTINCT cv.session_id)                         AS sessions_actual
+            FROM adpx_conversionsdetails cv
+            JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
+            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {days: Int32} DAY)
+              AND cv.created_at >= today() - INTERVAL {days: Int32} DAY
+            GROUP BY publisher_id
+        ),
+        historical_daily AS (
+            SELECT
+                s.user_id                                              AS publisher_id,
+                toDate(cv.created_at, 'America/Chicago')              AS rev_date,
+                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS daily_revenue,
+                intDiv(dateDiff('day', today() - INTERVAL {lookback: Int32} DAY, rev_date),
+                       {days: Int32}) + 1                              AS period_idx
+            FROM adpx_conversionsdetails cv
+            JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
+            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {lookback: Int32} DAY)
+              AND cv.created_at >= today() - INTERVAL {lookback: Int32} DAY
+              AND cv.created_at < today() - INTERVAL {days: Int32} DAY
+            GROUP BY publisher_id, rev_date
+        ),
+        historical_periods AS (
+            SELECT
+                publisher_id,
+                period_idx,
+                sum(daily_revenue)                                     AS period_revenue
+            FROM historical_daily
+            WHERE period_idx BETWEEN 1 AND 8
+            GROUP BY publisher_id, period_idx
+        ),
+        baseline AS (
+            SELECT
+                publisher_id,
+                round(median(period_revenue), 2)                       AS revenue_expected,
+                count()                                                AS period_count
+            FROM historical_periods
+            GROUP BY publisher_id
+            HAVING period_count >= {min_periods: Int32}
+        ),
+        names AS (
+            SELECT id AS publisher_id, organization AS publisher_name
+            FROM mv_adpx_users
+        )
+        SELECT
+            a.publisher_id,
+            coalesce(n.publisher_name, toString(a.publisher_id))       AS publisher_name,
+            a.revenue_actual,
+            b.revenue_expected,
+            round((a.revenue_actual - b.revenue_expected) /
+                  nullIf(b.revenue_expected, 0) * 100, 1)              AS delta_pct,
+            a.sessions_actual
+        FROM actual a
+        JOIN baseline b ON b.publisher_id = a.publisher_id
+        LEFT JOIN names n ON n.publisher_id = a.publisher_id
+        ORDER BY delta_pct ASC
+        """,
+        parameters={
+            "days": int(days),
+            "lookback": int(days * 9),
+            "min_periods": int(min_periods),
+        },
+    ).result_rows
+
+    def _trend(delta: float) -> str:
+        if delta <= -15:
+            return "down"
+        if delta >= 15:
+            return "up"
+        return "flat"
+
+    return [
+        {
+            "publisher_id": int(r[0]),
+            "publisher_name": r[1],
+            "revenue_actual": float(r[2] or 0),
+            "revenue_expected": float(r[3] or 0),
+            "delta_pct": float(r[4] or 0),
+            "trend": _trend(float(r[4] or 0)),
+            "sessions_actual": int(r[5] or 0),
+        }
+        for r in rows
+    ]
+
+
+def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[dict]:
+    """
+    Advertiser revenue trends: same period-median algorithm as publisher_revenue_trends
+    but aggregated by adv_name across all publishers.
+
+    Returns list of dicts with keys:
+        adv_name (str), revenue_actual (float), revenue_expected (float),
+        delta_pct (float), trend ("up" | "down" | "flat"), conversions_actual (int)
+    Raises on ClickHouse error — callers must catch.
+    """
+    rows = ch.query(
+        """
+        WITH actual AS (
+            SELECT
+                c.adv_name,
+                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS revenue_actual,
+                count()                                               AS conversions_actual
+            FROM adpx_conversionsdetails cv
+            JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
+            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {days: Int32} DAY)
+              AND cv.created_at >= today() - INTERVAL {days: Int32} DAY
+            GROUP BY c.adv_name
+        ),
+        historical_daily AS (
+            SELECT
+                c.adv_name,
+                toDate(cv.created_at, 'America/Chicago')              AS rev_date,
+                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS daily_revenue,
+                intDiv(dateDiff('day', today() - INTERVAL {lookback: Int32} DAY, rev_date),
+                       {days: Int32}) + 1                              AS period_idx
+            FROM adpx_conversionsdetails cv
+            JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
+            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {lookback: Int32} DAY)
+              AND cv.created_at >= today() - INTERVAL {lookback: Int32} DAY
+              AND cv.created_at < today() - INTERVAL {days: Int32} DAY
+            GROUP BY c.adv_name, rev_date
+        ),
+        historical_periods AS (
+            SELECT
+                adv_name,
+                period_idx,
+                sum(daily_revenue)                                     AS period_revenue
+            FROM historical_daily
+            WHERE period_idx BETWEEN 1 AND 8
+            GROUP BY adv_name, period_idx
+        ),
+        baseline AS (
+            SELECT
+                adv_name,
+                round(median(period_revenue), 2)                       AS revenue_expected,
+                count()                                                AS period_count
+            FROM historical_periods
+            GROUP BY adv_name
+            HAVING period_count >= {min_periods: Int32}
+        )
+        SELECT
+            a.adv_name,
+            a.revenue_actual,
+            b.revenue_expected,
+            round((a.revenue_actual - b.revenue_expected) /
+                  nullIf(b.revenue_expected, 0) * 100, 1)              AS delta_pct,
+            a.conversions_actual
+        FROM actual a
+        JOIN baseline b ON b.adv_name = a.adv_name
+        ORDER BY delta_pct ASC
+        """,
+        parameters={
+            "days": int(days),
+            "lookback": int(days * 9),
+            "min_periods": int(min_periods),
+        },
+    ).result_rows
+
+    def _trend(delta: float) -> str:
+        if delta <= -15:
+            return "down"
+        if delta >= 15:
+            return "up"
+        return "flat"
+
+    return [
+        {
+            "adv_name": r[0],
+            "revenue_actual": float(r[1] or 0),
+            "revenue_expected": float(r[2] or 0),
+            "delta_pct": float(r[3] or 0),
+            "trend": _trend(float(r[3] or 0)),
+            "conversions_actual": int(r[4] or 0),
+        }
+        for r in rows
+    ]

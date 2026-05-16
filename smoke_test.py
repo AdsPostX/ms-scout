@@ -2371,6 +2371,11 @@ def test_export_surface_importable_from_scout_agent():
         "_query_intraday_revenue_total",
         "_query_intraday_revenue_by_publisher",
         "_query_advertiser_rpm_context",
+        # PR-C new query helpers (re-exported from scout_ch via scout_agent import)
+        "_query_cvr_anomaly",
+        "_query_expiring_campaigns",
+        "_query_publisher_revenue_trends",
+        "_query_advertiser_revenue_trends",
         # Image helpers
         "_scrape_og_image",
         "_clearbit_domain",
@@ -2399,6 +2404,82 @@ def test_export_surface_importable_from_scout_agent():
         return False, f"Surface symbols present but not callable: {not_callable}"
 
     return True, f"All {len(expected)} extraction-surface symbols importable & callable ✓"
+
+
+@test("cvr_anomaly_monitor_registered_as_required_daemon")
+def test_cvr_anomaly_monitor_registered_as_required_daemon():
+    """cvr-anomaly-monitor and expiration-monitor must register via _start_daemon in main().
+
+    _start_daemon adds daemons to _REQUIRED_DAEMONS so thread watchdog and health
+    status both see them. Bypassing it with raw threading.Thread makes silent breakage
+    invisible to the health system. Verified via source inspection (runtime set is
+    empty at import time — same pattern as the existing heartbeat registration test).
+    """
+    import pathlib
+    src = (pathlib.Path(__file__).parent / "scout_bot.py").read_text()
+    main_section = src.split("def main()")[1].split("\ndef ")[0]
+    missing = []
+    if 'name="cvr-anomaly-monitor"' not in main_section:
+        missing.append("cvr-anomaly-monitor")
+    if 'name="expiration-monitor"' not in main_section:
+        missing.append("expiration-monitor")
+    if missing:
+        return False, f"Not registered via _start_daemon in main(): {missing}"
+    return True, "cvr-anomaly-monitor and expiration-monitor registered via _start_daemon ✓"
+
+
+@test("cvr_anomaly_and_expiration_agent_tools_in_tool_map")
+def test_cvr_anomaly_and_expiration_agent_tools_in_tool_map():
+    """All 4 new agent tools must be in TOOL_MAP with callable values.
+
+    A tool present in TOOLS[] but absent from TOOL_MAP silently returns 'tool not found'
+    to the LLM — no error, no alert, just a wrong answer.
+    """
+    import scout_agent
+    required = [
+        "get_cvr_anomalies",
+        "get_expiring_campaigns",
+        "get_publisher_revenue_trends",
+        "get_advertiser_revenue_trends",
+    ]
+    missing = [t for t in required if t not in scout_agent.TOOL_MAP]
+    not_callable = [t for t in required if t in scout_agent.TOOL_MAP and not callable(scout_agent.TOOL_MAP[t])]
+    if missing:
+        return False, f"Missing from TOOL_MAP: {missing}"
+    if not_callable:
+        return False, f"In TOOL_MAP but not callable: {not_callable}"
+    return True, f"All {len(required)} new tools in TOOL_MAP ✓"
+
+
+@test("new_monitor_state_helpers_present_in_scout_state")
+def test_new_monitor_state_helpers_present_in_scout_state():
+    """CVR anomaly and expiration monitor state helpers must exist and follow the pattern.
+
+    _run_with_web() calls load_state_fn() and save_state_fn() by name — if either is
+    missing from scout_state, the monitor crashes silently at the first fire window.
+    """
+    import scout_state
+    required = [
+        "_load_cvr_anomaly_alert_state",
+        "_save_cvr_anomaly_alert_date",
+        "_load_expiration_alert_state",
+        "_save_expiration_alert_date",
+    ]
+    missing = [fn for fn in required if not hasattr(scout_state, fn)]
+    if missing:
+        return False, f"Missing from scout_state: {missing}"
+    # verify load functions return None (no state yet) without error
+    errors = []
+    for fn_name in ["_load_cvr_anomaly_alert_state", "_load_expiration_alert_state"]:
+        try:
+            result = getattr(scout_state, fn_name)()
+            if result is not None and not isinstance(result, str):
+                errors.append(f"{fn_name} returned unexpected type: {type(result)}")
+        except Exception as e:
+            errors.append(f"{fn_name} raised: {e}")
+    if errors:
+        return False, "; ".join(errors)
+    return True, f"All {len(required)} state helpers present and load functions callable ✓"
 
 
 if __name__ == "__main__":
