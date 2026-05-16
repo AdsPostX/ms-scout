@@ -45,7 +45,7 @@ from scout_state import (
     _update_benchmark_from_actuals,
 )
 from scout_handlers import (
-    _set_bot_user_id, _set_thread_state, _set_pulse_runner, _set_force_monitor_fn,
+    _set_bot_user_id, _set_thread_state, _set_force_monitor_fn,
     handle_event,
 )
 
@@ -524,38 +524,6 @@ def _pulse_signal_velocity(ch) -> list:
     return results
 
 
-def _pulse_signal_overnight(ch) -> list:
-    import json as _json
-    results = []
-    try:
-        event_rows = ch.query(
-            """
-            SELECT type, old_data, created_at
-            FROM adpx_system_activity_logs
-            WHERE created_at >= now() - INTERVAL 24 HOUR
-              AND type IN ('pause', 'resume')
-              AND entity = 'campaigns'
-            ORDER BY created_at DESC
-            LIMIT 15
-            """
-        ).result_rows
-        for ev_type, old_data_str, created_at in event_rows:
-            adv_name = ""
-            try:
-                od = _json.loads(old_data_str) if old_data_str else {}
-                adv_name = od.get("adv_name") or od.get("name") or ""
-            except Exception:
-                log.debug("suppressed: overnight event old_data JSON parse failed", exc_info=True)
-            results.append({
-                "type":      ev_type,
-                "adv_name":  adv_name,
-                "timestamp": str(created_at) if created_at else "",
-            })
-    except Exception as e:
-        log.warning(f"Pulse events signal failed: {e}")
-    return results
-
-
 def _pulse_signal_ghost(ch) -> list:
     results = []
     try:
@@ -635,115 +603,15 @@ def _pulse_signal_fill_rate(ch) -> list:
     return results
 
 
-def _pulse_signal_opportunities(ch) -> list:
-    """
-    Revenue gap opportunities for the Pulse signal.
-
-    Uses queries.revenue_opportunities() — the same SQL + fuzzy name-match anti-join
-    as the agent tool (get_top_revenue_opportunities). Pulse takes the top 5 rows;
-    the agent shows the full 20-item detail view with additional Python-level grouping.
-
-    This ensures the Pulse and agent never recommend different things for the same
-    publisher × advertiser pair (fuzzy suppression: "Disney+" ⊂ "Disney+ and Hulu").
-    """
-    try:
-        rows = _q.revenue_opportunities(ch)
-    except Exception as e:
-        log.warning(f"Pulse opportunities signal failed: {e}")
-        return []
-    return [
-        {
-            "publisher_name":  r["publisher_name"] or "Unknown Publisher",
-            "adv_name":        r["adv_name"],
-            "est_monthly_rev": r["est_monthly_rev"],
-            "sessions_30d":    r["sessions_30d"],
-        }
-        for r in rows[:5]
-    ]
-
-
-# ── Proactive pulse: kill switch ─────────────────────────────────────────────
-
-def _pulse_signal_enabled(key: str) -> bool:
-    """Return True unless key appears in SCOUT_DISABLED_PULSE_SIGNALS env var.
-
-    Set SCOUT_DISABLED_PULSE_SIGNALS=seasonal,payout_upgrades,new_offers to mute
-    any new signal without a deploy.  Existing ClickHouse signals are never in
-    this list and are not affected.
-    """
-    disabled = {s.strip() for s in os.getenv("SCOUT_DISABLED_PULSE_SIGNALS", "").split(",") if s.strip()}
-    return key not in disabled
-
-
 def _monitor_enabled(key: str) -> bool:
     """Return True if the silent monitor `key` is opted in via config.
 
     Monitors are opt-in by default (False) — flip
     SCOUT_THRESHOLDS["signals"][f"{key}_monitor_enabled"] to true in
     config/scout_thresholds.json once validated.
-
-    Distinct from _pulse_signal_enabled (env-var, opt-out) — monitors are a
-    different concern (post-only-on-anomaly daemons replacing the pulse digest).
     """
     from scout_agent import SCOUT_THRESHOLDS
     return bool(SCOUT_THRESHOLDS.get("signals", {}).get(f"{key}_monitor_enabled", False))
-
-
-# Proactive signal priority (fatigue budget: max 1 per pulse)
-_PROACTIVE_SIGNAL_PRIORITY = ["new_offers", "payout_upgrades"]
-
-
-# ── Pulse signal orchestrator ─────────────────────────────────────────────────
-
-def _run_pulse_signals() -> dict:
-    """
-    Run all Pulse signals in parallel.  Each ClickHouse signal owns its own
-    connection — no shared state, no lock needed.
-
-    Returns a dict with all signal keys.  Applies the proactive fatigue budget:
-    at most one of {new_offers, payout_upgrades} is non-empty per run
-    (priority order: new_offers → payout_upgrades).
-    """
-    from scout_agent import _get_ch_client
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    signals: dict = {
-        "cap_alerts": [], "velocity_shifts": [], "overnight_events": [],
-        "ghost_campaigns": [], "fill_rate": [], "opportunities": [],
-        "seasonal": [], "new_offers": [], "payout_upgrades": [],
-    }
-
-    _signal_fns = [
-        ("cap_alerts",      _pulse_signal_cap),
-        ("velocity_shifts", _pulse_signal_velocity),
-        ("overnight_events",_pulse_signal_overnight),
-        ("ghost_campaigns", _pulse_signal_ghost),
-        ("fill_rate",       _pulse_signal_fill_rate),
-        ("opportunities",   _pulse_signal_opportunities),
-    ]
-
-    def _run_one(key, fn):
-        ch = _get_ch_client()
-        return key, fn(ch)
-
-    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="pulse") as pool:
-        futures = {pool.submit(_run_one, key, fn): key for key, fn in _signal_fns}
-        for future in as_completed(futures):
-            try:
-                key, result = future.result()
-                signals[key] = result
-            except Exception as e:
-                log.warning(f"Pulse {futures[future]} signal failed unexpectedly: {e}")
-
-    # Fatigue budget: emit at most one proactive section per pulse
-    # Priority: new_offers → seasonal → payout_upgrades
-    active = next((k for k in _PROACTIVE_SIGNAL_PRIORITY if signals.get(k)), None)
-    for k in _PROACTIVE_SIGNAL_PRIORITY:
-        if k != active:
-            signals[k] = []
-
-    return signals
-
 
 
 
@@ -911,8 +779,7 @@ def _revenue_tracker(web, ch) -> None:
 #     SCOUT_THRESHOLDS["signals"][f"{key}_monitor_check_hour_ct"], default 9)
 #   idempotent per calendar day via _load/_save_<key>_alert_state in scout_state
 #   silent unless the underlying signal returns non-empty
-# These replace the daily 8am _proactive_pulse — alert only when there's
-# something to act on, not "all 6 signals nominal" digests.
+# Alert only when there's something to act on — no "all signals nominal" digests.
 
 
 def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
@@ -1463,26 +1330,6 @@ def _launch_watchdog(web: WebClient) -> None:
             time.sleep(3600)
 
 
-def _snapshot_keys(sigs: dict) -> dict:
-    """
-    Extract string key sets for each signal type from a signals dict.
-
-    Used by _run_pulse_once to build the daily snapshot for PR 24a diff logic.
-    Module-level so smoke tests can exercise it without running a full pulse.
-
-    Key contract: each key is a stable identifier that is the same day-over-day
-    for the same item, so yesterday's snapshot can be diffed against today's.
-    """
-    snap: dict[str, set] = {}
-    snap["ghost"] = {g["adv_name"] for g in (sigs.get("ghost_campaigns") or [])}
-    snap["fill"]  = {f["publisher_name"] for f in (sigs.get("fill_rate") or [])}
-    snap["down"]  = {v["publisher_name"] for v in (sigs.get("velocity_shifts") or []) if v.get("direction") == "down"}
-    snap["up"]    = {v["publisher_name"] for v in (sigs.get("velocity_shifts") or []) if v.get("direction") == "up"}
-    snap["cap"]   = {a["adv_name"] for a in (sigs.get("cap_alerts") or [])}
-    snap["opp"]   = {f"{o['publisher_name']}:{o['adv_name']}" for o in (sigs.get("opportunities") or [])}
-    return snap
-
-
 def _one_shot_monitor(web, channel: str, signal_fn, format_fn, thread_ts: str = "") -> None:
     """Run a monitor signal query once and post the result in-thread immediately.
     Used by the force-trigger admin commands (@Scout force cap/velocity/ghost/fill).
@@ -1500,287 +1347,6 @@ def _one_shot_monitor(web, channel: str, signal_fn, format_fn, thread_ts: str = 
         return
     web.chat_postMessage(channel=channel, thread_ts=_ts, text=fallback, blocks=blocks)
 
-
-def _run_pulse_once(web: WebClient, force: bool = False) -> None:
-    """
-    Execute one pulse run immediately. If force=True, always routes to #scout-qa
-    and skips the idempotency state write (so the scheduled pulse still fires today).
-    Called by _proactive_pulse daemon and by the @Scout force pulse admin command.
-    """
-    import pytz
-    from datetime import datetime as _dt
-
-    chicago = pytz.timezone("America/Chicago")
-    now_chi = _dt.now(chicago)
-    today_str = now_chi.strftime("%Y-%m-%d")
-    is_weekend = now_chi.weekday() >= 5
-
-    state = _load_pulse_state()
-    flagged_history: dict = state.get("flagged_history", {})
-    today_s = today_str
-    from datetime import datetime as _fdt
-
-    signals = _run_pulse_signals()
-
-    for v in signals.get("velocity_shifts", []):
-        if v.get("direction") != "down":
-            continue
-        pname = v["publisher_name"]
-        rec   = flagged_history.get(pname, {})
-        last  = rec.get("last_flagged", "")
-        if last and (_fdt.strptime(today_s, "%Y-%m-%d") - _fdt.strptime(last, "%Y-%m-%d")).days <= 2:
-            rec["count"] = rec.get("count", 1) + 1
-        else:
-            rec = {"count": 1, "first_flagged": today_s}
-        rec["last_flagged"] = today_s
-        flagged_history[pname] = rec
-    state["flagged_history"] = flagged_history
-
-    chronic: list = state.get("chronic", [])
-    today_dt = _fdt.strptime(today_s, "%Y-%m-%d")
-    evicted = [
-        pname for pname in chronic
-        if (today_dt - _fdt.strptime(
-            flagged_history.get(pname, {}).get("last_flagged") or "2000-01-01",
-            "%Y-%m-%d",
-        )).days > 14
-    ]
-    for pname in evicted:
-        chronic.remove(pname)
-    for pname, rec in flagged_history.items():
-        if pname in chronic:
-            continue
-        count = rec.get("count", 0)
-        first = rec.get("first_flagged", "")
-        last  = rec.get("last_flagged", "")
-        if not first or not last:
-            continue
-        span_days = (_fdt.strptime(last, "%Y-%m-%d") - _fdt.strptime(first, "%Y-%m-%d")).days
-        if count >= 3 and span_days <= 14:
-            chronic.append(pname)
-    state["chronic"] = chronic
-
-    # ── PR 24a: Pulse diff — compare today's signals against yesterday's snapshot ──
-    # Build today's snapshot as sets of item keys per signal type.
-    # Key contract: stable identifier that is the same day-over-day for the same item.
-    _collapse_after = int(_SIGNAL_CFG.get("pulse_diff_collapse_after_days", 2))
-
-    prev_snap_raw: dict = state.get("signal_snapshot", {})
-    prev_snap = {k: set(v) for k, v in prev_snap_raw.items()} if prev_snap_raw else {}
-    today_snap = _snapshot_keys(signals)
-
-    # Consecutive-day counters — persist across runs
-    consec: dict = state.get("signal_consecutive_days", {})
-
-    def _days(signal_type: str, key: str) -> int:
-        """Return consecutive days an item has been in the signal (including today)."""
-        full_key = f"{signal_type}:{key}"
-        if key in prev_snap.get(signal_type, set()):
-            consec[full_key] = consec.get(full_key, 1) + 1
-        else:
-            consec[full_key] = 1
-        return consec[full_key]
-
-    def _annotate(item: dict, signal_type: str, key_field: str) -> dict:
-        """Attach _diff_meta to a signal item dict in-place and return it."""
-        key = item.get(key_field, "")
-        d = _days(signal_type, key)
-        is_new = d == 1
-        item["_diff_meta"] = {"is_new": is_new, "consecutive_days": d}
-        return item
-
-    # Annotate each signal item
-    for g in signals.get("ghost_campaigns", []):
-        _annotate(g, "ghost", "adv_name")
-    for f in signals.get("fill_rate", []):
-        _annotate(f, "fill", "publisher_name")
-    for v in signals.get("velocity_shifts", []):
-        sig_type = "down" if v.get("direction") == "down" else "up"
-        _annotate(v, sig_type, "publisher_name")
-    for a in signals.get("cap_alerts", []):
-        _annotate(a, "cap", "adv_name")
-    for o in signals.get("opportunities", []):
-        key = f"{o.get('publisher_name', '')}:{o.get('adv_name', '')}"
-        d = _days("opp", key)
-        o["_diff_meta"] = {"is_new": d == 1, "consecutive_days": d}
-    # ── End PR 24a diff ──────────────────────────────────────────────────────
-
-    has_content = (
-        signals.get("cap_alerts")
-        or signals.get("velocity_shifts")
-        or signals.get("overnight_events")
-        or signals.get("ghost_campaigns")
-        or signals.get("fill_rate")
-        or signals.get("opportunities")
-    )
-    # Force pulse always routes to #scout-qa; normal pulse uses _route_channel
-    channel = _route_channel("pulse", force=force)
-    if has_content:
-        fallback, blocks = _format_pulse_blocks(
-            signals,
-            is_weekend=is_weekend,
-            flagged_history=flagged_history,
-            chronic=chronic,
-        )
-        web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
-        log.info(f"[pulse{'|force' if force else ''}] posted to {channel}")
-    else:
-        log.info("[pulse] no signals — skipping post")
-
-    # Only update state for scheduled (non-force) runs
-    if not force:
-        state["last_pulse_date"] = today_str
-        # Persist signal summary so get_pulse_summary() can recall it later.
-        # Force runs are intentionally excluded — they route to #scout-qa and should not
-        # overwrite the canonical "what did you flag this morning?" state.
-        state["last_signals_summary"] = {
-            "posted_at": now_chi.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "had_content": bool(has_content),
-            "cap_alerts_count": len(signals.get("cap_alerts") or []),
-            "cap_alerts_preview": [
-                a.get("publisher_name", "") for a in (signals.get("cap_alerts") or [])[:3]
-            ],
-            "velocity_down_publishers": [
-                v["publisher_name"]
-                for v in (signals.get("velocity_shifts") or [])
-                if v.get("direction") == "down"
-            ][:3],
-            "ghost_campaigns_count": len(signals.get("ghost_campaigns") or []),
-            "fill_rate_count": len(signals.get("fill_rate") or []),
-            "opportunities_count": len(signals.get("opportunities") or []),
-            "overnight_events_count": len(signals.get("overnight_events") or []),
-        }
-        # PR 24a: persist today's snapshot for diff on next run
-        state["signal_snapshot"] = {k: list(v) for k, v in today_snap.items()}
-        state["signal_consecutive_days"] = consec
-        _save_pulse_state(state)
-
-
-def _proactive_pulse(web: WebClient) -> None:
-    """
-    Daily proactive intelligence briefing daemon.
-
-    Posts once per day at 8:00 AM Chicago time to the pulse channel.
-    Idempotent — uses pulse_state.json to avoid double-posting.
-    Surfaces: cap proximity alerts, revenue velocity shifts, overnight events.
-    """
-    import pytz
-    from datetime import datetime as _dt, timedelta
-
-    while True:
-        try:
-            chicago = pytz.timezone("America/Chicago")
-            now_chi = _dt.now(chicago)
-            today_str = now_chi.strftime("%Y-%m-%d")
-
-            # CHECK FIRST: fire immediately if past 8am and haven't run today.
-            # This handles: Mac was off at 8am, just resumed.
-            state = _load_pulse_state()
-            if state.get("last_pulse_date") != today_str and now_chi.hour >= 8:
-                is_weekend = now_chi.weekday() >= 5  # Saturday=5, Sunday=6
-
-                # Run signals
-                signals = _run_pulse_signals()
-
-                # ── Update signal fatigue tracking ────────────────────────────
-                # flagged_history: publisher_name → {count, first_flagged, last_flagged}
-                # Uses "last_flagged within 48h" window — resilient to Scout being
-                # offline for a day (strict consecutive counter would reset on gap).
-                flagged_history: dict = state.get("flagged_history", {})
-                today_s = today_str
-                from datetime import datetime as _fdt
-                for v in signals.get("velocity_shifts", []):
-                    if v.get("direction") != "down":
-                        continue
-                    pname = v["publisher_name"]
-                    rec   = flagged_history.get(pname, {})
-                    last  = rec.get("last_flagged", "")
-                    # Within 48h = either yesterday or today (handles one offline day)
-                    if last and (_fdt.strptime(today_s, "%Y-%m-%d") - _fdt.strptime(last, "%Y-%m-%d")).days <= 2:
-                        rec["count"] = rec.get("count", 1) + 1
-                    else:
-                        rec = {"count": 1, "first_flagged": today_s}
-                    rec["last_flagged"] = today_s
-                    flagged_history[pname] = rec
-                state["flagged_history"] = flagged_history
-
-                # ── Chronic classification (P9-2) ─────────────────────────────────
-                # Threshold: count >= 3 AND (last_flagged - first_flagged) <= 14 days
-                # Eviction: today - last_flagged > 14 days → remove from chronic list
-                chronic: list = state.get("chronic", [])
-                today_dt = _fdt.strptime(today_s, "%Y-%m-%d")
-
-                # Evict stale chronic partners
-                evicted = [
-                    pname for pname in chronic
-                    if (today_dt - _fdt.strptime(
-                        flagged_history.get(pname, {}).get("last_flagged") or "2000-01-01",
-                        "%Y-%m-%d",
-                    )).days > 14
-                ]
-                for pname in evicted:
-                    chronic.remove(pname)
-                    log.info(f"[pulse] {pname} evicted from chronic list (no flag in 14d)")
-
-                # Promote new chronic partners
-                for pname, rec in flagged_history.items():
-                    if pname in chronic:
-                        continue
-                    count = rec.get("count", 0)
-                    first = rec.get("first_flagged", "")
-                    last  = rec.get("last_flagged", "")
-                    if not first or not last:
-                        continue
-                    span_days = (_fdt.strptime(last, "%Y-%m-%d") - _fdt.strptime(first, "%Y-%m-%d")).days
-                    if count >= 3 and span_days <= 14:
-                        chronic.append(pname)
-                        log.info(f"[pulse] {pname} classified as chronic ({count} flags in {span_days}d)")
-
-                state["chronic"] = chronic
-
-                # Only post if there's something to say
-                has_content = (
-                    signals.get("cap_alerts")
-                    or signals.get("velocity_shifts")
-                    or signals.get("overnight_events")
-                    or signals.get("ghost_campaigns")
-                    or signals.get("fill_rate")
-                    or signals.get("opportunities")
-                )
-                channel = _route_channel("pulse")
-                if has_content:
-                    fallback, blocks = _format_pulse_blocks(
-                        signals,
-                        is_weekend=is_weekend,
-                        flagged_history=flagged_history,
-                        chronic=chronic,
-                    )
-                    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
-                    log.info(f"[pulse] posted to {channel}: {len(signals['cap_alerts'])} caps, "
-                             f"{len(signals['velocity_shifts'])} velocity, "
-                             f"{len(signals['overnight_events'])} events, "
-                             f"{len(signals['ghost_campaigns'])} ghosts, "
-                             f"{len(signals['fill_rate'])} low-fill, "
-                             f"{len(signals['opportunities'])} opportunities"
-                             f"{' [weekend]' if is_weekend else ''}")
-                else:
-                    log.info("[pulse] no signals today — skipping post")
-
-                # Record posted
-                state["last_pulse_date"] = today_str
-                _save_pulse_state(state)
-
-            # SLEEP until next 8am
-            target = now_chi.replace(hour=8, minute=0, second=0, microsecond=0)
-            if now_chi >= target:
-                target += timedelta(days=1)
-            sleep_secs = (target - now_chi).total_seconds()
-            log.info(f"[pulse] sleeping {sleep_secs / 3600:.1f}h until next pulse at {target}")
-            time.sleep(sleep_secs)
-
-        except Exception as e:
-            log.error(f"[pulse] cycle failed: {e}", exc_info=True)
-            time.sleep(3600)  # back off 1h on error
 
 
 
@@ -2654,7 +2220,6 @@ def main():
     # Inject shared state into scout_handlers (avoids circular import — handlers don't import scout_bot)
     _set_bot_user_id(_BOT_USER_ID)
     _set_thread_state(_LAST_THREAD_PER_CHANNEL, _LAST_THREAD_LOCK)
-    _set_pulse_runner(_run_pulse_once)
     _set_force_monitor_fn("cap",      lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_cap, _format_cap_alert, thread_ts=t))
     _set_force_monitor_fn("velocity", lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_velocity, _format_velocity_down_alert, thread_ts=t))
     _set_force_monitor_fn("ghost",    lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_ghost, _format_ghost_alert, thread_ts=t))
@@ -2674,16 +2239,7 @@ def main():
     _start_daemon(_check_stale_queue,     name="stale-queue-checker", args=(web_client,))
     _start_daemon(_performance_recap,     name="perf-recap",          args=(web_client,))
     _start_daemon(_cleanup_state,         name="state-cleanup")
-    # Legacy daily-digest pulse — retired in favor of silent per-signal monitors
-    # below. Gated by SCOUT_THRESHOLDS["signals"]["pulse_legacy_enabled"] so it
-    # can be flipped back on for one release if a monitor regresses.
-    from scout_agent import SCOUT_THRESHOLDS as _ST_BOOT
-    _pulse_legacy = bool(_ST_BOOT.get("signals", {}).get("pulse_legacy_enabled", False))
-    if _PULSE_ENABLED and _pulse_legacy:
-        _start_daemon(_proactive_pulse,   name="proactive-pulse",     args=(web_client,))
-    else:
-        log.info("[pulse] daily digest retired — silent per-signal monitors active "
-                 "(set signals.pulse_legacy_enabled=true to re-enable)")
+    # Legacy daily-digest pulse removed — silent per-signal monitors below are the replacement.
 
     # Silent per-signal monitors — alert only when the underlying signal fires.
     # Each is opt-in via SCOUT_THRESHOLDS["signals"][f"{key}_monitor_enabled"]

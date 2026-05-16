@@ -1045,31 +1045,7 @@ def test_schema_deps_empty_column():
         return False, str(e)
 
 
-# CH-gated regression test — proves the categories fix actually worked
-
-@test("Tier 3 benchmarks populated after categories fix (regression)")
-def test_tier3_benchmarks_populated():
-    """
-    PR 19 regression test. Calls _load_performance_benchmarks() against live CH;
-    asserts the by_category dict has > 5 categories. Before the fix this dict was
-    always empty (categories column NULL). After the fix it should have ~25
-    categories from tags JSON parsing. If this test fails on Render, scoring is
-    back to Tier 4 fallback — investigate queries.performance_benchmarks_raw().
-    """
-    try:
-        from scout_agent import _load_performance_benchmarks
-        result = _load_performance_benchmarks()
-        n_cats = len(result.get("by_category", {}))
-        if n_cats < 5:
-            return False, (
-                f"only {n_cats} categories in by_category — fix did not work. "
-                f"Check queries.performance_benchmarks_raw() CTE + tags-parsing."
-            )
-        sample = sorted(result["by_category"].keys())[:5]
-        return True, f"{n_cats} categories populated; sample: {sample}"
-    except Exception as e:
-        return False, str(e)
-
+# Tier 3 category coverage validated at boot via _SCHEMA_DEPS in scout_agent.py
 
 # ── PR 19a: benchmarks self-heal (no user-facing 'run X' for state Scout owns) ─
 
@@ -1278,30 +1254,6 @@ def test_intraday_revenue_by_publisher_query_exists():
         return False, "_query_intraday_revenue_by_publisher is not callable"
     return True, "_query_intraday_revenue_by_publisher callable"
 
-
-@test("pulse_diff_signal_snapshot_keys_emitted_by_run_pulse_signals_result")
-def test_pulse_diff_snapshot_keys():
-    """Verify _snapshot_keys() can consume the output of _run_pulse_signals() without error."""
-    import scout_bot
-    # Build a synthetic signals dict matching what _run_pulse_signals returns
-    synthetic_signals = {
-        "cap_alerts": [{"adv_name": "TestAdv", "cap_pct": 95, "days_to_cap": 2, "days_remaining": 30, "monthly_cap": 5000, "revenue_mtd": 4800}],
-        "velocity_shifts": [{"publisher_name": "TestPub", "direction": "down", "pct_delta": -45, "revenue_7d_ann": 8000, "revenue_30d": 15000}],
-        "overnight_events": [],
-        "ghost_campaigns": [{"adv_name": "GhostAdv", "impressions_7d": 10000, "impressions_2d": 3000, "revenue_7d": 0}],
-        "fill_rate": [{"publisher_name": "FillPub", "fill_rate_pct": 10.0, "sessions_7d": 8000, "missed_sessions": 7200}],
-        "opportunities": [{"publisher_name": "OppPub", "adv_name": "OppAdv", "est_monthly_rev": 5000, "sessions_30d": 200000}],
-    }
-    try:
-        snap = scout_bot._snapshot_keys(synthetic_signals)
-    except Exception as e:
-        return False, f"_snapshot_keys raised: {e}"
-    expected_keys = {"ghost", "fill", "down", "up", "cap", "opp"}
-    if set(snap.keys()) != expected_keys:
-        return False, f"snapshot keys mismatch: expected {expected_keys}, got {set(snap.keys())}"
-    if "GhostAdv" not in snap["ghost"]:
-        return False, f"GhostAdv not in ghost snapshot: {snap['ghost']}"
-    return True, f"_snapshot_keys emits correct keys: {{{', '.join(sorted(snap.keys()))}}}"
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 

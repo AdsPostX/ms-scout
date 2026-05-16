@@ -43,8 +43,8 @@ POST_TX_PLACEMENTS: tuple[str, ...] = (
 
 def ghost_campaigns(ch, recency_hours: int = 48) -> list[dict]:
     """
-    Canonical ghost campaign detection — single source of truth for both the
-    agent tool (get_ghost_campaigns) and the 8am Pulse signal (_run_pulse_signals).
+    Canonical ghost campaign detection — single source of truth for the
+    agent tool (get_ghost_campaigns) and the ghost monitor daemon.
 
     A campaign qualifies as a ghost if ALL of:
     - status = 'Active', non-expired

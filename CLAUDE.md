@@ -18,10 +18,10 @@ until something breaks.
 
 Scout computes signals in two places:
 1. **Agent tools** (`scout_agent.py`) — called when a user asks @Scout a question
-2. **Pulse signals** (`scout_bot.py` `_run_pulse_signals()`) — computed at 8am
+2. **Monitor daemons** (`scout_bot.py`) — silent per-signal daemons that alert only on anomaly
 
 When the same business logic exists in BOTH, they MUST call a shared `_query_*()` function.
-Duplicate SQL guarantees drift. This happened with ghost detection in Apr 2026 — the Pulse
+Duplicate SQL guarantees drift. This happened with ghost detection in Apr 2026 — a monitor
 missed a 48h recency filter that was added to the agent tool, causing false alarms.
 
 ---
@@ -77,23 +77,20 @@ Before marking any Scout PR complete, verify ALL of the following:
 
 ---
 
-## Signal Map — Verified Apr 2026
+## Signal Map — Verified May 2026
 
 | Signal | Shared function | Consumers | Notes |
 |---|---|---|---|
-| Ghost campaigns | `_query_ghost_campaigns(ch)` in `scout_agent.py` | `get_ghost_campaigns()` + Pulse `_run_pulse_signals()` | Pulse groups by adv_name; agent keeps per-campaign detail |
-| Revenue opportunities | `revenue_opportunities(ch)` in `queries.py` | `get_top_revenue_opportunities()` + Pulse `_pulse_signal_opportunities()` | Both callers use the same fuzzy anti-join SQL. Agent adds Python-level grouping; Pulse takes top 5. No drift. |
-| Fill rate | **Intentionally separate** | `get_low_fill_publishers()` (30d/10K threshold) + Pulse signal (7d/5K threshold) | Different thresholds on purpose: Pulse = early warning, Agent = stable analysis. Do not merge. |
-| Advertiser RPM context | `_query_advertiser_rpm_context(ch, adv_name)` in `scout_agent.py` | `_handle_approve()` in `scout_handlers.py` | At approval time only — not a Pulse signal. Fuzzy ILIKE match on adv_name; uses `trim(status) = 'active'`. Fails safe (returns has_history=False on any error). |
-| Velocity shifts | Pulse-only | `_build_velocity_signal()` | No agent tool — no divergence risk |
-| Cap alerts | Pulse-only | `_build_cap_signal()` | No agent tool — no divergence risk |
-| Overnight events | Pulse-only | `_build_overnight_signal()` | No agent tool — no divergence risk |
-| Pulse recall | `get_pulse_summary()` in `scout_agent.py` reads `last_signals_summary` from `pulse_state.json` | Agent tool only — Pulse writes summary, agent reads it | Written by `_run_once_pulse()` (non-force runs only). Force runs intentionally excluded to preserve canonical 8am state. |
+| Ghost campaigns | `_query_ghost_campaigns(ch)` in `scout_agent.py` | `get_ghost_campaigns()` agent tool + `_pulse_signal_ghost()` → `_ghost_monitor` daemon | Daemon groups by adv_name; agent keeps per-campaign detail |
+| Revenue opportunities | `revenue_opportunities(ch)` in `queries.py` | `get_top_revenue_opportunities()` agent tool only | Pulse-level opportunities signal removed with dead code cleanup (PR-D). Agent tool remains. |
+| Fill rate | **Intentionally separate** | `get_low_fill_publishers()` (30d/10K threshold) + `_fill_monitor` daemon (7d/5K threshold) | Different thresholds on purpose: monitor = early warning, Agent = stable analysis. Do not merge. |
+| Advertiser RPM context | `_query_advertiser_rpm_context(ch, adv_name)` in `scout_agent.py` | `_handle_approve()` in `scout_handlers.py` | At approval time only — not a monitor signal. Fuzzy ILIKE match on adv_name; uses `trim(status) = 'active'`. Fails safe (returns has_history=False on any error). |
+| Velocity shifts | Monitor-only | `_pulse_signal_velocity()` → `_velocity_down_monitor` daemon | No agent tool — no divergence risk |
+| Cap alerts | Monitor-only | `_pulse_signal_cap()` → `_cap_monitor` daemon | No agent tool — no divergence risk |
 | Health heartbeat (PR 15c) | `_run_health_heartbeat()` in `scout_bot.py` | Background daemon every 30 min | Calls `_compute_health_status()` + standalone CH ping. CH ping affects HEARTBEAT only — never the HTTP `/health` probe (Render must not restart on CH outage). Posts one Slack alert on transition to degraded after `_HEALTH_CONSECUTIVE_THRESHOLD` consecutive bad checks; one recovery alert on return to ok. PR 16c: `_run_startup_smoke_test()` also fires a one-shot CH ping right after smoke posts so the 35-min warmup window is no longer a blind spot. |
 | Benchmarks warmer (PR 19a) | `_benchmarks_warmer()` in `scout_bot.py` | Background daemon every 30 min | Keeps `_BENCHMARKS` populated in memory by calling `_get_benchmarks()` on a schedule. Boot-time warm happens in `_run_startup_smoke_test()`. `get_scout_status()` self-heals stale/missing benchmarks before reporting. Result: status check never reports "not loaded" except in real CH outage scenarios. |
 | Queue pipeline status (PR 23) | `_fetch_notion_queue_items()` in `scout_notion.py` | `get_queue_status()` agent tool + `app_home_opened` Home tab + `/scout-queue` slash command | TTL-cached (30s module-level). Returns `None` on Notion error, `[]` on empty. Callers distinguish: None → "unavailable", [] → "clear". Three surfaces share one render path: `_build_queue_card()` in `scout_slack_ui.py`. |
 | Revenue tracker (PR 25) | Phase 1: `_query_intraday_revenue_total(ch)` + Phase 2: `_query_intraday_revenue_by_publisher(ch, total)` in `scout_agent.py` | `_revenue_tracker` daemon in `scout_bot.py` only — no agent tool (use `sql_query` for ad-hoc revenue questions) | Weekdays at 3pm CT: Phase 1 checks if projected full-day revenue < 70% of 8-week same-weekday median. Phase 2 (only when Phase 1 trips): per-publisher decomposition with root cause tagging (ghost_campaign / fill_rate / revenue_down / traffic). Posts once per calendar day to #revenue-operations. State: `last_revenue_alert_date` in `pulse_state.json`. Thresholds: `revenue_tracker_check_hour_ct`, `revenue_tracker_publisher_min_delta`, `revenue_tracker_ghost_min_impressions`, `revenue_tracker_cvr_min_impressions` in `scout_thresholds.json`. |
-| Pulse diff snapshot (PR 24a) | `_snapshot_keys()` + `signal_consecutive_days` in `scout_bot.py` | `_run_pulse_once()` attaches `_diff_meta` to every signal item; `_format_pulse_blocks()` uses `is_new` / `consecutive_days` for 🆕/↔ rendering | State persisted in `pulse_state.json` as `signal_snapshot` (sets of item keys) + `signal_consecutive_days` (counters). Force runs (to `#scout-qa`) also compute diff but do NOT write snapshot — so scheduled 8am state is never overwritten by ad-hoc runs. |
 | CVR anomaly monitor (PR-C) | `cvr_anomaly(ch, ...)` in `queries.py` → thin wrapper `_query_cvr_anomaly(ch)` in `scout_ch.py` | `_cvr_anomaly_monitor` daemon in `scout_bot.py` + `get_cvr_anomalies()` agent tool | CVR = conversions/impressions. Fires on campaigns with ≥5K 7d impressions and ≥$50 avg payout where yesterday CVR dropped ≥30% vs 7d baseline. Daily check at 2am CT. State: `last_cvr_anomaly_alert_date` in `pulse_state.json`. Thresholds: `cvr_anomaly_drop_pct`, `cvr_anomaly_min_payout`, `cvr_anomaly_min_impressions_7d`, `cvr_anomaly_monitor_check_hour_ct`. |
 | Expiration monitor (PR-C) | `expiring_campaigns(ch, warning_days)` in `queries.py` → thin wrapper `_query_expiring_campaigns(ch)` in `scout_ch.py` | `_expiration_monitor` daemon in `scout_bot.py` + `get_expiring_campaigns()` agent tool | Active campaigns with `end_date` within `expiration_warning_days` (default 7). Includes 7d activity (impressions, publisher_count, revenue) to filter noise. Daily check at 2am CT. State: `last_expiration_alert_date` in `pulse_state.json`. Thresholds: `expiration_warning_days`, `expiration_monitor_check_hour_ct`. |
 | Publisher revenue trends (PR-C) | `publisher_revenue_trends(ch, days, min_periods)` in `queries.py` → `_query_publisher_revenue_trends(ch)` in `scout_ch.py` | `get_publisher_revenue_trends()` agent tool only | Period-median algorithm: divides history into `days`-length windows, takes median of 8 prior windows as expected, compares actual. Prevents median-of-daily semantic error. No monitor — ad-hoc agent tool. Thresholds: `revenue_trend_min_periods` (min historical periods required). |
@@ -177,7 +174,8 @@ When adding a new Scout capability, touch these files in this order:
 | Capability type | Files to touch |
 |---|---|
 | New agent tool (LLM-callable) | `scout_agent.py` (TOOLS list + function + SYSTEM_PROMPT) |
-| New Pulse signal | `scout_agent.py` (shared `_query_*` function) + `scout_bot.py` (wire to `_run_pulse_signals`) |
+| New monitor signal (monitor-only) | `scout_bot.py` (new `_pulse_signal_*` query fn + daemon via `_start_daemon`) — no `scout_agent.py` change needed |
+| New monitor signal (shared with agent) | `scout_agent.py` (shared `_query_*` function) + `scout_bot.py` (thin `_pulse_signal_*` wrapper + daemon via `_start_daemon`) — shared function only required when an agent tool also consumes the signal |
 | New Slack button handler | `scout_handlers.py` (handler) + `scout_slack_ui.py` (Block Kit card) |
 | New Notion page type | `scout_notion.py` (page builder) |
 | New state value | `scout_state.py` (load/save functions) |
@@ -195,11 +193,10 @@ When adding a new Scout capability, touch these files in this order:
 
 ### scout_bot.py
 - **Orchestrator only** — startup, daemon thread launch, SocketMode event routing, Pulse signal runner
-- **`_run_pulse_signals()`**: signal computation only — SQL belongs in shared `_query_*()` functions in scout_agent.py, not inline here
 - **`_format_pulse_blocks()`**: imported from scout_slack_ui — rendering only, no SQL or business logic
 - **`pulse_state.json`** is written by the bot at runtime — don't put static facts here
 - **Client instances** (WebClient, ClickHouse) are created here in `main()` and passed as parameters to modules — never imported from scout_bot (circular import)
-- **`_BOT_USER_ID`, `_LAST_THREAD_PER_CHANNEL`, and `_PULSE_RUNNER`** are injected into scout_handlers via `_set_bot_user_id()`, `_set_thread_state()`, and `_set_pulse_runner()` after auth — this is the circular-import workaround. Add new functions that scout_handlers needs from scout_bot here; never import scout_bot from scout_handlers.
+- **`_BOT_USER_ID`, `_LAST_THREAD_PER_CHANNEL`** are injected into scout_handlers via `_set_bot_user_id()` and `_set_thread_state()` after auth — this is the circular-import workaround. Add new functions that scout_handlers needs from scout_bot here; never import scout_bot from scout_handlers.
 - **Daemon registration (PR 16b)**: long-running daemons that must be alive for Scout to be healthy go through `_start_daemon(target, name=, args=())` instead of raw `threading.Thread(...).start()`. This auto-registers them in `_REQUIRED_DAEMONS`, which both `_compute_health_status()` and `_thread_watchdog` read from. Use raw `threading.Thread()` only for one-shot threads (smoke-test) or self-monitoring threads (`thread-watchdog`, `launch-watchdog`, `health-server`).
 
 ### scout_handlers.py
@@ -211,7 +208,7 @@ When adding a new Scout capability, touch these files in this order:
 - **Import prohibition**: `scout_slack_ui` and `scout_notion` must NOT import from `scout_handlers` — this would create a circular import. If you need shared state, pass it as a parameter.
 - **No bare variable references from `scout_bot`**: `scout_handlers.py` cannot reference `BOT_TOKEN`, `APP_TOKEN`, or any other module-level constant from `scout_bot.py`. Use `os.getenv("SLACK_BOT_TOKEN")` etc. directly. Bare references crash silently at runtime — the smoke test won't catch it because it bypasses `handle_event`.
 - **All stdlib imports required**: `os`, `re`, and any other stdlib module used inside `handle_event` or any handler function MUST be imported at the top of the file. The smoke test does not exercise handlers — missing imports crash silently at the first @mention.
-- **Functions from `scout_bot` needed in handlers**: use the `_set_*` injection pattern (see `_set_pulse_runner`). Never import from `scout_bot` directly — circular import.
+- **Functions from `scout_bot` needed in handlers**: use the `_set_*` injection pattern (see `_set_force_monitor_fn`). Never import from `scout_bot` directly — circular import.
 
 ### Cross-module button value contract
 `scout_slack_ui.py` builds button values; `scout_handlers.py` parses them.
@@ -382,6 +379,8 @@ Env var checklist:
 
 **[Future — PR 25] Slack write-back from queue card** — `views.push` for drill-down from Home tab offer row → push detail view with approve/reject. `reminders.add` for Scout nudging ops when an offer is stuck in "Awaiting Entry" >48h. Both require PR 23 (queue read path) to ship first.
 
+**[Future — PR-D follow-up] `@Scout force overnight` has no equivalent** — The overnight events signal (`_pulse_signal_overnight`) was removed with the dead pulse system cleanup. Overnight has no corresponding silent monitor. To add it back: add `_query_overnight_events(ch)` to `scout_agent.py`, wire into a new `_overnight_events_monitor` daemon via `_start_daemon()`, and add a `@Scout force overnight` handler in `scout_handlers.py` using the `_one_shot_monitor` pattern (same as cap/velocity/ghost/fill). Opportunities signal is still available via `@Scout opportunities` agent tool — no gap there.
+
 ---
 
 ### P6 — Minor cleanup (no functional impact)
@@ -399,6 +398,8 @@ Env var checklist:
 **[Resolved by PR-C] Offer expiration warnings** — `expiring_campaigns()` in `queries.py` + `_query_expiring_campaigns()` wrapper + `_expiration_monitor` daemon + `get_expiring_campaigns` agent tool. Silent monitor fires at configurable `expiration_monitor_check_hour_ct` CT. `expiration_warning_days` threshold wired. Schema deps added for `from_airbyte_campaigns.end_date` and `.status`. Signal muting ("Mute for 30d" button) remains deferred — see P5.
 
 **[Resolved by PR-C] Publisher and advertiser revenue trend tools** — `publisher_revenue_trends()` and `advertiser_revenue_trends()` in `queries.py` + thin wrappers in `scout_ch.py` + `get_publisher_revenue_trends` / `get_advertiser_revenue_trends` agent tools. Uses period-median algorithm (8 sequential periods) to avoid comparing period total against median of daily values. `revenue_trend_min_periods` threshold added to `scout_thresholds.json`.
+
+**[Resolved by PR-D] Dead pulse system removed** — Deleted ~490 lines: `_proactive_pulse` daemon (gated off by `pulse_legacy_enabled: false`), `_run_pulse_once`, `_run_pulse_signals`, `_snapshot_keys`, `_pulse_signal_enabled`, `_pulse_signal_overnight`, `_pulse_signal_opportunities`, `_PROACTIVE_SIGNAL_PRIORITY`, `_PULSE_RUNNER` injection in `scout_handlers.py`, and the force pulse handler. Two dead tests removed: `test_tier3_benchmarks_populated` (replaced by `_SCHEMA_DEPS` boot validation) and `test_pulse_diff_snapshot_keys` (tested deleted code). Monitor query layer (`_pulse_signal_cap/velocity/ghost/fill_rate`) and all 4 monitor daemons are unchanged. `@Scout force cap/velocity/ghost/fill` commands intact. Overnight signal follow-up tracked in P5 Known Debt.
 
 **[Resolved by PR #124] CVR root cause misclassification** — `_get_daily_revenue_anomaly()` in `scout_ch.py` was comparing `conv_today / impressions` (~0.001–0.01) against `conv_expected / (revenue_expected / delta) * 0.5` (~0.5) — different units, always true, so every soft-revenue publisher was labelled `cvr_drop`. Deleted the broken `elif` block, replaced with `else: root_cause = "revenue_down"`. Removed `cvr_drop` from `_ROOT_LABELS` in `scout_bot.py`, added `"revenue_down": "revenue below expected, specific cause unclear"`. Signal Map updated: root cause tags now `ghost_campaign / fill_rate / revenue_down / traffic`.
 
