@@ -391,7 +391,11 @@ _SCHEMA_DEPS: list[tuple[str, str, bool]] = [
     ("adpx_impressions_details",    "pid",                   True),
     ("adpx_conversionsdetails",     "campaign_id",           True),
     ("adpx_conversionsdetails",     "revenue",               True),
+    ("adpx_conversionsdetails",     "click_hash",            True),
+    ("adpx_conversionsdetails",     "session_id",            True),
     ("adpx_tracked_clicks",         "campaign_id",           True),
+    ("adpx_tracked_clicks",         "click_hash",            True),
+    ("adpx_tracked_clicks",         "session_id",            True),
     # Publisher resolution
     ("from_airbyte_users",          "id",                    True),
     ("from_airbyte_users",          "organization",          True),
@@ -1370,19 +1374,46 @@ adpx_impressions_details [582M] — one row per offer impression
 adpx_tracked_clicks [17M] — one row per carousel click
   SORT: (user_id, campaign_id, created_at, id)
   COLS: session_id (join key), campaign_id, offer_id, position (Int32, slot clicked),
+    click_hash (String — conversion join key; has TRAILING WHITESPACE — always trimBoth()),
     is_converted (Bool), pub_cost_cents (UInt64), os, device, browser, user_agent,
     fingerprint, is_offerwall, is_mou, is_embedded
 
 adpx_conversionsdetails [1.7M] — one row per conversion
   SORT: (user_id, campaign_id, created_at, id)
   CRITICAL: revenue, payout are STRINGS — always cast: toFloat64OrNull(revenue)
-  COLS: session_id (join key), campaign_id, offer_id, revenue (String), payout (String)
+  COLS: session_id (join key), campaign_id, offer_id, revenue (String), payout (String),
+    click_hash (String — join key to adpx_tracked_clicks; has TRAILING WHITESPACE — always trimBoth())
+  WARNING: conversionsdetails.pid is NOT the publisher user_id. Route through click_hash only.
   DOWNSTREAM LAG: extend conversion window +14 days beyond session end date.
 
 adpx_system_activity_logs [115K] — audit trail for dashboard changes
   COLS: entity, type, admin_id, old_data (JSON String), new_data (JSON String),
     user_type, user_role, created_at
   USE FOR: paused/resumed state, who changed what, when.
+
+── PUBLISHER-SCOPED QUERY RULES ─────────────────────────────────────────────────────────
+
+RULE 1: Use adpx_sdk_sessions.user_id as the publisher anchor for ALL cross-table queries.
+  Joining impressions → clicks on session_id fans out 20x. Always anchor on sdk_sessions.
+
+  ✅ Correct patterns:
+  -- Impressions: SELECT count() FROM adpx_impressions_details WHERE pid = '{user_id_str}'
+  -- Sessions:    SELECT count() FROM adpx_sdk_sessions WHERE user_id = {user_id}
+  -- Clicks:      SELECT count() FROM adpx_tracked_clicks c
+                  JOIN adpx_sdk_sessions s ON c.session_id = s.session_id
+                  WHERE s.user_id = {user_id}
+  -- Revenue:     SELECT count(), sum(toFloat64OrZero(cd.revenue))
+                  FROM adpx_tracked_clicks c
+                  JOIN adpx_sdk_sessions s ON c.session_id = s.session_id
+                  JOIN adpx_conversionsdetails cd ON trimBoth(cd.click_hash) = trimBoth(c.click_hash)
+                  WHERE s.user_id = {user_id}
+
+RULE 2: click_hash has trailing whitespace — trimBoth() REQUIRED on both sides.
+  Without it: join returns 0 rows, no error, silently missing all conversions.
+
+RULE 3: adpx_conversionsdetails.pid ≠ publisher user_id.
+  Never filter conversionsdetails by pid. Route via sdk_sessions → tracked_clicks → conversionsdetails.
+  ❌ Wrong: SELECT ... FROM adpx_conversionsdetails WHERE pid = {publisher_user_id}
 
 ── CONFIGURATION TABLES (Airbyte sync) ──────────────────────────────────────────────────
 
