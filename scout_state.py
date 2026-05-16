@@ -578,7 +578,6 @@ def _save_threshold_overrides(overrides: dict) -> None:
         _atomic_write(_THRESHOLD_OVERRIDES_FILE, overrides)
     except Exception as e:
         log.warning(f"_save_threshold_overrides failed: {e}")
-        raise
 
 
 def _append_threshold_changelog(entry: dict) -> None:
@@ -610,7 +609,8 @@ def _read_threshold_changelog(limit: int = 50, key: str | None = None) -> list[d
             continue
         try:
             entry = json.loads(raw)
-        except Exception:
+        except Exception as e:
+            log.warning(f"_read_threshold_changelog: skipping malformed line ({e}): {raw[:120]!r}")
             continue
         if key and entry.get("key") != key:
             continue

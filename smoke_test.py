@@ -2598,8 +2598,8 @@ def test_threshold_override_layers():
         try:
             import scout_agent as _sa
             _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
 
 
 @test("set_threshold_denies_non_admin_callers")
@@ -2675,8 +2675,8 @@ def test_set_threshold_writes_changelog():
         try:
             import scout_agent as _sa
             _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
 
 
 @test("force_run_monitor_returns_not_initialized_when_context_missing")
@@ -2761,8 +2761,8 @@ def test_get_scout_config_shows_overrides():
         try:
             import scout_agent as _sa
             _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
 
 
 if __name__ == "__main__":
