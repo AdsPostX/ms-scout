@@ -759,8 +759,8 @@ def test_scout_thresholds_loaded():
                 return False, f"section missing: {section}"
         if cfg["digest"]["min_rpm_floor"] != 20:
             return False, f"digest.min_rpm_floor expected 20, got {cfg['digest']['min_rpm_floor']}"
-        if cfg["signals"]["fill_rate_min_sessions_7d"] != 5000:
-            return False, f"signals.fill_rate_min_sessions_7d expected 5000, got {cfg['signals']['fill_rate_min_sessions_7d']}"
+        if cfg["signals"]["fill_rate_min_sessions_7d"] != 2500:
+            return False, f"signals.fill_rate_min_sessions_7d expected 2500, got {cfg['signals']['fill_rate_min_sessions_7d']}"
         # Confirm fallback path works
         fallback = scout_agent._SCOUT_THRESHOLDS_FALLBACK
         if "digest" not in fallback or "signals" not in fallback or "health" not in fallback:
