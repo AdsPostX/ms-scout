@@ -24,8 +24,10 @@ import re
 
 from scout_state import _load_launched_offers
 
-# Load Scout thresholds directly (avoids circular import with scout_agent).
-# Used for pulse diff suppression in _format_pulse_blocks().
+# Pulse diff suppression in _format_pulse_blocks() reads threshold values at call
+# time, not import time, so runtime overrides from set_threshold (PR-B) take effect
+# without a restart. _load_ui_thresholds remains as a bootstrap fallback for any
+# caller that imports SCOUT_THRESHOLDS at module scope before scout_agent loads.
 def _load_ui_thresholds() -> dict:
     try:
         p = pathlib.Path(__file__).parent / "config" / "scout_thresholds.json"
@@ -1242,7 +1244,14 @@ def _format_pulse_blocks(
     blocks: list = []
 
     # ── PR 24a: diff suppression helpers ──────────────────────────────────────
-    _sig_cfg        = SCOUT_THRESHOLDS.get("signals", {})
+    # Read thresholds at call time so runtime overrides (PR-B set_threshold) win
+    # over the import-time snapshot. Lazy-import — scout_agent is terminal in the
+    # import DAG, but this function may be called during agent dispatch.
+    try:
+        from scout_agent import SCOUT_THRESHOLDS as _LIVE_THRESHOLDS
+        _sig_cfg = _LIVE_THRESHOLDS.get("signals", {})
+    except Exception:
+        _sig_cfg = SCOUT_THRESHOLDS.get("signals", {})
     _collapse_after = int(_sig_cfg.get("pulse_diff_collapse_after_days", 2))
 
     def _is_chronic(item: dict) -> bool:

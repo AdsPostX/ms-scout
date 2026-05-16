@@ -35,6 +35,8 @@ _WATCHDOG_STATE_PATH     = _DATA_DIR / "watchdog_state.json"
 _NOTION_NOTIFIED_FILE    = _DATA_DIR / "notion_notified.json"
 _LEARNINGS_FILE          = _DATA_DIR / "learnings.json"
 _LEARNED_BENCHMARKS_FILE = _DATA_DIR / "learned_benchmarks.json"
+_THRESHOLD_OVERRIDES_FILE = _DATA_DIR / "threshold_overrides.json"
+_THRESHOLD_CHANGELOG_FILE = _DATA_DIR / "threshold_changelog.jsonl"
 
 
 # ── Atomic write ───────────────────────────────────────────────────────────────
@@ -548,3 +550,71 @@ def _post_error_update(web, channel: str, ts: str, err: Exception) -> None:
         web.chat_update(channel=channel, ts=ts, text=msg, blocks=blocks)
     except Exception as _e:
         log.warning(f"_post_error_update: could not update {channel}:{ts}: {_e}")
+
+
+# ── Threshold overrides + changelog (PR-B) ─────────────────────────────────────
+# Runtime overrides written by the `set_threshold` agent tool. Layered on top of
+# config/scout_thresholds.json at _load_thresholds() time. Defaults stay in git;
+# overrides live on Render's persistent disk.
+#
+# Override file shape:
+#   {"signals": {"cap_alert_pct": {"value": 80, "set_by": "U123", "set_at": "...", "reason": "..."}}}
+#
+# Changelog is append-only JSON Lines — one event per line. Never rewritten.
+
+def _load_threshold_overrides() -> dict:
+    """Return the current overrides dict, or {} if file missing or unreadable."""
+    try:
+        if _THRESHOLD_OVERRIDES_FILE.exists():
+            return json.loads(_THRESHOLD_OVERRIDES_FILE.read_text())
+    except Exception as e:
+        log.warning(f"_load_threshold_overrides failed: {e}")
+    return {}
+
+
+def _save_threshold_overrides(overrides: dict) -> None:
+    """Atomic write of the full overrides dict."""
+    try:
+        _atomic_write(_THRESHOLD_OVERRIDES_FILE, overrides)
+    except Exception as e:
+        log.warning(f"_save_threshold_overrides failed: {e}")
+        raise
+
+
+def _append_threshold_changelog(entry: dict) -> None:
+    """Append one JSON line to the changelog. Single-writer (Scout process), append-only."""
+    try:
+        line = json.dumps(entry, separators=(",", ":")) + "\n"
+        with open(_THRESHOLD_CHANGELOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        log.warning(f"_append_threshold_changelog failed: {e}")
+
+
+def _read_threshold_changelog(limit: int = 50, key: str | None = None) -> list[dict]:
+    """Read the last `limit` changelog entries, optionally filtered by threshold key.
+
+    Returns newest-first. Tolerates malformed lines (skips them).
+    """
+    try:
+        if not _THRESHOLD_CHANGELOG_FILE.exists():
+            return []
+        lines = _THRESHOLD_CHANGELOG_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception as e:
+        log.warning(f"_read_threshold_changelog failed: {e}")
+        return []
+
+    out: list[dict] = []
+    for raw in reversed(lines):
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            continue
+        if key and entry.get("key") != key:
+            continue
+        out.append(entry)
+        if len(out) >= limit:
+            break
+    return out

@@ -2224,6 +2224,10 @@ def main():
     _set_force_monitor_fn("velocity", lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_velocity, _format_velocity_down_alert, thread_ts=t))
     _set_force_monitor_fn("ghost",    lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_ghost, _format_ghost_alert, thread_ts=t))
     _set_force_monitor_fn("fill",     lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_fill_rate, _format_fill_alert, thread_ts=t))
+    # PR-B: inject web + CH factory so the force_run_monitor agent tool can call
+    # the same monitor lambdas registered above.
+    from scout_agent import _set_force_monitor_ctx as _set_fmc, _get_ch_client as _ch_factory
+    _set_fmc(web_client, _ch_factory)
     socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
 
