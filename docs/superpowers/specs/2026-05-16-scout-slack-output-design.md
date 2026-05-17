@@ -258,15 +258,19 @@ signoff(thread_url: str | None = None) -> str
 # Returns "<thread_url|Full reasoning →>" when present, empty when not
 # Never "Hope this helps!" or thumbs
 
-thinking_ellipsis() -> str
-# Returns "…" — posted as ephemeral pre-response when query exceeds 2s
+thinking_ellipsis(query: str) -> str
+# Returns voice-consistent initial placeholder text for the rotating status
+# Wraps _pick_loading_message(query) from scout_state — ensures copy follows voice rules
+# The rotating mechanic itself is handled by _rotating_status (already live in production)
 ```
 
-Thinking indicator mechanics (replacing silent gap):
-- Agent receives @mention → bot posts a placeholder message "…" immediately (reuses `_handle_suggestion` pattern)
-- Separately: after posting the placeholder, `reactions.add` 👀 to the **user's original message** — visible acknowledgment that Scout saw the request
-- On response complete: `chat.update` the placeholder with the full answer; `reactions.remove` 👀 from user's message
-- The 👀 on the user's message is the "I saw this" signal. The placeholder is the "answer is coming" container. Both are already patterns users recognize — no new UX paradigm.
+Thinking indicator mechanics (augmenting existing `_rotating_status`):
+- `_rotating_status` + `_pick_loading_message` already exist in `scout_state.py` and are wired at 3 call sites in `scout_handlers.py`. The rotating placeholder is live — Scout is NOT silent while thinking.
+- PR-4 augments the existing pattern with two additions:
+  1. After posting the placeholder: `reactions.add` 👀 to the **user's original message** — "I saw this" signal visible to the whole thread
+  2. On response complete (or error): `reactions.remove` 👀 from user's message — cleans up the receipt
+- The `reactions.remove` call MUST be in the same `finally` block as `stop_rotating()`. All 3 call sites already have `finally: stop_rotating()` — add `reactions.remove` there. A query error that skips `finally` leaves a permanent 👀 on messages that never got answered.
+- `thinking_ellipsis(query)` in `scout_voice.py` is the voice-layer entry point: it calls `_pick_loading_message(query)` and applies voice lint before the text reaches `_rotating_status`. One call site per handler.
 
 Voice rules (enforced via grep lint, not style guide):
 - No `!` in built blocks (severity dots carry urgency)
