@@ -2834,6 +2834,35 @@ def test_force_run_monitor_allowed_from_registry():
         scout_agent._FORCE_MONITOR_CTX.update(saved)
 
 
+@test("qa_suite_has_no_duplicate_labels")
+def test_qa_suite_no_duplicate_labels():
+    from scout_agent import _QA_SUITE
+    labels = [e[0] for e in _QA_SUITE]
+    dupes = [l for l in labels if labels.count(l) > 1]
+    if dupes:
+        return False, f"Duplicate labels: {dupes}"
+    return True, f"All {len(labels)} labels unique ✓"
+
+
+@test("qa_suite_entries_are_4_tuples_with_non_empty_category")
+def test_qa_suite_entry_structure():
+    from scout_agent import _QA_SUITE
+    for entry in _QA_SUITE:
+        if len(entry) != 4:
+            return False, f"Entry not 4-tuple: {entry[0]!r}"
+        if not isinstance(entry[3], str) or not entry[3]:
+            return False, f"Empty or non-string category on: {entry[0]!r}"
+    return True, f"All {len(_QA_SUITE)} entries are valid 4-tuples ✓"
+
+
+@test("qa_suite_meets_minimum_coverage_threshold")
+def test_qa_suite_minimum_coverage():
+    from scout_agent import _QA_SUITE
+    if len(_QA_SUITE) < 19:
+        return False, f"Expected ≥19 entries, got {len(_QA_SUITE)}"
+    return True, f"{len(_QA_SUITE)} entries ≥ 19 minimum ✓"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

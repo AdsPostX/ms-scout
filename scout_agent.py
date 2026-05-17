@@ -5478,81 +5478,120 @@ TOOL_MAP = {
 # Every major intent Scout supports, plus data-boundary probes.
 # Format: (label, question, pass_hints)
 # pass_hints: strings that should appear in a passing response (any one match = pass)
-_QA_SUITE: list[tuple[str, str, list[str]]] = [
+_QA_SUITE: list[tuple[str, str, list[str], str]] = [
     # ── Core health ──────────────────────────────────────────────────────────
     ("System status",
      "status",
-     ["healthy"]),
+     ["healthy"],
+     "Core Health"),
 
     # ── Dark offers ───────────────────────────────────────────────────────────
     ("Dark offers",
      "ghost campaigns",
-     ["ghost", "campaign", "impression", "revenue", "postback", "no ghost"]),
+     ["ghost", "campaign", "impression", "revenue", "postback", "no ghost"],
+     "Core Health"),
+
+    # ── Scout threshold config ────────────────────────────────────────────────
+    ("Scout threshold config",
+     "what are Scout's current alert thresholds?",
+     ["threshold", "config/scout_thresholds", "cvr", "fill", "velocity", "cap", "expiration"],
+     "Core Health"),
 
     # ── Offer search — vertical ───────────────────────────────────────────────
     ("Offer search — finance vertical",
      "best offers for a financial services partner",
-     ["capital one", "rocket", "payout", "rpm", "cpa", "offer"]),
+     ["capital one", "rocket", "payout", "rpm", "cpa", "offer"],
+     "Offer Intelligence"),
 
     # ── Offer search — specific publisher ────────────────────────────────────
     ("Offers for named publisher",
      "what offers should we pitch to AT&T?",
-     ["offer", "payout", "rpm", "finance", "campaign", "epc"]),
-
-    # ── Revenue drop analysis ─────────────────────────────────────────────────
-    ("WoW revenue drop",
-     "which publishers dropped the most revenue this week vs last week?",
-     ["publisher", "revenue", "drop", "week", "$"]),
-
-    # ── Publisher health ──────────────────────────────────────────────────────
-    ("Publisher health",
-     "how is TextNow performing?",
-     ["textnow", "impression", "revenue", "click", "cvr", "funnel"]),
-
-    # ── Campaign status ───────────────────────────────────────────────────────
-    ("Campaign status check",
-     "is Capital One Shopping still active?",
-     ["capital one", "active", "campaign", "status", "paused"]),
-
-    # ── Revenue projection ────────────────────────────────────────────────────
-    ("Revenue projection",
-     "project Truist revenue for this month",
-     ["truist", "revenue", "$", "projection", "month", "forecast"]),
+     ["offer", "payout", "rpm", "finance", "campaign", "epc"],
+     "Offer Intelligence"),
 
     # ── Supply/demand gaps ────────────────────────────────────────────────────
     ("Supply demand gaps",
      "where are our biggest supply gaps right now?",
-     ["gap", "publisher", "offer", "category", "missing", "opportunity"]),
+     ["gap", "publisher", "offer", "category", "missing", "opportunity"],
+     "Offer Intelligence"),
 
     # ── Offer inventory count ─────────────────────────────────────────────────
     ("Offer inventory count",
      "how many offers do we have in the inventory and which network has the most?",
-     ["offer", "network", "cj", "impact", "total", "active"]),
-
-    # ── Perkswall ────────────────────────────────────────────────────────────
-    ("Perkswall engagement",
-     "how is perkswall performing?",
-     ["perkswall", "engagement", "click", "impression", "session"]),
+     ["offer", "network", "cj", "impact", "total", "active"],
+     "Offer Intelligence"),
 
     # ── Pipeline health ───────────────────────────────────────────────────────
     ("Pipeline health",
      "what is the health of our offer pipeline?",
-     ["pipeline", "offer", "notion", "queue", "network", "active"]),
+     ["pipeline", "offer", "notion", "queue", "network", "active"],
+     "Offer Intelligence"),
+
+    # ── Revenue drop analysis ─────────────────────────────────────────────────
+    ("WoW revenue drop",
+     "which publishers dropped the most revenue this week vs last week?",
+     ["publisher", "revenue", "drop", "week", "$"],
+     "Revenue & Publisher"),
+
+    # ── Publisher health ──────────────────────────────────────────────────────
+    ("Publisher health",
+     "how is TextNow performing?",
+     ["textnow", "impression", "revenue", "click", "cvr", "funnel"],
+     "Revenue & Publisher"),
+
+    # ── Campaign status ───────────────────────────────────────────────────────
+    ("Campaign status check",
+     "is Capital One Shopping still active?",
+     ["capital one", "active", "campaign", "status", "paused"],
+     "Revenue & Publisher"),
+
+    # ── Revenue projection ────────────────────────────────────────────────────
+    ("Revenue projection",
+     "project Truist revenue for this month",
+     ["truist", "revenue", "$", "projection", "month", "forecast"],
+     "Revenue & Publisher"),
+
+    # ── Perkswall ────────────────────────────────────────────────────────────
+    ("Perkswall engagement",
+     "how is perkswall performing?",
+     ["perkswall", "engagement", "click", "impression", "session"],
+     "Revenue & Publisher"),
 
     # ── Multi-part question (new protocol test) ───────────────────────────────
     ("Multi-part question decomposition",
      "For our Intuit TurboTax review: what revenue did they drive this year? What were the top publishers? What offers worked best?",
-     ["turbotax", "revenue", "publisher", "campaign", "$"]),
+     ["turbotax", "revenue", "publisher", "campaign", "$"],
+     "Revenue & Publisher"),
+
+    # ── CVR anomalies ────────────────────────────────────────────────────────
+    ("CVR anomaly detection",
+     "are there any campaigns with unusual drops in conversion rate recently?",
+     ["cvr", "campaign", "drop", "impression", "anomaly", "conversion", "no anomaly", "no campaign"],
+     "Revenue & Publisher"),
+
+    # ── Expiring campaigns ───────────────────────────────────────────────────
+    ("Expiring campaign warnings",
+     "which campaigns are expiring in the next two weeks?",
+     ["expir", "campaign", "end", "day", "active", "no campaign", "none expiring"],
+     "Revenue & Publisher"),
+
+    # ── Publisher revenue trends ─────────────────────────────────────────────
+    ("Publisher revenue trends",
+     "which publishers have shown declining revenue trends recently?",
+     ["publisher", "trend", "revenue", "decline", "period", "down", "no publisher", "stable"],
+     "Revenue & Publisher"),
 
     # ── Data boundary: SOV (should gracefully decline) ────────────────────────
     ("Data boundary — SOV",
      "what is our share of voice vs competitors?",
-     ["don't have", "not tracked", "not in", "isn't in", "network", "dashboard", "sov"]),
+     ["don't have", "not tracked", "not in", "isn't in", "network", "dashboard", "sov"],
+     "Data Boundaries"),
 
     # ── Data boundary: strategic question ────────────────────────────────────
     ("Data boundary — strategic intent",
      "what does AT&T want from us next year?",
-     ["don't have", "not in", "judgment", "can't", "call", "data"]),
+     ["don't have", "not in", "judgment", "can't", "call", "data"],
+     "Data Boundaries"),
 ]
 
 
@@ -5568,7 +5607,7 @@ def run_self_qa() -> dict:
     results = []
     total = len(_QA_SUITE)
 
-    for label, question, pass_hints in _QA_SUITE:
+    for label, question, pass_hints, _category in _QA_SUITE:
         t0 = _time.monotonic()
         try:
             response = ask(question, history=[], user_id="self-qa")
