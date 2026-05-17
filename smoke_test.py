@@ -58,66 +58,7 @@ def test(name: str):
     return decorator
 
 
-# ── Test 1: Anthropic API ─────────────────────────────────────────────────────
-
-@test("Anthropic API — model auth")
-def test_anthropic():
-    """Validate the Anthropic client wiring without hitting the network.
-
-    B1d: replaces the live messages.create() probe with a mock so smoke runs
-    fast and offline-clean. No env var required — we instantiate with a
-    placeholder key and mock messages.create, so this test passes the same
-    way in CI, on a fresh checkout, and on the Render box.
-    """
-    import anthropic
-
-    try:
-        client = anthropic.Anthropic(api_key="sk-smoke-test-not-a-real-key")
-    except Exception as e:
-        return False, f"Anthropic client failed to instantiate: {e}"
-
-    # Synthetic Message-shaped response (matches anthropic.types.Message surface
-    # we actually read: .content list of blocks with .type/.text, .model,
-    # .stop_reason, .role).
-    def _fake_block(text: str):
-        return types.SimpleNamespace(type="text", text=text)
-
-    def _fake_message(model: str):
-        return types.SimpleNamespace(
-            id="msg_smoke_fake",
-            type="message",
-            role="assistant",
-            model=model,
-            stop_reason="end_turn",
-            content=[_fake_block("pong")],
-        )
-
-    for model in ("claude-haiku-4-5", "claude-sonnet-4-6"):
-        with patch.object(
-            client.messages, "create", return_value=_fake_message(model)
-        ) as mocked:
-            try:
-                resp = client.messages.create(
-                    model=model, max_tokens=5,
-                    messages=[{"role": "user", "content": "ping"}]
-                )
-            except Exception as e:
-                return False, f"{model} mocked call raised: {e}"
-
-        if not mocked.called:
-            return False, f"{model}: messages.create mock was not invoked"
-        if not getattr(resp, "content", None):
-            return False, f"{model}: mocked response missing .content"
-        first = resp.content[0]
-        if getattr(first, "type", None) != "text" or not getattr(first, "text", ""):
-            return False, f"{model}: mocked response content block malformed"
-        if getattr(resp, "model", None) != model:
-            return False, f"{model}: mocked response missing .model attribute"
-
-    return True, "Anthropic client wiring OK (mocked — no network) ✓"
-
-
-# ── Test 3: Entity overrides ──────────────────────────────────────────────────
+# ── Entity overrides ──────────────────────────────────────────────────────────
 
 @test("Entity overrides — file readable")
 def test_entity_overrides():

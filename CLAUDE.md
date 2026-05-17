@@ -347,12 +347,6 @@ Ordering: priority and blast radius — highest first.
 
 ---
 
-### P2 — Silent failures (nobody knows until humans notice)
-
-**[Cleanup — paired with smoke cleanup] Anthropic API auth check needs a live replacement before it can be removed from `smoke_test.py`.** Currently the only way Scout notices an Anthropic key revocation is the boot smoke test. If that test is removed without a replacement, Scout silently 401s on every @mention. Required: add a 1-token Anthropic completion ping to `_compute_health_status()` (or a daemon similar to `_run_health_heartbeat` if rate-limit is a concern) BEFORE removing it from `smoke_test.py`. Same PR.
-
----
-
 ### P3 — Data integrity risks (stale data leads to wrong queries or inconsistent state)
 
 **[Future] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. `scout_agent.py` SYSTEM_PROMPT lines ~820-900.
@@ -395,6 +389,8 @@ Env var checklist:
 ---
 
 ### Resolved (historical record)
+
+**[Resolved by Track C] Anthropic API auth live probe** — Replaced mocked `test_anthropic` in `smoke_test.py` with two live probes in `scout_bot.py`: (1) a 1-token `claude-haiku-4-5` ping in `_run_health_heartbeat()` alongside the CH ping (combined into `heartbeat_ok` / `status_with_ch["checks"]["anthropic_heartbeat"]`); (2) a matching one-shot startup ping in `_run_startup_smoke_test()` after the CH startup ping to close the ~35-min warmup blind spot. Failures post a red-circle alert to `_SCOUT_HQ_CHANNEL`. Key revocation now surfaces at deploy + every 30 min, never silently.
 
 **[Resolved by PR-C] CVR anomaly detection** — `cvr_anomaly()` in `queries.py` + `_query_cvr_anomaly()` wrapper in `scout_ch.py` + `_cvr_anomaly_monitor` daemon (registered via `_start_daemon`) + `get_cvr_anomalies` agent tool. Silent monitor fires at configurable `cvr_anomaly_monitor_check_hour_ct` CT. Thresholds `cvr_anomaly_drop_pct`, `cvr_anomaly_min_payout`, `cvr_anomaly_min_impressions_7d` wired via `SCOUT_THRESHOLDS`. Schema deps added for `adpx_conversionsdetails.payout`.
 

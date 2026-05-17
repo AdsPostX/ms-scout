@@ -1919,6 +1919,30 @@ def _run_startup_smoke_test(web: WebClient) -> None:
                 )
             except Exception as slack_err:
                 log.warning(f"[smoke] startup CH alert failed: {slack_err}")
+        # Mirror the CH startup ping for Anthropic: a revoked/invalid API key at
+        # deploy time would otherwise stay invisible until the first heartbeat
+        # (~35 min). 1-token ping is cheap and only runs once at startup.
+        try:
+            import anthropic as _anthropic
+            _anth_client = _anthropic.Anthropic()
+            _anth_client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=1,
+                messages=[{"role": "user", "content": "ping"}],
+            )
+            log.info("[smoke] startup Anthropic ping ok")
+        except Exception as anth_err:
+            log.error(f"[smoke] startup Anthropic ping failed: {anth_err}")
+            try:
+                web.chat_postMessage(
+                    channel=_SCOUT_HQ_CHANNEL,
+                    text=(
+                        f":red_circle: *Scout startup: Anthropic API unreachable* — `{anth_err}`\n"
+                        f"Heartbeat won't catch this for ~35 min. Investigate now."
+                    ),
+                )
+            except Exception as slack_err:
+                log.warning(f"[smoke] startup Anthropic alert failed: {slack_err}")
         # PR 19: schema-deps validation. Validates the columns Scout reads against
         # system.columns and (where flagged must_have_data=True) confirms the column
         # has at least 100 non-null rows. Catches the categories-NULL class of
@@ -2014,11 +2038,29 @@ def _run_health_heartbeat(web: WebClient) -> None:
                 ch_ok = False
                 ch_detail = f"CH ping failed: {ch_err}"
 
-            # Combine — if CH is bad, the heartbeat is bad even if HTTP /health is fine
-            heartbeat_ok = bool(status["ok"]) and ch_ok
+            # Live Anthropic auth ping — 1-token completion confirms the API key still
+            # works. Like the CH ping, this affects HEARTBEAT only, never the HTTP probe:
+            # an Anthropic outage or rate-limit must not restart the bot.
+            anthropic_ok = True
+            anthropic_detail = "ok"
+            try:
+                import anthropic as _anthropic
+                _anth_client = _anthropic.Anthropic()
+                _anth_client.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "ping"}],
+                )
+            except Exception as anth_err:
+                anthropic_ok = False
+                anthropic_detail = f"Anthropic ping failed: {anth_err}"
+
+            # Combine — if any live probe is bad, the heartbeat is bad even if HTTP /health is fine
+            heartbeat_ok = bool(status["ok"]) and ch_ok and anthropic_ok
             status_with_ch = dict(status)
             status_with_ch["checks"] = dict(status["checks"])
             status_with_ch["checks"]["clickhouse_heartbeat"] = {"ok": ch_ok, "detail": ch_detail}
+            status_with_ch["checks"]["anthropic_heartbeat"] = {"ok": anthropic_ok, "detail": anthropic_detail}
             status_with_ch["ok"] = heartbeat_ok
 
             with _HEALTH_STATUS_LOCK:
