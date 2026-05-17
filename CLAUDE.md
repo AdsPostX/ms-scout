@@ -377,7 +377,7 @@ Ordering: priority and blast radius — highest first.
 
 ### P3 — Data integrity risks (stale data leads to wrong queries or inconsistent state)
 
-**[Future] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. `scout_agent.py` SYSTEM_PROMPT lines ~820-900.
+**[Future] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. See DATA DICTIONARY section in `prompts/scout_system.md`.
 
 **[Future — PR 25] `get_demand_queue_status()` consolidation** — still reads from local `launched_offers.json`; `get_queue_status()` (PR 23) now reads from Notion. Two sources of truth for queue state. `get_demand_queue_status` could be narrowed further or removed once Notion is the sole source.
 
@@ -412,7 +412,7 @@ Env var checklist:
 
 **[Future] `@test()` category system deferred** — PR 22 added a name validator that rejects PR-numbered test names at import time. The remaining structural gap is test *body* contents: a developer could write `@test("legit-name")` and still call `_get_ch_client()` inside, adding a runtime probe invisibly. The fix is a `category` parameter on `@test` (`"code" | "runtime" | "config"`) with the renderer filtering by category. Deferred because: (a) all 4 current runtime probes are deleted in PR 22, so the risk is absent; (b) adding the parameter requires tagging all ~39 existing tests; (c) code review remains the gate. Revisit if runtime probes re-accumulate.
 
-**[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. SYSTEM_PROMPT line ~430 still requires a manual edit when a network is added or removed. This was intentional — converting the 4300-line SYSTEM_PROMPT to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
+**[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. The network list in `prompts/scout_system.md` still requires a manual edit when a network is added or removed. This was intentional — converting the prompt to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
 
 **[Future] `get_advertiser_revenue_trends` not represented in `_QA_SUITE`** — PR-F added QA entries for `get_cvr_anomalies`, `get_expiring_campaigns`, `get_publisher_revenue_trends`, and the threshold config tool, but intentionally excluded `get_advertiser_revenue_trends` (already covered by the publisher trends entry's hint set; advertiser trends are lower-traffic and not a known partner question). Add an entry only if a real-world Slack question for advertiser-level trends starts appearing and the existing publisher trends entry doesn't catch it.
 
