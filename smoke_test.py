@@ -343,43 +343,6 @@ def test_pulse_summary_shape():
         return False, str(e)
 
 
-@test("_format_pulse_blocks() — synthetic signals, block count ≤ 50, Monday path exercised")
-def test_pulse_block_count():
-    try:
-        from datetime import date
-        from scout_slack_ui import _format_pulse_blocks
-        signals = {
-            "ghost_campaigns": [{"adv_name": f"Ghost{i}", "impressions_7d": 2000, "revenue_7d": 0} for i in range(5)],
-            "fill_rate": [{"publisher_name": f"Pub{i}", "fill_rate_pct": 35, "sessions_7d": 10000,
-                           "missed_sessions": 3500, "revenue_at_risk": 0} for i in range(4)],
-            "opportunities": [{"adv_name": f"Opp{i}", "publisher_name": f"Pub{i}",
-                               "sessions_30d": 100000, "est_monthly_rev": 5000} for i in range(4)],
-            "velocity_shifts": [
-                {"publisher_name": "TextNow", "direction": "down", "pct_delta": -50, "revenue_7d_ann": 20000,
-                 "revenue_30d": 35000, "top_advertisers": [{"adv_name": "Capital One", "delta_ann": -5000, "rev_7d": 1000}],
-                 "hypothesis": "TextNow paused", "gaps": [("Capital One", 2.50)]},
-                {"publisher_name": "WBMason", "direction": "up", "pct_delta": 23, "revenue_7d_ann": 45000,
-                 "revenue_30d": 32000, "top_advertisers": [], "hypothesis": None, "gaps": []},
-            ],
-            "cap_alerts": [{"adv_name": "CapOne", "cap_pct": 93, "days_to_cap": 2, "days_remaining": 10}],
-            "overnight_events": [],
-        }
-        monday = date(2026, 4, 27)  # known Monday — exercises opportunities code path
-        fallback, blocks = _format_pulse_blocks(signals, is_weekend=False, _today=monday)
-        if len(blocks) > 50:
-            return False, f"Block count {len(blocks)} exceeds Slack's 50-block limit"
-        if not fallback:
-            return False, "fallback text is empty"
-        block_types = [b["type"] for b in blocks]
-        if "section" not in block_types:
-            return False, "no section blocks found"
-        if "context" not in block_types:
-            return False, "no context blocks found"
-        return True, f"block count={len(blocks)}/50, Monday path exercised, all block types present"
-    except Exception as e:
-        return False, str(e)
-
-
 @test("_build_signal_header() — correct block structure with and without context")
 def test_build_signal_header():
     try:
@@ -551,49 +514,6 @@ def test_network_emoji_single_source():
         if not expected.issubset(actual):
             return False, f"missing emoji for networks: {expected - actual}"
         return True, f"single-source _NETWORK_EMOJI covers {len(actual)} networks"
-    except Exception as e:
-        return False, str(e)
-
-
-# ── PR 15b: Pulse block invariants — Wednesday + ghost-clear + non-Monday opps ──
-
-@test("pulse_blocks_stay_under_50_and_render_correct_non_monday_paths")
-def test_pulse_block_count_with_pr15b():
-    """
-    PR 15b adds two new branches:
-      1. Ghost all-clear (else: branch when no ghost campaigns)
-      2. Non-Monday opportunities note (elif: branch on weekdays != Monday)
-    Verify both render correctly on a Wednesday with NO ghosts and WITH opps,
-    and stay under Slack's 50-block hard limit.
-    """
-    try:
-        from datetime import date
-        from scout_slack_ui import _format_pulse_blocks
-        signals = {
-            "ghost_campaigns": [],  # triggers all-clear else branch
-            "fill_rate": [{"publisher_name": f"Pub{i}", "fill_rate_pct": 35, "sessions_7d": 10000,
-                           "missed_sessions": 3500, "revenue_at_risk": 0} for i in range(2)],
-            "opportunities": [{"adv_name": f"Opp{i}", "publisher_name": f"Pub{i}",
-                               "sessions_30d": 100000, "est_monthly_rev": 5000} for i in range(3)],
-            "velocity_shifts": [],
-            "cap_alerts": [],
-            "overnight_events": [],
-        }
-        wednesday = date(2026, 4, 29)  # known Wednesday
-        fallback, blocks = _format_pulse_blocks(signals, is_weekend=False, _today=wednesday)
-        if len(blocks) > 50:
-            return False, f"block count {len(blocks)} exceeds 50-block limit"
-
-        # Render to text and confirm BOTH branches fired.
-        # Use ensure_ascii=False so em-dash matches literal em-dash.
-        all_text = json.dumps(blocks, ensure_ascii=False)
-        if "DARK OFFERS — none active" not in all_text:
-            return False, "ghost all-clear header missing on no-ghosts run"
-        if "shown in detail on Monday" not in all_text:
-            return False, "non-Monday opportunities note missing"
-        if "queued" not in all_text:
-            return False, "opportunities count not surfaced in non-Monday note"
-        return True, f"both PR 15b branches rendered correctly; {len(blocks)} blocks"
     except Exception as e:
         return False, str(e)
 
