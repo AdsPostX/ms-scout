@@ -1,476 +1,127 @@
-# Scout — Architecture Invariants
+# MomentScience — Project Context
 
-## Session Start Protocol
+Stacks on top of global `~/.claude/CLAUDE.md`.
 
-At the start of any Scout session where code changes are expected:
-1. **Verify you are working in `tools/offer-scraper/`** — if the current directory is `tools/ms-scout-pr14/` or any other path, stop. That directory is a stale worktree. This CLAUDE.md is only current on the `main` branch of `tools/offer-scraper/`.
-2. Read `## Known Debt` (bottom of this file) and surface items relevant to the current task
-3. If the current task resolves a Known Debt item, remove it from the list as part of the PR
-4. New deferred items go into `## Known Debt` — not into gstack plan files (those are not auto-loaded into sessions; this file is)
+## Role
+- **Head of CS / PP&SE** at MomentScience. Manages 1 CSM + 1 SE (Chris Teceno).
+- Owns: partner strategy, new platform products (WiWo, MoMoney/Sudoku), supply-side analytics, API/SDK ecosystem, demo pipeline oversight.
+- **Not the CEO.** No company-wide strategy / fundraising / org decisions unless asked.
 
-Why: ms-scout has no project management system. Linear, Notion, and gstack TODO files
-are not auto-loaded by Claude. CLAUDE.md is. If a deferred item isn't here, nobody sees it
-until something breaks.
+## Chris Teceno (SE, direct report)
+- Strong at: building demos from tight briefs, SDK config, technical partner onboarding.
+- Needs: clear, scoped briefs — exact screens, partner hesitation, the belief to leave with.
+- **Not client-ready** for discovery calls. Route to execution, never relationship. Sidd reviews output before partner sees it.
+- Build systems Chris can run alone. Templates + checklists beat supervision.
 
-### Context discipline (read before touching scout_agent.py or scout_handlers.py)
+## Active Product Builds
+- **WiWo** (`wiwo/`) — location-based rewards mobile (Flutter + Node.js server). Background geofencing, WonderPush, Mapbox. Flutter code → `flutter-reviewer`. Library docs → context7 MCP.
+- **MoMoney** (`site-momoney/`) — developer platform (Vite + Svelte 5 runes + Tailwind 3). Docs/API/platform examples (Unity, RN, Godot, Solar2D). `frontend-patterns` for site.
+- **Sudoku Perks** (`Sudoku-Unity-Game/`) — Unity 6 + Firebase. SDK fires on level-complete and consolation. Treat as vanilla (no test framework). `renaissance-architecture` for systems, `security-review` for Firebase rules.
 
-Scout's two largest files (`scout_agent.py` ~5,600 lines, `scout_handlers.py` ~2,100 lines) will exhaust the context window in 2-3 turns if read in full. This causes autocompact thrashing — the symptom is a stream of "Autocompact is thrashing..." errors and a session that can no longer make progress.
+## About MomentScience
+- Ad-tech SDK for post-transaction monetization. Products: Moments SDK, Perkswall, PWaaS.
+- Partners = **Publishers** (integrate SDK on confirmation pages).
+- Repo layout: `demos/demo-[partner]`, `tools/`, `wiwo/`, `_templates/` (in `demos/_templates/`, never edit), `knowledge/`.
 
-Rules:
-1. **Never `Read` scout_agent.py or scout_handlers.py without `offset` + `limit`.** Grep for the target symbol first (e.g. `grep -n "_QA_SUITE" scout_agent.py`), then `Read` the slice you need. Same for any file >1,500 lines.
-2. **Compact at 30% on Scout sessions** (lower than the global 40% rule). These files are big enough that the normal headroom isn't enough.
-3. **If autocompact thrashing starts: run `/clear`, not `/strategic-compact`.** `/strategic-compact` reads files to summarize them, which makes the thrashing worse. `/clear` is the escape hatch — drop context entirely, re-enter with a tight brief that names only the symbols you need.
+## Work Modes (priority order)
+1. Product strategy & partnership leadership
+2. New product builds (WiWo, Sudoku, MoMoney)
+3. Strategic demos Sidd owns directly (OfferUp-level, new categories). Chris handles routine demos.
+4. Supply-side analytics (ClickHouse, partner perf, Scout)
+5. Team enablement (briefs, templates for Chris + CSM)
+6. Partner pipeline (call prep, follow-ups, onboarding)
+7. Content & distribution
+8. Marketing/landing pages
 
----
+## Skill Routing (mosci-specific)
 
-## The Core Rule: One Function Per Signal
-
-Scout computes signals in two places:
-1. **Agent tools** (`scout_agent.py`) — called when a user asks @Scout a question
-2. **Monitor daemons** (`scout_bot.py`) — silent per-signal daemons that alert only on anomaly
-
-When the same business logic exists in BOTH, they MUST call a shared `_query_*()` function.
-Duplicate SQL guarantees drift. This happened with ghost detection in Apr 2026 — a monitor
-missed a 48h recency filter that was added to the agent tool, causing false alarms.
-
----
-
-## Engineering Principles
-
-Five principles derived from Scout's actual incident history. Read before planning any change.
-
-**P1 — Validate at the boundary.**
-- Module boundaries: all stdlib imports at file top, not inside functions — a missing `import os` inside a handler crashes silently at the first @mention
-- API boundaries: every Slack/Anthropic/ClickHouse/Notion call wrapped in `try/except` with a safe fallback — uncaught exceptions drop the entire handler, not just the signal
-- Config boundaries: every configurable threshold read from `config/scout_thresholds.json` or env vars at module load, not hardcoded mid-function — hardcoded values are silently ignored when config changes
-- Data boundaries: never assume upstream columns are populated; use NULL-safe SQL (`coalesce`, `nullIf`, `arrayFilter`); validate schema at boot via `_SCHEMA_DEPS` before querying
-
-**P2 — One source of truth per concept.**
-- One function per signal: shared `_query_*()` functions called by both Agent tools and Pulse — duplicate SQL guarantees filter drift (ghost campaigns, Apr 2026)
-- One config store: `config/team_corrections.json` for static platform facts, `data/entity_overrides.json` for entity facts — not inline constants in SQL strings or `pulse_state.json`
-- One network list: `SUPPORTED_NETWORKS` in `scout_agent.py` is the single source — `_DIGEST_NETWORKS_FALLBACK` in `scout_digest.py` derives from the live offers file, not a parallel hardcoded list
-
-**P3 — Read before building.**
-- Before planning any new Scout capability: read `scout_agent.py` SYSTEM_PROMPT, TOOLS, TOOL_MAP — the feature may already exist
-- Before adding a new shared function: check if a `_query_*()` equivalent already exists in `scout_agent.py`
-- Before adding a new daemon: check what daemons already exist in `scout_bot.py` and how they register via `_start_daemon()`
-- Proposing code that duplicates existing functionality is a defect, not a feature
-
-**P4 — Tests describe behaviors, not incidents.**
-See `### Tests-as-behaviors rule` under File-Editing Rules for `scout_slack_ui.py`.
-
-**P5 — Self-heal, don't report chores.**
-See `## User-Facing Action Rule` above.
-
-**P6 — Token-efficiency is a first-class constraint.**
-
-*During development (Claude Code sessions):*
-- Never read `scout_agent.py` in full unless you are editing it — grep or use gbrain to find the specific function first
-- Run `/compact` after every completed task, not at 80% context — Scout sessions are expensive
-- Spawn a subagent for file exploration; their context is thrown away when done
-- Don't paste smoke test output back into the main context — note pass/fail, move on
-
-*At runtime (Scout's Anthropic API):*
-- Every new `_query_*` function gets a default `limit: int = 50` param + `ORDER BY` + `truncated: bool` return field; callers that need more pass `limit=N` explicitly
-- Every new tool: justify why it can't reuse an existing one
-- Do not edit the SYSTEM_PROMPT or top-level `scout_agent.py` constants for unrelated reasons — each edit blows the 5-min Anthropic prompt cache
-- The SYSTEM_PROMPT lives in `prompts/scout_system.md` (not inline in `scout_agent.py`) — edit that file only when the prompt actually needs to change
-
-*In PR reviews:*
-- Any PR adding >500 tokens to the static prefix must note the token delta in the PR description
-- Any new `_query_*` without a `limit` param is a PR DoD failure
-
-
----
-
-## PR Definition of Done
-
-Before marking any Scout PR complete, verify ALL of the following:
-
-- [ ] `python3 smoke_test.py` passes — paste the output line ("PASSED N/N" or "FAILED M/N") into the PR description
-- [ ] `python3 -m unittest discover -s tests -p "test_*.py" -v` passes — all tests OK
-- [ ] No new test names contain PR numbers, fix labels, or dates — test names describe behavior only
-- [ ] No new live API calls added to `smoke_test.py` — health probes belong in `_compute_health_status()`, not the smoke suite
-- [ ] Every new `_query_*()` shared function has a corresponding smoke test
-- [ ] Every new config-driven threshold has a test proving behavior changes when the config value changes (monkey-patch pattern) — note: signal config keys in `scout_thresholds.json` are not yet wired to their queries; adding a test for those before wiring will pass for the wrong reason
-- [ ] Import DAG unchanged: `grep -rn "from scout_bot import" scout_handlers.py` must return empty
-- [ ] Block Kit canonical primitives used in any new Pulse blocks (no naked `section.fields`, no NBSP padding `\xa0`, no `·` separators between items)
-- [ ] No "Action: run X" or "Action required" messages added to user-facing Slack output unless the action requires genuine human judgment
-- [ ] Any new monitor daemon has a `_set_force_monitor_fn("name", fn)` registration in `main()` — `_FORCE_MON_PAT` and `force_run_monitor` auto-discover from the registry; no other edits needed
-- [ ] Signal Map updated if a new signal was added or an existing one changed
-- [ ] Known Debt updated: resolved items removed, new deferred items added
-- [ ] Delete the worktree after the PR is merged (`git worktree remove <path>`)
-- [ ] Local main fast-forwarded (`git pull --ff-only origin main`) before next PR baseline
-
-**Enforcement:** `smoke_test.py` is not wired to CI. Until it is, running it and pasting the output is the gate. "It's a small change" is how the last 3 production breaks happened.
-
----
-
-## Signal Map — Verified May 2026
-
-| Signal | Shared function | Consumers | Notes |
-|---|---|---|---|
-| Ghost campaigns | `_query_ghost_campaigns(ch)` in `scout_agent.py` | `get_ghost_campaigns()` agent tool + `_pulse_signal_ghost()` → `_ghost_monitor` daemon | Daemon groups by adv_name; agent keeps per-campaign detail |
-| Revenue opportunities | `revenue_opportunities(ch)` in `queries.py` | `get_top_revenue_opportunities()` agent tool only | Pulse-level opportunities signal removed with dead code cleanup (PR-D). Agent tool remains. |
-| Fill rate | **Intentionally separate** | `get_low_fill_publishers()` (30d/10K threshold) + `_fill_monitor` daemon (7d/5K threshold) | Different thresholds on purpose: monitor = early warning, Agent = stable analysis. Do not merge. |
-| Advertiser RPM context | `_query_advertiser_rpm_context(ch, adv_name)` in `scout_agent.py` | `_handle_approve()` in `scout_handlers.py` | At approval time only — not a monitor signal. Fuzzy ILIKE match on adv_name; uses `trim(status) = 'active'`. Fails safe (returns has_history=False on any error). |
-| Velocity shifts | Monitor-only | `_pulse_signal_velocity()` → `_velocity_down_monitor` daemon | No agent tool — no divergence risk |
-| Cap alerts | Monitor-only | `_pulse_signal_cap()` → `_cap_monitor` daemon | No agent tool — no divergence risk |
-| Health heartbeat (PR 15c) | `_run_health_heartbeat()` in `scout_bot.py` | Background daemon every 30 min | Calls `_compute_health_status()` + standalone CH ping. CH ping affects HEARTBEAT only — never the HTTP `/health` probe (Render must not restart on CH outage). Posts one Slack alert on transition to degraded after `_HEALTH_CONSECUTIVE_THRESHOLD` consecutive bad checks; one recovery alert on return to ok. PR 16c: `_run_startup_smoke_test()` also fires a one-shot CH ping right after smoke posts so the 35-min warmup window is no longer a blind spot. |
-| Benchmarks warmer (PR 19a) | `_benchmarks_warmer()` in `scout_bot.py` | Background daemon every 30 min | Keeps `_BENCHMARKS` populated in memory by calling `_get_benchmarks()` on a schedule. Boot-time warm happens in `_run_startup_smoke_test()`. `get_scout_status()` self-heals stale/missing benchmarks before reporting. Result: status check never reports "not loaded" except in real CH outage scenarios. |
-| Queue pipeline status (PR 23) | `_fetch_notion_queue_items()` in `scout_notion.py` | `get_queue_status()` agent tool + `app_home_opened` Home tab + `/scout-queue` slash command | TTL-cached (30s module-level). Returns `None` on Notion error, `[]` on empty. Callers distinguish: None → "unavailable", [] → "clear". Three surfaces share one render path: `_build_queue_card()` in `scout_slack_ui.py`. |
-| Revenue tracker (PR 25) | Phase 1: `_query_intraday_revenue_total(ch)` + Phase 2: `_query_intraday_revenue_by_publisher(ch, total)` in `scout_agent.py` | `_revenue_tracker` daemon in `scout_bot.py` only — no agent tool (use `sql_query` for ad-hoc revenue questions) | Weekdays at 3pm CT: Phase 1 checks if projected full-day revenue < 70% of 8-week same-weekday median. Phase 2 (only when Phase 1 trips): per-publisher decomposition with root cause tagging (ghost_campaign / fill_rate / revenue_down / traffic). Posts once per calendar day to #revenue-operations. State: `last_revenue_alert_date` in `pulse_state.json`. Thresholds: `revenue_tracker_check_hour_ct`, `revenue_tracker_publisher_min_delta`, `revenue_tracker_ghost_min_impressions`, `revenue_tracker_cvr_min_impressions` in `scout_thresholds.json`. |
-| CVR anomaly monitor (PR-C) | `cvr_anomaly(ch, ...)` in `queries.py` → thin wrapper `_query_cvr_anomaly(ch)` in `scout_ch.py` | `_cvr_anomaly_monitor` daemon in `scout_bot.py` + `get_cvr_anomalies()` agent tool | CVR = conversions/impressions. Fires on campaigns with ≥5K 7d impressions and ≥$50 avg payout where yesterday CVR dropped ≥30% vs 7d baseline. Daily check at 2am CT. State: `last_cvr_anomaly_alert_date` in `pulse_state.json`. Thresholds: `cvr_anomaly_drop_pct`, `cvr_anomaly_min_payout`, `cvr_anomaly_min_impressions_7d`, `cvr_anomaly_monitor_check_hour_ct`. |
-| Expiration monitor (PR-C) | `expiring_campaigns(ch, warning_days)` in `queries.py` → thin wrapper `_query_expiring_campaigns(ch)` in `scout_ch.py` | `_expiration_monitor` daemon in `scout_bot.py` + `get_expiring_campaigns()` agent tool | Active campaigns with `end_date` within `expiration_warning_days` (default 7). Includes 7d activity (impressions, publisher_count, revenue) to filter noise. Daily check at 2am CT. State: `last_expiration_alert_date` in `pulse_state.json`. Thresholds: `expiration_warning_days`, `expiration_monitor_check_hour_ct`. |
-| Publisher revenue trends (PR-C) | `publisher_revenue_trends(ch, days, min_periods)` in `queries.py` → `_query_publisher_revenue_trends(ch)` in `scout_ch.py` | `get_publisher_revenue_trends()` agent tool only | Period-median algorithm: divides history into `days`-length windows, takes median of 8 prior windows as expected, compares actual. Prevents median-of-daily semantic error. No monitor — ad-hoc agent tool. Thresholds: `revenue_trend_min_periods` (min historical periods required). |
-| Advertiser revenue trends (PR-C) | `advertiser_revenue_trends(ch, days, min_periods)` in `queries.py` → `_query_advertiser_revenue_trends(ch)` in `scout_ch.py` | `get_advertiser_revenue_trends()` agent tool only | Same period-median algorithm as publisher trends, but grouped by `adv_name` across all publishers. No monitor — ad-hoc agent tool. |
-
----
-
-## Rules When Editing Signal Logic
-
-1. **Threshold, window, or filter change** → edit the shared `_query_*()` function only, never in the caller
-2. **Adding a field** → add to the shared function SELECT, then consume in both callers
-3. **New Pulse signal** → check if an agent tool already computes the same thing; if yes, extract shared function first
-4. **New agent tool** → check if the Pulse already computes the same thing; if yes, use or create a shared function
-
----
-
-## User-Facing Action Rule (PR 19a)
-
-**"Action: run X" messages in Scout's user-facing output are red flags.** Every one
-of those should be eliminated unless the user genuinely must do something.
-
-The test: when Scout tells the team "Run @Scout X", ask "could Scout do X itself?"
-- If yes (state Scout owns): fix it. Add a daemon, add a self-heal in the read path,
-  load on boot. Whatever it takes. Never make Sidd press a button to refresh a cache.
-- If no (real human judgment required, like "approve this offer" or "decide between
-  two strategies"): keep the action. But verify the action is actually about judgment,
-  not chore work.
-
-PR 19a fixed the first instance: "Benchmarks not loaded → Run @Scout refresh offers"
-was a chore message. Solution: warm benchmarks at boot, refresh every 30 min via the
-benchmarks-warmer daemon, self-heal in `get_scout_status()`. The team only sees
-benchmark state when ClickHouse itself is down — at which point it's a real escalation,
-not a chore.
-
-When you find yourself adding an "Action: run X" line to user-facing output (Pulse,
-digest footer, status response, error response), STOP and ask:
-1. Is this state Scout owns? (cache, derived data, refresh of something Scout reads)
-   → fix it in code. Don't ask the user to do it.
-2. Is this state Scout doesn't own but could attempt? (CH reachable but query failed
-   for transient reason) → retry with backoff, alert only after N failures.
-3. Is this state truly external? (env var missing, credentials revoked, queue empty)
-   → action message is appropriate. Make it specific and explain WHY.
-
----
-
-## Revenue Opportunities — Resolved Apr 2026
-
-Both callers now use `revenue_opportunities(ch)` in `queries.py`. The shared function uses a
-fuzzy position-match anti-join that suppresses name variants (e.g., "Disney+" is suppressed
-when a publisher already runs "Disney+ and Hulu"). No drift between Pulse and agent tool.
-
----
-
-## Architecture Map
-
-```
-offer_scraper.py        — Scraper: 9 networks → offers_latest.json (every 6h)
-scout_agent.py          — Claude intelligence: TOOLS list, SYSTEM_PROMPT, shared _query_*() functions
-scout_bot.py            — Orchestrator: startup, daemon launch, SocketMode handler, Pulse signal runner
-scout_handlers.py       — Slack event handlers: _handle_approve, _handle_block_action, handle_event, etc.
-scout_slack_ui.py       — Block Kit builders: Pulse blocks, brief blocks, opportunity cards, home view
-scout_notion.py         — Notion API: write queue page, AI copy pipeline, notion watcher
-scout_state.py          — State I/O: all JSON read/write for 8 state files in data/
-scout_digest.py         — Daily digest: offer scoring + dedup + Slack post
-context_harvester.py    — Nightly Slack context extraction
-```
-
-**Knowledge stores:**
-- `data/offers_latest.json` — current offer snapshot (refreshed every 6h)
-- `data/entity_overrides.json` — publisher/advertiser facts Scout has learned from the team
-- `data/pulse_state.json` — runtime Pulse state; never manually edit publisher names without verifying in ClickHouse
-- `config/team_corrections.json` — static platform-wide facts (git-tracked), not for entity facts
-- `config/scout_thresholds.json` — Scout's tunable thresholds (PR 17a; loaded by `scout_agent._load_thresholds()` at startup). The `@Scout config` tool surfaces current values so the team can audit without reading source.
-- `data/threshold_overrides.json` — runtime threshold overrides written by `@Scout set ...` (admin-gated). Three-layer merge: fallback → `config/scout_thresholds.json` → `data/threshold_overrides.json` (overrides win). `set_threshold()` re-runs `_load_thresholds()` so changes go live in-process — no restart. Admin allowlist: `SCOUT_THRESHOLD_ADMINS` env var (comma-separated Slack user_ids).
-- `data/threshold_changelog.jsonl` — append-only audit log: one JSON line per `set_threshold` call with `ts`, `section`, `key`, `prior`, `value`, `set_by`, `reason`. Read via `get_threshold_history(key=optional, limit=N)`.
-
----
-
-## New Capability Checklist
-
-When adding a new Scout capability, touch these files in this order:
-
-| Capability type | Files to touch |
+| Task | Skill |
 |---|---|
-| New agent tool (LLM-callable) | `scout_agent.py` (TOOLS list + function + SYSTEM_PROMPT); if the tool covers a natural-language question type not yet in `_QA_SUITE`, add an entry with a 4th element (category string) |
-| New monitor signal (monitor-only) | `scout_bot.py` (signal fn + daemon via `_start_daemon` + `_set_force_monitor_fn` registration in `main()`) — `_FORCE_MON_PAT` and `force_run_monitor` auto-discover; no other edits needed |
-| New monitor signal (shared with agent) | `scout_agent.py` (shared `_query_*` function) + `scout_bot.py` (thin wrapper + daemon via `_start_daemon` + `_set_force_monitor_fn` registration in `main()`) |
-| New Slack button handler | `scout_handlers.py` (handler) + `scout_slack_ui.py` (Block Kit card) |
-| New Notion page type | `scout_notion.py` (page builder) |
-| New state value | `scout_state.py` (load/save functions) |
-| Documentation change | `CLAUDE.md` always — update Signal Map and File-Editing Rules |
-
----
-
-## File-Editing Rules
-
-### scout_agent.py
-- **TOOLS list**: every new tool needs 4 things — `name`, `description`, `input_schema`, and a TOOL_MAP entry + function. Missing any one silently breaks routing.
-- **SYSTEM_PROMPT**: add a numbered intent routing line for every new tool
-- **Shared functions**: prefix with `_query_` and accept `ch` (ClickHouse client) as first arg; return plain dicts, not formatted text
-- **DAG terminal**: `scout_agent.py` is the terminal node of the import DAG — no other module imports FROM it. `scout_handlers.py` calls its functions at runtime via `TOOL_MAP`, not via import. Any `import scout_agent` in another module creates a circular dependency.
-
-### scout_bot.py
-- **Orchestrator only** — startup, daemon thread launch, SocketMode event routing, Pulse signal runner
-- **`_format_pulse_blocks()`**: imported from scout_slack_ui — rendering only, no SQL or business logic
-- **`pulse_state.json`** is written by the bot at runtime — don't put static facts here
-- **Client instances** (WebClient, ClickHouse) are created here in `main()` and passed as parameters to modules — never imported from scout_bot (circular import)
-- **`_BOT_USER_ID`, `_LAST_THREAD_PER_CHANNEL`** are injected into scout_handlers via `_set_bot_user_id()` and `_set_thread_state()` after auth — this is the circular-import workaround. Add new functions that scout_handlers needs from scout_bot here; never import scout_bot from scout_handlers.
-- **Daemon registration (PR 16b)**: long-running daemons that must be alive for Scout to be healthy go through `_start_daemon(target, name=, args=())` instead of raw `threading.Thread(...).start()`. This auto-registers them in `_REQUIRED_DAEMONS`, which both `_compute_health_status()` and `_thread_watchdog` read from. Use raw `threading.Thread()` only for one-shot threads (smoke-test) or self-monitoring threads (`thread-watchdog`, `launch-watchdog`, `health-server`).
-
-### scout_handlers.py
-- **All `_handle_*` functions** live here: approve, reject, DM, block_action routing
-- **Import DAG**: `scout_handlers → scout_slack_ui, scout_notion, scout_state, scout_agent` — never imports from `scout_bot`
-- **Add `elif action_id == "..."` for each new button** in `_handle_block_action`; always thread-dispatch heavy operations
-- **`_update_brief_card_queued`** is defined here (NOT in scout_notion) — updates the Slack digest card after an offer is added to queue
-- **Routing rule**: Block Kit *builders* (functions that return `list[dict]` blocks) → `scout_slack_ui.py`. Functions that call `web.chat_postMessage` / `web.chat_update` → `scout_handlers.py`. If it builds blocks, it belongs in scout_slack_ui. If it sends them to Slack, it belongs here.
-- **Import prohibition**: `scout_slack_ui` and `scout_notion` must NOT import from `scout_handlers` — this would create a circular import. If you need shared state, pass it as a parameter.
-- **No bare variable references from `scout_bot`**: `scout_handlers.py` cannot reference `BOT_TOKEN`, `APP_TOKEN`, or any other module-level constant from `scout_bot.py`. Use `os.getenv("SLACK_BOT_TOKEN")` etc. directly. Bare references crash silently at runtime — the smoke test won't catch it because it bypasses `handle_event`.
-- **All stdlib imports required**: `os`, `re`, and any other stdlib module used inside `handle_event` or any handler function MUST be imported at the top of the file. The smoke test does not exercise handlers — missing imports crash silently at the first @mention.
-- **Functions from `scout_bot` needed in handlers**: use the `_set_*` injection pattern (see `_set_force_monitor_fn`). Never import from `scout_bot` directly — circular import.
-
-### Cross-module button value contract
-`scout_slack_ui.py` builds button values; `scout_handlers.py` parses them.
-These share an implicit JSON contract:
-
-```
-_build_opportunity_cards() sets:  {"offer_id": ..., "advertiser": ..., ...}
-_handle_approve() reads:           v.get("offer_id") and v.get("advertiser")
-```
-
-Changing key names in one file REQUIRES updating the other. There is no type enforcement.
-If the contract drifts, approved offers keep showing active buttons — no error, no alert.
-
-**Rule: Never rename these keys without a grep across both files first.**
-
-### scout_slack_ui.py
-- **Zero ClickHouse calls, zero Notion calls** — pure data-in → blocks-out
-- **`_SOLO_HEADER_RE`** is defined at MODULE LEVEL (not inside `_text_to_blocks`) — compiles once at import
-- **Conditional rendering based on caller-provided data is OK** — showing a warning when `risk_flag` is non-empty, hiding a button when a field is absent. What's NOT OK: making threshold comparisons, writing SQL, or deciding what action to take. The caller decides what's true; `scout_slack_ui.py` decides how to display it.
-- **Constants**: `_HELP_TRIGGERS`, `_EMOJI_ALIASES`, `_INLINE_RE`, `_HOME_EXAMPLES` live here
-
-### Block Kit Rendering Contract
-
-**Layer 1 — `scout_ui_kit.py` (PR-2+, in progress):** All new monitor alarms and agent responses use `Card`, `Answer`, `Conversation`, `ResultTable` from `scout_ui_kit.py`. Import with guard:
-```python
-try:
-    from scout_ui_kit import Card, Answer, Conversation, Severity, Surface, enforce, ts, _KIT_ENABLED
-    _KIT_AVAILABLE = True
-except Exception:
-    _KIT_AVAILABLE = False
-    _KIT_ENABLED = False
-```
-`_KIT_ENABLED` is exported from `scout_ui_kit.py` — do NOT re-read `SCOUT_KIT_ENABLED` env var in other files. The guard prevents a kit syntax error from silencing all of Scout.
-
-**Layer 2 — `scout_slack_ui.py` legacy primitives (kept while migration is in progress):**
-
-Every Pulse signal group and per-item card MUST use the canonical primitives. Inline `{"type": "section", ...}` construction in `_format_pulse_blocks()` is prohibited — it drifts on the next edit.
-
-| Use case | Canonical primitive | Notes |
-|---|---|---|
-| Signal group header (ghost, fill, opps, NA, momentum) | `_build_signal_header(emoji, title, context="")` | Returns 1 block (no context) or 2 blocks (section + context). No "WARNING:"/"CRITICAL:" label. |
-| Per-item card (publisher, campaign, opportunity) | `_build_item_card(name, left_body, right_body="", context="", action_button=None)` | Uses `section.fields` when `right_body` is set; plain `section.text` when empty. ONE call per item — never join multiple items on one line. |
-| Publisher velocity card (NEEDS ATTENTION, MOMENTUM) | `_build_publisher_card(name, delta_pct, ...)` | Thin wrapper over `_build_item_card`. Includes `float(delta_pct)` type guard. Use `*Top Advertiser*` label (not "Driven by"). |
-| Actions row (buttons) | `_build_action_row(buttons)` | Pass pre-built button element dicts. |
-
-**Prohibited patterns** — do NOT use in `_format_pulse_blocks()`:
-- NBSP padding (` `, `\xa0`) in any mrkdwn text — renders as garbage on mobile
-- Joining multiple items on one line with `·` separators (e.g. `pub1 · pub2 · pub3`)
-- `section.fields` with an empty right column (`"*Label*\n—"`) — use plain `text` section instead
-- `_build_alert_block()` for Pulse signal headers — that function is for `_build_brief_blocks()` risk flags only
-
-**Block count hard limit**: Slack silently drops messages over 50 blocks. `_format_pulse_blocks()` logs the count via `log.debug("[pulse] block count: %d", len(blocks))` and gates the standing section using `_ALWAYS_TAIL = 4` to stay under the limit.
-
-**`_today` test-injection seam**: `_format_pulse_blocks()` accepts `_today=None`. When `None`, it calls `_date.today()` at runtime. Tests pass `_today=date(2026, 4, 27)` (a known Monday) to exercise the opportunities code path without mocking. **Do NOT remove this parameter** — Test 16 in `smoke_test.py` depends on it. No production caller passes it.
-
-### scout_notion.py
-- **All Notion API calls** live here: `_write_to_notion_queue`, `_patch_notion_copy`, `_notion_watcher_loop`
-- **Zero Slack calls** — fire-and-forget; callers don't wait on it
-- **`_patch_notion_copy`** is a LIVE async fallback for the coalescer — do NOT delete it
-- **Coalescer**: `_copy_coalescer_loop` batches AI copy enrichment with a 10s window + 24h cache; this is the fallback when sync copy generation fails in `_handle_approve`
-- **AI copy pipeline**: `_generate_offer_copy` → `_queue_copy_enrichment` → `_copy_coalescer_loop` → `_patch_notion_copy`
-
-### scout_ui_kit.py (PR-2+)
-- **Pure functions only** — no Slack API calls, no ClickHouse calls, no file I/O. Data-in, blocks-out.
-- **`_KIT_ENABLED` is exported here** — all other modules import it from this file. Never read `SCOUT_KIT_ENABLED` env var directly elsewhere.
-- **`enforce(blocks, surface, thread_ts=None)`** — callers on `CHANNEL_ROOT` pass `thread_ts=None` (message doesn't exist yet); callers in existing threads pass the thread's ts. This is intentional — enforce cannot produce a thread expand path before the message exists.
-- All primitives are `@dataclass`. Render interface: `Answer(...).render(surface, thread_ts)`.
-
-### scout_voice.py (PR-4+)
-- **Copy module only** — returns strings, never calls Slack API.
-- `reactions.remove` in the thinking indicator MUST be in a `finally` block — if the query errors, the 👀 must still come off the user's message. Failure leaves a permanent orphaned reaction.
-
-### scout_surface.py (PR-4+)
-- **Import restrictions**: may only import from stdlib and `scout_state`. No `scout_bot`, no `scout_handlers`, no `scout_ui_kit`. This keeps it testable without the full Slack/ClickHouse stack.
-- `route(event, signal_type) -> Surface` — returns the correct Surface enum value. All routing logic that was inline in `scout_handlers.py` migrates here.
-
-### scout_state.py
-- **The ONLY module that reads/writes the `data/` directory** (besides offer_scraper.py)
-- **All state file paths** are defined here as constants — `home_seen.json` is a new state file added in PR-4; register it here alongside the existing 8.
-- **All reads/writes are atomic** (write to `.tmp`, then `os.replace`) — prevents partial writes on crash
-- **Pattern**: `_load_*()` returns dict/list; `_save_*()` writes atomically
-
-### Tests-as-behaviors rule (PR 19b)
-
-Test names describe behavior, never history. Never `PR XYZ —`, `Test N`, or `fix #123`. The git log is the changelog. The test name is the contract.
-
-When a test's behavior evolves, rename it; the old name was a snapshot, not a permanent identity. When you're tempted to write `test_pr_X_invariant_Y`, stop and ask: "what behavior is this asserting?" That IS the test name.
-
-Why: 14 of 40 current smoke tests are PR-numbered. Each release adds 1-3 more. The accumulation makes the morning #scout-qa post a museum of past work instead of a status signal. The git log already records when each test shipped — putting that in the test name is duplicate, lossy, and noise.
-
-This rule is honored on NEW tests. Existing PR-numbered tests stay until someone has a concrete reason to touch `smoke_test.py`; they don't merit a dedicated cleanup PR. The cleanup is captured in `## Known Debt` below.
-
-### Smoke-vs-runtime-vs-config separation rule (PR 19b)
-
-Three different things should NOT share a Slack post:
-
-1. **Code behavior tests** (`smoke_test.py`) — deterministic; run at deploy time; failures point at code regressions. Belong in #scout-qa as a SIGNAL.
-2. **Runtime state probes** — non-deterministic; depend on external systems (ClickHouse, Anthropic API, Slack auth). Belong in heartbeat / `_compute_health_status`; alert on TRANSITIONS only (OK→degraded, degraded→OK). Never a recurring boot post.
-3. **Boot config checks** — required env vars, persistent disk present, etc. Belong in startup logs OR fail-fast at boot. Don't add to the smoke Slack post.
-
-When you find yourself adding a "smoke test" that probes external state (CH up, API valid, file fresh, env var set), STOP — that test belongs in #2 or #3, not #1.
-
-Why: the current `smoke_test.py` mixes all three. The post grows linearly with PRs because every concern lands in the same bucket. This rule stops the next conflated test from being added.
-
-This rule is honored on NEW tests. The 5 existing runtime probes in `smoke_test.py` (Anthropic API auth, ClickHouse query, Offer inventory present, Slack auth.test, Notion queue DB ID) stay until there's a concrete reason to migrate them. The migration is captured in `## Known Debt` below.
-
-### Shared function contract
-```python
-def _query_ghost_campaigns(ch) -> list[dict]:
-    # Returns: list of dicts with keys:
-    #   campaign_id, adv_name, campaign_title,
-    #   impressions_7d, impressions_2d, clicks_7d, revenue_7d,
-    #   first_impression_date, publisher_ids, publisher_names
-    ...
-```
-
-Always return plain Python dicts — let the caller decide how to format for Slack, Pulse display, etc.
-
----
-
-## ClickHouse Publisher Query Rules
-
-Three rules for any publisher-scoped metrics query. Discovered 2026-05-15 (WB Mason debugging).
-Violating any one produces silently wrong counts — no SQL error, just wrong numbers.
-
-**Rule 1: Anchor on `adpx_sdk_sessions.user_id`** — joining impressions→clicks fans out 20x.
-```sql
--- Clicks: FROM adpx_tracked_clicks c JOIN adpx_sdk_sessions s ON c.session_id = s.session_id WHERE s.user_id = {uid}
--- Revenue: ... JOIN adpx_conversionsdetails cd ON trimBoth(cd.click_hash) = trimBoth(c.click_hash)
-```
-
-**Rule 2: `click_hash` needs `trimBoth()` on both sides** — trailing whitespace in prod data, zero rows without it.
-
-**Rule 3: `adpx_conversionsdetails.pid` ≠ publisher `user_id`** — filtering by `pid` returns wrong results. Filter by `user_id` (correct — in sort key `(user_id, campaign_id, created_at, id)`) OR join via `click_hash` for attribution-matched queries (linking a specific click to its conversion). The `click_hash` join is only required when you need per-click attribution, not for aggregate publisher metrics.
-
-These rules are also in the SYSTEM_PROMPT DATA DICTIONARY ("PUBLISHER-SCOPED QUERY RULES" section).
-
----
-
-## Known Data Quality Issues
-
-### "Major Rocket Real Real" publisher name
-- **Publisher ID**: 927 in `mv_adpx_users`
-- **Status**: Genuine organization name in ClickHouse — not a Scout artifact
-- **Verified**: Apr 23 2026 — 1,388 impressions in last 30 days, active publisher
-- **Fix needed**: Platform ops — update organization name in the MS platform for publisher 927 to "Major Rocket" (flag for Vamsee)
-- **Do not**: Edit pulse_state.json to rename this — the name comes directly from ClickHouse and will revert next Pulse run
-
----
-
-## Known Debt
-
-Items deferred from review pipelines. Surfaced automatically at session start via the Session
-Start Protocol above.
-
-When you start a Scout task, scan this list for items the task touches. If you ship a fix,
-remove the item in the same PR. New deferred items go here, not into gstack files.
-
-Ordering: priority and blast radius — highest first.
-
----
-
-### P3 — Data integrity risks (stale data leads to wrong queries or inconsistent state)
-
-**[Future] SYSTEM_PROMPT DATA DICTIONARY may drift from ClickHouse schema** — `from_airbyte_campaigns` was already missing `start_date`, `categories`, `end_date` (caught in PR 8 eng review). No test validates SYSTEM_PROMPT schema against live tables. Fix: schema smoke test that queries ClickHouse for column existence. See DATA DICTIONARY section in `prompts/scout_system.md`.
-
-**[Future — PR 25] `get_demand_queue_status()` consolidation** — still reads from local `launched_offers.json`; `get_queue_status()` (PR 23) now reads from Notion. Two sources of truth for queue state. `get_demand_queue_status` could be narrowed further or removed once Notion is the sole source.
-
----
-
-### P4 — Missing coverage (no current breakage, just blind spots)
-
-**[Action — Vamsee] 5 affiliate networks need API credentials on Render to actually fetch offers** — Scout has scraper code for ShareASale, Rakuten, AWIN, Tune (HasOffers), and Everflow but they all silently `return []` when their env vars aren't set. PR 18 trimmed `SUPPORTED_NETWORKS` and `_DIGEST_NETWORKS_FALLBACK` from 9 → 4 to be honest about coverage. To re-enable each network: set the env vars on Render, then add the network back to `SUPPORTED_NETWORKS` (`scout_agent.py`) and `_DIGEST_NETWORKS_FALLBACK` (`scout_digest.py`). `_NETWORK_LABEL` and `_NETWORK_EMOJI` already have all 9 entries — no edit needed there.
-
-Env var checklist:
-- ShareASale: `SHAREASALE_API_TOKEN`, `SHAREASALE_API_SECRET` (affiliate ID 3279349 defaulted)
-- Rakuten: `RAKUTEN_API_TOKEN` (publisher ID 3948979 defaulted)
-- AWIN: `AWIN_API_KEY`, `AWIN_PUBLISHER_ID`
-- Tune (per-instance for KASHKICK/BROWNBOOTS/ADACTION/REVOFFERS/ADBLOOM/SUCCESSFUL_MEDIA): `TUNE_<NAME>_NETWORK_ID` + `TUNE_<NAME>_API_KEY`
-- Everflow (per-instance for GIDDYUP/ACCIOADS/KLAYMEDIA/CREDITCOM/MWKCONSULTING/PAWZITIVITY/ARAGONPREMIUM): `EVERFLOW_<NAME>_API_KEY` + `EVERFLOW_<NAME>_BASE_URL`
-
----
-
-### P5 — Future features (deferred by design, no current breakage)
-
-**[Future — PR 24d partial] Offer expiration signal muting** — The expiration warning monitor itself shipped in PR-C (`_expiration_monitor` daemon + `get_expiring_campaigns` agent tool). Remaining: "Mute for 30d" button on expiration alert cards → `data/signal_mutes.json` loaded in `scout_state.py`. Deferred because the muting mechanism applies broadly (any signal) and deserves a dedicated PR rather than being bolted onto PR-C.
-
-**[Future — PR 25] Slack Canvas as ambient pipeline board** — `conversations.canvases.create` + `canvases.edit` APIs allow a pinned always-visible canvas in #revenue-operations showing live queue status. Higher value than Slack Lists (no scope gap, simpler write API, shared visibility). Spike before any Slack Lists re-attempt.
-
-**[Future — PR 25] Slack write-back from queue card** — `views.push` for drill-down from Home tab offer row → push detail view with approve/reject. `reminders.add` for Scout nudging ops when an offer is stuck in "Awaiting Entry" >48h. Both require PR 23 (queue read path) to ship first.
-
-**[Offer queue — future] Rejection modal with structured reason capture** — `views.open` on Reject button click. Dropdown: "wrong vertical" / "payout too low" / "conflict with existing deal" / "quality issue" / "other". Optional free-text note. On submit: write reason + note to Notion offer row, post a compact ephemeral confirmation to the rejector. Enables pattern analysis ("how often is payout the reason?") without requiring anyone to manually log. Scope: offer queue track, not core Scout monitoring.
-
-**[Offer queue — future] /scout-enter as a modal** — currently `/scout-enter` returns an ephemeral card with campaign entry fields. Replace with `views.open` form: advertiser name, tracking URL, payout, network, vertical, notes. Pre-fills from the queued Notion row when matched. Submit writes directly to the MS platform entry checklist. Removes the copy-paste step. Scope: offer queue track.
-
-**[Offer queue — future] Offer stale nudge daemon** — silent monitor that checks `data/notion_queue.json` (or live Notion) for offers stuck in "Awaiting Entry" >48h. Posts a single ephemeral DM to the ops user who approved it: "TurboTax has been sitting in Awaiting Entry for 3 days — still happening?" No channel noise. Scope: offer queue track.
-
-**[Future — PR-D follow-up] `@Scout force overnight` has no equivalent** — The overnight events signal (`_pulse_signal_overnight`) was removed with the dead pulse system cleanup. Overnight has no corresponding silent monitor. To add it back: add `_query_overnight_events(ch)` to `scout_agent.py`, wire into a new `_overnight_events_monitor` daemon via `_start_daemon()`, and add a `@Scout force overnight` handler in `scout_handlers.py` using the `_one_shot_monitor` pattern (same as cap/velocity/ghost/fill). Opportunities signal is still available via `@Scout opportunities` agent tool — no gap there.
-
----
-
-### P6 — Minor cleanup (no functional impact)
-
-**[Future] `@test()` category system deferred** — PR 22 added a name validator that rejects PR-numbered test names at import time. The remaining structural gap is test *body* contents: a developer could write `@test("legit-name")` and still call `_get_ch_client()` inside, adding a runtime probe invisibly. The fix is a `category` parameter on `@test` (`"code" | "runtime" | "config"`) with the renderer filtering by category. Deferred because: (a) all 4 current runtime probes are deleted in PR 22, so the risk is absent; (b) adding the parameter requires tagging all ~39 existing tests; (c) code review remains the gate. Revisit if runtime probes re-accumulate.
-
-**[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. The network list in `prompts/scout_system.md` still requires a manual edit when a network is added or removed. This was intentional — converting the prompt to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
-
-**[Future] `get_advertiser_revenue_trends` not represented in `_QA_SUITE`** — PR-F added QA entries for `get_cvr_anomalies`, `get_expiring_campaigns`, `get_publisher_revenue_trends`, and the threshold config tool, but intentionally excluded `get_advertiser_revenue_trends` (already covered by the publisher trends entry's hint set; advertiser trends are lower-traffic and not a known partner question). Add an entry only if a real-world Slack question for advertiser-level trends starts appearing and the existing publisher trends entry doesn't catch it.
-
----
-
-### Resolved (historical record)
-
-**[Resolved by Track C] Anthropic API auth live probe** — Replaced mocked `test_anthropic` in `smoke_test.py` with two live probes in `scout_bot.py`: (1) a 1-token `claude-haiku-4-5` ping in `_run_health_heartbeat()` alongside the CH ping (combined into `heartbeat_ok` / `status_with_ch["checks"]["anthropic_heartbeat"]`); (2) a matching one-shot startup ping in `_run_startup_smoke_test()` after the CH startup ping to close the ~35-min warmup blind spot. Failures post a red-circle alert to `_SCOUT_HQ_CHANNEL`. Key revocation now surfaces at deploy + every 30 min, never silently.
-
-**[Resolved by PR-C] CVR anomaly detection** — `cvr_anomaly()` in `queries.py` + `_query_cvr_anomaly()` wrapper in `scout_ch.py` + `_cvr_anomaly_monitor` daemon (registered via `_start_daemon`) + `get_cvr_anomalies` agent tool. Silent monitor fires at configurable `cvr_anomaly_monitor_check_hour_ct` CT. Thresholds `cvr_anomaly_drop_pct`, `cvr_anomaly_min_payout`, `cvr_anomaly_min_impressions_7d` wired via `SCOUT_THRESHOLDS`. Schema deps added for `adpx_conversionsdetails.payout`.
-
-**[Resolved by PR-C] Offer expiration warnings** — `expiring_campaigns()` in `queries.py` + `_query_expiring_campaigns()` wrapper + `_expiration_monitor` daemon + `get_expiring_campaigns` agent tool. Silent monitor fires at configurable `expiration_monitor_check_hour_ct` CT. `expiration_warning_days` threshold wired. Schema deps added for `from_airbyte_campaigns.end_date` and `.status`. Signal muting ("Mute for 30d" button) remains deferred — see P5.
-
-**[Resolved by PR-C] Publisher and advertiser revenue trend tools** — `publisher_revenue_trends()` and `advertiser_revenue_trends()` in `queries.py` + thin wrappers in `scout_ch.py` + `get_publisher_revenue_trends` / `get_advertiser_revenue_trends` agent tools. Uses period-median algorithm (8 sequential periods) to avoid comparing period total against median of daily values. `revenue_trend_min_periods` threshold added to `scout_thresholds.json`.
-
-**[Resolved by PR-D] Dead pulse system removed** — Deleted ~490 lines: `_proactive_pulse` daemon (gated off by `pulse_legacy_enabled: false`), `_run_pulse_once`, `_run_pulse_signals`, `_snapshot_keys`, `_pulse_signal_enabled`, `_pulse_signal_overnight`, `_pulse_signal_opportunities`, `_PROACTIVE_SIGNAL_PRIORITY`, `_PULSE_RUNNER` injection in `scout_handlers.py`, and the force pulse handler. Two dead tests removed: `test_tier3_benchmarks_populated` (replaced by `_SCHEMA_DEPS` boot validation) and `test_pulse_diff_snapshot_keys` (tested deleted code). Monitor query layer (`_pulse_signal_cap/velocity/ghost/fill_rate`) and all 4 monitor daemons are unchanged. `@Scout force cap/velocity/ghost/fill` commands intact. Overnight signal follow-up tracked in P5 Known Debt.
-
-**[Resolved by PR #124] CVR root cause misclassification** — `_get_daily_revenue_anomaly()` in `scout_ch.py` was comparing `conv_today / impressions` (~0.001–0.01) against `conv_expected / (revenue_expected / delta) * 0.5` (~0.5) — different units, always true, so every soft-revenue publisher was labelled `cvr_drop`. Deleted the broken `elif` block, replaced with `else: root_cause = "revenue_down"`. Removed `cvr_drop` from `_ROOT_LABELS` in `scout_bot.py`, added `"revenue_down": "revenue below expected, specific cause unclear"`. Signal Map updated: root cause tags now `ghost_campaign / fill_rate / revenue_down / traffic`.
-
-**[Resolved by PRs #116-121 session] Signal thresholds now wired** — Prior item claimed the `signals` section of `config/scout_thresholds.json` was decorative (editing JSON was a no-op). Verified May 2026: cap, velocity (down/up), and fill rate thresholds ARE wired to actual SQL/logic in `scout_bot.py` (`_CAP_ALERT_PCT:282`, `_VELOCITY_*:337`, `_FILL_RATE_MIN_SESSIONS_7D:593`). Ghost threshold is wired via `scout_ch.py:67` (reads `SCOUT_THRESHOLDS` directly — the `_GHOST_RECENCY_HOURS` variable in `scout_bot.py:194` is dead code but the actual behavior is driven by config). Editing the JSON now takes effect for all 5 thresholds.
-
-**[Resolved by PR 23] Renderer tests migrated from smoke_test.py to tests/test_boot_card.py** — 5 `unittest.TestCase` tests now in `tests/` directory. Run with `python3 -m unittest discover -s tests -p "test_*.py" -v`. Smoke suite reduced by 5 tests (now 40); new boot invariant `get_queue_status_tool_registered_with_all_contract_pieces` added.
-
-**[Resolved by PR 22] Cleanup — smoke test compliance + boot card redesign** — 14 PR-numbered tests renamed to behavior names, 4 runtime probes deleted (CH/offers/Slack/Notion all covered by heartbeat), `format_slack_blocks()` redesigned to 2-block summary card on all-pass and capped failure list on fail, 5 renderer unit tests added, name validator added at `@test()` decorator (fails at import time on PR-numbered names).
-
-**[New schema-deps pattern — PR 19] Boot-time validation against `system.columns`.** `scout_agent._SCHEMA_DEPS` is a list of `(table, column, must_have_data)` tuples for the columns Scout reads. `_validate_schema_deps(ch)` runs on startup (wired into `_run_startup_smoke_test()` in scout_bot.py), confirms each column exists, and (where `must_have_data=True`) confirms it has at least 100 non-null rows. Violations post to #scout-qa. When you add a new ClickHouse query to Scout, add the columns it reads to `_SCHEMA_DEPS`. The threshold lives in `_SCHEMA_DEPS_MIN_ROWS` (=100).
-
-**[Resolved by PR 19] `from_airbyte_campaigns.categories` is NULL — but data is in `c.tags`.** Original framing was wrong (claimed needed upstream fix). Verified Apr 2026: the column is genuinely NULL across all 4,816 rows, BUT real category data lives in `c.tags` as a JSON array. PR 19 rewrites `queries.performance_benchmarks_raw()` to parse tags via `arrayFilter(t -> NOT startsWith(lower(t), 'internal-'), JSONExtract(coalesce(c.tags, '[]'), 'Array(String)'))` — drops `internal-*` system tags, keeps real categories. 25+ categories now light up Tier 2/3 benchmarks.
+| SDK/embed config for publisher | `ms-partner-config` |
+| Integration docs for new partner | `ms-integration-guide` |
+| Security/compliance questionnaire | `ms-enterprise-review` |
+| Product feedback memo | `ms-product-feedback` |
+| Post-call follow-up (Slack + email + summary) | `ms-partner-follow-up` |
+| ClickHouse analytics | use `mcp__ClickHouse_Analytics__MomentScience__*` — ignore generic `mcp-clickhouse`. See `~/.claude/playbooks/clickhouse-schema.md` |
+| Building a demo | see `~/.claude/playbooks/demo-anatomy.md` |
+| Python code (Scout, scrapers, beverly) | `python-patterns` |
+| Scout bot work | `continuous-agent-loop` + `tools/offer-scraper/CLAUDE.md` |
+| Scrapers / data pipelines | `data-scraper-agent` |
+| Schedule recurring report | `autonomous-loops` + `mcp__scheduled-tasks__*` |
+
+## Demo Workflow
+**New demo (`demos/demo-*`)** — hook enforced. Before code, answer the partner brief:
+1. What stage is [partner] at?
+2. What's their primary hesitation?
+3. What's the ONE thing they need to leave believing?
+
+Then route: `ui-ux-pro-max` → `frontend-slides`. Save to claude-mem tagged with partner name.
+
+**Returning to existing demo** — run `mem-search [partner] brief` first. If no prior brief, answer the brief.
+
+**Verification** — Sidd reviews Chris's output before any partner sees it. Use Claude Preview to spot-check before the call.
+
+## Demo Stack Defaults
+- **Vanilla HTML + CSS + JS only.** No build, no npm, no framework. GSAP via CDN. **No tests, no coverage.** ECC rules do NOT apply to demos.
+- Always start from a template — `cp -r demos/_templates/moments-checkout demos/demo-[partner]`.
+- Structural gold standard: `demos/_templates/moments-checkout` (uses `demo.config.js`).
+- Visual gold standard: `demos/demo-txb` (older structure, design reference only).
+- Full anatomy (iPhone bezel CSS, SDK integration, animation curves) → `~/.claude/playbooks/demo-anatomy.md`.
+- Deploy: `render.yaml` → Render.
+
+## Other Stack Defaults
+- **Websites / marketing** — Next.js + Tailwind + Framer Motion + shadcn/ui.
+- **Internal tools** — Next.js + Tailwind + shadcn/ui. `security-review` for any auth.
+- **WiWo** — Flutter, stay the course. Don't suggest React Native.
+- **Video** — Remotion.
+- **Animation rule:** demos → GSAP; React → Framer Motion; video → Remotion; mobile → Flutter animations.
+
+## MCP Tools (mosci)
+
+| Tool | When |
+|---|---|
+| Slack `mcp__18ab42c2-*` | revenue-operations channel, Scout traffic, partner comms |
+| Notion `mcp__33bb34b4-*` | Beverly, analytics context |
+| Gmail `mcp__d4cf6c1a-*` | partner follow-up, advertiser outreach — MomentScience account |
+| Google Drive `mcp__c1fc4002-*` | contracts, creatives, SDK docs |
+| Google Calendar `mcp__5c63523a-*` | partner calls, demo meetings |
+| Clarify CRM `mcp__b6600653-*` | leads, lists, campaigns |
+| Scheduled Tasks `mcp__scheduled-tasks__*` | digests, recurring reports |
+| Gamma `mcp__3fdca5ac-*` | quick decks, briefs |
+| Claude Preview `mcp__Claude_Preview__*` | demo QA in browser |
+| ClickHouse `mcp__ClickHouse_Analytics__MomentScience__*` | all analytics |
+
+## Linear Ticket Discipline
+- **Never create Linear issues without explicit approval.** Show draft table (Title | Priority | Platform | desc) first, wait for "looks good"/"ship it"/"create them", then API call.
+- iOS + Android = ONE ticket with platform labels unless fix paths genuinely differ.
+- Fewer, higher-signal tickets over comprehensive coverage. If unsure, ask.
+
+## Partner Pipeline
+
+| Task | Skill |
+|---|---|
+| Prospect research | `apollo:enrich-lead` + `common-room:account-research` + `market-research` |
+| Sourcing new partners | `apollo:prospect` + `common-room:prospect` |
+| Call prep | `sales:call-prep` |
+| Post-call summary | `sales:call-summary` + `ms-partner-follow-up` |
+| CRM hygiene | Clarify MCP |
+| Competitive landscape | `market-research` → `deep-research` |
+| Partner-facing GTM copy | `marketing:draft-content` |
+| Onboarding playbook | `ms-integration-guide` + knowledge vault |
+| CSM/SE tool or template | document in `tools/` or `knowledge/`, optimize for self-serve |
+
+## Session-end
+Run `/dream` before closing long Flutter / Svelte / Unity / Scout sessions — captures mid-build judgment calls into CLAUDE.md.
+
+## Batch Playbook
+- Partner call/demo prep → `/partner-prep [name]` (account + call-prep + ClickHouse + competitive)
+- 3+ partners in pipeline sprint → `/batch`
+- Building a demo → fan out demo build + ClickHouse pull + offer catalog in parallel
+- **Never batch:** demo iteration (builds on prior), Scout debugging (shared signal state), ClickHouse tuning (shared investigation).
+
+## Scout Quickstart
+Starting any Scout session:
+1. `/mem-search scout` for prior context
+2. Read `tools/offer-scraper/CLAUDE.md` Engineering Principles + Known Debt
+3. Read `scout_agent.py` SYSTEM_PROMPT + TOOLS + TOOL_MAP if planning anything new
+4. Run `python3 smoke_test.py` to confirm baseline — "it worked last time" is not a baseline
