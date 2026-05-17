@@ -12,6 +12,15 @@ Why: ms-scout has no project management system. Linear, Notion, and gstack TODO 
 are not auto-loaded by Claude. CLAUDE.md is. If a deferred item isn't here, nobody sees it
 until something breaks.
 
+### Context discipline (read before touching scout_agent.py or scout_handlers.py)
+
+Scout's two largest files (`scout_agent.py` ~5,600 lines, `scout_handlers.py` ~2,100 lines) will exhaust the context window in 2-3 turns if read in full. This causes autocompact thrashing — the symptom is a stream of "Autocompact is thrashing..." errors and a session that can no longer make progress.
+
+Rules:
+1. **Never `Read` scout_agent.py or scout_handlers.py without `offset` + `limit`.** Grep for the target symbol first (e.g. `grep -n "_QA_SUITE" scout_agent.py`), then `Read` the slice you need. Same for any file >1,500 lines.
+2. **Compact at 30% on Scout sessions** (lower than the global 40% rule). These files are big enough that the normal headroom isn't enough.
+3. **If autocompact thrashing starts: run `/clear`, not `/strategic-compact`.** `/strategic-compact` reads files to summarize them, which makes the thrashing worse. `/clear` is the escape hatch — drop context entirely, re-enter with a tight brief that names only the symbols you need.
+
 ---
 
 ## The Core Rule: One Function Per Signal
@@ -391,6 +400,8 @@ Env var checklist:
 **[Future] `@test()` category system deferred** — PR 22 added a name validator that rejects PR-numbered test names at import time. The remaining structural gap is test *body* contents: a developer could write `@test("legit-name")` and still call `_get_ch_client()` inside, adding a runtime probe invisibly. The fix is a `category` parameter on `@test` (`"code" | "runtime" | "config"`) with the renderer filtering by category. Deferred because: (a) all 4 current runtime probes are deleted in PR 22, so the risk is absent; (b) adding the parameter requires tagging all ~39 existing tests; (c) code review remains the gate. Revisit if runtime probes re-accumulate.
 
 **[Future] SYSTEM_PROMPT body still references network names verbatim** — PR 17c scoped `SUPPORTED_NETWORKS` to tool description strings + docstrings only. SYSTEM_PROMPT line ~430 still requires a manual edit when a network is added or removed. This was intentional — converting the 4300-line SYSTEM_PROMPT to an f-string risks silent format breakage in SQL/JSON examples. Revisit only if the prompt structure is refactored for other reasons.
+
+**[Future] `get_advertiser_revenue_trends` not represented in `_QA_SUITE`** — PR-F added QA entries for `get_cvr_anomalies`, `get_expiring_campaigns`, `get_publisher_revenue_trends`, and the threshold config tool, but intentionally excluded `get_advertiser_revenue_trends` (already covered by the publisher trends entry's hint set; advertiser trends are lower-traffic and not a known partner question). Add an entry only if a real-world Slack question for advertiser-level trends starts appearing and the existing publisher trends entry doesn't catch it.
 
 ---
 
