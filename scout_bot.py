@@ -40,6 +40,7 @@ try:
 except Exception:
     _KIT_AVAILABLE = False
     _KIT_ENABLED = False
+from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_state import (
     _DATA_DIR,
     _atomic_write,
