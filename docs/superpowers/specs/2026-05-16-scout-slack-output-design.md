@@ -174,7 +174,7 @@ ResultTable(rows, columns, max_rows=10)
 | 1–3 rows | Inline as Card.facts | — | — |
 | 4–10 rows | summary + top 5 + "View full →" | Full table | — |
 | 11–50 rows | summary + top 5 + "+N more · View in thread →" | Full table (max 50) | Footer: "Showing 50/N" |
-| 51–200 rows | summary + top 5 + "N rows, see thread" | First 50 + CSV code block | 3000-char limit |
+| 51–200 rows | summary + top 5 + "N rows, see thread" | First 50 rows as ResultTable + CSV in `rich_text_preformatted` (max 2900 chars; if CSV exceeds limit, truncate to however many full rows fit and add "… N rows omitted") | — |
 | 200+ rows | summary + "N rows is too large — narrow query or /scout-export" | skipped | Steer user to refine |
 | 0 rows | "No matches for those filters in the last 7 days. Try a wider window." | — | Explicit empty state |
 | Error | "Couldn't reach ClickHouse (10s). Ask again in a minute." | Full error + cached result if available | No stack traces |
@@ -215,10 +215,10 @@ thinking_ellipsis() -> str
 ```
 
 Thinking indicator mechanics (replacing silent gap):
-- Agent receives @mention
-- If query takes >2s: `reactions.add` 👀 to bot's own placeholder (matches user's own Slack habit)
-- On response complete: `reactions.remove` 👀, update placeholder with full answer
-- This reuses existing placeholder-update pattern from `_handle_suggestion`. Zero new paradigm.
+- Agent receives @mention → bot posts a placeholder message "…" immediately (reuses `_handle_suggestion` pattern)
+- Separately: after posting the placeholder, `reactions.add` 👀 to the **user's original message** — visible acknowledgment that Scout saw the request
+- On response complete: `chat.update` the placeholder with the full answer; `reactions.remove` 👀 from user's message
+- The 👀 on the user's message is the "I saw this" signal. The placeholder is the "answer is coming" container. Both are already patterns users recognize — no new UX paradigm.
 
 Voice rules (enforced via grep lint, not style guide):
 - No `!` in built blocks (severity dots carry urgency)
@@ -228,7 +228,7 @@ Voice rules (enforced via grep lint, not style guide):
 - No `...` — use `…`
 - No double-hyphen `--`
 - Numbers without hedging when data is available. Hedge only when inferred, partial, or stale.
-- One dry aside per response max, never on alarms or errors
+- One dry aside per response max, never on alarms or errors — style guide rule only, not CI-lintable (requires semantic judgment; enforce at code review)
 
 Sample lines (anchors, not templates):
 - Monitor alarm: `🟠 cap alert: Disney+ hit 92% of daily cap by 11am. Pacing says it tops out around 1pm.`
@@ -298,7 +298,7 @@ Leaner than Card. No header, no severity dot, no divider. 2–3 blocks max. Conv
 [context] 💡 Try: "which publishers dropped the most revenue this week?" · Rotates daily
 ```
 
-6 blocks. `section.fields` gives the 2-col. All data pre-computed by existing daemons into `_HOME_CACHE`. Zero ClickHouse queries on tab open.
+6 blocks. `section.fields` renders 2-col on desktop; stacks vertically on mobile (expected Slack behavior — no fix available). Data pre-computed by existing daemons into `_HOME_CACHE`. Zero ClickHouse queries on tab open.
 
 Discovery nudge rotates from a curated list — pulls a different query suggestion each day, grouped by JTBD (publisher health / revenue gaps / queue ops).
 
@@ -308,7 +308,7 @@ Discovery nudge rotates from a curated list — pulls a different query suggesti
 - `scout_ui_kit.py` — add Conversation primitive (~30 lines)
 - `scout_slack_ui.py` — `_build_home_view` splits into `_build_home_first_open` + `_build_home_returning`
 - `scout_handlers.py` — agent path uses `scout_surface.route()`; `app_home_opened` forks on `home_seen` state; `reactions.add` 👀 wired to placeholder flow; ephemeral "Done." acknowledgment after approve/reject
-- `scout_state.py` — `_load_home_seen()` / `_mark_home_seen(user_id)`
+- `scout_state.py` — `_load_home_seen()` / `_mark_home_seen(user_id)` + `data/home_seen.json` registered as state file constant (per P2: only scout_state.py reads/writes data/)
 - CI: lint for banned copy patterns
 
 **Verification:**
@@ -326,7 +326,7 @@ Discovery nudge rotates from a curated list — pulls a different query suggesti
 | PR | Kill switch | Recovery |
 |---|---|---|
 | PR-1 | `git revert` — no callers existed | <2 min |
-| PR-2 | `SCOUT_KIT_ENABLED=false` — old `_build_alert_block` stays gated | <5 min |
+| PR-2 | `SCOUT_KIT_ENABLED=false` — flag wraps BOTH the call site (cap monitor emission) AND the renderer (`_build_alert_block` fallback). Old function stays in code for one release cycle. | <5 min |
 | PR-3 | Same gate. Old per-monitor `_format_*_alert` functions stay for one release cycle. | <5 min |
 | PR-4 | Three independent flags: `SCOUT_VOICE_ENABLED`, `SCOUT_SURFACE_ROUTER_ENABLED`, `SCOUT_HOME_ONBOARDING_ENABLED`. Each falls back independently. | <5 min per flag |
 
