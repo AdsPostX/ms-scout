@@ -343,6 +343,40 @@ Cross-PR invariant: old code path stays in tree, behind env flag, for one releas
 - `/scout-enter` as modal — offer queue track, Known Debt P5
 - Offer stale nudge daemon — offer queue track, Known Debt P5
 - Channel bookmarks — set-once chrome, ship when convenient
+- Rotating thinking indicator commentary — PR-4b, after PR-4 is stable (see below)
+
+---
+
+## Phase 2 — Thinking Indicator Commentary (deferred, post PR-4)
+
+PR-4 ships the basic mechanic: 👀 reaction on user's message after 2s + placeholder message that gets updated with the final answer. That's the load-bearing piece.
+
+The rotating commentary below requires a separate background timer thread that edits the placeholder every ~5s until the query lands. That's its own concurrency concern — ship it as a clean standalone PR after PR-4 is stable.
+
+**Copy is approved and ready to implement:**
+
+| Elapsed | Message |
+|---|---|
+| 2s | `Eyes on it. Querying ClickHouse…` |
+| 5s | `Copy. In the weeds. 5s.` |
+| 8s | `Running recon on the impressions table…` |
+| 10s | `10s. This query has more joins than a CJ report.` |
+| 13s | `Still here. Ghost campaigns take time to find. They're ghosts.` |
+| 16s | `16s. The click_hash whitespace isn't going to trim itself.` |
+| 20s | `Easy day. 20s. Big dataset.` |
+| 25s | `25s. FlexOffers has slower payouts than this query has seconds.` |
+| 30s | `30s in. Scout is not bailing.` |
+| 35s | `35s. Don't tell Todd.` |
+| 40s | `40s. Somewhere, Todd just refreshed his dashboard.` |
+| 46s | `Easy day, Chief Panic Officer. Scout's got it.` |
+| 52s | `52s. This is a CVR query. They're like that.` |
+| 60s | `60s. Still running. No ghost campaigns were harmed in this query.` |
+| 68s | `68s. MaxBounty publishers are faster than this. Barely.` |
+| 75s | `75s. This is what peak fill-rate analysis looks like.` |
+| 85s | `85s. Scout is not a ghost campaign. Results incoming.` |
+| 95s+ | `95s. Unprecedented. Even by Todd standards.` |
+
+**Implementation note:** Todd references are intentional and team-approved. They reference his "Chief Panic Officer" reputation (affectionate, worksafe). Keep them at the 35–46s band where levity helps the wait. Drop them if the tone ever stops landing.
 
 ---
 
