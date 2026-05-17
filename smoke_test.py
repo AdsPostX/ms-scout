@@ -7,21 +7,23 @@ Usage:
   python smoke_test.py --slack --quiet   # Slack only (no stdout)
 
 Tests covered:
-  1. Anthropic API — valid model name, auth works
-  2. ClickHouse — connection + simple query
-  3. Entity overrides — file readable, valid JSON
-  4. Offer inventory — offers_latest.json present and non-empty
-  5. ask("status") — end-to-end LLM + tool call round-trip
-  6. ask("ghost campaigns") — tool-calling path (ClickHouse query)
-  7. State files — JSON validity of pulse_state/digest_state/image_cache + data/ writable
-  8. Slack token — auth.test confirms bot identity
-  9. Notion queue DB ID — NOTION_QUEUE_DB_ID env var is set
- 10. Handler symbols — SocketModeResponse and RateLimitErrorRetryHandler importable
- 11. scout_state runtime — _pick_loading_message and _smart_history callable
- 12. _build_advertiser_rpm_context_blocks — pure function, no DB
- 13. get_scout_status() — digest_env + digest_routing fields present
- 14. get_scout_status() — available_networks is a list when offers exist
- 15. get_pulse_summary() — has_pulse key present, handles no-pulse case gracefully
+  1. ClickHouse — connection + simple query
+  2. Entity overrides — file readable, valid JSON
+  3. Offer inventory — offers_latest.json present and non-empty
+  4. ask("status") — end-to-end LLM + tool call round-trip
+  5. ask("ghost campaigns") — tool-calling path (ClickHouse query)
+  6. State files — JSON validity of pulse_state/digest_state/image_cache + data/ writable
+  7. Slack token — auth.test confirms bot identity
+  8. Notion queue DB ID — NOTION_QUEUE_DB_ID env var is set
+  9. Handler symbols — SocketModeResponse and RateLimitErrorRetryHandler importable
+ 10. scout_state runtime — _pick_loading_message and _smart_history callable
+ 11. _build_advertiser_rpm_context_blocks — pure function, no DB
+ 12. get_scout_status() — digest_env + digest_routing fields present
+ 13. get_scout_status() — available_networks is a list when offers exist
+ 14. get_pulse_summary() — has_pulse key present, handles no-pulse case gracefully
+
+Note: Anthropic API auth is now verified via _compute_health_status() in the health
+heartbeat daemon — not here. Smoke tests cover deterministic code paths only.
 """
 
 import argparse
