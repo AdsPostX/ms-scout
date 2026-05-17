@@ -37,7 +37,8 @@ from scout_slack_ui import (
 try:
     from scout_ui_kit import Card, Severity, Surface, enforce, _KIT_ENABLED
     _KIT_AVAILABLE = True
-except Exception:
+except Exception as _e:
+    logging.getLogger("scout_bot").warning("scout_ui_kit import failed, disabling kit: %s", _e)
     _KIT_AVAILABLE = False
     _KIT_ENABLED = False
 from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns

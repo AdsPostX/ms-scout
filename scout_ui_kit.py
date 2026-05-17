@@ -93,7 +93,8 @@ class Card:
     headline:  Short title (≤150 chars, no mrkdwn needed — rendered bold)
     body:      Optional main body text (mrkdwn supported)
     facts:     Optional list of (label, value) pairs rendered as section.fields
-    actions:   Optional list of (label, value, style) button tuples
+    actions:   Optional list of (label, action_id, value, style) button tuples
+               action_id: Slack action_id for block_action routing
                style: "primary" | "danger" | "" (default/unstyled)
 
     IMPORTANT: actions uses field(default_factory=list) — never pass actions=[]
@@ -104,7 +105,7 @@ class Card:
     headline: str
     body: str = ""
     facts: list[tuple[str, str]] = field(default_factory=list)
-    actions: list[tuple[str, str, str]] = field(default_factory=list)
+    actions: list[tuple[str, str, str, str]] = field(default_factory=list)
 
     def render(self, surface: Surface) -> list[dict]:
         """Render to Block Kit blocks. Caller must pass through enforce() before send."""
@@ -134,10 +135,11 @@ class Card:
         # Actions row (optional)
         if self.actions:
             elements = []
-            for label, value, style in self.actions[:5]:  # Slack max 5 per actions block
+            for label, action_id, value, style in self.actions[:25]:  # Slack Block Kit limit: 25
                 btn: dict = {
                     "type": "button",
                     "text": {"type": "plain_text", "text": label},
+                    "action_id": action_id,
                     "value": value,
                 }
                 if style in ("primary", "danger"):
@@ -175,7 +177,7 @@ def enforce(
     truncated = blocks[: limit - 1]
 
     if thread_ts:
-        overflow_text = f"View full results in <slack://channel?thread_ts={thread_ts}|thread>"
+        overflow_text = "Results truncated. Full response is in the thread above."
     else:
         overflow_text = "Response too large for this surface. Narrow the query or ask in a thread."
 

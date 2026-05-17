@@ -27,7 +27,8 @@ from scout_state import _load_launched_offers
 try:
     from scout_ui_kit import Card, Severity, Surface, BUDGETS, enforce, ts, _KIT_ENABLED
     _KIT_AVAILABLE = True
-except Exception:
+except Exception as _e:
+    logging.getLogger("scout_slack_ui").warning("scout_ui_kit import failed, disabling kit: %s", _e)
     _KIT_AVAILABLE = False
     _KIT_ENABLED = False
 
