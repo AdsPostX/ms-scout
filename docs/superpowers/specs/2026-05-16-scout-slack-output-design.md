@@ -108,9 +108,9 @@ BUDGETS = {
 }
 ```
 
-`enforce(blocks, surface)` hard-caps to the surface budget. Truncation always emits an expand path — either a "View full →" thread button or a context block noting "Showing N/M". Never a silent cut.
+`enforce(blocks, surface, thread_ts=None)` hard-caps to the surface budget. Truncation always emits an expand path — either a "View full →" thread button (requires `thread_ts` to be provided) or a context block noting "Showing N/M". Never a silent cut.
 
-If no expand path can be built, falls back to a single "Results too large — narrow your query" Card rather than emitting a half-rendered message.
+If `thread_ts` is `None` (e.g. a fresh monitor alarm posting to channel root before the message exists), the expand path cannot be a thread link. In that case the kit falls back to a "Results too large — narrow your query" Card rather than emitting a half-rendered message. Callers on CHANNEL_ROOT pass `thread_ts=None`; callers responding to an existing thread pass the thread's ts. This is the canonical enforce() contract — every caller must pass `thread_ts` explicitly or accept the fallback.
 
 Every block-returning function in the kit takes a `surface` arg. The kit refuses to render if surface is unset — this forces every caller to declare intent, eliminating the current "channel-post-by-default" failure mode.
 
@@ -127,6 +127,31 @@ class Surface(Enum):
 ```
 
 Surface routing (deciding CHANNEL vs THREAD vs DM from the event context) is intentionally left to callers. The kit stays pure — no event handling, no I/O decisions. Routing moves to `scout_surface.py` in PR-4.
+
+**Implementation constraints for PR-2:**
+
+**Import guard (REQUIRED — prevents total silence on syntax error in kit):**
+
+```python
+# scout_slack_ui.py top of file
+try:
+    from scout_ui_kit import Card, Severity, Surface, BUDGETS, enforce, ts
+    _KIT_AVAILABLE = True
+except Exception:
+    _KIT_AVAILABLE = False
+```
+
+`_KIT_AVAILABLE` is the runtime gate. `SCOUT_KIT_ENABLED` env var is the operator gate. Both must be true to use kit paths. A syntax error in `scout_ui_kit.py` sets `_KIT_AVAILABLE = False`; Scout degrades to old paths instead of going fully silent.
+
+**`_KIT_ENABLED` single source of truth:**
+
+```python
+# scout_ui_kit.py — exported at module level
+import os
+_KIT_ENABLED = os.getenv("SCOUT_KIT_ENABLED", "true").lower() == "true"
+```
+
+Both `scout_bot.py` (call site) and `scout_slack_ui.py` (renderer) import `_KIT_ENABLED` from `scout_ui_kit`. No duplicate env reads. Rollback is a single `SCOUT_KIT_ENABLED=false` on Render.
 
 **Migrations in PR-2:**
 
@@ -148,33 +173,40 @@ Ad-hoc agent queries are the noisiest surface — more frequent than monitor ala
 #### Answer primitive
 
 ```python
-Answer(
-    question: str,          # The user's query (rendered as rich_text_quote)
-    summary: str,           # Channel surface — ≤2 sentences
-    facts: list[...],       # Optional Card.facts for structured data
-    result_table: ResultTable | None,
+@dataclass
+class Answer:
+    question: str                       # rendered as rich_text_quote
+    summary: str                        # channel surface — ≤2 sentences
+    facts: list[tuple[str, str]] = field(default_factory=list)
+    result_table: ResultTable | None = None
     action: str = "View thread →"
-)
+    thread_continuation: bool = False   # if True, omit opener (turn 2+)
 ```
+
+`Answer` is a `@dataclass`. `ResultTable` is also a `@dataclass` (see below). Both render to blocks via `Answer.render(surface, thread_ts=None)` — render logic lives inside Answer, not on a separate `.render()` call chain. Caller interface: `Answer(...).render(Surface.CHANNEL_ROOT)`.
 
 Channel summary (≤8 blocks) + thread carries SQL via `rich_text_preformatted`, full results, citations, feedback buttons.
 
-Multi-turn: Answer includes a `thread_continuation` mode that omits the opener after turn 1 — prevents 5-turn threads from accumulating 5 hero blocks.
+`thread_continuation=True` omits the opener block — prevents 5-turn threads from accumulating 5 hero blocks. `scout_handlers.py` sets this when `thread_ts` already exists and the thread has prior Scout messages.
 
 #### ResultTable primitive
 
 ```python
-ResultTable(rows, columns, max_rows=10)
+@dataclass
+class ResultTable:
+    rows: list[dict]
+    columns: list[str]
+    max_rows: int = 10
 ```
 
-`render(rows, surface)` picks rendering tier from row count + surface budget. Caller passes full result set; kit decides what to show where.
+`ResultTable` is a `@dataclass`. No public `.render()` method — Answer calls its internal `_render_for_surface(surface, thread_ts)`. Caller passes full result set; kit decides what to show where. This keeps the API consistent: Answer, Card, Conversation are all dataclasses; none have public `.render()` — they're rendered via `Answer.render()`.
 
 | Result size | Channel (≤8 blocks) | Thread | Overflow |
 |---|---|---|---|
 | 1–3 rows | Inline as Card.facts | — | — |
 | 4–10 rows | summary + top 5 + "View full →" | Full table | — |
 | 11–50 rows | summary + top 5 + "+N more · View in thread →" | Full table (max 50) | Footer: "Showing 50/N" |
-| 51–200 rows | summary + top 5 + "N rows, see thread" | First 50 rows as ResultTable + CSV in `rich_text_preformatted` (max 2900 chars; if CSV exceeds limit, truncate to however many full rows fit and add "… N rows omitted") | — |
+| 51–200 rows | summary + top 5 + "N rows, see thread" | Thread: first 20 rows as section text + context block with "/scout-export to get the full CSV" (readable; avoids the rich_text_preformatted wall-of-text problem — raw CSV in a code block is unreadable at 50 rows) | — |
 | 200+ rows | summary + "N rows is too large — narrow query or /scout-export" | skipped | Steer user to refine |
 | 0 rows | "No matches for those filters in the last 7 days. Try a wider window." | — | Explicit empty state |
 | Error | "Couldn't reach ClickHouse (10s). Ask again in a minute." | Full error + cached result if available | No stack traces |
@@ -185,6 +217,22 @@ ResultTable(rows, columns, max_rows=10)
 - Add `ts()` everywhere Python computes time labels
 - Wire all 4 slash commands (`/scout-pub`, `/scout-enter`, `/scout-queue`, `/scout-status`) to kit (≤6 blocks, ephemeral)
 - Vague/unparseable queries → Conversation primitive (no severity dot, no card chrome — see PR-4)
+
+**Slash command ack/async pattern (REQUIRED — Slack enforces 3s HTTP 200 deadline):**
+
+```python
+# scout_handlers.py — all slash command handlers
+def handle_slash_pub(ack, body, client, logger):
+    ack()                          # HTTP 200 immediately — MUST be first line
+    channel_id = body["channel_id"]
+    user_id = body["user_id"]
+    # now do the work — ClickHouse queries, kit rendering, etc.
+    result = _fetch_pub_data(...)
+    blocks = Conversation(message=...).render(Surface.EPHEMERAL)
+    client.chat_postEphemeral(channel=channel_id, user=user_id, blocks=blocks)
+```
+
+`ack()` is always the first call — before any I/O. The Bolt SDK routes all `/` commands through an `ack` callback parameter. Never do work before calling `ack()`. The same pattern applies to all block_action handlers with slow I/O. This is already the pattern for `_handle_approve` and `_handle_reject` — PR-3 extends it to the 4 slash commands.
 
 **Verification:**
 - 5 @mentions in #scout-qa: lookup / analysis / vague / error / slash
@@ -259,13 +307,23 @@ Migrate `scout_handlers.py:_handle_agent_query` to call `scout_surface.route(eve
 #### Conversation primitive (additive to kit)
 
 ```python
-Conversation(message: str, facts: list | None = None, action: str | None = None)
+@dataclass
+class Conversation:
+    message: str
+    facts: list[tuple[str, str]] | None = None
+    action: str | None = None
+
+    @classmethod
+    def empty(cls, what: str, suggestion: str) -> "Conversation":
+        return cls(message=f"{what} {suggestion}")
 ```
 
-Leaner than Card. No header, no severity dot, no divider. 2–3 blocks max. Conversational tone via `opener()`. Used for DM replies and ephemeral slash command responses.
+`Conversation` is a `@dataclass`. `Conversation.empty` is a `@classmethod` on the class — this works because it's a class, not a module-level function (which cannot have classmethods). Leaner than Card: no header, no severity dot, no divider. 2–3 blocks max. Conversational tone. Used for DM replies and ephemeral slash command responses.
 
-`Conversation.empty(what, suggestion)` — every empty state names what's empty AND suggests next action:
+Empty state contract: every empty state names what's empty AND suggests next action:
 - ❌ "No results." → ✅ "No campaigns matched those filters in the last 7 days. Try a wider window, or drop the publisher filter."
+
+Voice lint also rejects bare "No results" / "Nothing found" / "Empty" in any block builder.
 
 #### App Home — two states
 
@@ -274,16 +332,23 @@ Leaner than Card. No header, no severity dot, no divider. 2–3 blocks max. Conv
 **First-open view (Block Kit only):**
 
 ```
-[header] Meet Scout
-[section] Scout knows your revenue pipeline. Ask anything in plain English — @Scout in any channel or thread.
-[divider]
-[section + button accessory] Watch publisher health | Try it →
-[section + button accessory] Find revenue gaps | Try it →
-[section + button accessory] Manage the offer queue | Try it →
-[context] What Scout knows: ClickHouse · 4,660 offers · Notion queue · Impact · MaxBounty · CJ · FlexOffers
+[header] Meet Scout                                                      block 1
+[section] Scout knows your revenue pipeline. Ask…                        block 2
+[divider]                                                                block 3
+[section + button accessory] Watch publisher health | Try it →           block 4
+[section + button accessory] Find revenue gaps | Try it →                block 5
+[section + button accessory] Manage the offer queue | Try it →           block 6
+[context] What Scout knows: ClickHouse · 4,660 offers · …               block 7
 ```
 
-4 blocks. One "Try it →" per JTBD. That's it.
+7 blocks total. One "Try it →" per JTBD.
+
+**"Try it →" button behavior:** Each button has a distinct `action_id`:
+- `home_try_publisher_health` → posts "which publishers need attention right now?" to Scout DM and opens that DM
+- `home_try_revenue_gaps` → posts "which advertisers aren't running on publishers who'd convert them?" to DM
+- `home_try_offer_queue` → posts "what's in the queue right now?" to DM
+
+Handler: `_handle_home_try(action_id, user_id)` in `scout_handlers.py`. Opens/reuses DM channel via `conversations.open`, then posts the canned query there and runs it through the agent path. This is identical to the existing "Try it →" pattern on suggestion buttons — the DM is the answer container. No modal, no channel post.
 
 **Returning view (Block Kit only, pre-computed by daemons — zero ClickHouse on open):**
 
