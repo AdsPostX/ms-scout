@@ -7,21 +7,23 @@ Usage:
   python smoke_test.py --slack --quiet   # Slack only (no stdout)
 
 Tests covered:
-  1. Anthropic API — valid model name, auth works
-  2. ClickHouse — connection + simple query
-  3. Entity overrides — file readable, valid JSON
-  4. Offer inventory — offers_latest.json present and non-empty
-  5. ask("status") — end-to-end LLM + tool call round-trip
-  6. ask("ghost campaigns") — tool-calling path (ClickHouse query)
-  7. State files — JSON validity of pulse_state/digest_state/image_cache + data/ writable
-  8. Slack token — auth.test confirms bot identity
-  9. Notion queue DB ID — NOTION_QUEUE_DB_ID env var is set
- 10. Handler symbols — SocketModeResponse and RateLimitErrorRetryHandler importable
- 11. scout_state runtime — _pick_loading_message and _smart_history callable
- 12. _build_advertiser_rpm_context_blocks — pure function, no DB
- 13. get_scout_status() — digest_env + digest_routing fields present
- 14. get_scout_status() — available_networks is a list when offers exist
- 15. get_pulse_summary() — has_pulse key present, handles no-pulse case gracefully
+  1. ClickHouse — connection + simple query
+  2. Entity overrides — file readable, valid JSON
+  3. Offer inventory — offers_latest.json present and non-empty
+  4. ask("status") — end-to-end LLM + tool call round-trip
+  5. ask("ghost campaigns") — tool-calling path (ClickHouse query)
+  6. State files — JSON validity of pulse_state/digest_state/image_cache + data/ writable
+  7. Slack token — auth.test confirms bot identity
+  8. Notion queue DB ID — NOTION_QUEUE_DB_ID env var is set
+  9. Handler symbols — SocketModeResponse and RateLimitErrorRetryHandler importable
+ 10. scout_state runtime — _pick_loading_message and _smart_history callable
+ 11. _build_advertiser_rpm_context_blocks — pure function, no DB
+ 12. get_scout_status() — digest_env + digest_routing fields present
+ 13. get_scout_status() — available_networks is a list when offers exist
+ 14. get_pulse_summary() — has_pulse key present, handles no-pulse case gracefully
+
+Note: Anthropic API auth is now verified via _compute_health_status() in the health
+heartbeat daemon — not here. Smoke tests cover deterministic code paths only.
 """
 
 import argparse
@@ -58,66 +60,7 @@ def test(name: str):
     return decorator
 
 
-# ── Test 1: Anthropic API ─────────────────────────────────────────────────────
-
-@test("Anthropic API — model auth")
-def test_anthropic():
-    """Validate the Anthropic client wiring without hitting the network.
-
-    B1d: replaces the live messages.create() probe with a mock so smoke runs
-    fast and offline-clean. No env var required — we instantiate with a
-    placeholder key and mock messages.create, so this test passes the same
-    way in CI, on a fresh checkout, and on the Render box.
-    """
-    import anthropic
-
-    try:
-        client = anthropic.Anthropic(api_key="sk-smoke-test-not-a-real-key")
-    except Exception as e:
-        return False, f"Anthropic client failed to instantiate: {e}"
-
-    # Synthetic Message-shaped response (matches anthropic.types.Message surface
-    # we actually read: .content list of blocks with .type/.text, .model,
-    # .stop_reason, .role).
-    def _fake_block(text: str):
-        return types.SimpleNamespace(type="text", text=text)
-
-    def _fake_message(model: str):
-        return types.SimpleNamespace(
-            id="msg_smoke_fake",
-            type="message",
-            role="assistant",
-            model=model,
-            stop_reason="end_turn",
-            content=[_fake_block("pong")],
-        )
-
-    for model in ("claude-haiku-4-5", "claude-sonnet-4-6"):
-        with patch.object(
-            client.messages, "create", return_value=_fake_message(model)
-        ) as mocked:
-            try:
-                resp = client.messages.create(
-                    model=model, max_tokens=5,
-                    messages=[{"role": "user", "content": "ping"}]
-                )
-            except Exception as e:
-                return False, f"{model} mocked call raised: {e}"
-
-        if not mocked.called:
-            return False, f"{model}: messages.create mock was not invoked"
-        if not getattr(resp, "content", None):
-            return False, f"{model}: mocked response missing .content"
-        first = resp.content[0]
-        if getattr(first, "type", None) != "text" or not getattr(first, "text", ""):
-            return False, f"{model}: mocked response content block malformed"
-        if getattr(resp, "model", None) != model:
-            return False, f"{model}: mocked response missing .model attribute"
-
-    return True, "Anthropic client wiring OK (mocked — no network) ✓"
-
-
-# ── Test 3: Entity overrides ──────────────────────────────────────────────────
+# ── Entity overrides ──────────────────────────────────────────────────────────
 
 @test("Entity overrides — file readable")
 def test_entity_overrides():
