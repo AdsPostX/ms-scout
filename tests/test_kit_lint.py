@@ -2,13 +2,19 @@
 Lint tests for scout_ui_kit migration invariants.
 
 Enforces that block builders do not contain legacy severity string literals
-("WARNING:" / "CRITICAL:") that the kit Severity enum replaced.
-Fails if a contributor bypasses the enum and hard-codes the old strings.
+("WARNING:" / "CRITICAL:") that the kit Severity enum replaced, and verifies
+that high-traffic surfaces (monitor alarms) apply enforce() budget caps.
+Fails if a contributor bypasses the enum, hard-codes the old strings, or
+returns unbudgeted blocks on a paging surface.
 """
+import os
 import pathlib
+import sys
 import unittest
 
 _REPO = pathlib.Path(__file__).parent.parent
+sys.path.insert(0, str(_REPO))
+
 _BUILDER_FILES = [
     _REPO / "scout_slack_ui.py",
     _REPO / "scout_bot.py",
@@ -39,6 +45,45 @@ class TestKitLint(unittest.TestCase):
             "Legacy bold severity labels found in block builders — use Severity enum:\n"
             + "\n".join(violations),
         )
+
+    def test_monitor_alert_enforces_budget_when_kit_enabled(self):
+        """Monitor alerts are a paging surface. When the kit is on, output
+        MUST be capped at BUDGETS[MONITOR_ALARM] so we never overflow Slack
+        on a noisy day. Regression guard for the PR-2 budget wrapping."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        # Force re-import so _KIT_ENABLED picks up the env var
+        for mod in ("scout_ui_kit", "scout_slack_ui"):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import BUDGETS, Surface
+        from scout_slack_ui import _build_monitor_alert_blocks
+
+        # 50 items would otherwise render 50+ blocks; we cap at 8 bullets per
+        # section, but the surrounding header+context+section still need budget.
+        many_items = [f"item {i}" for i in range(50)]
+        _fallback, blocks = _build_monitor_alert_blocks(
+            ":warning:", "Stress test", many_items, "test cta"
+        )
+        cap = BUDGETS[Surface.MONITOR_ALARM]
+        self.assertLessEqual(
+            len(blocks), cap,
+            f"_build_monitor_alert_blocks returned {len(blocks)} blocks; "
+            f"MONITOR_ALARM budget is {cap}. enforce() not wired correctly.",
+        )
+
+    def test_monitor_alert_passthrough_when_kit_disabled(self):
+        """Kill switch sanity: SCOUT_KIT_ENABLED=false must not crash and
+        must return blocks (no enforcement, legacy behavior)."""
+        os.environ["SCOUT_KIT_ENABLED"] = "false"
+        for mod in ("scout_ui_kit", "scout_slack_ui"):
+            sys.modules.pop(mod, None)
+        from scout_slack_ui import _build_monitor_alert_blocks
+
+        _fallback, blocks = _build_monitor_alert_blocks(
+            ":warning:", "Kill-switch test", ["a", "b"], ""
+        )
+        self.assertGreater(len(blocks), 0)
+        # Restore default
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
 
 
 if __name__ == "__main__":

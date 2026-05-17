@@ -1111,7 +1111,13 @@ def _build_monitor_alert_blocks(
     items: list[str],
     cta_query: str = "",
 ) -> tuple[str, list[dict]]:
-    """Canonical Block Kit alert for all silent monitors and revenue tracker."""
+    """Canonical Block Kit alert for all silent monitors and revenue tracker.
+
+    Budget enforcement: output is capped at BUDGETS[Surface.MONITOR_ALARM] via
+    enforce(); overflow gets a context indicator. Topical emoji (ghost/droplet/
+    hourglass) is preserved in the header — Severity.emoji standardization is
+    PR-3's job, not this surface's.
+    """
     fallback = f"{emoji} {title}"
     blocks: list[dict] = [*_build_signal_header(emoji, title)]
     if items:
@@ -1122,6 +1128,8 @@ def _build_monitor_alert_blocks(
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"_`@Scout {cta_query}` for the full breakdown_"}],
         })
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        blocks = enforce(blocks, Surface.MONITOR_ALARM)
     return fallback, blocks
 
 _MAX_QUEUE_ITEMS_RENDERED = 12
