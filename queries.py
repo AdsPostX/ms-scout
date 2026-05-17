@@ -979,18 +979,7 @@ def cvr_anomaly(
     """
     rows = ch.query(
         """
-        SELECT
-            publisher_id,
-            publisher_name,
-            campaign_id,
-            adv_name,
-            cvr_7d,
-            cvr_yesterday,
-            delta_pct,
-            impressions_7d,
-            payout_per_conversion
-        FROM (
-            WITH imp_7d AS (
+        WITH imp_7d AS (
                 SELECT
                     s.user_id                         AS publisher_id,
                     i.campaign_id                     AS campaign_id,
@@ -1061,8 +1050,12 @@ def cvr_anomaly(
                       nullIf(i7.impressions_7d, 0), 6)                AS cvr_7d,
                 round(coalesce(cy.conversions_yesterday, 0) /
                       nullIf(iy.impressions_yesterday, 0), 6)         AS cvr_yesterday,
-                round((cvr_yesterday - cvr_7d) /
-                      nullIf(cvr_7d, 0) * 100, 2)                    AS delta_pct,
+                round((coalesce(cy.conversions_yesterday, 0) /
+                      nullIf(iy.impressions_yesterday, 0) -
+                      coalesce(c7.conversions_7d, 0) /
+                      nullIf(i7.impressions_7d, 0)) /
+                      nullIf(coalesce(c7.conversions_7d, 0) /
+                      nullIf(i7.impressions_7d, 0), 0) * 100, 2)     AS delta_pct,
                 i7.impressions_7d,
                 coalesce(c7.payout_per_conversion, 0)                 AS payout_per_conversion
             FROM imp_7d i7
@@ -1077,10 +1070,9 @@ def cvr_anomaly(
                   AND cy.campaign_id  = i7.campaign_id
             LEFT JOIN names n ON n.publisher_id = i7.publisher_id
             LEFT JOIN campaigns ca ON ca.campaign_id = toInt64(i7.campaign_id)
-            WHERE cvr_7d > 0
-        )
-        WHERE delta_pct <= -{drop_pct: Float64}
-        ORDER BY delta_pct ASC
+            HAVING cvr_7d > 0
+               AND delta_pct <= -{drop_pct: Float64}
+            ORDER BY delta_pct ASC
         """,
         parameters={
             "min_impressions_7d": int(min_impressions_7d),
@@ -1123,16 +1115,23 @@ def expiring_campaigns(ch, warning_days: int = 7) -> list[dict]:
     """
     rows = ch.query(
         """
-        WITH expiring AS (
+        WITH expiring_raw AS (
             SELECT
-                id                                    AS campaign_id,
+                id                                              AS campaign_id,
                 adv_name,
-                toString(end_date)                    AS end_date,
-                dateDiff('day', today(), toDate(end_date))    AS days_remaining
+                toDate(end_date)                                AS end_date_dt
             FROM from_airbyte_campaigns
             WHERE toDate(end_date) BETWEEN today() AND today() + INTERVAL {warning_days: Int32} DAY
               AND trim(status) = 'Active'
               AND deleted_at IS NULL
+        ),
+        expiring AS (
+            SELECT
+                campaign_id,
+                adv_name,
+                toString(end_date_dt)                           AS end_date,
+                dateDiff('day', today(), end_date_dt)           AS days_remaining
+            FROM expiring_raw
         ),
         imp_agg AS (
             SELECT
