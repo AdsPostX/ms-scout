@@ -33,6 +33,15 @@ from scout_notion import (
 from scout_slack_ui import (
     _build_monitor_alert_blocks,
 )
+
+try:
+    from scout_ui_kit import Card, Severity, Surface, enforce, _KIT_ENABLED
+    _KIT_AVAILABLE = True
+except Exception as _e:
+    logging.getLogger("scout_bot").warning("scout_ui_kit import failed, disabling kit: %s", _e)
+    _KIT_AVAILABLE = False
+    _KIT_ENABLED = False
+from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_state import (
     _DATA_DIR,
     _atomic_write,
@@ -797,6 +806,14 @@ def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
             f"${rev_mtd:,.0f} / ${cap:,.0f} · "
             f"~{dtc:.0f}d to cap vs {dr}d remaining"
         )
+
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        headline = "Cap alert — advertisers approaching monthly budget"
+        body = "\n".join(f"• {item}" for item in items) if items else ""
+        card = Card(severity=Severity.WARN, headline=headline, body=body)
+        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        return f"🟠 {headline}", blocks
+
     return _build_monitor_alert_blocks(
         ":warning:",
         "Cap alert — advertisers approaching monthly budget",

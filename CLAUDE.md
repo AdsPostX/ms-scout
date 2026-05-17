@@ -261,7 +261,20 @@ If the contract drifts, approved offers keep showing active buttons — no error
 - **Conditional rendering based on caller-provided data is OK** — showing a warning when `risk_flag` is non-empty, hiding a button when a field is absent. What's NOT OK: making threshold comparisons, writing SQL, or deciding what action to take. The caller decides what's true; `scout_slack_ui.py` decides how to display it.
 - **Constants**: `_HELP_TRIGGERS`, `_EMOJI_ALIASES`, `_INLINE_RE`, `_HOME_EXAMPLES` live here
 
-### Block Kit Rendering Contract (PR 14 — Apr 2026)
+### Block Kit Rendering Contract
+
+**Layer 1 — `scout_ui_kit.py` (PR-2+, in progress):** All new monitor alarms and agent responses use `Card`, `Answer`, `Conversation`, `ResultTable` from `scout_ui_kit.py`. Import with guard:
+```python
+try:
+    from scout_ui_kit import Card, Answer, Conversation, Severity, Surface, enforce, ts, _KIT_ENABLED
+    _KIT_AVAILABLE = True
+except Exception:
+    _KIT_AVAILABLE = False
+    _KIT_ENABLED = False
+```
+`_KIT_ENABLED` is exported from `scout_ui_kit.py` — do NOT re-read `SCOUT_KIT_ENABLED` env var in other files. The guard prevents a kit syntax error from silencing all of Scout.
+
+**Layer 2 — `scout_slack_ui.py` legacy primitives (kept while migration is in progress):**
 
 Every Pulse signal group and per-item card MUST use the canonical primitives. Inline `{"type": "section", ...}` construction in `_format_pulse_blocks()` is prohibited — it drifts on the next edit.
 
@@ -289,9 +302,23 @@ Every Pulse signal group and per-item card MUST use the canonical primitives. In
 - **Coalescer**: `_copy_coalescer_loop` batches AI copy enrichment with a 10s window + 24h cache; this is the fallback when sync copy generation fails in `_handle_approve`
 - **AI copy pipeline**: `_generate_offer_copy` → `_queue_copy_enrichment` → `_copy_coalescer_loop` → `_patch_notion_copy`
 
+### scout_ui_kit.py (PR-2+)
+- **Pure functions only** — no Slack API calls, no ClickHouse calls, no file I/O. Data-in, blocks-out.
+- **`_KIT_ENABLED` is exported here** — all other modules import it from this file. Never read `SCOUT_KIT_ENABLED` env var directly elsewhere.
+- **`enforce(blocks, surface, thread_ts=None)`** — callers on `CHANNEL_ROOT` pass `thread_ts=None` (message doesn't exist yet); callers in existing threads pass the thread's ts. This is intentional — enforce cannot produce a thread expand path before the message exists.
+- All primitives are `@dataclass`. Render interface: `Answer(...).render(surface, thread_ts)`.
+
+### scout_voice.py (PR-4+)
+- **Copy module only** — returns strings, never calls Slack API.
+- `reactions.remove` in the thinking indicator MUST be in a `finally` block — if the query errors, the 👀 must still come off the user's message. Failure leaves a permanent orphaned reaction.
+
+### scout_surface.py (PR-4+)
+- **Import restrictions**: may only import from stdlib and `scout_state`. No `scout_bot`, no `scout_handlers`, no `scout_ui_kit`. This keeps it testable without the full Slack/ClickHouse stack.
+- `route(event, signal_type) -> Surface` — returns the correct Surface enum value. All routing logic that was inline in `scout_handlers.py` migrates here.
+
 ### scout_state.py
 - **The ONLY module that reads/writes the `data/` directory** (besides offer_scraper.py)
-- **All 8 state file paths** are defined here as constants
+- **All state file paths** are defined here as constants — `home_seen.json` is a new state file added in PR-4; register it here alongside the existing 8.
 - **All reads/writes are atomic** (write to `.tmp`, then `os.replace`) — prevents partial writes on crash
 - **Pattern**: `_load_*()` returns dict/list; `_save_*()` writes atomically
 
@@ -403,6 +430,12 @@ Env var checklist:
 **[Future — PR 25] Slack Canvas as ambient pipeline board** — `conversations.canvases.create` + `canvases.edit` APIs allow a pinned always-visible canvas in #revenue-operations showing live queue status. Higher value than Slack Lists (no scope gap, simpler write API, shared visibility). Spike before any Slack Lists re-attempt.
 
 **[Future — PR 25] Slack write-back from queue card** — `views.push` for drill-down from Home tab offer row → push detail view with approve/reject. `reminders.add` for Scout nudging ops when an offer is stuck in "Awaiting Entry" >48h. Both require PR 23 (queue read path) to ship first.
+
+**[Offer queue — future] Rejection modal with structured reason capture** — `views.open` on Reject button click. Dropdown: "wrong vertical" / "payout too low" / "conflict with existing deal" / "quality issue" / "other". Optional free-text note. On submit: write reason + note to Notion offer row, post a compact ephemeral confirmation to the rejector. Enables pattern analysis ("how often is payout the reason?") without requiring anyone to manually log. Scope: offer queue track, not core Scout monitoring.
+
+**[Offer queue — future] /scout-enter as a modal** — currently `/scout-enter` returns an ephemeral card with campaign entry fields. Replace with `views.open` form: advertiser name, tracking URL, payout, network, vertical, notes. Pre-fills from the queued Notion row when matched. Submit writes directly to the MS platform entry checklist. Removes the copy-paste step. Scope: offer queue track.
+
+**[Offer queue — future] Offer stale nudge daemon** — silent monitor that checks `data/notion_queue.json` (or live Notion) for offers stuck in "Awaiting Entry" >48h. Posts a single ephemeral DM to the ops user who approved it: "TurboTax has been sitting in Awaiting Entry for 3 days — still happening?" No channel noise. Scope: offer queue track.
 
 **[Future — PR-D follow-up] `@Scout force overnight` has no equivalent** — The overnight events signal (`_pulse_signal_overnight`) was removed with the dead pulse system cleanup. Overnight has no corresponding silent monitor. To add it back: add `_query_overnight_events(ch)` to `scout_agent.py`, wire into a new `_overnight_events_monitor` daemon via `_start_daemon()`, and add a `@Scout force overnight` handler in `scout_handlers.py` using the `_one_shot_monitor` pattern (same as cap/velocity/ghost/fill). Opportunities signal is still available via `@Scout opportunities` agent tool — no gap there.
 

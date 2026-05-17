@@ -979,18 +979,7 @@ def cvr_anomaly(
     """
     rows = ch.query(
         """
-        SELECT
-            publisher_id,
-            publisher_name,
-            campaign_id,
-            adv_name,
-            cvr_7d,
-            cvr_yesterday,
-            delta_pct,
-            impressions_7d,
-            payout_per_conversion
-        FROM (
-            WITH imp_7d AS (
+        WITH imp_7d AS (
                 SELECT
                     s.user_id                         AS publisher_id,
                     i.campaign_id                     AS campaign_id,
@@ -999,7 +988,7 @@ def cvr_anomaly(
                 JOIN adpx_sdk_sessions s ON i.session_id = s.session_id
                 WHERE toYYYYMM(i.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
                   AND i.created_at >= today() - INTERVAL 7 DAY
-                GROUP BY publisher_id, campaign_id
+                GROUP BY s.user_id, i.campaign_id
                 HAVING impressions_7d >= {min_impressions_7d: Int64}
             ),
             imp_yesterday AS (
@@ -1012,7 +1001,7 @@ def cvr_anomaly(
                 WHERE toYYYYMM(i.created_at) >= toYYYYMM(yesterday())
                   AND i.created_at >= yesterday()
                   AND i.created_at < today()
-                GROUP BY publisher_id, campaign_id
+                GROUP BY s.user_id, i.campaign_id
             ),
             conv_7d AS (
                 SELECT
@@ -1024,7 +1013,7 @@ def cvr_anomaly(
                 JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
                 WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
                   AND cv.created_at >= today() - INTERVAL 7 DAY
-                GROUP BY publisher_id, campaign_id
+                GROUP BY s.user_id, cv.campaign_id
                 HAVING payout_per_conversion >= {min_payout: Float64}
             ),
             conv_yesterday AS (
@@ -1037,7 +1026,7 @@ def cvr_anomaly(
                 WHERE toYYYYMM(cv.created_at) >= toYYYYMM(yesterday())
                   AND cv.created_at >= yesterday()
                   AND cv.created_at < today()
-                GROUP BY publisher_id, campaign_id
+                GROUP BY s.user_id, cv.campaign_id
             ),
             names AS (
                 SELECT
@@ -1051,35 +1040,42 @@ def cvr_anomaly(
                     adv_name
                 FROM from_airbyte_campaigns
                 WHERE deleted_at IS NULL
+            ),
+            final AS (
+                SELECT
+                    i7.publisher_id                                       AS publisher_id,
+                    coalesce(n.publisher_name, toString(i7.publisher_id)) AS publisher_name,
+                    toInt64(i7.campaign_id)                               AS campaign_id,
+                    coalesce(ca.adv_name, '')                             AS adv_name,
+                    round(coalesce(c7.conversions_7d, 0) /
+                          nullIf(i7.impressions_7d, 0), 6)                AS cvr_7d,
+                    round(coalesce(cy.conversions_yesterday, 0) /
+                          nullIf(iy.impressions_yesterday, 0), 6)         AS cvr_yesterday,
+                    round((coalesce(cy.conversions_yesterday, 0) /
+                          nullIf(iy.impressions_yesterday, 0) -
+                          coalesce(c7.conversions_7d, 0) /
+                          nullIf(i7.impressions_7d, 0)) /
+                          nullIf(coalesce(c7.conversions_7d, 0) /
+                          nullIf(i7.impressions_7d, 0), 0) * 100, 2)     AS delta_pct,
+                    i7.impressions_7d,
+                    coalesce(c7.payout_per_conversion, 0)                 AS payout_per_conversion
+                FROM imp_7d i7
+                LEFT JOIN imp_yesterday iy
+                       ON iy.publisher_id = i7.publisher_id
+                      AND iy.campaign_id  = i7.campaign_id
+                LEFT JOIN conv_7d c7
+                       ON c7.publisher_id = i7.publisher_id
+                      AND c7.campaign_id  = i7.campaign_id
+                LEFT JOIN conv_yesterday cy
+                       ON cy.publisher_id = i7.publisher_id
+                      AND cy.campaign_id  = i7.campaign_id
+                LEFT JOIN names n ON n.publisher_id = i7.publisher_id
+                LEFT JOIN campaigns ca ON ca.campaign_id = toInt64(i7.campaign_id)
             )
-            SELECT
-                i7.publisher_id,
-                coalesce(n.publisher_name, toString(i7.publisher_id)) AS publisher_name,
-                toInt64(i7.campaign_id)                               AS campaign_id,
-                coalesce(ca.adv_name, '')                             AS adv_name,
-                round(coalesce(c7.conversions_7d, 0) /
-                      nullIf(i7.impressions_7d, 0), 6)                AS cvr_7d,
-                round(coalesce(cy.conversions_yesterday, 0) /
-                      nullIf(iy.impressions_yesterday, 0), 6)         AS cvr_yesterday,
-                round((cvr_yesterday - cvr_7d) /
-                      nullIf(cvr_7d, 0) * 100, 2)                    AS delta_pct,
-                i7.impressions_7d,
-                coalesce(c7.payout_per_conversion, 0)                 AS payout_per_conversion
-            FROM imp_7d i7
-            LEFT JOIN imp_yesterday iy
-                   ON iy.publisher_id = i7.publisher_id
-                  AND iy.campaign_id  = i7.campaign_id
-            LEFT JOIN conv_7d c7
-                   ON c7.publisher_id = i7.publisher_id
-                  AND c7.campaign_id  = i7.campaign_id
-            LEFT JOIN conv_yesterday cy
-                   ON cy.publisher_id = i7.publisher_id
-                  AND cy.campaign_id  = i7.campaign_id
-            LEFT JOIN names n ON n.publisher_id = i7.publisher_id
-            LEFT JOIN campaigns ca ON ca.campaign_id = toInt64(i7.campaign_id)
-            WHERE cvr_7d > 0
-        )
-        WHERE delta_pct <= -{drop_pct: Float64}
+        SELECT *
+        FROM final
+        WHERE cvr_7d > 0
+          AND delta_pct <= -{drop_pct: Float64}
         ORDER BY delta_pct ASC
         """,
         parameters={
@@ -1123,16 +1119,23 @@ def expiring_campaigns(ch, warning_days: int = 7) -> list[dict]:
     """
     rows = ch.query(
         """
-        WITH expiring AS (
+        WITH expiring_raw AS (
             SELECT
-                id                                    AS campaign_id,
+                id                                              AS campaign_id,
                 adv_name,
-                toString(end_date)                    AS end_date,
-                dateDiff('day', today(), end_date)    AS days_remaining
+                toDate(end_date)                                AS end_date_dt
             FROM from_airbyte_campaigns
-            WHERE end_date BETWEEN today() AND today() + INTERVAL {warning_days: Int32} DAY
+            WHERE toDate(end_date) BETWEEN today() AND today() + INTERVAL {warning_days: Int32} DAY
               AND trim(status) = 'Active'
               AND deleted_at IS NULL
+        ),
+        expiring AS (
+            SELECT
+                campaign_id,
+                adv_name,
+                toString(end_date_dt)                           AS end_date,
+                dateDiff('day', today(), end_date_dt)           AS days_remaining
+            FROM expiring_raw
         ),
         imp_agg AS (
             SELECT

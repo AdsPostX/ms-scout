@@ -24,6 +24,15 @@ import re
 
 from scout_state import _load_launched_offers
 
+try:
+    from scout_ui_kit import Card, Severity, Surface, BUDGETS, enforce, ts, _KIT_ENABLED
+    _KIT_AVAILABLE = True
+except Exception as _e:
+    logging.getLogger("scout_slack_ui").warning("scout_ui_kit import failed, disabling kit: %s", _e)
+    _KIT_AVAILABLE = False
+    _KIT_ENABLED = False
+
+# Load Scout thresholds directly (avoids circular import with scout_agent).
 def _load_ui_thresholds() -> dict:
     try:
         p = pathlib.Path(__file__).parent / "config" / "scout_thresholds.json"
@@ -112,26 +121,33 @@ def _build_alert_block(severity: str, title: str, body: str = "") -> list[dict]:
 
     severity: "danger" | "warning" | "info"
     - danger: 🔴 Ghost campaigns, caps near limit, critical issues
-    - warning: 🟡 Fill rate, velocity drops, warnings
-    - info: ℹ️ General context, non-blocking info
+    - warning: 🟠 Fill rate, velocity drops, warnings
+    - info: 🔵 General context, non-blocking info
 
     Returns list of blocks for consistent stacking.
     """
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        _KIT_MAP = {
+            "danger": Severity.CRITICAL,
+            "warning": Severity.WARN,
+            "info": Severity.INFO,
+        }
+        kit_sev = _KIT_MAP.get(severity, Severity.INFO)
+        return Card(severity=kit_sev, headline=title, body=body).render(Surface.EPHEMERAL)
+
+    # Legacy path — active when SCOUT_KIT_ENABLED=false
     _SEVERITY_MAP = {
         "danger": {"emoji": "🔴", "label": "CRITICAL"},
         "warning": {"emoji": "🟡", "label": "WARNING"},
         "info": {"emoji": "ℹ️", "label": "INFO"},
     }
     sev = _SEVERITY_MAP.get(severity, _SEVERITY_MAP["info"])
-    emoji = sev["emoji"]
-    label = sev["label"]
-
     blocks = [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"{emoji} *{label}:* {title}",
+                "text": f"{sev['emoji']} *{sev['label']}:* {title}",
             },
         },
     ]
