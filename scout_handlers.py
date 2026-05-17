@@ -1989,7 +1989,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 import random as _random
                 web.chat_postMessage(
                     channel=channel, thread_ts=thread_ts,
-                    text=":test_tube: Scout Self-QA — 15 questions, live results",
+                    text=f":test_tube: Scout Self-QA — {len(_QA_SUITE)} questions, live results",
                     blocks=[
                         {"type": "header", "text": {"type": "plain_text", "text": "Scout Self-QA"}},
                         {"type": "section", "text": {"type": "mrkdwn", "text": "Testing every major intent. Pass = responded + expected content present.\nPosting each result as it completes…"}},
@@ -1998,35 +1998,16 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 )
 
                 results = []
-                groups = {
-                    "Core Health": ["System status", "Dark offers"],
-                    "Offer Intelligence": [
-                        "Offer search — finance vertical",
-                        "Offers for named publisher",
-                        "Supply demand gaps",
-                        "Offer inventory count",
-                        "Pipeline health",
-                    ],
-                    "Revenue & Publisher": [
-                        "WoW revenue drop",
-                        "Publisher health",
-                        "Campaign status check",
-                        "Revenue projection",
-                        "Perkswall engagement",
-                        "Multi-part question decomposition",
-                    ],
-                    "Data Boundaries": [
-                        "Data boundary — SOV",
-                        "Data boundary — strategic intent",
-                    ],
-                }
+                groups: dict[str, list[str]] = {}
+                for _lbl, _q, _h, _cat in _QA_SUITE:
+                    groups.setdefault(_cat, []).append(_lbl)
 
                 # Shuffle order each run so live results stream differently
                 # and the suite clearly feels live rather than replaying cached output.
                 qa_suite = list(_QA_SUITE)
                 _random.shuffle(qa_suite)
 
-                for label, question, pass_hints in qa_suite:
+                for label, question, pass_hints, _category in qa_suite:
                     t0 = _time.monotonic()
                     try:
                         response = ask(question, history=[], user_id="self-qa")
@@ -2075,9 +2056,9 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 # Final scorecard — Block Kit
                 passed_count = sum(1 for r in results if r["passed"])
                 total = len(results)
-                if passed_count >= 13:
+                if passed_count >= total - 2:
                     overall = ":large_green_circle:"
-                elif passed_count >= 9:
+                elif passed_count >= total - 7:
                     overall = ":large_yellow_circle:"
                 else:
                     overall = ":red_circle:"

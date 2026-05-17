@@ -176,7 +176,7 @@ When adding a new Scout capability, touch these files in this order:
 
 | Capability type | Files to touch |
 |---|---|
-| New agent tool (LLM-callable) | `scout_agent.py` (TOOLS list + function + SYSTEM_PROMPT) |
+| New agent tool (LLM-callable) | `scout_agent.py` (TOOLS list + function + SYSTEM_PROMPT); if the tool covers a natural-language question type not yet in `_QA_SUITE`, add an entry with a 4th element (category string) |
 | New monitor signal (monitor-only) | `scout_bot.py` (signal fn + daemon via `_start_daemon` + `_set_force_monitor_fn` registration in `main()`) — `_FORCE_MON_PAT` and `force_run_monitor` auto-discover; no other edits needed |
 | New monitor signal (shared with agent) | `scout_agent.py` (shared `_query_*` function) + `scout_bot.py` (thin wrapper + daemon via `_start_daemon` + `_set_force_monitor_fn` registration in `main()`) |
 | New Slack button handler | `scout_handlers.py` (handler) + `scout_slack_ui.py` (Block Kit card) |
