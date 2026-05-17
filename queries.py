@@ -999,7 +999,7 @@ def cvr_anomaly(
                 JOIN adpx_sdk_sessions s ON i.session_id = s.session_id
                 WHERE toYYYYMM(i.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
                   AND i.created_at >= today() - INTERVAL 7 DAY
-                GROUP BY publisher_id, campaign_id
+                GROUP BY s.user_id, i.campaign_id
                 HAVING impressions_7d >= {min_impressions_7d: Int64}
             ),
             imp_yesterday AS (
@@ -1012,7 +1012,7 @@ def cvr_anomaly(
                 WHERE toYYYYMM(i.created_at) >= toYYYYMM(yesterday())
                   AND i.created_at >= yesterday()
                   AND i.created_at < today()
-                GROUP BY publisher_id, campaign_id
+                GROUP BY s.user_id, i.campaign_id
             ),
             conv_7d AS (
                 SELECT
@@ -1024,7 +1024,7 @@ def cvr_anomaly(
                 JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
                 WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
                   AND cv.created_at >= today() - INTERVAL 7 DAY
-                GROUP BY publisher_id, campaign_id
+                GROUP BY s.user_id, cv.campaign_id
                 HAVING payout_per_conversion >= {min_payout: Float64}
             ),
             conv_yesterday AS (
@@ -1037,7 +1037,7 @@ def cvr_anomaly(
                 WHERE toYYYYMM(cv.created_at) >= toYYYYMM(yesterday())
                   AND cv.created_at >= yesterday()
                   AND cv.created_at < today()
-                GROUP BY publisher_id, campaign_id
+                GROUP BY s.user_id, cv.campaign_id
             ),
             names AS (
                 SELECT
@@ -1053,7 +1053,7 @@ def cvr_anomaly(
                 WHERE deleted_at IS NULL
             )
             SELECT
-                i7.publisher_id,
+                i7.publisher_id                                       AS publisher_id,
                 coalesce(n.publisher_name, toString(i7.publisher_id)) AS publisher_name,
                 toInt64(i7.campaign_id)                               AS campaign_id,
                 coalesce(ca.adv_name, '')                             AS adv_name,
