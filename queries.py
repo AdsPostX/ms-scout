@@ -1128,9 +1128,9 @@ def expiring_campaigns(ch, warning_days: int = 7) -> list[dict]:
                 id                                    AS campaign_id,
                 adv_name,
                 toString(end_date)                    AS end_date,
-                dateDiff('day', today(), end_date)    AS days_remaining
+                dateDiff('day', today(), toDate(end_date))    AS days_remaining
             FROM from_airbyte_campaigns
-            WHERE end_date BETWEEN today() AND today() + INTERVAL {warning_days: Int32} DAY
+            WHERE toDate(end_date) BETWEEN today() AND today() + INTERVAL {warning_days: Int32} DAY
               AND trim(status) = 'Active'
               AND deleted_at IS NULL
         ),
