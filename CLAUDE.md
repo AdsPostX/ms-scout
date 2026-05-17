@@ -62,6 +62,25 @@ See `### Tests-as-behaviors rule` under File-Editing Rules for `scout_slack_ui.p
 **P5 — Self-heal, don't report chores.**
 See `## User-Facing Action Rule` above.
 
+**P6 — Token-efficiency is a first-class constraint.**
+
+*During development (Claude Code sessions):*
+- Never read `scout_agent.py` in full unless you are editing it — grep or use gbrain to find the specific function first
+- Run `/compact` after every completed task, not at 80% context — Scout sessions are expensive
+- Spawn a subagent for file exploration; their context is thrown away when done
+- Don't paste smoke test output back into the main context — note pass/fail, move on
+
+*At runtime (Scout's Anthropic API):*
+- Every new `_query_*` function gets a default `limit: int = 50` param + `ORDER BY` + `truncated: bool` return field; callers that need more pass `limit=N` explicitly
+- Every new tool: justify why it can't reuse an existing one
+- Do not edit the SYSTEM_PROMPT or top-level `scout_agent.py` constants for unrelated reasons — each edit blows the 5-min Anthropic prompt cache
+- The SYSTEM_PROMPT lives in `prompts/scout_system.md` (not inline in `scout_agent.py`) — edit that file only when the prompt actually needs to change
+
+*In PR reviews:*
+- Any PR adding >500 tokens to the static prefix must note the token delta in the PR description
+- Any new `_query_*` without a `limit` param is a PR DoD failure
+
+
 ---
 
 ## PR Definition of Done
