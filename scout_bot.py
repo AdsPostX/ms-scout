@@ -32,7 +32,6 @@ from scout_notion import (
 )
 from scout_slack_ui import (
     _build_monitor_alert_blocks,
-    _format_pulse_blocks,
 )
 from scout_state import (
     _DATA_DIR,
