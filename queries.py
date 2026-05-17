@@ -1040,39 +1040,43 @@ def cvr_anomaly(
                     adv_name
                 FROM from_airbyte_campaigns
                 WHERE deleted_at IS NULL
+            ),
+            final AS (
+                SELECT
+                    i7.publisher_id                                       AS publisher_id,
+                    coalesce(n.publisher_name, toString(i7.publisher_id)) AS publisher_name,
+                    toInt64(i7.campaign_id)                               AS campaign_id,
+                    coalesce(ca.adv_name, '')                             AS adv_name,
+                    round(coalesce(c7.conversions_7d, 0) /
+                          nullIf(i7.impressions_7d, 0), 6)                AS cvr_7d,
+                    round(coalesce(cy.conversions_yesterday, 0) /
+                          nullIf(iy.impressions_yesterday, 0), 6)         AS cvr_yesterday,
+                    round((coalesce(cy.conversions_yesterday, 0) /
+                          nullIf(iy.impressions_yesterday, 0) -
+                          coalesce(c7.conversions_7d, 0) /
+                          nullIf(i7.impressions_7d, 0)) /
+                          nullIf(coalesce(c7.conversions_7d, 0) /
+                          nullIf(i7.impressions_7d, 0), 0) * 100, 2)     AS delta_pct,
+                    i7.impressions_7d,
+                    coalesce(c7.payout_per_conversion, 0)                 AS payout_per_conversion
+                FROM imp_7d i7
+                LEFT JOIN imp_yesterday iy
+                       ON iy.publisher_id = i7.publisher_id
+                      AND iy.campaign_id  = i7.campaign_id
+                LEFT JOIN conv_7d c7
+                       ON c7.publisher_id = i7.publisher_id
+                      AND c7.campaign_id  = i7.campaign_id
+                LEFT JOIN conv_yesterday cy
+                       ON cy.publisher_id = i7.publisher_id
+                      AND cy.campaign_id  = i7.campaign_id
+                LEFT JOIN names n ON n.publisher_id = i7.publisher_id
+                LEFT JOIN campaigns ca ON ca.campaign_id = toInt64(i7.campaign_id)
             )
-            SELECT
-                i7.publisher_id                                       AS publisher_id,
-                coalesce(n.publisher_name, toString(i7.publisher_id)) AS publisher_name,
-                toInt64(i7.campaign_id)                               AS campaign_id,
-                coalesce(ca.adv_name, '')                             AS adv_name,
-                round(coalesce(c7.conversions_7d, 0) /
-                      nullIf(i7.impressions_7d, 0), 6)                AS cvr_7d,
-                round(coalesce(cy.conversions_yesterday, 0) /
-                      nullIf(iy.impressions_yesterday, 0), 6)         AS cvr_yesterday,
-                round((coalesce(cy.conversions_yesterday, 0) /
-                      nullIf(iy.impressions_yesterday, 0) -
-                      coalesce(c7.conversions_7d, 0) /
-                      nullIf(i7.impressions_7d, 0)) /
-                      nullIf(coalesce(c7.conversions_7d, 0) /
-                      nullIf(i7.impressions_7d, 0), 0) * 100, 2)     AS delta_pct,
-                i7.impressions_7d,
-                coalesce(c7.payout_per_conversion, 0)                 AS payout_per_conversion
-            FROM imp_7d i7
-            LEFT JOIN imp_yesterday iy
-                   ON iy.publisher_id = i7.publisher_id
-                  AND iy.campaign_id  = i7.campaign_id
-            LEFT JOIN conv_7d c7
-                   ON c7.publisher_id = i7.publisher_id
-                  AND c7.campaign_id  = i7.campaign_id
-            LEFT JOIN conv_yesterday cy
-                   ON cy.publisher_id = i7.publisher_id
-                  AND cy.campaign_id  = i7.campaign_id
-            LEFT JOIN names n ON n.publisher_id = i7.publisher_id
-            LEFT JOIN campaigns ca ON ca.campaign_id = toInt64(i7.campaign_id)
-            HAVING cvr_7d > 0
-               AND delta_pct <= -{drop_pct: Float64}
-            ORDER BY delta_pct ASC
+        SELECT *
+        FROM final
+        WHERE cvr_7d > 0
+          AND delta_pct <= -{drop_pct: Float64}
+        ORDER BY delta_pct ASC
         """,
         parameters={
             "min_impressions_7d": int(min_impressions_7d),
