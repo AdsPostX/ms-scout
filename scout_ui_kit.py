@@ -175,11 +175,13 @@ def enforce(
 
     # Reserve 1 slot for the overflow indicator
     truncated = blocks[: limit - 1]
+    shown = limit - 1
+    total = len(blocks)
 
     if thread_ts:
-        overflow_text = "Results truncated. Full response is in the thread above."
+        overflow_text = f"Showing {shown} of {total} items. Rest is in the thread above."
     else:
-        overflow_text = "Response too large for this surface. Narrow the query or ask in a thread."
+        overflow_text = f"Too long for this view ({total} items). Narrow the query or ask in a thread."
 
     truncated.append({
         "type": "context",
