@@ -1153,7 +1153,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         if _KIT_ENABLED:
             _sg_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
             _sg_fallback, _sg_blocks = wrap_response(
-                card=_sg_card, surface=Surface.CHANNEL_ROOT,
+                card=_sg_card, surface=Surface.THREAD,
                 suggestions=list(response.payload.get("suggestions", [])),
                 feedback="reaction", query_hash=_placeholder_ts_sg,
                 elapsed_seconds=_elapsed,
@@ -1206,9 +1206,9 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     response_text = response_text[:3000]  # cap for Slack text= limit
     content_blocks_sg = _text_to_blocks(response_text)
     if _KIT_ENABLED:
-        _sg2_card = Card(Severity.INFO, response_text, body="")
+        _sg2_card = Card(Severity.INFO, "", body=response_text)
         _sg2_fallback, _sg2_blocks = wrap_response(
-            card=_sg2_card, surface=Surface.CHANNEL_ROOT,
+            card=_sg2_card, surface=Surface.THREAD,
             suggestions=list(sugg),
             feedback="reaction", query_hash=_placeholder_ts_sg,
             elapsed_seconds=_elapsed,
@@ -1494,7 +1494,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
             response_text = response_text[:3000]  # cap for Slack text= limit
             content_blocks = _text_to_blocks(response_text)
             if _KIT_ENABLED:
-                _ah4_card = Card(Severity.INFO, response_text, body="")
+                _ah4_card = Card(Severity.INFO, "", body=response_text)
                 _ah4_fallback, _ah4_blocks = wrap_response(
                     card=_ah4_card, surface=Surface.DM,
                     suggestions=list(suggestions) if isinstance(suggestions, list) else [],
@@ -2454,7 +2454,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             content_blocks = _text_to_blocks(response_text)
             # No elapsed-time footer in DMs — the reaction disappearing IS the signal
             if _KIT_ENABLED:
-                _dm6_card = Card(Severity.INFO, response_text, body="")
+                _dm6_card = Card(Severity.INFO, "", body=response_text)
                 _dm6_fallback, _dm6_blocks = wrap_response(
                     card=_dm6_card, surface=Surface.DM,
                     suggestions=list(suggestions),
@@ -2632,7 +2632,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         response_text  = _sanitize_slack(response.text)[:3000]
         content_blocks = _text_to_blocks(response_text)
         if _KIT_ENABLED:
-            _ch8_card = Card(Severity.INFO, response_text, body="")
+            _ch8_card = Card(Severity.INFO, "", body=response_text)
             _ch8_fallback, _ch8_blocks = wrap_response(
                 card=_ch8_card, surface=Surface.CHANNEL_ROOT,
                 suggestions=list(suggestions),

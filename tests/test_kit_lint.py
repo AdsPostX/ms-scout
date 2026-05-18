@@ -145,10 +145,14 @@ class TestKitLint(unittest.TestCase):
         for block in blocks:
             text_val = ""
             if isinstance(block.get("text"), dict):
-                text_val = block["text"].get("text", "")
+                text_val += block["text"].get("text", "")
             for el in block.get("elements", []) or []:
                 if isinstance(el, dict):
                     text_val += el.get("text", "") if isinstance(el.get("text"), str) else ""
+            # Also check section.fields (facts block) — same mobile rule applies
+            for field in block.get("fields", []) or []:
+                if isinstance(field, dict):
+                    text_val += field.get("text", "")
             self.assertNotIn(
                 "```", text_val,
                 "Triple-backtick fenced code found in wrap_response output — use inline `code` instead",

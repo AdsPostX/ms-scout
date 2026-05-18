@@ -305,8 +305,12 @@ def wrap_response(
 
     # 1. Headline + body from Card
     blocks: list[dict] = []
-    header_text = f"{card.severity.emoji} *{card.headline}*"
-    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
+    # Skip the header section when headline is empty so body-only cards don't
+    # render as "🔵 **" (empty bold) — callers pass headline="" for plain-text
+    # responses where the full answer goes into body.
+    if card.headline:
+        header_text = f"{card.severity.emoji} *{card.headline}*"
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
 
     if card.body:
         body_text = _escape_md_code(card.body)
@@ -391,7 +395,8 @@ def wrap_response(
     # 6. Budget enforcement — always last
     blocks = enforce(blocks, surface)
 
-    # Fallback text for push previews — always non-empty
-    fallback = card.headline or card.body or f"{card.severity.emoji} Scout update"
+    # Fallback text for push previews — always non-empty; strip markdown for clean preview
+    _raw_fallback = card.headline or card.body or f"{card.severity.emoji} Scout update"
+    fallback = _raw_fallback[:200].strip() or f"{card.severity.emoji} Scout update"
 
     return fallback, blocks
