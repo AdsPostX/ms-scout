@@ -543,6 +543,7 @@ def publisher_campaign_rpms(
             FROM default.adpx_conversionsdetails cv
             PREWHERE cv.pid = {pub_pid: String}
             WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - {extended_days: UInt32})
+              AND cv.created_at >= today() - {extended_days: UInt32}
               AND cv.campaign_id IN {cids: Array(String)}
             GROUP BY cv.campaign_id
         ) cv ON toInt64(imp.campaign_id) = toInt64(cv.campaign_id)
@@ -721,15 +722,15 @@ def publishers_missing_advertiser(ch, active_pub_ids: list[int]) -> list[dict]:
     """
     rows = ch.query(
         """
-        SELECT s.user_id, u.organization, count() AS sessions_30d
-        FROM adpx_sdk_sessions s
         -- mv_adpx_users is a lightweight MV (id, organization, is_test, parent_id only)
         -- — prefer over from_airbyte_users for simple name lookups.
+        SELECT s.user_id, coalesce(u.organization, '') AS organization, count() AS sessions_30d
+        FROM adpx_sdk_sessions s
         LEFT JOIN mv_adpx_users u ON s.user_id = u.id
         WHERE s.created_at >= today() - 30
           AND toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
           AND s.user_id NOT IN {active_ids: Array(Int64)}
-        GROUP BY s.user_id, u.organization
+        GROUP BY s.user_id, coalesce(u.organization, '')
         HAVING sessions_30d > 1000
         ORDER BY sessions_30d DESC
         LIMIT 20
@@ -970,7 +971,7 @@ def low_fill_publishers(ch, placements: list[str]) -> list[dict]:
         )
         SELECT
             s.publisher_id,
-            u.organization AS publisher_name,
+            coalesce(u.organization, '') AS publisher_name,
             s.placement,
             s.sessions_30d,
             coalesce(i.sessions_with_imps, 0) AS sessions_with_imps,
@@ -980,7 +981,8 @@ def low_fill_publishers(ch, placements: list[str]) -> list[dict]:
         FROM sessions_agg s
         LEFT JOIN imps_agg i ON i.publisher_id = s.publisher_id
         LEFT JOIN rev_agg r  ON r.publisher_id = s.publisher_id
-        LEFT JOIN from_airbyte_users u ON s.publisher_id = u.id
+        -- mv_adpx_users is a lightweight MV (id, organization, is_test, parent_id only)
+        LEFT JOIN mv_adpx_users u ON toUInt64(s.publisher_id) = u.id
         WHERE coalesce(i.sessions_with_imps, 0) * 100.0 / s.sessions_30d < 15
         ORDER BY missed_sessions DESC
         LIMIT 15
@@ -1043,14 +1045,14 @@ def revenue_opportunities(ch) -> list[dict]:
             -- mv_adpx_users is a lightweight MV (id, organization, is_test, parent_id only)
             -- — prefer over from_airbyte_users for simple name lookups.
             SELECT
-                toInt64(s.user_id) AS publisher_id,
-                u.organization     AS publisher_name,
-                count()            AS sessions_30d
+                toInt64(s.user_id)              AS publisher_id,
+                coalesce(u.organization, '')    AS publisher_name,
+                count()                         AS sessions_30d
             FROM adpx_sdk_sessions s
             LEFT JOIN mv_adpx_users u ON s.user_id = u.id
             WHERE toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
               AND s.created_at >= today() - 30
-            GROUP BY s.user_id, u.organization
+            GROUP BY s.user_id, coalesce(u.organization, '')
             HAVING sessions_30d > 100000
         ),
         active_pairs AS (
