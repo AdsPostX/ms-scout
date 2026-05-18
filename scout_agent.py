@@ -7,6 +7,7 @@ Performance benchmarks: queried from ClickHouse at startup, cached in memory.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
@@ -127,29 +128,39 @@ _SCOUT_THRESHOLDS_FALLBACK: dict = {
 }
 
 
+def _load_base_thresholds() -> dict:
+    """Allowlist of valid `section.key` pairs: fallback ← config/scout_thresholds.json.
+
+    Excludes runtime overrides so write-validation cannot be tricked by a previously
+    persisted bad key in data/threshold_overrides.json.
+    """
+    try:
+        if not _SCOUT_THRESHOLDS_FILE.exists():
+            log.warning(f"[config] {_SCOUT_THRESHOLDS_FILE} missing — using fallback thresholds")
+            base = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
+        else:
+            loaded = json.loads(_SCOUT_THRESHOLDS_FILE.read_text())
+            loaded.pop("_doc", None)
+            base = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
+            for section, values in loaded.items():
+                if section in base and isinstance(values, dict):
+                    base[section].update(values)
+                else:
+                    base[section] = values
+    except Exception as e:
+        log.warning(f"[config] _load_base_thresholds() failed on config file, using fallback: {e}")
+        base = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
+    return base
+
+
 def _load_thresholds() -> dict:
-    """Load Scout thresholds: fallback ← config/scout_thresholds.json ← data/threshold_overrides.json.
+    """Load Scout thresholds: base schema ← data/threshold_overrides.json.
 
     Runtime overrides from the `set_threshold` agent tool are layered last, so they
     win over the git-tracked config. Override file shape:
       {"signals": {"cap_alert_pct": {"value": 80, "set_by": "U123", "set_at": "...", "reason": "..."}}}
     """
-    try:
-        if not _SCOUT_THRESHOLDS_FILE.exists():
-            log.warning(f"[config] {_SCOUT_THRESHOLDS_FILE} missing — using fallback thresholds")
-            merged = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
-        else:
-            loaded = json.loads(_SCOUT_THRESHOLDS_FILE.read_text())
-            loaded.pop("_doc", None)
-            merged = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
-            for section, values in loaded.items():
-                if section in merged and isinstance(values, dict):
-                    merged[section].update(values)
-                else:
-                    merged[section] = values
-    except Exception as e:
-        log.warning(f"[config] _load_thresholds() failed on config file, using fallback: {e}")
-        merged = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
+    merged = _load_base_thresholds()
 
     # Layer runtime overrides on top (lazy import — scout_state has no scout_agent dep)
     try:
@@ -169,6 +180,9 @@ def _load_thresholds() -> dict:
     return merged
 
 
+# Base schema (no overrides) — the source of truth for write-validation in
+# set_threshold. SCOUT_THRESHOLDS below is the merged read-view callers actually see.
+_BASE_THRESHOLDS: dict = _load_base_thresholds()
 SCOUT_THRESHOLDS: dict = _load_thresholds()
 
 
@@ -2460,6 +2474,24 @@ def set_threshold(section: str = "", key: str = "", value=None, reason: str = ""
     if not reason or not reason.strip():
         return {"ok": False, "error": "missing_reason",
                 "message": "reason is required so the changelog stays useful."}
+
+    # Reject unknown keys with closest-match suggestion. Validate against the
+    # BASE schema (fallback + config file), not the post-override merge — otherwise
+    # a previously persisted typo in data/threshold_overrides.json would mask
+    # itself by appearing "known."
+    known_section = _BASE_THRESHOLDS.get(section)
+    if not isinstance(known_section, dict):
+        sections = list(_BASE_THRESHOLDS.keys())
+        suggestions = difflib.get_close_matches(section, sections, n=1, cutoff=0.6)
+        hint = f" Did you mean `{suggestions[0]}`?" if suggestions else ""
+        return {"ok": False, "error": "unknown_section",
+                "message": f"Unknown section `{section}` (valid: {', '.join(sections)}).{hint}"}
+    if key not in known_section:
+        keys = list(known_section.keys())
+        suggestions = difflib.get_close_matches(key, keys, n=1, cutoff=0.6)
+        hint = f" Did you mean `{section}.{suggestions[0]}`?" if suggestions else ""
+        return {"ok": False, "error": "unknown_key",
+                "message": f"Unknown key `{section}.{key}`.{hint}"}
 
     # Capture prior value (post-override merge — what callers actually saw)
     prior = SCOUT_THRESHOLDS.get(section, {}).get(key) if isinstance(SCOUT_THRESHOLDS.get(section), dict) else None
@@ -4802,6 +4834,163 @@ def _select_model(user_message: str) -> str:
     return "claude-sonnet-4-6"
 
 
+# ── Deterministic pre-router ─────────────────────────────────────────────────
+# Reliable routing for control-surface verbs (threshold list/history/config/set).
+# Bypasses the LLM for exact-match phrasing so `@scout alert thresholds` always
+# lands on list_thresholds(), not get_scout_status(). LLM stays as fallback for
+# anything not matched here.
+_ROUTE_KEYWORDS: dict[str, str] = {
+    "alert thresholds":   "list_thresholds",
+    "thresholds":         "list_thresholds",
+    "show thresholds":    "list_thresholds",
+    "current thresholds": "list_thresholds",
+    "threshold config":   "list_thresholds",
+    "scout config":       "get_scout_config",
+    "settings":           "list_thresholds",
+    "config":             "get_scout_config",
+    "status":             "get_scout_status",
+    "threshold history":  "get_threshold_history",
+    "overrides history":  "get_threshold_history",
+}
+
+_SET_RE_FULL  = re.compile(
+    r"^set\s+([\w.]+)\s+to\s+(-?\d+(?:\.\d+)?|true|false)\s+because\s+(.+)$",
+    re.IGNORECASE,
+)
+_SET_RE_SHORT = re.compile(
+    r"^set\s+([\w.]+)\s+to\s+(-?\d+(?:\.\d+)?|true|false)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _coerce_threshold_value(raw: str):
+    """Parse a stringified threshold value into bool/int/float, falling back to
+    the raw string if no numeric form matches. `"true"`/`"false"` are case-
+    insensitive; `.` anywhere in the input forces float interpretation."""
+    low = raw.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if "." in raw:
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+class AmbiguousThresholdKey(ValueError):
+    """Bare key matches more than one section — caller must disambiguate."""
+    def __init__(self, key: str, sections: list[str]):
+        self.key = key
+        self.sections = sections
+        super().__init__(
+            f"`{key}` exists in multiple sections ({', '.join(sections)}); "
+            f"qualify it as `<section>.{key}`."
+        )
+
+
+def _split_dotted_key(dotted: str) -> tuple[str, str]:
+    """Split 'signals.cap_alert_pct' → ('signals', 'cap_alert_pct').
+
+    Bare keys are resolved by searching the base schema for a unique match
+    across sections. Raises AmbiguousThresholdKey if multiple sections own a
+    key with the same name. Falls back to ('signals', dotted) if no section
+    owns the key — `set_threshold` will then surface a proper unknown-key
+    error with a suggestion."""
+    if "." in dotted:
+        section, _, key = dotted.partition(".")
+        return section, key
+    owners = [sec for sec, body in _BASE_THRESHOLDS.items()
+              if isinstance(body, dict) and dotted in body]
+    if len(owners) == 1:
+        return owners[0], dotted
+    if len(owners) > 1:
+        raise AmbiguousThresholdKey(dotted, owners)
+    return "signals", dotted
+
+
+def _format_dict_response(title: str, data: dict) -> str:
+    """Slack-friendly JSON dump for control-surface tool results."""
+    try:
+        body = json.dumps(data, indent=2, default=str, sort_keys=True)
+    except Exception:
+        body = repr(data)
+    return f"*{title}*\n```\n{body}\n```"
+
+
+def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]:
+    """Match raw user text against control-surface verbs and execute directly.
+
+    Returns AskResult on hit; None to let the LLM handle the query. Must be
+    called on the RAW message (no date/caller/channel prefix) so exact-match
+    phrases like `alert thresholds` survive.
+    """
+    raw = re.sub(r"<@[A-Z0-9]+>", "", user_message or "").strip()
+    if not raw:
+        return None
+    low = raw.lower()
+
+    # set_threshold — admin-gated, deterministic arg parsing
+    m = _SET_RE_FULL.match(raw)
+    if m:
+        dotted, raw_val, reason = m.group(1), m.group(2), m.group(3).strip()
+        try:
+            section, key = _split_dotted_key(dotted)
+        except AmbiguousThresholdKey as exc:
+            return AskResult(
+                text=f":warning: {exc}",
+                tools_called=(), duration_ms=0,
+            )
+        value = _coerce_threshold_value(raw_val)
+        result = set_threshold(section=section, key=key, value=value,
+                               reason=reason, _caller_user_id=user_id)
+        if result.get("ok"):
+            text = (f":white_check_mark: `{section}.{key}` set: "
+                    f"`{result.get('prior')}` → `{result.get('value')}` "
+                    f"(reason: {result.get('reason')}).")
+        else:
+            text = f":warning: {result.get('message') or result.get('error', 'set_threshold failed')}"
+        return AskResult(text=text, tools_called=("set_threshold",), duration_ms=0)
+
+    if _SET_RE_SHORT.match(raw):
+        return AskResult(
+            text=(":warning: Reason required: please re-send as "
+                  "`set <key> to <value> because <reason>`."),
+            tools_called=(), duration_ms=0,
+        )
+
+    tool_name = _ROUTE_KEYWORDS.get(low)
+    if not tool_name:
+        return None
+
+    tool = TOOL_MAP.get(tool_name)
+    if tool is None:
+        return None
+    # Re-raise tool failures rather than silently falling back to the LLM —
+    # the pre-router exists to guarantee determinism for control-surface verbs.
+    # A silent fall-through would let a transient ClickHouse blip return free-form
+    # prose for `@scout status`, which is exactly the misroute we shipped this fix
+    # to prevent. Let the caller decide how to surface the failure.
+    data = tool()
+
+    titles = {
+        "list_thresholds":       "Scout thresholds",
+        "get_scout_config":      "Scout config",
+        "get_scout_status":      "Scout status",
+        "get_threshold_history": "Threshold history",
+    }
+    return AskResult(
+        text=_format_dict_response(titles.get(tool_name, tool_name), data),
+        tools_called=(tool_name,),
+        duration_ms=0,
+    )
+
+
 def ask(user_message: str, history: list | None = None, user_id: str = "",
         permalink: str = "", user_tz: str = "") -> AskResult:
     """
@@ -4819,6 +5008,18 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     _tools_called: list = []
     def _dur() -> int:
         return int((time.monotonic() - _start_ms) * 1000)
+
+    # Deterministic pre-router: control-surface verbs (thresholds/config/status/set)
+    # are matched against the RAW user_message before any LLM call. Context prefixes
+    # added below would defeat exact-match. LLM stays as fallback for misses.
+    _routed = _route_deterministic(user_message, user_id)
+    if _routed is not None:
+        return AskResult(
+            text=_routed.text,
+            tools_called=_routed.tools_called,
+            duration_ms=_dur(),
+            payload=_routed.payload,
+        )
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
