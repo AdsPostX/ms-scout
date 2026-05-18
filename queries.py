@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -175,6 +176,7 @@ ORDER BY day
 """.strip()
 
     series_map: dict[date, int] = {}
+    series_query_ok = True
     try:
         for row in ch.query(series_sql).result_rows:
             day_val, rev_val = row
@@ -182,14 +184,17 @@ ORDER BY day
                 day_val = day_val.date()
             series_map[day_val] = int(float(rev_val or 0) * 100)
     except Exception:
+        series_query_ok = False
         log.exception("scoreboard_rollup: series query failed, sparkline will be empty")
 
-    today_ct = datetime.utcnow().date()
+    # Use CT wall-clock date to match the CH query's toDate(toTimeZone(..., 'America/Chicago'))
+    today_ct = datetime.now(ZoneInfo("America/Chicago")).date()
     series: list[int] = []
-    for offset in range(7, 0, -1):
-        d = today_ct - timedelta(days=offset)
-        series.append(series_map.get(d, 0))
-    series.append(int(float(rev_today or 0) * 100))
+    if series_query_ok:
+        for offset in range(7, 0, -1):
+            d = today_ct - timedelta(days=offset)
+            series.append(series_map.get(d, 0))
+        series.append(int(float(rev_today or 0) * 100))
 
     return ScoreboardRollup(
         revenue_today_cents=int(float(rev_today or 0) * 100),

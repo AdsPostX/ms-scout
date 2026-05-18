@@ -1554,17 +1554,22 @@ def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
         blocks = [{"type": "section",
                    "text": {"type": "mrkdwn", "text": "🟢  *All systems normal.* No alerts firing."}}]
     else:
-        from datetime import timezone as _tz
+        from datetime import datetime as _dt, timezone as _tz
         blocks = []
         for alert in firing:
             name = alert.alert_name.replace("_", " ").title()
-            ts   = int(alert.last_change.replace(tzinfo=_tz.utc).timestamp())
+            last_change = getattr(alert, "last_change", None)
+            if isinstance(last_change, _dt):
+                aware = last_change.astimezone(_tz.utc) if last_change.tzinfo else last_change.replace(tzinfo=_tz.utc)
+                since_text = f"_Since <!date^{int(aware.timestamp())}^{{time}} on {{date_short}}|just now>_"
+            else:
+                since_text = "_Since just now_"
             ctx  = alert.context or {}
             detail_parts = [f"*{name}*"]
             if ctx:
                 for k, v in list(ctx.items())[:3]:
                     detail_parts.append(f"{k.replace('_', ' ')}: {v}")
-            detail_parts.append(f"_Since <!date^{ts}^{{time}} on {{date_short}}|just now>_")
+            detail_parts.append(since_text)
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": "\n".join(detail_parts)},
