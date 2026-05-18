@@ -4802,6 +4802,131 @@ def _select_model(user_message: str) -> str:
     return "claude-sonnet-4-6"
 
 
+# ── Deterministic pre-router ─────────────────────────────────────────────────
+# Reliable routing for control-surface verbs (threshold list/history/config/set).
+# Bypasses the LLM for exact-match phrasing so `@scout alert thresholds` always
+# lands on list_thresholds(), not get_scout_status(). LLM stays as fallback for
+# anything not matched here.
+_ROUTE_KEYWORDS: dict[str, str] = {
+    "alert thresholds":   "list_thresholds",
+    "thresholds":         "list_thresholds",
+    "show thresholds":    "list_thresholds",
+    "current thresholds": "list_thresholds",
+    "threshold config":   "list_thresholds",
+    "scout config":       "list_thresholds",
+    "settings":           "list_thresholds",
+    "config":             "get_scout_config",
+    "status":             "get_scout_status",
+    "threshold history":  "get_threshold_history",
+    "overrides history":  "get_threshold_history",
+}
+
+_SET_RE_FULL  = re.compile(
+    r"^set\s+([\w.]+)\s+to\s+(-?\d+(?:\.\d+)?|true|false)\s+because\s+(.+)$",
+    re.IGNORECASE,
+)
+_SET_RE_SHORT = re.compile(
+    r"^set\s+([\w.]+)\s+to\s+(-?\d+(?:\.\d+)?|true|false)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _coerce_threshold_value(raw: str):
+    low = raw.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if "." in raw:
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+def _split_dotted_key(dotted: str) -> tuple[str, str]:
+    """Split 'signals.cap_alert_pct' → ('signals', 'cap_alert_pct'). Bare key
+    falls back to 'signals' (the most common section)."""
+    if "." in dotted:
+        section, _, key = dotted.partition(".")
+        return section, key
+    return "signals", dotted
+
+
+def _format_dict_response(title: str, data: dict) -> str:
+    """Slack-friendly JSON dump for control-surface tool results."""
+    try:
+        body = json.dumps(data, indent=2, default=str, sort_keys=True)
+    except Exception:
+        body = repr(data)
+    return f"*{title}*\n```\n{body}\n```"
+
+
+def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]:
+    """Match raw user text against control-surface verbs and execute directly.
+
+    Returns AskResult on hit; None to let the LLM handle the query. Must be
+    called on the RAW message (no date/caller/channel prefix) so exact-match
+    phrases like `alert thresholds` survive.
+    """
+    raw = re.sub(r"<@[A-Z0-9]+>", "", user_message or "").strip()
+    if not raw:
+        return None
+    low = raw.lower()
+
+    # set_threshold — admin-gated, deterministic arg parsing
+    m = _SET_RE_FULL.match(raw)
+    if m:
+        dotted, raw_val, reason = m.group(1), m.group(2), m.group(3).strip()
+        section, key = _split_dotted_key(dotted)
+        value = _coerce_threshold_value(raw_val)
+        result = set_threshold(section=section, key=key, value=value,
+                               reason=reason, _caller_user_id=user_id)
+        if result.get("ok"):
+            text = (f":white_check_mark: `{section}.{key}` set: "
+                    f"`{result.get('prior')}` → `{result.get('value')}` "
+                    f"(reason: {result.get('reason')}).")
+        else:
+            text = f":warning: {result.get('message') or result.get('error', 'set_threshold failed')}"
+        return AskResult(text=text, tools_called=("set_threshold",), duration_ms=0)
+
+    if _SET_RE_SHORT.match(raw):
+        return AskResult(
+            text=(":warning: Reason required: please re-send as "
+                  "`set <key> to <value> because <reason>`."),
+            tools_called=(), duration_ms=0,
+        )
+
+    tool_name = _ROUTE_KEYWORDS.get(low)
+    if not tool_name:
+        return None
+
+    tool = TOOL_MAP.get(tool_name)
+    if tool is None:
+        return None
+    try:
+        data = tool()
+    except Exception as e:
+        log.warning(f"_route_deterministic: {tool_name} failed: {e}")
+        return None
+
+    titles = {
+        "list_thresholds":       "Scout thresholds",
+        "get_scout_config":      "Scout config",
+        "get_scout_status":      "Scout status",
+        "get_threshold_history": "Threshold history",
+    }
+    return AskResult(
+        text=_format_dict_response(titles.get(tool_name, tool_name), data),
+        tools_called=(tool_name,),
+        duration_ms=0,
+    )
+
+
 def ask(user_message: str, history: list | None = None, user_id: str = "",
         permalink: str = "", user_tz: str = "") -> AskResult:
     """
@@ -4819,6 +4944,18 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     _tools_called: list = []
     def _dur() -> int:
         return int((time.monotonic() - _start_ms) * 1000)
+
+    # Deterministic pre-router: control-surface verbs (thresholds/config/status/set)
+    # are matched against the RAW user_message before any LLM call. Context prefixes
+    # added below would defeat exact-match. LLM stays as fallback for misses.
+    _routed = _route_deterministic(user_message, user_id)
+    if _routed is not None:
+        return AskResult(
+            text=_routed.text,
+            tools_called=_routed.tools_called,
+            duration_ms=_dur(),
+            payload=_routed.payload,
+        )
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
