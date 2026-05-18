@@ -23,13 +23,13 @@ import unittest
 _REPO = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
 
-# Match smoke_test.py's pattern — load .env so creds populate when running
-# locally. CI without a .env file silently skips below.
-try:
-    from dotenv import load_dotenv
-    load_dotenv(_REPO / ".env", override=True)
-except Exception:
-    pass
+# Load .env so creds populate when running locally. python-dotenv is a
+# required dependency (see requirements.txt); load_dotenv() returns False
+# (no exception) when the .env file is absent, so no try/except needed
+# for the missing-file case. CI without a .env silently skips below
+# because CH_HOST will be unset.
+from dotenv import load_dotenv
+load_dotenv(_REPO / ".env", override=True)
 
 _HAS_CH = bool(os.getenv("CH_HOST"))
 

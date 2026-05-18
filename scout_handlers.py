@@ -82,7 +82,28 @@ def _set_force_monitor_fn(name: str, fn) -> None:
 # CH-pressure days surface as a friendly degraded message, not an infinite
 # spinner. The orphaned ask() thread is allowed to complete in the
 # background (daemon=True so it dies on process exit).
-ASK_TIMEOUT_S = int(os.getenv("SCOUT_ASK_TIMEOUT_S", "90"))
+# Defensive parse: a bad SCOUT_ASK_TIMEOUT_S (e.g. "90s", "", "0") would
+# either crash the module at import or time out every request instantly.
+# Clamp to a sane minimum so misconfiguration degrades to "slow" not "broken".
+_raw_ask_timeout_s = os.getenv("SCOUT_ASK_TIMEOUT_S", "90")
+try:
+    ASK_TIMEOUT_S = int(_raw_ask_timeout_s)
+    if ASK_TIMEOUT_S <= 0:
+        raise ValueError
+except ValueError:
+    log.warning(
+        "Invalid SCOUT_ASK_TIMEOUT_S=%r; defaulting to 90",
+        _raw_ask_timeout_s,
+    )
+    ASK_TIMEOUT_S = 90
+
+# Bounded concurrency for in-flight ask() workers. Under sustained CH
+# pressure, timed-out workers keep running in the background (daemon=True);
+# without a cap they accumulate every time a user retries. Cap at 3 so we
+# shed load fast rather than burning CH harder. acquire(blocking=False)
+# raises AskTimeout immediately when the cap is hit — user sees the
+# friendly degraded message instead of an infinite spinner.
+_ASK_SEMAPHORE = threading.BoundedSemaphore(3)
 
 
 class AskTimeout(Exception):
@@ -96,17 +117,30 @@ def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
     timeout_s. The worker thread keeps running (daemon) so the agent
     can finish in the background, but the caller stops waiting.
 
+    Bounded by _ASK_SEMAPHORE (cap 3) so timed-out workers don't pile up
+    under sustained CH pressure. If the cap is full, raise AskTimeout
+    immediately rather than queueing.
+
     Use this in any user-facing path where an infinite spinner is worse
     than a 'try again in 10-15m' message: App Home tries, channel
     @mentions, DMs.
     """
+    if not _ASK_SEMAPHORE.acquire(blocking=False):
+        log.warning(
+            "ask() semaphore full (>=3 inflight); shedding query=%r",
+            query[:80],
+        )
+        raise AskTimeout("ask() concurrency cap reached")
+
     result_box: dict = {}
 
     def _worker():
         try:
             result_box["resp"] = ask(query, **kwargs)
-        except BaseException as e:  # surface agent-side errors to caller
+        except Exception as e:  # surface agent-side errors; let SystemExit/KeyboardInterrupt through
             result_box["err"] = e
+        finally:
+            _ASK_SEMAPHORE.release()
 
     t = threading.Thread(target=_worker, daemon=True, name="ask-worker")
     t.start()
@@ -2309,10 +2343,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 _uname = user_id
             _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
         except AskTimeout:
-            try:
-                web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
-            except Exception:
-                pass
+            # reactions_remove is handled by the finally block below
             web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text="ClickHouse is under pressure — try again in 10–15 minutes.",
@@ -2322,14 +2353,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             return
         except Exception as e:
             log.error(f"Agent error (DM): {e}", exc_info=True)
-            try:
-                web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
-            except Exception:
-                pass
             web.chat_postMessage(channel=channel, text=f":warning: Something went wrong — `{e}`")
             return
         finally:
-            # Always remove the 🤔 — even on error — so it doesn't hang
+            # Single point of cleanup: always remove the 🤔 — even on error
+            # — so it doesn't hang on the user's message.
             try:
                 web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
             except Exception:
