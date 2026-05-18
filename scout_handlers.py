@@ -1989,8 +1989,12 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 alerts = current_state()
             except Exception:
                 log.exception("app_home_opened: alert_registry.current_state failed")
+            queue_items = None
             try:
                 queue_items = _fetch_notion_queue_items()
+            except Exception:
+                log.exception("app_home_opened: _fetch_notion_queue_items failed for %s", user_id)
+            try:
                 web.views_publish(
                     user_id=user_id,
                     view=_build_home_view(queue_items=queue_items, rollup=rollup, alerts=alerts),
