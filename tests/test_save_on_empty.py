@@ -36,7 +36,7 @@ def _run_one_iteration(
 ):
     """Drive _run_with_web through exactly one inner-loop iteration.
 
-    Returns (save_state_calls, post_calls, dq_advisory_calls).
+    Returns (save_state_calls, post_calls).
     """
     import datetime as _dtmod
     from datetime import datetime as _real_dt
