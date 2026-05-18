@@ -70,6 +70,34 @@ class TestKitLint(unittest.TestCase):
             f"MONITOR_ALARM budget is {cap}. enforce() not wired correctly.",
         )
 
+    def test_home_view_action_ids_are_unique(self):
+        """Slack mobile silently drops clicks when action_ids repeat in a
+        single view. Regression guard for the 5-button Home that all shared
+        action_id='home_try_query' and broke on iOS."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit", "scout_slack_ui"):
+            sys.modules.pop(mod, None)
+        from scout_slack_ui import _build_home_view
+
+        view = _build_home_view()
+        seen: dict[str, int] = {}
+        for block in view.get("blocks", []):
+            # actions block elements
+            for el in block.get("elements", []) or []:
+                aid = el.get("action_id") if isinstance(el, dict) else None
+                if aid:
+                    seen[aid] = seen.get(aid, 0) + 1
+            # section.accessory
+            acc = block.get("accessory") if isinstance(block, dict) else None
+            if isinstance(acc, dict) and acc.get("action_id"):
+                aid = acc["action_id"]
+                seen[aid] = seen.get(aid, 0) + 1
+        dupes = {k: v for k, v in seen.items() if v > 1}
+        self.assertFalse(
+            dupes,
+            f"Duplicate action_ids in Home view (mobile drops clicks): {dupes}",
+        )
+
     def test_monitor_alert_passthrough_when_kit_disabled(self):
         """Kill switch sanity: SCOUT_KIT_ENABLED=false must not crash and
         must return blocks (no enforcement, legacy behavior)."""

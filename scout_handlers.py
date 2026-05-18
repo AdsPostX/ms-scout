@@ -1172,7 +1172,11 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         return
 
     # ── App Home "Try it" buttons ─────────────────────────────────────────────
-    if action_id == "home_try_query":
+    # action_ids: home_try_query_hero, home_try_query_0..N (unique per
+    # button so iOS doesn't drop clicks). Backwards-compatible with the
+    # legacy bare "home_try_query" id in case any live message still
+    # references it.
+    if action_id.startswith("home_try_query"):
         user_id = payload.get("user", {}).get("id", "")
         query   = action.get("value", "").strip()
         if user_id and query:
@@ -1393,6 +1397,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
     /scout-queue  — Show the current demand queue with Notion links
     /scout-enter  — MS Platform entry card for a queued offer
     /scout-status — System health: benchmark freshness, offer count, ClickHouse status
+    /scout-help   — Ephemeral reference card (capabilities, commands, limits)
     """
     from scout_agent import get_demand_queue_status, get_scout_status, get_publisher_competitive_landscape
 
@@ -1576,10 +1581,48 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": full_text}}],
             )
 
+        elif command == "/scout-help":
+            help_blocks = [
+                {"type": "header", "text": {"type": "plain_text",
+                    "text": "Scout — quick reference", "emoji": False}},
+                {"type": "section", "text": {"type": "mrkdwn", "text":
+                    "*Talk to Scout in any channel or thread*\n"
+                    "Mention `@Scout` followed by your question in plain English. "
+                    "Scout remembers context within a thread, so you can follow up."}},
+                {"type": "divider"},
+                {"type": "section", "text": {"type": "mrkdwn", "text":
+                    "*Slash commands — responses are private to you*\n"
+                    "• `/scout-pub [publisher]` — revenue health, active offers, what to pitch\n"
+                    "• `/scout-enter [advertiser]` — campaign entry card for the MS platform\n"
+                    "• `/scout-queue` — what's pending in the pipeline\n"
+                    "• `/scout-status` — system health + data freshness\n"
+                    "• `/scout-help` — this card"}},
+                {"type": "divider"},
+                {"type": "section", "text": {"type": "mrkdwn", "text":
+                    "*Things Scout is good at*\n"
+                    "• Revenue and conversion analysis (this week vs last, drops, anomalies)\n"
+                    "• Publisher health (sessions, RPM, placements, what's serving)\n"
+                    "• Campaign briefs and offer search across networks\n"
+                    "• Pipeline questions (what's approved, what's expiring)"}},
+                {"type": "section", "text": {"type": "mrkdwn", "text":
+                    "*Things Scout is not for*\n"
+                    "• Strategic intent or contract terms (lives in your head, not in CH)\n"
+                    "• Share of voice vs competitors (we only see our own data)\n"
+                    "• Real-time trading decisions (data refreshes daily)"}},
+                {"type": "divider"},
+                {"type": "context", "elements": [{"type": "mrkdwn", "text":
+                    "_Stuck? React 👎 on any Scout reply to flag a miss, "
+                    "or ✏️ to teach Scout the right answer._"}]},
+            ]
+            web.chat_postEphemeral(
+                channel=channel, user=user_id,
+                text="Scout — quick reference", blocks=help_blocks,
+            )
+
         else:
             web.chat_postEphemeral(
                 channel=channel, user=user_id,
-                text=f"Unknown command `{command}`. Try `/scout-pub`, `/scout-queue`, `/scout-enter`, or `/scout-status`.",
+                text=f"Unknown command `{command}`. Try `/scout-help`, `/scout-pub`, `/scout-queue`, `/scout-enter`, or `/scout-status`.",
             )
     except Exception as e:
         log.error(f"_handle_slash_command error ({command}): {e}")
