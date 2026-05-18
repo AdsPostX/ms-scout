@@ -259,21 +259,34 @@ class TestKitLint(unittest.TestCase):
         )
 
     def test_long_body_preserves_feedback(self):
-        """5000-char body must not push the feedback block past enforce() truncation.
-        Feedback is placed before suggestions in composition order specifically to
-        survive budget enforcement."""
+        """enforce() must not truncate the feedback row when blocks exceed the surface budget.
+        Uses Surface.DM (budget=6) and a card with body + facts + card.actions + elapsed +
+        suggestions — 7 blocks total — so enforce() actually fires. Feedback is placed before
+        suggestions in composition order specifically to survive truncation; this test verifies
+        that guarantee holds under real budget pressure."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
         for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
         from scout_ui_kit import Card, Severity, Surface, wrap_response
-        long_body = "x" * 5000
+        # Build a card that produces 7 blocks on Surface.DM (budget=6):
+        # header + body + facts + feedback + suggestions + elapsed + card.actions = 7
+        card = Card(
+            Severity.INFO,
+            "Revenue summary",
+            body="x" * 200,
+            facts=[("Publisher", "Pub 1247"), ("Fill %", "62%")],
+            actions=[("View full", "drill_down_view", "val", "")],
+        )
         _, blocks = wrap_response(
-            card=Card(Severity.INFO, "Revenue summary", body=long_body),
-            surface=Surface.CHANNEL_ROOT,
+            card=card,
+            surface=Surface.DM,
             feedback="button",
             query_hash="ts_123",
             suggestions=["Follow-up 1", "Follow-up 2"],
+            elapsed_seconds=3,
         )
+        # Budget is 6 — enforce() must have fired (truncated to 5 + 1 overflow context)
+        self.assertLessEqual(len(blocks), 6, "enforce() did not fire — test setup is invalid")
         has_feedback = any(
             b.get("type") == "actions" and any(
                 e.get("action_id", "").startswith("scout_feedback")

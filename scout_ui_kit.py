@@ -290,8 +290,10 @@ def wrap_response(
                           Pass [] or None to emit zero actions blocks.
         feedback:         "reaction" — no button row, caller should seed 👎 reaction.
                           "button"   — include 👎 Off + ✏️ Correct this actions block.
+                                       NOTE: requires query_hash; silently omitted if None.
                           "none"     — omit feedback entirely.
         query_hash:       Message ts / hash used as button value for feedback routing.
+                          Required when feedback="button"; pass None to suppress buttons.
         elapsed_seconds:  If provided, appended as a context footer (ops surfaces only;
                           omit on DM to keep output clean).
 
@@ -311,7 +313,10 @@ def wrap_response(
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body_text}})
 
     if card.facts:
-        fields = [{"type": "mrkdwn", "text": f"*{lbl}*\n{val}"} for lbl, val in card.facts[:10]]
+        fields = [
+            {"type": "mrkdwn", "text": f"*{lbl}*\n{_escape_md_code(str(val))}"}
+            for lbl, val in card.facts[:10]
+        ]
         blocks.append({"type": "section", "fields": fields})
 
     # 2. Feedback row (protected — placed before suggestions so enforce() keeps it)
@@ -366,6 +371,9 @@ def wrap_response(
         })
 
     # 5. Card-level extra actions (e.g. drill-down CTAs from Card.actions)
+    # Intentionally not subject to MAX_ACTIONS: these are specific CTAs the caller
+    # attached to the Card (e.g. "View in ClickHouse"), not open-ended suggestions.
+    # Budget enforcement via enforce() is the final backstop.
     if card.actions:
         elements = []
         for label, action_id, value, style in card.actions[:25]:

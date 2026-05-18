@@ -2427,7 +2427,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             if _KIT_ENABLED:
                 _dm5_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
                 _dm5_fallback, _dm5_blocks = wrap_response(
-                    card=_dm5_card, surface=Surface.CHANNEL_ROOT,
+                    card=_dm5_card, surface=Surface.DM,
                     suggestions=list(response.payload.get("suggestions", [])),
                     feedback="reaction", query_hash=msg_ts,
                     elapsed_seconds=_elapsed,
