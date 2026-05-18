@@ -198,29 +198,64 @@ class TestKitLint(unittest.TestCase):
 
     def test_handlers_no_direct_builder_calls(self):
         """scout_handlers.py must not call _build_feedback_buttons or _build_suggestion_buttons
-        directly — all calls must go through wrap_response. Uses AST walk (not grep)
-        to avoid false positives from docstrings or comments.
+        in active (kit-enabled) code paths. Uses AST walk with if/else awareness so that
+        calls inside `else:` branches of `if _KIT_ENABLED:` guards are treated as
+        intentional legacy rollback paths and are not flagged.
 
-        NOTE: This test requires PR 2 (handlers migration) to be complete.
-        It will fail until scout_handlers.py is migrated to use wrap_response.
+        Calls outside any _KIT_ENABLED guard are violations.
         """
         import ast
+
         handlers_path = _REPO / "scout_handlers.py"
         if not handlers_path.exists():
             self.skipTest("scout_handlers.py not found")
+
         tree = ast.parse(handlers_path.read_text())
         banned = {"_build_feedback_buttons", "_build_suggestion_buttons"}
+
+        def _is_kit_enabled_test(node: ast.expr) -> bool:
+            """Return True if node is `_KIT_ENABLED` (Name) or `not _KIT_ENABLED`."""
+            if isinstance(node, ast.Name) and node.id == "_KIT_ENABLED":
+                return True
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+                return _is_kit_enabled_test(node.operand)
+            return False
+
+        def _collect_legacy_nodes(stmts) -> set[int]:
+            """Collect line numbers of all AST nodes in legacy (else) branches."""
+            legacy: set[int] = set()
+            for stmt in stmts:
+                for n in ast.walk(stmt):
+                    legacy.add(id(n))
+            return legacy
+
+        # Collect all node ids that live inside legacy else: branches
+        legacy_node_ids: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and _is_kit_enabled_test(node.test):
+                # orelse is the legacy fallback path — exclude it from violation checks
+                legacy_node_ids |= _collect_legacy_nodes(node.orelse)
+            elif isinstance(node, ast.If):
+                # Also handle `if not _KIT_ENABLED:` → body is legacy, orelse is active
+                if (isinstance(node.test, ast.UnaryOp)
+                        and isinstance(node.test.op, ast.Not)
+                        and _is_kit_enabled_test(node.test.operand)):
+                    legacy_node_ids |= _collect_legacy_nodes(node.body)
+
         violations = []
         for node in ast.walk(tree):
+            if id(node) in legacy_node_ids:
+                continue
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and node.func.id in banned:
                     violations.append(f"line {node.lineno}: direct call to {node.func.id}()")
                 elif isinstance(node.func, ast.Attribute) and node.func.attr in banned:
                     violations.append(f"line {node.lineno}: direct call to {node.func.attr}()")
+
         self.assertFalse(
             violations,
-            "Direct calls to legacy builder functions found — route through wrap_response:\n"
-            + "\n".join(violations),
+            "Direct calls to legacy builder functions found outside _KIT_ENABLED guard "
+            "— route through wrap_response:\n" + "\n".join(violations),
         )
 
     def test_long_body_preserves_feedback(self):
