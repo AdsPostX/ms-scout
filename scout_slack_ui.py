@@ -77,32 +77,27 @@ _INLINE_RE = re.compile(
 )
 
 
-_HOME_EXAMPLES = [
-    {
-        "jtbd":        "Morning triage — what needs my attention?",
-        "description": "Get a plain-English summary of what moved overnight and who needs a call.",
-        "query":       "What happened today?",
-    },
-    {
-        "jtbd":        "Prep for a publisher call",
-        "description": "Full account picture: provisioned offers, what's serving, revenue health, what to pitch.",
-        "query":       "Give me a health check on TuitionHero",
-    },
-    {
-        "jtbd":        "Understand a revenue drop",
-        "description": "Diagnose why a publisher's revenue fell — which advertiser pulled back and when.",
-        "query":       "What happened to Pinger this week?",
-    },
-    {
-        "jtbd":        "Build a campaign brief",
-        "description": "Get campaign-ready copy, tracking URL, and RPM estimate. One click to add to the queue.",
-        "query":       "Build a brief for Square",
-    },
-    {
-        "jtbd":        "Find better payouts",
-        "description": "Check if an advertiser exists on other networks at a higher payout rate.",
-        "query":       "Find Capital One Shopping on other networks — is there a better payout?",
-    },
+# App Home content — mobile-first activation surface.
+# JTBD: get a first-timer to click and have their "magic moment" within seconds.
+# Hero = the most compelling single example (call prep). Secondary = 4 quick
+# tries. All CTAs render via dedicated `actions` blocks (NOT section.accessory)
+# so iOS doesn't clip them; queries use inline `code` (NOT fenced ```) so
+# narrow widths don't horizontal-scroll. action_ids must be unique within
+# the view — see tests/test_kit_lint.py.
+_HOME_HERO = {
+    "jtbd":        "Prep for a publisher call",
+    "description": "Full account picture — provisioned offers, what's serving, "
+                   "revenue health, what to pitch.",
+    "query":       "Give me a health check on TuitionHero",
+    "cta":         "Health check on TuitionHero",
+}
+
+_HOME_SECONDARY = [
+    {"jtbd": "Morning triage",            "query": "What happened today?"},
+    {"jtbd": "Understand a revenue drop", "query": "What happened to Pinger this week?"},
+    {"jtbd": "Build a campaign brief",    "query": "Build a brief for Square"},
+    {"jtbd": "Find better payouts",
+     "query": "Find Capital One Shopping on other networks — is there a better payout?"},
 ]
 
 
@@ -1111,7 +1106,13 @@ def _build_monitor_alert_blocks(
     items: list[str],
     cta_query: str = "",
 ) -> tuple[str, list[dict]]:
-    """Canonical Block Kit alert for all silent monitors and revenue tracker."""
+    """Canonical Block Kit alert for all silent monitors and revenue tracker.
+
+    Budget enforcement: output is capped at BUDGETS[Surface.MONITOR_ALARM] via
+    enforce(); overflow gets a context indicator. Topical emoji (ghost/droplet/
+    hourglass) is preserved in the header — Severity.emoji standardization is
+    PR-3's job, not this surface's.
+    """
     fallback = f"{emoji} {title}"
     blocks: list[dict] = [*_build_signal_header(emoji, title)]
     if items:
@@ -1122,6 +1123,8 @@ def _build_monitor_alert_blocks(
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"_`@Scout {cta_query}` for the full breakdown_"}],
         })
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        blocks = enforce(blocks, Surface.MONITOR_ALARM)
     return fallback, blocks
 
 _MAX_QUEUE_ITEMS_RENDERED = 12
@@ -1253,71 +1256,91 @@ def _build_queue_card(items: "list[dict] | None") -> list:
 
 def _build_home_view(queue_items: "list[dict] | None" = None) -> dict:
     """
-    App Home dashboard — live queue at the top, system health strip, then examples.
-    Refreshed every time the user opens the App Home tab.
+    App Home — activation surface, NOT a dashboard.
+
+    JTBD: get a first-timer to click an example and have the magic moment.
+    Mobile-first: CTAs render in dedicated `actions` blocks (NOT
+    section.accessory, which clips on narrow iOS widths). Queries use inline
+    `code` (NOT fenced ```, which horizontal-scrolls on mobile). action_ids
+    are unique within the view — verified by test_kit_lint.py.
+
+    The queue lives on `/scout-queue`, not here. Status lives on
+    `/scout-status`. Help lives on `/scout-help`. This view stays minimal
+    so the magic-moment click is unambiguous.
+
+    `queue_items` is accepted for backwards compatibility with bot callers
+    but no longer rendered on Home.
     """
-    # ── Queue section ─────────────────────────────────────────────────────────
-    blocks: list = _build_queue_card(queue_items)
+    del queue_items  # intentionally unused — queue moved off Home
 
-    # ── System health strip ───────────────────────────────────────────────────
-    try:
-        from scout_agent import _BENCHMARKS_LOADED_AT, _load_offers
-        import time as _time
-        age_secs = _time.time() - _BENCHMARKS_LOADED_AT if _BENCHMARKS_LOADED_AT else None
-        bm_str = (f"{int(age_secs / 60)}m ago" if age_secs and age_secs < 3600
-                  else (f"{int(age_secs)}s ago" if age_secs and age_secs < 120
-                        else ("not loaded" if age_secs is None else f"{age_secs/3600:.1f}h ago")))
-        offers_count = len(_load_offers())
-        health_text = f"_Benchmarks: {bm_str}  ·  Offers: {offers_count:,}  ·  Networks: Impact · MaxBounty · FlexOffers_"
-    except Exception:
-        health_text = "_Networks: Impact · MaxBounty · FlexOffers · Data refreshes daily_"
+    blocks: list = []
 
-    blocks += [
-        {"type": "divider"},
-        {"type": "context", "elements": [{"type": "mrkdwn", "text": health_text}]},
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    "*Ask @Scout anything in plain English.*\n"
-                    "Mention @Scout in any channel or thread. Scout remembers context within a thread.\n\n"
-                    "*Slash commands — responses are only visible to you:*\n"
-                    "• `/scout-pub [publisher name]` — revenue health, active offers, what to pitch\n"
-                    "• `/scout-enter [advertiser or URL]` — campaign entry card for the MS platform\n"
-                    "• `/scout-queue` — what's pending in the pipeline\n"
-                    "• `/scout-status` — system health + data freshness\n\n"
-                    ":lock: _Slash command responses are private — only you can see them. Great for quick lookups mid-call._\n\n"
-                    "*Try one →*"
-                ),
-            },
+    # ── Value prop ────────────────────────────────────────────────────────────
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": (
+                "*Ask Scout anything about your publishers, advertisers, "
+                "and revenue — in plain English.*\n"
+                "Mention `@Scout` in any channel or thread. Scout remembers "
+                "context within the thread, so you can follow up."
+            ),
         },
-    ]
+    })
+    blocks.append({"type": "divider"})
 
-    # ── Example "Try it" buttons (unchanged) ─────────────────────────────────
-    for ex in _HOME_EXAMPLES:
+    # ── Hero example (primary CTA) ────────────────────────────────────────────
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"⭐ *{_HOME_HERO['jtbd']}*\n{_HOME_HERO['description']}",
+        },
+    })
+    blocks.append({
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "text": {"type": "plain_text",
+                     "text": f"Try: {_HOME_HERO['cta']} →", "emoji": False},
+            "style": "primary",
+            "action_id": "home_try_query_hero",
+            "value": _HOME_HERO["query"],
+        }],
+    })
+    blocks.append({"type": "divider"})
+
+    # ── Secondary examples ────────────────────────────────────────────────────
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*Other things to try*"},
+    })
+    for idx, ex in enumerate(_HOME_SECONDARY):
         blocks.append({
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*{ex['jtbd']}*\n{ex['description']}\n```{ex['query']}```",
-            },
-            "accessory": {
+            "text": {"type": "mrkdwn",
+                     "text": f"*{ex['jtbd']}*\n`{ex['query']}`"},
+        })
+        blocks.append({
+            "type": "actions",
+            "elements": [{
                 "type": "button",
-                "text": {"type": "plain_text", "text": "Try it →", "emoji": False},
-                "action_id": "home_try_query",
-                "value":     ex["query"],
-            },
+                "text": {"type": "plain_text", "text": "Try →", "emoji": False},
+                "action_id": f"home_try_query_{idx}",
+                "value": ex["query"],
+            }],
         })
 
-    blocks += [
-        {"type": "divider"},
-        {
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "_Networks: Impact · MaxBounty · FlexOffers · Data refreshes daily_"}],
-        },
-    ]
+    blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "context",
+        "elements": [{
+            "type": "mrkdwn",
+            "text": "Need more? Type `/scout-help` for the full command list, "
+                    "or `/scout-status` for system health.",
+        }],
+    })
 
     return {"type": "home", "blocks": blocks}
 

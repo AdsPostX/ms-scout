@@ -74,6 +74,96 @@ def _set_force_monitor_fn(name: str, fn) -> None:
     _FORCE_MONITOR_FNS[name] = fn
 
 
+# ── ask() wall-clock timeout wrapper ─────────────────────────────────────────
+# Background: 2026-05-17, "project Truist revenue for this month" stuck at
+# "Consulting the archives… 15s" forever — ClickHouse hit its 25 GB memory
+# limit and ask() has no internal timeout. The rotating-status placeholder
+# spun until the user gave up. This wrapper enforces a wall-clock cap so
+# CH-pressure days surface as a friendly degraded message, not an infinite
+# spinner. The orphaned ask() thread is allowed to complete in the
+# background (daemon=True so it dies on process exit).
+# Defensive parse: a bad SCOUT_ASK_TIMEOUT_S (e.g. "90s", "", "0") would
+# either crash the module at import or time out every request instantly.
+# Clamp to a sane minimum so misconfiguration degrades to "slow" not "broken".
+_raw_ask_timeout_s = os.getenv("SCOUT_ASK_TIMEOUT_S", "90")
+try:
+    ASK_TIMEOUT_S = int(_raw_ask_timeout_s)
+    if ASK_TIMEOUT_S <= 0:
+        raise ValueError
+except ValueError:
+    log.warning(
+        "Invalid SCOUT_ASK_TIMEOUT_S=%r; defaulting to 90",
+        _raw_ask_timeout_s,
+    )
+    ASK_TIMEOUT_S = 90
+
+# Bounded concurrency for in-flight ask() workers. Under sustained CH
+# pressure, timed-out workers keep running in the background (daemon=True);
+# without a cap they accumulate every time a user retries. Cap at 3 so we
+# shed load fast rather than burning CH harder. acquire(blocking=False)
+# raises AskTimeout immediately when the cap is hit — user sees the
+# friendly degraded message instead of an infinite spinner.
+_ASK_SEMAPHORE = threading.BoundedSemaphore(3)
+
+
+class AskTimeout(Exception):
+    """ask() exceeded the wall-clock timeout. Caller should render a
+    degraded message — typically 'ClickHouse is under pressure — try
+    again in 10-15 minutes.'"""
+
+
+def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
+    """Run ask() in a worker thread; raise AskTimeout if it exceeds
+    timeout_s. The worker thread keeps running (daemon) so the agent
+    can finish in the background, but the caller stops waiting.
+
+    Bounded by _ASK_SEMAPHORE (cap 3) so timed-out workers don't pile up
+    under sustained CH pressure. If the cap is full, raise AskTimeout
+    immediately rather than queueing.
+
+    Use this in any user-facing path where an infinite spinner is worse
+    than a 'try again in 10-15m' message: App Home tries, channel
+    @mentions, DMs.
+    """
+    if not _ASK_SEMAPHORE.acquire(blocking=False):
+        log.warning(
+            "ask() semaphore full (>=3 inflight); shedding query=%r",
+            query[:80],
+        )
+        raise AskTimeout("ask() concurrency cap reached")
+
+    result_box: dict = {}
+
+    def _worker():
+        try:
+            result_box["resp"] = ask(query, **kwargs)
+        except Exception as e:  # surface agent-side errors; let SystemExit/KeyboardInterrupt through
+            result_box["err"] = e
+        finally:
+            _ASK_SEMAPHORE.release()
+
+    t = threading.Thread(target=_worker, daemon=True, name="ask-worker")
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        log.warning(
+            f"ask() exceeded {timeout_s}s for query={query[:80]!r}; "
+            f"abandoning wait, worker continues in background",
+        )
+        raise AskTimeout(f"ask() exceeded {timeout_s}s")
+    if "err" in result_box:
+        raise result_box["err"]
+    return result_box["resp"]
+
+
+_TIMEOUT_FALLBACK_TEXT = (
+    ":hourglass_flowing_sand: *ClickHouse is under pressure right now.*\n"
+    "Your query took longer than expected — likely a memory-heavy time "
+    "window or a busy moment. Try again in 10–15 minutes, or narrow the "
+    "scope (e.g. a single publisher instead of all)."
+)
+
+
 # ── Part 3.6 — 👍/👎 feedback loop ──────────────────────────────────────────
 _FEEDBACK_LOG = _DATA_DIR / "feedback_log.jsonl"
 _FEEDBACK_PS_SEEN: set[str] = set()
@@ -1172,7 +1262,11 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         return
 
     # ── App Home "Try it" buttons ─────────────────────────────────────────────
-    if action_id == "home_try_query":
+    # action_ids: home_try_query_hero, home_try_query_0..N (unique per
+    # button so iOS doesn't drop clicks). Backwards-compatible with the
+    # legacy bare "home_try_query" id in case any live message still
+    # references it.
+    if action_id.startswith("home_try_query"):
         user_id = payload.get("user", {}).get("id", "")
         query   = action.get("value", "").strip()
         if user_id and query:
@@ -1337,7 +1431,17 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
 
         try:
             _t0 = time.monotonic()
-            response = ask(query)
+            try:
+                response = _ask_with_timeout(query)
+            except AskTimeout:
+                # stop_rotating() handled by finally below
+                web.chat_update(
+                    channel=dm_channel, ts=_placeholder_ts_ah,
+                    text="ClickHouse is under pressure — try again in 10–15 minutes.",
+                    blocks=[{"type": "section",
+                             "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                )
+                return
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         finally:
@@ -1393,6 +1497,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
     /scout-queue  — Show the current demand queue with Notion links
     /scout-enter  — MS Platform entry card for a queued offer
     /scout-status — System health: benchmark freshness, offer count, ClickHouse status
+    /scout-help   — Ephemeral reference card (capabilities, commands, limits)
     """
     from scout_agent import get_demand_queue_status, get_scout_status, get_publisher_competitive_landscape
 
@@ -1576,10 +1681,48 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": full_text}}],
             )
 
+        elif command == "/scout-help":
+            help_blocks = [
+                {"type": "header", "text": {"type": "plain_text",
+                    "text": "Scout — quick reference", "emoji": False}},
+                {"type": "section", "text": {"type": "mrkdwn", "text":
+                    "*Talk to Scout in any channel or thread*\n"
+                    "Mention `@Scout` followed by your question in plain English. "
+                    "Scout remembers context within a thread, so you can follow up."}},
+                {"type": "divider"},
+                {"type": "section", "text": {"type": "mrkdwn", "text":
+                    "*Slash commands — responses are private to you*\n"
+                    "• `/scout-pub [publisher]` — revenue health, active offers, what to pitch\n"
+                    "• `/scout-enter [advertiser]` — campaign entry card for the MS platform\n"
+                    "• `/scout-queue` — what's pending in the pipeline\n"
+                    "• `/scout-status` — system health + data freshness\n"
+                    "• `/scout-help` — this card"}},
+                {"type": "divider"},
+                {"type": "section", "text": {"type": "mrkdwn", "text":
+                    "*Things Scout is good at*\n"
+                    "• Revenue and conversion analysis (this week vs last, drops, anomalies)\n"
+                    "• Publisher health (sessions, RPM, placements, what's serving)\n"
+                    "• Campaign briefs and offer search across networks\n"
+                    "• Pipeline questions (what's approved, what's expiring)"}},
+                {"type": "section", "text": {"type": "mrkdwn", "text":
+                    "*Things Scout is not for*\n"
+                    "• Strategic intent or contract terms (lives in your head, not in CH)\n"
+                    "• Share of voice vs competitors (we only see our own data)\n"
+                    "• Real-time trading decisions (data refreshes daily)"}},
+                {"type": "divider"},
+                {"type": "context", "elements": [{"type": "mrkdwn", "text":
+                    "_Stuck? React 👎 on any Scout reply to flag a miss, "
+                    "or ✏️ to teach Scout the right answer._"}]},
+            ]
+            web.chat_postEphemeral(
+                channel=channel, user=user_id,
+                text="Scout — quick reference", blocks=help_blocks,
+            )
+
         else:
             web.chat_postEphemeral(
                 channel=channel, user=user_id,
-                text=f"Unknown command `{command}`. Try `/scout-pub`, `/scout-queue`, `/scout-enter`, or `/scout-status`.",
+                text=f"Unknown command `{command}`. Try `/scout-help`, `/scout-pub`, `/scout-queue`, `/scout-enter`, or `/scout-status`.",
             )
     except Exception as e:
         log.error(f"_handle_slash_command error ({command}): {e}")
@@ -2185,8 +2328,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         try:
             _t0 = time.monotonic()
             _permalink = _permalink_for(web, channel, msg_ts)
-            response = ask(query, history=history, user_id=user_id, permalink=_permalink,
-                           user_tz=_get_user_tz(web, user_id))
+            response = _ask_with_timeout(
+                query, history=history, user_id=user_id, permalink=_permalink,
+                user_tz=_get_user_tz(web, user_id),
+            )
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
             _tools_called = response.tools_called
@@ -2197,16 +2342,22 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             except Exception:
                 _uname = user_id
             _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
+        except AskTimeout:
+            # reactions_remove is handled by the finally block below
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text="ClickHouse is under pressure — try again in 10–15 minutes.",
+                blocks=[{"type": "section",
+                         "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+            )
+            return
         except Exception as e:
             log.error(f"Agent error (DM): {e}", exc_info=True)
-            try:
-                web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
-            except Exception:
-                pass
             web.chat_postMessage(channel=channel, text=f":warning: Something went wrong — `{e}`")
             return
         finally:
-            # Always remove the 🤔 — even on error — so it doesn't hang
+            # Single point of cleanup: always remove the 🤔 — even on error
+            # — so it doesn't hang on the user's message.
             try:
                 web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
             except Exception:
@@ -2286,7 +2437,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     try:
         _t0 = time.monotonic()
         _permalink = _permalink_for(web, channel, msg_ts)
-        response = ask(query, history=history, user_id=user_id, permalink=_permalink)
+        response = _ask_with_timeout(query, history=history, user_id=user_id, permalink=_permalink)
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting
@@ -2298,12 +2449,21 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         except Exception:
             _uname = user_id
         _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
+    except AskTimeout:
+        # stop_rotating() handled by finally below
+        web.chat_update(
+            channel=channel, ts=placeholder["ts"],
+            text="ClickHouse is under pressure — try again in 10–15 minutes.",
+            blocks=[{"type": "section",
+                     "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+        )
+        return
     except Exception as e:
         log.error(f"Agent error: {e}")
-        stop_rotating()
         _post_error_update(web, channel, placeholder["ts"], e)
         return
     finally:
+        # Single point of cleanup — the rotating status always stops here.
         stop_rotating()
 
     # ── Route response: brief (Block Kit) vs text_with_context vs plain text ────

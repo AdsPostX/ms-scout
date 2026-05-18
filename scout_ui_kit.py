@@ -11,6 +11,34 @@ read the env var directly in other modules.
 Import DAG: scout_ui_kit imports stdlib only. Nothing else imports from it
 before scout_slack_ui.py. Do NOT import from scout_handlers, scout_bot, or
 scout_slack_ui — circular import.
+
+────────────────────────────────────────────────────────────────────────────
+MOBILE-FIRST RULES (every Scout Slack surface)
+────────────────────────────────────────────────────────────────────────────
+Sidd reads Scout on iPhone as often as desktop. Every renderer in
+scout_slack_ui.py must follow these — enforced by tests/test_kit_lint.py:
+
+1. **Primary CTAs go in `actions` blocks, never `section.accessory`.**
+   Accessory buttons clip on narrow iOS widths and get tap-eaten by the
+   surrounding section. Dedicated `actions` blocks render reliably.
+
+2. **No fenced code blocks (```) in user-facing copy.**
+   Triple-backtick blocks horizontal-scroll on mobile. Use inline `code`
+   spans for short snippets; for longer payloads use a `section` with
+   wrapped mrkdwn text.
+
+3. **`action_id` must be unique within a single view/message.**
+   Slack mobile silently drops clicks when ids repeat. Namespace ids by
+   purpose + index (e.g. `home_try_query_hero`, `home_try_query_0`).
+
+4. **`style: "danger"` only for destructive actions.**
+   👎 is feedback, not destruction. Pink-styled feedback buttons visually
+   dominate the response. Use unstyled buttons for non-destructive UX.
+
+5. **Stay under the Surface budget.**
+   See BUDGETS dict below. `enforce(blocks, surface)` truncates and adds
+   a human-readable overflow line. Use it on paging surfaces (monitor
+   alarms, channel root) — never let a noisy day blow past 100 blocks.
 """
 
 from __future__ import annotations
