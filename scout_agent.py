@@ -4845,7 +4845,7 @@ _ROUTE_KEYWORDS: dict[str, str] = {
     "show thresholds":    "list_thresholds",
     "current thresholds": "list_thresholds",
     "threshold config":   "list_thresholds",
-    "scout config":       "list_thresholds",
+    "scout config":       "get_scout_config",
     "settings":           "list_thresholds",
     "config":             "get_scout_config",
     "status":             "get_scout_status",

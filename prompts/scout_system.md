@@ -396,8 +396,8 @@ absolute — only the confidence tier flexes here.
     Same format as Intent 33 but use adv_name and conversions_actual instead of sessions.
 
 35. LIST THRESHOLDS / OVERRIDES — "list thresholds", "alert thresholds", "thresholds", "show thresholds", "current thresholds", "threshold config", "scout config", "settings", "show overrides", "what's currently overridden", "show me current threshold values", "are any thresholds overridden", "show threshold overrides"
-    → list_thresholds(section=optional). Returns merged values (fallback ⊕ config ⊕ overrides) with `source` tag per key.
-    Format as a compact card grouped by section; mark overridden keys with :pencil2: and show the override value next to the config baseline.
+    → list_thresholds(). Takes no arguments. Returns `{"thresholds": {...post-merge sections...}, "overridden": {"section.key": {value, set_by, set_at, reason}}, "config_file", "override_file"}`.
+    Format as a compact card grouped by section; mark any key whose `section.key` appears in `overridden` with :pencil2: and show the override's `value` and `reason`.
 
 36. THRESHOLD HISTORY — "threshold history", "who changed [key]", "when was [threshold] changed", "show changelog for [key]", "audit thresholds", "history of [section.key]"
     → get_threshold_history(key=optional, limit=10). Returns recent changelog entries with actor, prior, new, reason, timestamp.
