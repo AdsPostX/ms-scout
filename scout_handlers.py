@@ -1450,6 +1450,15 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             view_id = open_resp["view"]["id"]
         except Exception:
             log.exception("_handle_home_try_query: views_open failed for %s query=%r", user_id, query[:80])
+            try:
+                conv = web.conversations_open(users=[user_id])
+                if conv.get("ok"):
+                    web.chat_postMessage(
+                        channel=conv["channel"]["id"],
+                        text=f"Something went wrong opening the modal — try `@Scout {query}` directly in any channel.",
+                    )
+            except Exception:
+                log.exception("_handle_home_try_query: DM fallback also failed for %s", user_id)
             return
 
         def _run_modal(v_id: str = view_id) -> None:
@@ -1486,6 +1495,18 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 log.info("home_try_query modal: ran %r for %s in %ss", query[:50], user_id, _elapsed)
             except Exception:
                 log.exception("_handle_home_try_query: modal update failed for %s query=%r", user_id, query[:80])
+                try:
+                    web.views_update(
+                        view_id=v_id,
+                        view={
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "Scout", "emoji": False},
+                            "close": {"type": "plain_text", "text": "Close", "emoji": False},
+                            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"Something went wrong — try `@Scout {query}` directly in any channel."}}],
+                        },
+                    )
+                except Exception:
+                    log.exception("_handle_home_try_query: error modal update also failed for %s", user_id)
 
         threading.Thread(target=_run_modal, daemon=True).start()
         return
