@@ -163,14 +163,14 @@ HAVING rev_today >= 50 OR rev_baseline >= 50
     # Fetches one row per completed day (D-7 through D-1); fills missing days
     # with 0; appends today's partial as the 8th point.
     series_sql = """
-WITH today_start_ct AS (toStartOfDay(toTimeZone(now(), 'America/Chicago')))
 SELECT
     toDate(toTimeZone(c.created_at, 'America/Chicago')) AS day,
     round(sum(toFloat64OrNull(c.revenue)), 2)           AS daily_rev
 FROM adpx_conversionsdetails c
-PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(today_start_ct - INTERVAL 8 DAY)
-WHERE toDate(toTimeZone(c.created_at, 'America/Chicago')) >= today_start_ct - INTERVAL 7 DAY
-  AND toDate(toTimeZone(c.created_at, 'America/Chicago')) < today_start_ct
+WHERE toDate(toTimeZone(c.created_at, 'America/Chicago'))
+          >= toDate(toStartOfDay(toTimeZone(now(), 'America/Chicago'))) - 7
+  AND toDate(toTimeZone(c.created_at, 'America/Chicago'))
+          < toDate(toStartOfDay(toTimeZone(now(), 'America/Chicago')))
 GROUP BY day
 ORDER BY day
 """.strip()
