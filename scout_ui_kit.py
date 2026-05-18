@@ -233,20 +233,36 @@ MAX_ACTIONS: dict[Surface, int] = {
 
 
 # ---------------------------------------------------------------------------
-# _escape_md_code — protect underscores inside backtick spans from italic
+# _escape_md_code — strip fenced code blocks (mobile horizontal-scroll) and
+#                   protect underscores inside backtick spans from italic.
 # ---------------------------------------------------------------------------
 _CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+_FENCED_BLOCK_RE = re.compile(r"```[a-z]*\n?(.*?)```", re.DOTALL)
 
 
 def _escape_md_code(text: str) -> str:
-    """Escape underscores inside backtick code spans to prevent Slack italic rendering.
+    """Convert fenced code blocks to inline code and escape underscores in spans.
 
-    Slack's mrkdwn parser treats _word_ as italic even inside inline code spans.
-    This helper escapes only underscores that appear between backticks so that
-    ``cap_alert_pct`` renders as literal text, not ``cap<em>alert</em>pct``.
+    1. Triple-backtick fenced blocks cause horizontal scroll on mobile (Slack rule 2).
+       They are collapsed to a single inline ``code`` span containing just the first
+       non-blank line of the block, so context is preserved without the scroll trap.
+
+    2. Slack's mrkdwn parser treats _word_ as italic even inside inline code spans.
+       Underscores inside backtick spans are escaped so that ``cap_alert_pct``
+       renders as literal text rather than ``cap<em>alert</em>pct``.
     """
+    # Step 1: replace fenced blocks with inline code (first non-blank content line)
+    def _collapse_fenced(m: re.Match) -> str:
+        inner = m.group(1).strip()
+        first_line = next((ln for ln in inner.splitlines() if ln.strip()), inner)
+        return f"`{first_line.strip()}`"
+
+    text = _FENCED_BLOCK_RE.sub(_collapse_fenced, text)
+
+    # Step 2: escape underscores inside remaining inline code spans
     def _escape_underscores(m: re.Match) -> str:
         return "`" + m.group(1).replace("_", r"\_") + "`"
+
     return _CODE_SPAN_RE.sub(_escape_underscores, text)
 
 

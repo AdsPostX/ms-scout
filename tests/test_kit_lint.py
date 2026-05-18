@@ -113,6 +113,185 @@ class TestKitLint(unittest.TestCase):
         # Restore default
         os.environ["SCOUT_KIT_ENABLED"] = "true"
 
+    def test_no_section_accessory_buttons(self):
+        """Primary CTAs must be in actions blocks, never section.accessory (mobile-first rule 1).
+        Renders all Card severity levels and asserts no section contains an accessory button."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit", "scout_slack_ui"):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response
+        for sev in Severity:
+            _, blocks = wrap_response(
+                card=Card(sev, "Test headline", body="Test body"),
+                surface=Surface.CHANNEL_ROOT,
+            )
+            for block in blocks:
+                acc = block.get("accessory") if isinstance(block, dict) else None
+                if isinstance(acc, dict):
+                    self.assertNotEqual(
+                        acc.get("type"), "button",
+                        f"section.accessory button found in {sev} render — use actions block instead",
+                    )
+
+    def test_no_fenced_code_in_response(self):
+        """Triple-backtick blocks horizontal-scroll on mobile (rule 2).
+        wrap_response output must never contain ``` in any mrkdwn text field."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response
+        card = Card(Severity.INFO, "Result", body="Here is the data:\n```sql\nSELECT 1\n```")
+        _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
+        for block in blocks:
+            text_val = ""
+            if isinstance(block.get("text"), dict):
+                text_val = block["text"].get("text", "")
+            for el in block.get("elements", []) or []:
+                if isinstance(el, dict):
+                    text_val += el.get("text", "") if isinstance(el.get("text"), str) else ""
+            self.assertNotIn(
+                "```", text_val,
+                "Triple-backtick fenced code found in wrap_response output — use inline `code` instead",
+            )
+
+    def test_no_danger_style_on_feedback(self):
+        """style:danger is for destructive actions only (rule 4).
+        Feedback and suggestion buttons must not use danger styling."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response
+        _, blocks = wrap_response(
+            card=Card(Severity.WARN, "Something is off"),
+            surface=Surface.CHANNEL_ROOT,
+            suggestions=["Try this", "Or this"],
+            feedback="button",
+            query_hash="fake_ts_123",
+        )
+        for block in blocks:
+            for el in block.get("elements", []) or []:
+                if isinstance(el, dict) and el.get("type") == "button":
+                    self.assertNotEqual(
+                        el.get("style"), "danger",
+                        f"Feedback/suggestion button has style:danger — remove it: {el}",
+                    )
+
+    def test_suggestions_capped_at_max_actions(self):
+        """More suggestions than MAX_ACTIONS[surface] must be silently trimmed."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, MAX_ACTIONS, wrap_response
+        many = [f"suggestion {i}" for i in range(10)]
+        for surface in (Surface.CHANNEL_ROOT, Surface.DM, Surface.THREAD):
+            _, blocks = wrap_response(
+                card=Card(Severity.INFO, "headline"),
+                surface=surface,
+                suggestions=many,
+            )
+            action_blocks = [b for b in blocks if b.get("type") == "actions"]
+            total_buttons = sum(len(b.get("elements", [])) for b in action_blocks)
+            self.assertLessEqual(
+                total_buttons, MAX_ACTIONS[surface],
+                f"{surface}: {total_buttons} buttons exceeds MAX_ACTIONS={MAX_ACTIONS[surface]}",
+            )
+
+    def test_handlers_no_direct_builder_calls(self):
+        """scout_handlers.py must not call _build_feedback_buttons or _build_suggestion_buttons
+        directly — all calls must go through wrap_response. Uses AST walk (not grep)
+        to avoid false positives from docstrings or comments.
+
+        NOTE: This test requires PR 2 (handlers migration) to be complete.
+        It will fail until scout_handlers.py is migrated to use wrap_response.
+        """
+        import ast
+        handlers_path = _REPO / "scout_handlers.py"
+        if not handlers_path.exists():
+            self.skipTest("scout_handlers.py not found")
+        tree = ast.parse(handlers_path.read_text())
+        banned = {"_build_feedback_buttons", "_build_suggestion_buttons"}
+        violations = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in banned:
+                    violations.append(f"line {node.lineno}: direct call to {node.func.id}()")
+                elif isinstance(node.func, ast.Attribute) and node.func.attr in banned:
+                    violations.append(f"line {node.lineno}: direct call to {node.func.attr}()")
+        self.assertFalse(
+            violations,
+            "Direct calls to legacy builder functions found — route through wrap_response:\n"
+            + "\n".join(violations),
+        )
+
+    def test_long_body_preserves_feedback(self):
+        """5000-char body must not push the feedback block past enforce() truncation.
+        Feedback is placed before suggestions in composition order specifically to
+        survive budget enforcement."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response
+        long_body = "x" * 5000
+        _, blocks = wrap_response(
+            card=Card(Severity.INFO, "Revenue summary", body=long_body),
+            surface=Surface.CHANNEL_ROOT,
+            feedback="button",
+            query_hash="ts_123",
+            suggestions=["Follow-up 1", "Follow-up 2"],
+        )
+        has_feedback = any(
+            b.get("type") == "actions" and any(
+                e.get("action_id", "").startswith("scout_feedback")
+                for e in b.get("elements", [])
+            )
+            for b in blocks
+        )
+        self.assertTrue(
+            has_feedback,
+            "Feedback row was truncated by enforce() — check composition order in wrap_response",
+        )
+
+    def test_empty_suggestions_no_actions_block(self):
+        """suggestions=[] must produce zero actions blocks.
+        Slack rejects messages with actions blocks containing empty elements arrays."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response
+        for empty in ([], None):
+            _, blocks = wrap_response(
+                card=Card(Severity.INFO, "headline"),
+                surface=Surface.CHANNEL_ROOT,
+                suggestions=empty,
+                feedback="none",
+            )
+            action_blocks = [b for b in blocks if b.get("type") == "actions"]
+            self.assertEqual(
+                action_blocks, [],
+                f"suggestions={empty!r} produced actions blocks: {action_blocks}",
+            )
+
+    def test_fallback_text_nonempty(self):
+        """Every wrap_response return must have a non-empty fallback string.
+        Mobile push previews go blank when fallback is empty."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response
+        fixtures = [
+            Card(Severity.CRITICAL, "Revenue dropped 40%"),
+            Card(Severity.WARN, "Fill rate low", body="Below 60% threshold"),
+            Card(Severity.INFO, "Status OK"),
+            Card(Severity.POSITIVE, "Revenue up"),
+            Card(Severity.INFO, "", body="Body only"),
+        ]
+        for card in fixtures:
+            fallback, _ = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
+            self.assertTrue(
+                fallback and fallback.strip(),
+                f"Empty fallback for card headline={card.headline!r} body={card.body!r}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
