@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import scout_agent  # noqa: E402
 from scout_agent import (  # noqa: E402
+    AmbiguousThresholdKey,
     AskResult,
     _coerce_threshold_value,
     _route_deterministic,
@@ -164,6 +165,99 @@ class TestUnknownKeyRejection(unittest.TestCase):
                               reason="typo test", _caller_user_id="U_admin")
         self.assertFalse(r["ok"])
         self.assertIn("cap_alert_pct", r["message"])
+
+
+class TestBareKeyResolution(unittest.TestCase):
+    """Bare keys must resolve to their owning section via the base schema."""
+
+    def test_bare_key_unique_in_signals(self):
+        # cap_alert_pct lives only under signals.
+        section, key = _split_dotted_key("cap_alert_pct")
+        self.assertEqual((section, key), ("signals", "cap_alert_pct"))
+
+    def test_bare_key_unique_in_digest(self):
+        section, key = _split_dotted_key("min_rpm_floor")
+        self.assertEqual((section, key), ("digest", "min_rpm_floor"))
+
+    def test_bare_key_unique_in_health(self):
+        section, key = _split_dotted_key("offer_staleness_hours")
+        self.assertEqual((section, key), ("health", "offer_staleness_hours"))
+
+    def test_ambiguous_bare_key_raises(self):
+        # Simulate a key registered in two sections by patching the base schema.
+        fake_base = {
+            "signals": {"shared_key": 1},
+            "digest":  {"shared_key": 2},
+        }
+        with unittest.mock.patch.object(scout_agent, "_BASE_THRESHOLDS", fake_base):
+            with self.assertRaises(AmbiguousThresholdKey) as ctx:
+                _split_dotted_key("shared_key")
+        self.assertIn("signals", str(ctx.exception))
+        self.assertIn("digest", str(ctx.exception))
+
+    def test_unknown_bare_key_falls_back_to_signals(self):
+        # Unknown bare keys still default to signals — set_threshold then
+        # surfaces a proper unknown-key error with a suggestion.
+        section, key = _split_dotted_key("bogus_unknown_key")
+        self.assertEqual((section, key), ("signals", "bogus_unknown_key"))
+
+
+class TestAmbiguousKeyInRouter(unittest.TestCase):
+    """The router must surface ambiguity as a Slack-friendly warning, not crash."""
+
+    def test_router_returns_warning_on_ambiguous_key(self):
+        fake_base = {
+            "signals": {"shared_key": 1},
+            "digest":  {"shared_key": 2},
+        }
+        with unittest.mock.patch.dict(os.environ, {"SCOUT_THRESHOLD_ADMINS": "U_admin"}):
+            with unittest.mock.patch.object(scout_agent, "_BASE_THRESHOLDS", fake_base):
+                r = _route_deterministic(
+                    "set shared_key to 5 because test", user_id="U_admin"
+                )
+        self.assertIsNotNone(r)
+        self.assertEqual(r.tools_called, ())
+        self.assertIn("multiple sections", r.text)
+
+
+class TestRouterReraisesToolFailures(unittest.TestCase):
+    """Tool exceptions must propagate — silent fallback would defeat determinism."""
+
+    def test_tool_exception_propagates(self):
+        def boom():
+            raise RuntimeError("clickhouse exploded")
+
+        with unittest.mock.patch.object(scout_agent, "TOOL_MAP", {
+            "list_thresholds": boom,
+        }):
+            with self.assertRaises(RuntimeError):
+                _route_deterministic("alert thresholds", user_id="U1")
+
+
+class TestBaseSchemaValidation(unittest.TestCase):
+    """set_threshold must validate against the base schema, not the merged read-view.
+
+    Otherwise a previously persisted typo in data/threshold_overrides.json
+    would appear "known" and pass validation forever.
+    """
+
+    def test_legacy_override_in_merged_view_does_not_mask_unknown_key(self):
+        # Simulate: a bad key 'typo_key' sneaked into SCOUT_THRESHOLDS via a
+        # legacy override, but is NOT in _BASE_THRESHOLDS. Writes to it must
+        # still be rejected.
+        polluted_merged = {
+            "signals": {"cap_alert_pct": 80, "typo_key": 99},
+        }
+        clean_base = {
+            "signals": {"cap_alert_pct": 90},
+        }
+        with unittest.mock.patch.dict(os.environ, {"SCOUT_THRESHOLD_ADMINS": "U_admin"}):
+            with unittest.mock.patch.object(scout_agent, "SCOUT_THRESHOLDS", polluted_merged):
+                with unittest.mock.patch.object(scout_agent, "_BASE_THRESHOLDS", clean_base):
+                    r = set_threshold(section="signals", key="typo_key", value=1,
+                                      reason="should reject", _caller_user_id="U_admin")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"], "unknown_key")
 
 
 class TestRawMessageRouting(unittest.TestCase):
