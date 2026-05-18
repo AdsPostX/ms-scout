@@ -998,11 +998,13 @@ def _build_feedback_buttons(query_hash: str) -> list:
             "type": "actions",
             "elements": [
                 {
+                    # No style: "danger" — feedback is not destructive.
+                    # Pink-styled feedback dominated the response visually
+                    # and violated the MOBILE-FIRST RULE on danger usage.
                     "type": "button",
                     "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
                     "action_id": "scout_feedback_bad",
                     "value": query_hash,
-                    "style": "danger",
                 },
                 {
                     "type": "button",
