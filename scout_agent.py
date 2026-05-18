@@ -4848,7 +4848,6 @@ _ROUTE_KEYWORDS: dict[str, str] = {
     "scout config":       "get_scout_config",
     "settings":           "list_thresholds",
     "config":             "get_scout_config",
-    "status":             "get_scout_status",
     "threshold history":  "get_threshold_history",
     "overrides history":  "get_threshold_history",
 }
