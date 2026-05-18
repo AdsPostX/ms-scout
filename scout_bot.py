@@ -35,7 +35,7 @@ from scout_slack_ui import (
 )
 
 try:
-    from scout_ui_kit import Card, Severity, Surface, enforce, _KIT_ENABLED
+    from scout_ui_kit import Card, Severity, Surface, enforce, wrap_response, _KIT_ENABLED
     _KIT_AVAILABLE = True
 except Exception as _e:
     logging.getLogger("scout_bot").warning("scout_ui_kit import failed, disabling kit: %s", _e)
@@ -801,7 +801,7 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
         headline = "Revenue alert — today is tracking soft"
         body = "\n".join(items)
         card = Card(severity=Severity.CRITICAL, headline=headline, body=body)
-        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
         return f"🔴 {headline}", blocks
 
     return _build_monitor_alert_blocks(
@@ -920,7 +920,7 @@ def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
         headline = "Cap alert — advertisers approaching monthly budget"
         body = "\n".join(f"• {item}" for item in items) if items else ""
         card = Card(severity=Severity.WARN, headline=headline, body=body)
-        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
         return f"🟠 {headline}", blocks
 
     return _build_monitor_alert_blocks(
@@ -955,7 +955,7 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
         headline = "Revenue velocity — publishers tracking down"
         body = "\n".join(f"• {item}" for item in items) if items else ""
         card = Card(severity=Severity.WARN, headline=headline, body=body)
-        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
         return f"🟠 {headline}", blocks
 
     return _build_monitor_alert_blocks(
@@ -979,7 +979,7 @@ def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
         headline = "Ghost campaigns — impressions without revenue"
         body = "\n".join(f"• {item}" for item in items) if items else ""
         card = Card(severity=Severity.WARN, headline=headline, body=body)
-        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
         return f"🟠 {headline}", blocks
 
     return _build_monitor_alert_blocks(
@@ -1007,7 +1007,7 @@ def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
         headline = "Low fill rate — publishers with significant unfilled sessions"
         body = "\n".join(f"• {item}" for item in items) if items else ""
         card = Card(severity=Severity.WARN, headline=headline, body=body)
-        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
         return f"🟠 {headline}", blocks
 
     return _build_monitor_alert_blocks(
@@ -1115,7 +1115,7 @@ def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
         headline = "CVR anomalies — significant conversion rate drops since yesterday"
         body = "\n".join(f"• {item}" for item in items) if items else ""
         card = Card(severity=Severity.WARN, headline=headline, body=body)
-        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
         return f"🟠 {headline}", blocks
 
     return _build_monitor_alert_blocks(
@@ -1145,7 +1145,7 @@ def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
         headline = "Expiring campaigns — active campaigns ending within the alert window"
         body = "\n".join(f"• {item}" for item in items) if items else ""
         card = Card(severity=Severity.WARN, headline=headline, body=body)
-        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
         return f"🟠 {headline}", blocks
 
     return _build_monitor_alert_blocks(

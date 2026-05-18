@@ -151,14 +151,14 @@ class Card:
         if self.body:
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": self.body},
+                "text": {"type": "mrkdwn", "text": _escape_md_code(self.body)},
             })
 
         # Facts as section.fields (max 10 fields — Slack limit)
         if self.facts:
             fields = []
             for label, value in self.facts[:10]:
-                fields.append({"type": "mrkdwn", "text": f"*{label}*\n{value}"})
+                fields.append({"type": "mrkdwn", "text": f"*{label}*\n{_escape_md_code(str(value))}"})
             blocks.append({"type": "section", "fields": fields})
 
         # Actions row (optional)
