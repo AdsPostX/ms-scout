@@ -203,7 +203,7 @@ def _build_card_with_image(
             "type": "section",
             "text": {"type": "mrkdwn", "text": ""},
             "fields": [
-                {"type": "mrkdwn", "text": f"*{f['label']}|\n{f['value']}"}
+                {"type": "mrkdwn", "text": f"*{f['label']}*\n{f['value']}"}
                 for f in fields if f.get("label") and f.get("value")
             ],
         })
