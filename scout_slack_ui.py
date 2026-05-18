@@ -1300,7 +1300,7 @@ def _build_sparkline_url(series: "list[int]") -> "str | None":
         "&backgroundColor=transparent"
         "&lineColor=%2300875a"
         "&fill=true"
-        "&fillColor=rgba(0%2C135%2C90%2C0.12)"
+        "&fillColor=rgba%280%2C135%2C90%2C0.12%29"
         "&lineWidth=2"
     )
 
@@ -1479,26 +1479,19 @@ def _build_home_view(queue_items: "list[dict] | None" = None,
     })
     blocks.append({"type": "divider"})
 
-    # ── Secondary examples ────────────────────────────────────────────────────
+    # ── Secondary examples — compact 4-button grid (2 per row on mobile) ─────
     blocks.append({
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "*Other things to try*"},
-    })
-    for idx, ex in enumerate(_HOME_SECONDARY):
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn",
-                     "text": f"*{ex['jtbd']}*\n`{ex['query']}`"},
-        })
-        blocks.append({
-            "type": "actions",
-            "elements": [{
+        "type": "actions",
+        "elements": [
+            {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "Try →", "emoji": False},
+                "text": {"type": "plain_text", "text": ex["jtbd"], "emoji": False},
                 "action_id": f"home_try_query_{idx}",
                 "value": ex["query"],
-            }],
-        })
+            }
+            for idx, ex in enumerate(_HOME_SECONDARY)
+        ],
+    })
 
     blocks.append({"type": "divider"})
     blocks.append({

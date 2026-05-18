@@ -1270,10 +1270,11 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
     # legacy bare "home_try_query" id in case any live message still
     # references it.
     if action_id.startswith("home_try_query"):
-        user_id = payload.get("user", {}).get("id", "")
-        query   = action.get("value", "").strip()
+        user_id    = payload.get("user", {}).get("id", "")
+        query      = action.get("value", "").strip()
+        trigger_id = payload.get("trigger_id", "")
         if user_id and query:
-            _handle_home_try_query(web, user_id, query)
+            _handle_home_try_query(web, user_id, query, trigger_id=trigger_id)
         return
 
     # ── App Home scoreboard — alert drill modal ───────────────────────────────
@@ -1420,19 +1421,102 @@ def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
 
     log.info(f"Feedback recorded: {action_id} query={query_hash} user={user_id}")
 
-def _handle_home_try_query(web: WebClient, user_id: str, query: str):
+def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id: str = ""):
     """
     Execute an example query from App Home.
-    Opens a DM with the user, posts the query for context, then runs it through Scout.
-    The user sees a real answer — learns by doing, not by reading docs.
+
+    When trigger_id is present (button tap from Home): opens a modal overlay via
+    views_open so the answer appears in-context without a DM nobody notices.
+    Falls back to a DM thread only when trigger_id is absent (legacy callers).
     """
-    log.info("home_try_query entered: user=%s query=%r", user_id, query[:80])
+    log.info("home_try_query entered: user=%s query=%r modal=%s", user_id, query[:80], bool(trigger_id))
+
+    if trigger_id:
+        # ── Modal path — open loading state immediately (trigger_id expires in 3s) ──
+        try:
+            open_resp = web.views_open(
+                trigger_id=trigger_id,
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "Scout", "emoji": False},
+                    "close": {"type": "plain_text", "text": "Close", "emoji": False},
+                    "blocks": [{
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{_pick_loading_message(query)}"},
+                    }],
+                },
+            )
+            assert open_resp.get("ok"), f"views_open failed: {open_resp.get('error')}"
+            view_id = open_resp["view"]["id"]
+        except Exception:
+            log.exception("_handle_home_try_query: views_open failed for %s query=%r", user_id, query[:80])
+            try:
+                conv = web.conversations_open(users=[user_id])
+                if conv.get("ok"):
+                    web.chat_postMessage(
+                        channel=conv["channel"]["id"],
+                        text=f"Something went wrong opening the modal — try `@Scout {query}` directly in any channel.",
+                    )
+            except Exception:
+                log.exception("_handle_home_try_query: DM fallback also failed for %s", user_id)
+            return
+
+        def _run_modal(v_id: str = view_id) -> None:
+            try:
+                _t0 = time.monotonic()
+                try:
+                    response = _ask_with_timeout(query)
+                except AskTimeout:
+                    web.views_update(
+                        view_id=v_id,
+                        view={
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "Scout", "emoji": False},
+                            "close": {"type": "plain_text", "text": "Close", "emoji": False},
+                            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                        },
+                    )
+                    return
+                _elapsed = int(time.monotonic() - _t0)
+                _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
+
+                response_text = (response.text or "")[:3000]
+                content_blocks = _text_to_blocks(response_text)[:45]
+                footer_block = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
+                web.views_update(
+                    view_id=v_id,
+                    view={
+                        "type": "modal",
+                        "title": {"type": "plain_text", "text": "Scout", "emoji": False},
+                        "close": {"type": "plain_text", "text": "Close", "emoji": False},
+                        "blocks": [*content_blocks, footer_block],
+                    },
+                )
+                log.info("home_try_query modal: ran %r for %s in %ss", query[:50], user_id, _elapsed)
+            except Exception:
+                log.exception("_handle_home_try_query: modal update failed for %s query=%r", user_id, query[:80])
+                try:
+                    web.views_update(
+                        view_id=v_id,
+                        view={
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "Scout", "emoji": False},
+                            "close": {"type": "plain_text", "text": "Close", "emoji": False},
+                            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"Something went wrong — try `@Scout {query}` directly in any channel."}}],
+                        },
+                    )
+                except Exception:
+                    log.exception("_handle_home_try_query: error modal update also failed for %s", user_id)
+
+        threading.Thread(target=_run_modal, daemon=True).start()
+        return
+
+    # ── Legacy DM path (fallback when no trigger_id) ──────────────────────────
     try:
         conv = web.conversations_open(users=[user_id])
         assert conv.get("ok"), f"conversations_open failed: {conv.get('error')}"
         dm_channel = conv["channel"]["id"]
 
-        # Post the query as context so the user knows what was asked
         intro = web.chat_postMessage(
             channel=dm_channel,
             text=f"Try it: {query}",
