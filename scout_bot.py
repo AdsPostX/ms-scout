@@ -695,6 +695,13 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
             "Run `@Scout fill rate` to check publisher-level session health."
         )
 
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        headline = "Revenue alert — today is tracking soft"
+        body = "\n".join(items)
+        card = Card(severity=Severity.CRITICAL, headline=headline, body=body)
+        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        return f"🔴 {headline}", blocks
+
     return _build_monitor_alert_blocks(
         ":red_circle:",
         "Revenue alert — today is tracking soft",
@@ -841,6 +848,14 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
         if hyp:
             line += f"\n  {hyp}"
         items.append(line)
+
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        headline = "Revenue velocity — publishers tracking down"
+        body = "\n".join(f"• {item}" for item in items) if items else ""
+        card = Card(severity=Severity.WARN, headline=headline, body=body)
+        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        return f"🟠 {headline}", blocks
+
     return _build_monitor_alert_blocks(
         ":chart_with_downwards_trend:",
         "Revenue velocity — publishers tracking down",
@@ -857,6 +872,14 @@ def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
         imp_7d  = r.get("impressions_7d", 0)
         imp_2d  = r.get("impressions_2d", 0)
         items.append(f"*{adv}*: {imp_7d:,} impressions in 7d · {imp_2d:,} in 2d")
+
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        headline = "Ghost campaigns — impressions without revenue"
+        body = "\n".join(f"• {item}" for item in items) if items else ""
+        card = Card(severity=Severity.WARN, headline=headline, body=body)
+        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        return f"🟠 {headline}", blocks
+
     return _build_monitor_alert_blocks(
         ":ghost:",
         "Ghost campaigns — impressions without revenue",
@@ -877,6 +900,14 @@ def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
             f"*{name}*: *{fill:.0f}%* fill · "
             f"{missed:,} missed of {sess:,} sessions/7d"
         )
+
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        headline = "Low fill rate — publishers with significant unfilled sessions"
+        body = "\n".join(f"• {item}" for item in items) if items else ""
+        card = Card(severity=Severity.WARN, headline=headline, body=body)
+        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        return f"🟠 {headline}", blocks
+
     return _build_monitor_alert_blocks(
         ":droplet:",
         "Low fill rate — publishers with significant unfilled sessions",
@@ -977,6 +1008,14 @@ def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
             f"CVR {cvr_yd:.2%} vs {cvr_7d:.2%} baseline "
             f"({delta:+.0f}%) - ${payout:.0f} payout"
         )
+
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        headline = "CVR anomalies — significant conversion rate drops since yesterday"
+        body = "\n".join(f"• {item}" for item in items) if items else ""
+        card = Card(severity=Severity.WARN, headline=headline, body=body)
+        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        return f"🟠 {headline}", blocks
+
     return _build_monitor_alert_blocks(
         ":chart_with_downwards_trend:",
         "CVR anomalies — significant conversion rate drops since yesterday",
@@ -999,6 +1038,14 @@ def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
             f"*{adv}*: expires {end_date} ({days}d) - "
             f"{pubs} publisher(s), {imp_7d:,} impressions, ${rev_7d:,.0f} revenue/7d"
         )
+
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        headline = "Expiring campaigns — active campaigns ending within the alert window"
+        body = "\n".join(f"• {item}" for item in items) if items else ""
+        card = Card(severity=Severity.WARN, headline=headline, body=body)
+        blocks = enforce(card.render(Surface.MONITOR_ALARM), Surface.MONITOR_ALARM)
+        return f"🟠 {headline}", blocks
+
     return _build_monitor_alert_blocks(
         ":hourglass_flowing_sand:",
         "Expiring campaigns — active campaigns ending within the alert window",
