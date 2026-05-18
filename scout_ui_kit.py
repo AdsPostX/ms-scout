@@ -44,9 +44,10 @@ scout_slack_ui.py must follow these — enforced by tests/test_kit_lint.py:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 # ---------------------------------------------------------------------------
 # Kill switch — import from here, never re-read the env var elsewhere
@@ -216,3 +217,157 @@ def enforce(
         "elements": [{"type": "mrkdwn", "text": overflow_text}],
     })
     return truncated
+
+
+# ---------------------------------------------------------------------------
+# MAX_ACTIONS — per-surface button budget (mobile-first defaults)
+# ---------------------------------------------------------------------------
+MAX_ACTIONS: dict[Surface, int] = {
+    Surface.CHANNEL_ROOT: 2,
+    Surface.THREAD: 3,
+    Surface.DM: 2,
+    Surface.MONITOR_ALARM: 0,
+    Surface.HOME: 2,
+    Surface.EPHEMERAL: 1,
+}
+
+
+# ---------------------------------------------------------------------------
+# _escape_md_code — protect underscores inside backtick spans from italic
+# ---------------------------------------------------------------------------
+_CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+
+
+def _escape_md_code(text: str) -> str:
+    """Escape underscores inside backtick code spans to prevent Slack italic rendering.
+
+    Slack's mrkdwn parser treats _word_ as italic even inside inline code spans.
+    This helper escapes only underscores that appear between backticks so that
+    ``cap_alert_pct`` renders as literal text, not ``cap<em>alert</em>pct``.
+    """
+    def _escape_underscores(m: re.Match) -> str:
+        return "`" + m.group(1).replace("_", r"\_") + "`"
+    return _CODE_SPAN_RE.sub(_escape_underscores, text)
+
+
+# ---------------------------------------------------------------------------
+# wrap_response — single mobile-tuned chokepoint for all ask() exits
+# ---------------------------------------------------------------------------
+def wrap_response(
+    *,
+    card: "Card",
+    surface: Surface,
+    suggestions: Optional[list[str]] = None,
+    feedback: Literal["reaction", "button", "none"] = "reaction",
+    query_hash: Optional[str] = None,
+    elapsed_seconds: Optional[int] = None,
+) -> tuple[str, list[dict]]:
+    """Single entry-point for every ask() reply surface.
+
+    Composition order (earlier items are protected from enforce() truncation):
+        headline → body → feedback → suggestions → footer → enforce()
+
+    Args:
+        card:             Card to render (severity + headline + optional body/facts/actions).
+        surface:          Target Slack surface — drives budget and button caps.
+        suggestions:      Follow-up query strings. Capped at MAX_ACTIONS[surface].
+                          Pass [] or None to emit zero actions blocks.
+        feedback:         "reaction" — no button row, caller should seed 👎 reaction.
+                          "button"   — include 👎 Off + ✏️ Correct this actions block.
+                          "none"     — omit feedback entirely.
+        query_hash:       Message ts / hash used as button value for feedback routing.
+        elapsed_seconds:  If provided, appended as a context footer (ops surfaces only;
+                          omit on DM to keep output clean).
+
+    Returns:
+        (fallback_text, blocks) — fallback is always non-empty (mobile push previews).
+    """
+    suggestions = suggestions or []
+    max_btn = MAX_ACTIONS.get(surface, 2)
+
+    # 1. Headline + body from Card
+    blocks: list[dict] = []
+    header_text = f"{card.severity.emoji} *{card.headline}*"
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
+
+    if card.body:
+        body_text = _escape_md_code(card.body)
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body_text}})
+
+    if card.facts:
+        fields = [{"type": "mrkdwn", "text": f"*{lbl}*\n{val}"} for lbl, val in card.facts[:10]]
+        blocks.append({"type": "section", "fields": fields})
+
+    # 2. Feedback row (protected — placed before suggestions so enforce() keeps it)
+    if feedback == "button" and query_hash:
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
+                    "action_id": "scout_feedback_bad",
+                    "value": query_hash,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✏️ Correct this", "emoji": True},
+                    "action_id": "scout_feedback_correct",
+                    "value": query_hash,
+                },
+            ],
+        })
+
+    # 3. Suggestion buttons — capped at MAX_ACTIONS[surface]; omit block entirely if empty
+    capped = [s for s in suggestions[:max_btn] if isinstance(s, str) and s.strip()]
+    if capped:
+        def _fit(s: str, max_len: int = 25) -> str:
+            if len(s) <= max_len:
+                return s
+            cut = s[:max_len].rsplit(" ", 1)[0]
+            return cut if cut else s[:max_len]
+
+        elements = [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": _fit(s), "emoji": False},
+                "value": s,
+                "action_id": f"scout_suggestion_{i}",
+            }
+            for i, s in enumerate(capped)
+        ]
+        blocks.append({"type": "actions", "elements": elements})
+
+    # 4. Elapsed footer (ops surfaces; skip on DM)
+    if elapsed_seconds is not None and surface not in (Surface.DM, Surface.EPHEMERAL):
+        elapsed_str = (
+            f"{elapsed_seconds}s" if elapsed_seconds < 60
+            else f"{elapsed_seconds // 60}m {elapsed_seconds % 60}s"
+        )
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"_Scout · {elapsed_str}_"}],
+        })
+
+    # 5. Card-level extra actions (e.g. drill-down CTAs from Card.actions)
+    if card.actions:
+        elements = []
+        for label, action_id, value, style in card.actions[:25]:
+            btn: dict = {
+                "type": "button",
+                "text": {"type": "plain_text", "text": label},
+                "action_id": action_id,
+                "value": value,
+            }
+            if style in ("primary", "danger"):
+                btn["style"] = style
+            elements.append(btn)
+        blocks.append({"type": "actions", "elements": elements})
+
+    # 6. Budget enforcement — always last
+    blocks = enforce(blocks, surface)
+
+    # Fallback text for push previews — always non-empty
+    fallback = card.headline or card.body or f"{card.severity.emoji} Scout update"
+
+    return fallback, blocks
