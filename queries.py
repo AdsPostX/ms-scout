@@ -85,7 +85,7 @@ SELECT
                     toFloat64OrNull(c.revenue), 0)), 0) AS rev_yest,
     coalesce(sum(if(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct - INTERVAL 7 DAY
                     AND toTimeZone(c.created_at, 'America/Chicago') < today_start_ct
-                    AND toTimeOfDay(toTimeZone(c.created_at, 'America/Chicago')) <= toTimeOfDay(now_ct),
+                    AND (toTimeZone(c.created_at, 'America/Chicago') - toStartOfDay(toTimeZone(c.created_at, 'America/Chicago'))) <= elapsed_today,
                     toFloat64OrNull(c.revenue), 0)), 0) / 7 AS rev_7d_avg,
     countIf(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct
             AND toTimeZone(c.created_at, 'America/Chicago') <= now_ct) AS conv_today,
@@ -93,7 +93,7 @@ SELECT
             AND toTimeZone(c.created_at, 'America/Chicago') <= yest_same_time_ct) AS conv_yest,
     countIf(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct - INTERVAL 7 DAY
             AND toTimeZone(c.created_at, 'America/Chicago') < today_start_ct
-            AND toTimeOfDay(toTimeZone(c.created_at, 'America/Chicago')) <= toTimeOfDay(now_ct)) / 7 AS conv_7d_avg
+            AND (toTimeZone(c.created_at, 'America/Chicago') - toStartOfDay(toTimeZone(c.created_at, 'America/Chicago'))) <= elapsed_today) / 7 AS conv_7d_avg
 FROM adpx_conversionsdetails c
 PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY)
 WHERE c.created_at >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY
@@ -112,7 +112,8 @@ WHERE c.created_at >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 
     pub_sql = """
 WITH
     toStartOfDay(toTimeZone(now(), 'America/Chicago')) AS today_start_ct,
-    toTimeZone(now(), 'America/Chicago') AS now_ct
+    toTimeZone(now(), 'America/Chicago') AS now_ct,
+    (now_ct - today_start_ct) AS elapsed_today
 SELECT
     toInt64(c.user_id) AS uid,
     coalesce(any(u.organization), '') AS publisher_name,
@@ -121,7 +122,7 @@ SELECT
                     toFloat64OrNull(c.revenue), 0)), 0) AS rev_today,
     coalesce(sum(if(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct - INTERVAL 7 DAY
                     AND toTimeZone(c.created_at, 'America/Chicago') < today_start_ct
-                    AND toTimeOfDay(toTimeZone(c.created_at, 'America/Chicago')) <= toTimeOfDay(now_ct),
+                    AND (toTimeZone(c.created_at, 'America/Chicago') - toStartOfDay(toTimeZone(c.created_at, 'America/Chicago'))) <= elapsed_today,
                     toFloat64OrNull(c.revenue), 0)), 0) / 7 AS rev_baseline
 FROM adpx_conversionsdetails c
 LEFT JOIN from_airbyte_users u ON u.id = toInt64(c.user_id)
