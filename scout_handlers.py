@@ -30,6 +30,9 @@ from scout_notion import (
     _patch_notion_copy, _copy_cache_key, _copy_cache_get, _copy_cache_set,
     _fetch_notion_queue_items,
 )
+from scout_ui_kit import (
+    _KIT_ENABLED, Card, Severity, Surface, wrap_response,
+)
 from scout_slack_ui import (
     _build_brief_blocks, _queue_confirm_blocks, _build_opportunity_cards,
     _build_suggestion_buttons, _build_help_blocks, _build_feedback_buttons,
@@ -166,12 +169,6 @@ _TIMEOUT_FALLBACK_TEXT = (
 
 # ── Part 3.6 — 👍/👎 feedback loop ──────────────────────────────────────────
 _FEEDBACK_LOG = _DATA_DIR / "feedback_log.jsonl"
-_FEEDBACK_PS_SEEN: set[str] = set()
-_FEEDBACK_LOCK = threading.Lock()
-_FEEDBACK_PS_LINE = (
-    "\n\n_P.S. — tap 👍 or 👎 below so I learn what's working. "
-    "First time? That's all you have to do._"
-)
 
 # ── Part 9 — Smart 👎 handler: clarification detection ───────────────────────
 _CLARIFICATION_PHRASES: tuple = (
@@ -241,23 +238,6 @@ def _already_retried(msg_ts: str) -> bool:
     return False
 
 
-def _load_ps_seen() -> None:
-    """Populate the in-memory PS-seen set from the feedback log on first use."""
-    if _FEEDBACK_PS_SEEN or not _FEEDBACK_LOG.exists():
-        return
-    try:
-        with _FEEDBACK_LOG.open() as fh:
-            for line in fh:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                u = row.get("user")
-                if u and row.get("rating") in ("ps_shown", "up", "down", "down_retry"):
-                    _FEEDBACK_PS_SEEN.add(u)
-    except Exception as e:
-        log.warning(f"[feedback] could not preload PS-seen set: {e}")
-
 
 def _feedback_log_row(row: dict) -> None:
     """Append one row to feedback_log.jsonl. Best-effort, never raises."""
@@ -265,14 +245,11 @@ def _feedback_log_row(row: dict) -> None:
         _FEEDBACK_LOG.parent.mkdir(parents=True, exist_ok=True)
         from datetime import datetime, timezone
         row.setdefault("ts", datetime.now(timezone.utc).isoformat())
-        with _FEEDBACK_LOCK, _FEEDBACK_LOG.open("a") as fh:
+        with _FEEDBACK_LOG.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
     except Exception as e:
         log.warning(f"[feedback] log write failed: {e}")
 
-
-def _maybe_append_ps(user_id: str, text: str) -> str:
-    return text
 
 
 def _retry_with_hint(web: WebClient, channel: str, msg_ts: str,
@@ -1173,16 +1150,29 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     if response.payload and response.payload.get("type") == "opportunities":
         header_text       = _sanitize_slack(response.text)
         offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-        suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
-        feedback_blocks   = _build_feedback_buttons(_placeholder_ts_sg)
-        _sep              = [{"type": "divider"}] if suggestion_blocks else []
-        elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
-        all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks, elapsed_ctx]
-        web.chat_update(
-            channel=channel, ts=_placeholder_ts_sg,
-            text=header_text or "Top opportunities",
-            blocks=all_blocks,
-        )
+        if _KIT_ENABLED:
+            _sg_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
+            _sg_fallback, _sg_blocks = wrap_response(
+                card=_sg_card, surface=Surface.THREAD,
+                suggestions=list(response.payload.get("suggestions", [])),
+                feedback="reaction", query_hash=_placeholder_ts_sg,
+                elapsed_seconds=_elapsed,
+            )
+            web.chat_update(
+                channel=channel, ts=_placeholder_ts_sg,
+                text=_sg_fallback, blocks=_sg_blocks,
+            )
+        else:
+            suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
+            feedback_blocks   = _build_feedback_buttons(_placeholder_ts_sg)
+            _sep              = [{"type": "divider"}] if suggestion_blocks else []
+            elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
+            all_blocks = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks, elapsed_ctx]
+            web.chat_update(
+                channel=channel, ts=_placeholder_ts_sg,
+                text=header_text or "Top opportunities",
+                blocks=all_blocks,
+            )
         log.info(f"Suggestion answered (opportunities) in {channel} (thread {thread_ts}): {query!r}")
         return
 
@@ -1215,15 +1205,28 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
 
     response_text = response_text[:3000]  # cap for Slack text= limit
     content_blocks_sg = _text_to_blocks(response_text)
-    suggestion_blocks = _build_suggestion_buttons(sugg)
-    web.chat_update(
-        channel=channel, ts=_placeholder_ts_sg, text=response_text,
-        blocks=[
-            *content_blocks_sg,
-            *suggestion_blocks,
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]},
-        ],
-    )
+    if _KIT_ENABLED:
+        _sg2_card = Card(Severity.INFO, "", body=response_text)
+        _sg2_fallback, _sg2_blocks = wrap_response(
+            card=_sg2_card, surface=Surface.THREAD,
+            suggestions=list(sugg),
+            feedback="reaction", query_hash=_placeholder_ts_sg,
+            elapsed_seconds=_elapsed,
+        )
+        web.chat_update(
+            channel=channel, ts=_placeholder_ts_sg,
+            text=_sg2_fallback, blocks=_sg2_blocks,
+        )
+    else:
+        suggestion_blocks = _build_suggestion_buttons(sugg)
+        web.chat_update(
+            channel=channel, ts=_placeholder_ts_sg, text=response_text,
+            blocks=[
+                *content_blocks_sg,
+                *suggestion_blocks,
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]},
+            ],
+        )
     log.info(f"Suggestion answered in {channel} (thread {thread_ts}): {query!r}")
 
 def _handle_block_action(req: SocketModeRequest, web: WebClient):
@@ -1458,32 +1461,58 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
         elif response.payload and response.payload.get("type") == "opportunities":
             header_text       = _sanitize_slack(response.text)
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-            suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
-            feedback_blocks   = _build_feedback_buttons(_placeholder_ts_ah)
-            _sep              = [{"type": "divider"}] if suggestion_blocks else []
-            elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
-            all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks, elapsed_ctx]
-            web.chat_update(
-                channel=dm_channel, ts=_placeholder_ts_ah,
-                text=header_text or "Top opportunities",
-                blocks=all_blocks,
-            )
+            if _KIT_ENABLED:
+                _ah3_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
+                _ah3_fallback, _ah3_blocks = wrap_response(
+                    card=_ah3_card, surface=Surface.DM,
+                    suggestions=list(response.payload.get("suggestions", [])),
+                    feedback="reaction", query_hash=_placeholder_ts_ah,
+                    elapsed_seconds=_elapsed,
+                )
+                web.chat_update(
+                    channel=dm_channel, ts=_placeholder_ts_ah,
+                    text=_ah3_fallback, blocks=_ah3_blocks,
+                )
+            else:
+                suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
+                feedback_blocks   = _build_feedback_buttons(_placeholder_ts_ah)
+                _sep              = [{"type": "divider"}] if suggestion_blocks else []
+                elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
+                all_blocks = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks, elapsed_ctx]
+                web.chat_update(
+                    channel=dm_channel, ts=_placeholder_ts_ah,
+                    text=header_text or "Top opportunities",
+                    blocks=all_blocks,
+                )
         else:
             if response.payload and response.payload.get("type") == "text_with_context":
-                response_text     = response.text
-                suggestions       = response.payload.get("suggestions", [])
-                suggestion_blocks = _build_suggestion_buttons(suggestions)
+                response_text = response.text
+                suggestions   = response.payload.get("suggestions", [])
             else:
-                response_text     = response.text
-                suggestion_blocks = []
+                response_text = response.text
+                suggestions   = []
             response_text = response_text[:3000]  # cap for Slack text= limit
             content_blocks = _text_to_blocks(response_text)
-            web.chat_update(
-                channel=dm_channel, ts=_placeholder_ts_ah,
-                text=response_text,
-                blocks=[*content_blocks, *suggestion_blocks,
-                        {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
-            )
+            if _KIT_ENABLED:
+                _ah4_card = Card(Severity.INFO, "", body=response_text)
+                _ah4_fallback, _ah4_blocks = wrap_response(
+                    card=_ah4_card, surface=Surface.DM,
+                    suggestions=list(suggestions) if isinstance(suggestions, list) else [],
+                    feedback="reaction", query_hash=_placeholder_ts_ah,
+                    elapsed_seconds=_elapsed,
+                )
+                web.chat_update(
+                    channel=dm_channel, ts=_placeholder_ts_ah,
+                    text=_ah4_fallback, blocks=_ah4_blocks,
+                )
+            else:
+                suggestion_blocks = _build_suggestion_buttons(suggestions)
+                web.chat_update(
+                    channel=dm_channel, ts=_placeholder_ts_ah,
+                    text=response_text,
+                    blocks=[*content_blocks, *suggestion_blocks,
+                            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
+                )
         log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
     except Exception as e:
         log.warning(f"_handle_home_try_query failed for {user_id}: {e}")
@@ -1826,8 +1855,6 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
                 "answer":     answer_text,
                 "rating":     rating,
             })
-            # First reaction also closes the PS nudge for this user
-            _FEEDBACK_PS_SEEN.add(rater_id)
             if rating == "down":
                 # Always retry on 👎 — gated only by _already_retried.
                 # Clarification responses get a direct-answer hint; everything
@@ -2397,31 +2424,58 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         elif response.payload and response.payload.get("type") == "opportunities":
             header_text       = _sanitize_slack(response.text)
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-            suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
-            feedback_blocks   = _build_feedback_buttons(msg_ts)
-            _sep              = [{"type": "divider"}] if suggestion_blocks else []
-            all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks]
-            _post = web.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=header_text or "Top opportunities",
-                blocks=all_blocks,
-                unfurl_links=False,
-            )
+            if _KIT_ENABLED:
+                _dm5_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
+                _dm5_fallback, _dm5_blocks = wrap_response(
+                    card=_dm5_card, surface=Surface.DM,
+                    suggestions=list(response.payload.get("suggestions", [])),
+                    feedback="reaction", query_hash=msg_ts,
+                    elapsed_seconds=_elapsed,
+                )
+                _post = web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=_dm5_fallback, blocks=_dm5_blocks,
+                    unfurl_links=False,
+                )
+            else:
+                suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
+                feedback_blocks   = _build_feedback_buttons(msg_ts)
+                _sep              = [{"type": "divider"}] if suggestion_blocks else []
+                all_blocks = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks]
+                _post = web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=header_text or "Top opportunities",
+                    blocks=all_blocks,
+                    unfurl_links=False,
+                )
             _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         else:
-            response_text     = _maybe_append_ps(user_id, response.text)
-            response_text     = _sanitize_slack(response_text)[:3000]
-            content_blocks    = _text_to_blocks(response_text)
-            suggestion_blocks = _build_suggestion_buttons(suggestions)
-            feedback_blocks   = _build_feedback_buttons(msg_ts)
-            _sep              = [{"type": "divider"}] if suggestion_blocks else []
+            response_text  = _sanitize_slack(response.text)[:3000]
+            content_blocks = _text_to_blocks(response_text)
             # No elapsed-time footer in DMs — the reaction disappearing IS the signal
-            _post = web.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=response_text,
-                blocks=[*content_blocks, *suggestion_blocks, *_sep, *feedback_blocks],
-                unfurl_links=False,
-            )
+            if _KIT_ENABLED:
+                _dm6_card = Card(Severity.INFO, "", body=response_text)
+                _dm6_fallback, _dm6_blocks = wrap_response(
+                    card=_dm6_card, surface=Surface.DM,
+                    suggestions=list(suggestions),
+                    feedback="reaction", query_hash=msg_ts,
+                    elapsed_seconds=_elapsed,
+                )
+                _post = web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=_dm6_fallback, blocks=_dm6_blocks,
+                    unfurl_links=False,
+                )
+            else:
+                suggestion_blocks = _build_suggestion_buttons(suggestions)
+                feedback_blocks   = _build_feedback_buttons(msg_ts)
+                _sep              = [{"type": "divider"}] if suggestion_blocks else []
+                _post = web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=response_text,
+                    blocks=[*content_blocks, *suggestion_blocks, *_sep, *feedback_blocks],
+                    unfurl_links=False,
+                )
             _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
@@ -2543,37 +2597,64 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             _run_preflight_qa(web, channel, thread_ts, brief_data)
 
     elif response.payload and response.payload.get("type") == "opportunities":
-        header_text       = _sanitize_slack(response.text)
-        offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-        suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
-        feedback_blocks   = _build_feedback_buttons(_placeholder_ts)
-        _sep              = [{"type": "divider"}] if suggestion_blocks else []
-        elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
-        all_blocks        = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks, elapsed_ctx]
-        web.chat_update(
-            channel=channel,
-            ts=_placeholder_ts,
-            text=header_text or "Top opportunities",
-            blocks=all_blocks,
-        )
+        header_text = _sanitize_slack(response.text)
+        offer_cards = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+        if _KIT_ENABLED:
+            _ch7_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
+            _ch7_fallback, _ch7_blocks = wrap_response(
+                card=_ch7_card, surface=Surface.CHANNEL_ROOT,
+                suggestions=list(response.payload.get("suggestions", [])),
+                feedback="reaction", query_hash=_placeholder_ts,
+                elapsed_seconds=_elapsed,
+            )
+            web.chat_update(
+                channel=channel,
+                ts=_placeholder_ts,
+                text=_ch7_fallback, blocks=_ch7_blocks,
+            )
+        else:
+            suggestion_blocks = _build_suggestion_buttons(response.payload.get("suggestions", []))
+            feedback_blocks   = _build_feedback_buttons(_placeholder_ts)
+            _sep              = [{"type": "divider"}] if suggestion_blocks else []
+            elapsed_ctx       = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
+            all_blocks = [*(_text_to_blocks(header_text) if header_text else []), *offer_cards, *suggestion_blocks, *_sep, *feedback_blocks, elapsed_ctx]
+            web.chat_update(
+                channel=channel,
+                ts=_placeholder_ts,
+                text=header_text or "Top opportunities",
+                blocks=all_blocks,
+            )
         _seed_feedback_reactions(web, channel, _placeholder_ts)
         log.info(f"Posted opportunity cards ({len(response.payload.get('offers', []))} offers) in {channel}")
 
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
-        response_text     = _maybe_append_ps(user_id, response.text)
-        response_text     = _sanitize_slack(response_text)[:3000]
-        content_blocks    = _text_to_blocks(response_text)
-        suggestion_blocks = _build_suggestion_buttons(suggestions)
-        feedback_blocks   = _build_feedback_buttons(_placeholder_ts)
-        _sep              = [{"type": "divider"}] if suggestion_blocks else []
-        web.chat_update(
-            channel=channel,
-            ts=_placeholder_ts,
-            text=response_text,
-            blocks=[*content_blocks, *suggestion_blocks, *_sep, *feedback_blocks,
-                    {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
-        )
+        response_text  = _sanitize_slack(response.text)[:3000]
+        content_blocks = _text_to_blocks(response_text)
+        if _KIT_ENABLED:
+            _ch8_card = Card(Severity.INFO, "", body=response_text)
+            _ch8_fallback, _ch8_blocks = wrap_response(
+                card=_ch8_card, surface=Surface.CHANNEL_ROOT,
+                suggestions=list(suggestions),
+                feedback="reaction", query_hash=_placeholder_ts,
+                elapsed_seconds=_elapsed,
+            )
+            web.chat_update(
+                channel=channel,
+                ts=_placeholder_ts,
+                text=_ch8_fallback, blocks=_ch8_blocks,
+            )
+        else:
+            suggestion_blocks = _build_suggestion_buttons(suggestions)
+            feedback_blocks   = _build_feedback_buttons(_placeholder_ts)
+            _sep              = [{"type": "divider"}] if suggestion_blocks else []
+            web.chat_update(
+                channel=channel,
+                ts=_placeholder_ts,
+                text=response_text,
+                blocks=[*content_blocks, *suggestion_blocks, *_sep, *feedback_blocks,
+                        {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
+            )
         _seed_feedback_reactions(web, channel, _placeholder_ts)
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 
