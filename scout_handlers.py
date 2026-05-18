@@ -1407,8 +1407,11 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
     Opens a DM with the user, posts the query for context, then runs it through Scout.
     The user sees a real answer — learns by doing, not by reading docs.
     """
+    log.info("home_try_query entered: user=%s query=%r", user_id, query[:80])
     try:
-        dm_channel = web.conversations_open(users=[user_id])["channel"]["id"]
+        conv = web.conversations_open(users=[user_id])
+        assert conv.get("ok"), f"conversations_open failed: {conv.get('error')}"
+        dm_channel = conv["channel"]["id"]
 
         # Post the query as context so the user knows what was asked
         intro = web.chat_postMessage(
@@ -1419,6 +1422,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
                 "text": {"type": "mrkdwn", "text": f"*Example query:*\n_{query}_"},
             }],
         )
+        assert intro.get("ok"), f"chat_postMessage intro failed: {intro.get('error')}"
         thread_ts = intro["ts"]
 
         _msg_text = _pick_loading_message(query)
@@ -1485,8 +1489,8 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
                         {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}],
             )
         log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
-    except Exception as e:
-        log.warning(f"_handle_home_try_query failed for {user_id}: {e}")
+    except Exception:
+        log.exception("_handle_home_try_query failed for %s query=%r", user_id, query[:80])
 
 def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
     """
@@ -1759,11 +1763,30 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     if event.get("type") == "app_home_opened":
         user_id = event.get("user", "")
         if user_id:
+            # Best-effort scoreboard rollup. Each source is independently
+            # try/excepted — a CH failure should not prevent the activation
+            # surface from rendering. None propagates as "—" in the UI.
+            rollup = None
+            alerts: list = []
+            try:
+                from queries import scoreboard_rollup
+                from scout_ch import _get_ch_client
+                rollup = scoreboard_rollup(_get_ch_client())
+            except Exception:
+                log.exception("app_home_opened: scoreboard_rollup failed")
+            try:
+                from alert_registry import current_state
+                alerts = current_state()
+            except Exception:
+                log.exception("app_home_opened: alert_registry.current_state failed")
             try:
                 queue_items = _fetch_notion_queue_items()
-                web.views_publish(user_id=user_id, view=_build_home_view(queue_items=queue_items))
-            except Exception as e:
-                log.warning(f"app_home_opened: views_publish failed: {e}")
+                web.views_publish(
+                    user_id=user_id,
+                    view=_build_home_view(queue_items=queue_items, rollup=rollup, alerts=alerts),
+                )
+            except Exception:
+                log.exception("app_home_opened: views_publish failed for %s", user_id)
         return
 
     # ── 🗑️ reaction → delete Scout's own message ─────────────────────────────

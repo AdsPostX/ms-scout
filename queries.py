@@ -15,9 +15,158 @@ Import pattern in callers:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Home scoreboard rollup — scoreboard_rollup()
+#
+# Single narrow query against adpx_conversionsdetails. No JOINs to
+# impression-level tables; those cause OOM on cvr_anomaly today. eCPM and
+# Fill are deliberately omitted from v1 — render them as "—" in the UI
+# rather than waiting on a heavy MV that may not exist yet.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PublisherDelta:
+    publisher_id: int
+    publisher_name: str
+    revenue_today_cents: int
+    revenue_baseline_cents: int  # 7-day same-time-of-day average
+    delta_pct: float             # signed percentage Δ vs baseline
+
+
+@dataclass
+class ScoreboardRollup:
+    revenue_today_cents: int
+    revenue_yesterday_same_time_cents: int
+    revenue_7d_avg_cents: int
+    conversions_today: int
+    conversions_yesterday_same_time: int
+    conversions_7d_avg: int
+    winners: list[PublisherDelta] = field(default_factory=list)  # top 3 by revenue Δ%
+    worry:   list[PublisherDelta] = field(default_factory=list)  # bottom 3 by revenue Δ%
+    generated_at: datetime = field(default_factory=datetime.utcnow)
+
+
+def scoreboard_rollup(ch) -> ScoreboardRollup:
+    """Headline numbers for the App Home scoreboard.
+
+    Returns revenue + conversion totals for three windows (today, yesterday
+    same-time-of-day, 7-day same-time-of-day average) plus top/bottom-3
+    publisher Δ% lists.
+
+    Source: adpx_conversionsdetails only. All timezone math lives in
+    ClickHouse (America/Chicago) so DST doesn't drift the comparison windows.
+
+    Errors propagate — caller (the home cache layer) wraps in try/except
+    and renders "—" placeholders if the query fails.
+    """
+    # ── Headline totals: today / yesterday-same-time / 7d-same-time avg ──
+    # Yesterday-same-time = midnight yesterday CT → now-minus-1-day.
+    # 7d avg = sum of last 7 same-time windows ÷ 7 (excludes today).
+    totals_sql = """
+WITH
+    toStartOfDay(toTimeZone(now(), 'America/Chicago')) AS today_start_ct,
+    toStartOfDay(toTimeZone(now() - INTERVAL 1 DAY, 'America/Chicago')) AS yest_start_ct,
+    toTimeZone(now(), 'America/Chicago') AS now_ct,
+    (now_ct - today_start_ct) AS elapsed_today,
+    yest_start_ct + elapsed_today AS yest_same_time_ct
+SELECT
+    coalesce(sum(if(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct
+                    AND toTimeZone(c.created_at, 'America/Chicago') <= now_ct,
+                    toFloat64OrNull(c.revenue), 0)), 0) AS rev_today,
+    coalesce(sum(if(toTimeZone(c.created_at, 'America/Chicago') >= yest_start_ct
+                    AND toTimeZone(c.created_at, 'America/Chicago') <= yest_same_time_ct,
+                    toFloat64OrNull(c.revenue), 0)), 0) AS rev_yest,
+    coalesce(sum(if(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct - INTERVAL 7 DAY
+                    AND toTimeZone(c.created_at, 'America/Chicago') < today_start_ct
+                    AND toTimeOfDay(toTimeZone(c.created_at, 'America/Chicago')) <= toTimeOfDay(now_ct),
+                    toFloat64OrNull(c.revenue), 0)), 0) / 7 AS rev_7d_avg,
+    countIf(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct
+            AND toTimeZone(c.created_at, 'America/Chicago') <= now_ct) AS conv_today,
+    countIf(toTimeZone(c.created_at, 'America/Chicago') >= yest_start_ct
+            AND toTimeZone(c.created_at, 'America/Chicago') <= yest_same_time_ct) AS conv_yest,
+    countIf(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct - INTERVAL 7 DAY
+            AND toTimeZone(c.created_at, 'America/Chicago') < today_start_ct
+            AND toTimeOfDay(toTimeZone(c.created_at, 'America/Chicago')) <= toTimeOfDay(now_ct)) / 7 AS conv_7d_avg
+FROM adpx_conversionsdetails c
+PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY)
+WHERE c.created_at >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY
+""".strip()
+
+    rows = ch.query(totals_sql).result_rows
+    if not rows:
+        return ScoreboardRollup(0, 0, 0, 0, 0, 0, [], [])
+
+    rev_today, rev_yest, rev_7d_avg, conv_today, conv_yest, conv_7d_avg = rows[0]
+
+    # ── Per-publisher Δ% (today vs 7d-same-time avg) ──
+    # Same source table; group by user_id and align with mv_adpx_users / from_airbyte_users
+    # for the friendly name. Cap at top/bottom 3; ignore publishers under $50 today
+    # (noise floor — single small conversion shouldn't crown a "winner").
+    pub_sql = """
+WITH
+    toStartOfDay(toTimeZone(now(), 'America/Chicago')) AS today_start_ct,
+    toTimeZone(now(), 'America/Chicago') AS now_ct
+SELECT
+    toInt64(c.user_id) AS uid,
+    coalesce(any(u.organization), '') AS publisher_name,
+    coalesce(sum(if(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct
+                    AND toTimeZone(c.created_at, 'America/Chicago') <= now_ct,
+                    toFloat64OrNull(c.revenue), 0)), 0) AS rev_today,
+    coalesce(sum(if(toTimeZone(c.created_at, 'America/Chicago') >= today_start_ct - INTERVAL 7 DAY
+                    AND toTimeZone(c.created_at, 'America/Chicago') < today_start_ct
+                    AND toTimeOfDay(toTimeZone(c.created_at, 'America/Chicago')) <= toTimeOfDay(now_ct),
+                    toFloat64OrNull(c.revenue), 0)), 0) / 7 AS rev_baseline
+FROM adpx_conversionsdetails c
+LEFT JOIN from_airbyte_users u ON u.id = toInt64(c.user_id)
+PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY)
+WHERE c.created_at >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY
+GROUP BY uid
+HAVING rev_today >= 50 OR rev_baseline >= 50
+""".strip()
+
+    pub_rows = ch.query(pub_sql).result_rows
+    deltas: list[PublisherDelta] = []
+    for uid, name, today, baseline in pub_rows:
+        today_c = int(float(today or 0) * 100)
+        base_c  = int(float(baseline or 0) * 100)
+        if base_c <= 0:
+            pct = 100.0 if today_c > 0 else 0.0
+        else:
+            pct = round(100.0 * (today_c - base_c) / base_c, 1)
+        deltas.append(PublisherDelta(
+            publisher_id=int(uid),
+            publisher_name=(name or "").strip() or f"pub {uid}",
+            revenue_today_cents=today_c,
+            revenue_baseline_cents=base_c,
+            delta_pct=pct,
+        ))
+
+    deltas.sort(key=lambda d: d.delta_pct, reverse=True)
+    winners = deltas[:3]
+    worry   = list(reversed(deltas[-3:])) if len(deltas) >= 3 else []
+    # If winners and worry overlap (very few publishers), prefer winners as-is
+    # and trim worry to non-overlapping tail.
+    win_ids = {d.publisher_id for d in winners}
+    worry = [d for d in worry if d.publisher_id not in win_ids][:3]
+
+    return ScoreboardRollup(
+        revenue_today_cents=int(float(rev_today or 0) * 100),
+        revenue_yesterday_same_time_cents=int(float(rev_yest or 0) * 100),
+        revenue_7d_avg_cents=int(float(rev_7d_avg or 0) * 100),
+        conversions_today=int(conv_today or 0),
+        conversions_yesterday_same_time=int(conv_yest or 0),
+        conversions_7d_avg=int(float(conv_7d_avg or 0)),
+        winners=winners,
+        worry=worry,
+        generated_at=datetime.utcnow(),
+    )
 
 # ---------------------------------------------------------------------------
 # Post-transaction placement names (canonical list — single source of truth)

@@ -1263,7 +1263,82 @@ def _build_queue_card(items: "list[dict] | None") -> list:
     return blocks
 
 
-def _build_home_view(queue_items: "list[dict] | None" = None) -> dict:
+def _fmt_money_short(cents: int) -> str:
+    """Compact dollar string for scoreboard headlines: $42.1K, $1.2M, $312."""
+    dollars = (cents or 0) / 100.0
+    if abs(dollars) >= 1_000_000:
+        return f"${dollars / 1_000_000:.1f}M"
+    if abs(dollars) >= 1_000:
+        return f"${dollars / 1_000:.1f}K"
+    return f"${int(round(dollars))}"
+
+
+def _fmt_delta_pct(today: int, baseline: int) -> str:
+    """Signed Δ% with arrow glyph. Returns '—' when baseline is zero."""
+    if not baseline:
+        return "—"
+    pct = round(100.0 * (today - baseline) / baseline, 1)
+    arrow = "↗" if pct > 0 else ("↘" if pct < 0 else "→")
+    sign = "+" if pct > 0 else ""
+    return f"{arrow} {sign}{pct}%"
+
+
+def _build_home_scoreboard_blocks(rollup, alerts) -> list:
+    """Headline pulse + alert health line for App Home.
+
+    `rollup` is a ScoreboardRollup (or None on data failure).
+    `alerts` is a list[AlertState] of currently-firing alerts (or [] / None).
+
+    PR 1 scope: headline revenue + two deltas + one health line. No quad
+    tile, no Winners/Worry, no drill modals — see plan PR 2 for the rest.
+    """
+    blocks: list = []
+
+    # ── Headline pulse ───────────────────────────────────────────────────
+    if rollup is None:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": "*Today's revenue:* —\n_Data temporarily unavailable._"},
+        })
+    else:
+        rev = _fmt_money_short(rollup.revenue_today_cents)
+        d_yest = _fmt_delta_pct(rollup.revenue_today_cents,
+                                rollup.revenue_yesterday_same_time_cents)
+        d_7d   = _fmt_delta_pct(rollup.revenue_today_cents,
+                                rollup.revenue_7d_avg_cents)
+        blocks.append({
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"{rev} today", "emoji": False},
+        })
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": f"{d_yest} vs yesterday  ·  {d_7d} vs 7d avg",
+            }],
+        })
+
+    # ── Alert health line ────────────────────────────────────────────────
+    firing = list(alerts or [])
+    if not firing:
+        health_text = "🟢 *All systems normal.*"
+    elif len(firing) == 1:
+        name = firing[0].alert_name.replace("_", " ")
+        health_text = f"🟠 *1 alert firing:* {name}"
+    else:
+        health_text = f"🔴 *{len(firing)} alerts firing.*"
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": health_text},
+    })
+    blocks.append({"type": "divider"})
+    return blocks
+
+
+def _build_home_view(queue_items: "list[dict] | None" = None,
+                     rollup=None,
+                     alerts=None) -> dict:
     """
     App Home — activation surface, NOT a dashboard.
 
@@ -1283,6 +1358,13 @@ def _build_home_view(queue_items: "list[dict] | None" = None) -> dict:
     del queue_items  # intentionally unused — queue moved off Home
 
     blocks: list = []
+
+    # ── Scoreboard (PR 1 thin slice) ──────────────────────────────────────────
+    # Prepended only when rollup is provided. Anonymous opens (no rollup) fall
+    # through to the existing activation surface so first-timers aren't blocked
+    # on a CH query failure.
+    if rollup is not None or alerts is not None:
+        blocks.extend(_build_home_scoreboard_blocks(rollup, alerts))
 
     # ── Value prop ────────────────────────────────────────────────────────────
     blocks.append({
