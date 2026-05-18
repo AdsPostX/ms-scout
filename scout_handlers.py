@@ -74,6 +74,62 @@ def _set_force_monitor_fn(name: str, fn) -> None:
     _FORCE_MONITOR_FNS[name] = fn
 
 
+# ── ask() wall-clock timeout wrapper ─────────────────────────────────────────
+# Background: 2026-05-17, "project Truist revenue for this month" stuck at
+# "Consulting the archives… 15s" forever — ClickHouse hit its 25 GB memory
+# limit and ask() has no internal timeout. The rotating-status placeholder
+# spun until the user gave up. This wrapper enforces a wall-clock cap so
+# CH-pressure days surface as a friendly degraded message, not an infinite
+# spinner. The orphaned ask() thread is allowed to complete in the
+# background (daemon=True so it dies on process exit).
+ASK_TIMEOUT_S = int(os.getenv("SCOUT_ASK_TIMEOUT_S", "90"))
+
+
+class AskTimeout(Exception):
+    """ask() exceeded the wall-clock timeout. Caller should render a
+    degraded message — typically 'ClickHouse is under pressure — try
+    again in 10-15 minutes.'"""
+
+
+def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
+    """Run ask() in a worker thread; raise AskTimeout if it exceeds
+    timeout_s. The worker thread keeps running (daemon) so the agent
+    can finish in the background, but the caller stops waiting.
+
+    Use this in any user-facing path where an infinite spinner is worse
+    than a 'try again in 10-15m' message: App Home tries, channel
+    @mentions, DMs.
+    """
+    result_box: dict = {}
+
+    def _worker():
+        try:
+            result_box["resp"] = ask(query, **kwargs)
+        except BaseException as e:  # surface agent-side errors to caller
+            result_box["err"] = e
+
+    t = threading.Thread(target=_worker, daemon=True, name="ask-worker")
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        log.warning(
+            f"ask() exceeded {timeout_s}s for query={query[:80]!r}; "
+            f"abandoning wait, worker continues in background",
+        )
+        raise AskTimeout(f"ask() exceeded {timeout_s}s")
+    if "err" in result_box:
+        raise result_box["err"]
+    return result_box["resp"]
+
+
+_TIMEOUT_FALLBACK_TEXT = (
+    ":hourglass_flowing_sand: *ClickHouse is under pressure right now.*\n"
+    "Your query took longer than expected — likely a memory-heavy time "
+    "window or a busy moment. Try again in 10–15 minutes, or narrow the "
+    "scope (e.g. a single publisher instead of all)."
+)
+
+
 # ── Part 3.6 — 👍/👎 feedback loop ──────────────────────────────────────────
 _FEEDBACK_LOG = _DATA_DIR / "feedback_log.jsonl"
 _FEEDBACK_PS_SEEN: set[str] = set()
@@ -1341,7 +1397,17 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
 
         try:
             _t0 = time.monotonic()
-            response = ask(query)
+            try:
+                response = _ask_with_timeout(query)
+            except AskTimeout:
+                stop_rotating()
+                web.chat_update(
+                    channel=dm_channel, ts=_placeholder_ts_ah,
+                    text="ClickHouse is under pressure — try again in 10–15 minutes.",
+                    blocks=[{"type": "section",
+                             "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                )
+                return
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         finally:
@@ -2228,8 +2294,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         try:
             _t0 = time.monotonic()
             _permalink = _permalink_for(web, channel, msg_ts)
-            response = ask(query, history=history, user_id=user_id, permalink=_permalink,
-                           user_tz=_get_user_tz(web, user_id))
+            response = _ask_with_timeout(
+                query, history=history, user_id=user_id, permalink=_permalink,
+                user_tz=_get_user_tz(web, user_id),
+            )
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
             _tools_called = response.tools_called
@@ -2240,6 +2308,18 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             except Exception:
                 _uname = user_id
             _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
+        except AskTimeout:
+            try:
+                web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
+            except Exception:
+                pass
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text="ClickHouse is under pressure — try again in 10–15 minutes.",
+                blocks=[{"type": "section",
+                         "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+            )
+            return
         except Exception as e:
             log.error(f"Agent error (DM): {e}", exc_info=True)
             try:
@@ -2329,7 +2409,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     try:
         _t0 = time.monotonic()
         _permalink = _permalink_for(web, channel, msg_ts)
-        response = ask(query, history=history, user_id=user_id, permalink=_permalink)
+        response = _ask_with_timeout(query, history=history, user_id=user_id, permalink=_permalink)
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting
@@ -2341,6 +2421,15 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         except Exception:
             _uname = user_id
         _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
+    except AskTimeout:
+        stop_rotating()
+        web.chat_update(
+            channel=channel, ts=placeholder["ts"],
+            text="ClickHouse is under pressure — try again in 10–15 minutes.",
+            blocks=[{"type": "section",
+                     "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+        )
+        return
     except Exception as e:
         log.error(f"Agent error: {e}")
         stop_rotating()
