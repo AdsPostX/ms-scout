@@ -281,17 +281,10 @@ def _queue_confirm_blocks(
     ]
 
     section_text = f"{network} · {payout_display}"
-    section_block: dict = {
+    blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": section_text},
-    }
-    if notion_url:
-        section_block["accessory"] = {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "View Brief →", "emoji": True},
-            "url": notion_url,
-        }
-    blocks.append(section_block)
+    })
 
     blocks.append({
         "type": "context",
@@ -301,6 +294,20 @@ def _queue_confirm_blocks(
             {"type": "mrkdwn", "text": signal},
         ],
     })
+
+    # Primary CTA in a dedicated actions block — section.accessory buttons
+    # clip on narrow iOS widths and get tap-eaten by the surrounding section.
+    # See MOBILE-FIRST RULES in scout_ui_kit.py.
+    if notion_url:
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "View Brief →", "emoji": True},
+                "url": notion_url,
+                "action_id": "queue_view_brief",
+            }],
+        })
 
     return blocks
 
