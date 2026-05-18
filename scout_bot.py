@@ -246,6 +246,108 @@ def _route_channel(purpose: str, force: bool = False) -> str:
     return _PRODUCTION_CHANNELS.get(purpose, _SCOUT_HQ_CHANNEL)
 
 
+# ── DQ pre-filter + hourly shadow feature flag ────────────────────────────────
+# Drops known-bad postback patterns before any monitor evaluates threshold
+# logic. When the filter trips, a gray advisory is posted to the shadow
+# channel (#sidd-qa) so postback storms / misfires get visibility without
+# polluting #revenue-operations.
+
+def _hourly_shadow_enabled() -> bool:
+    """Return True when SCOUT_HOURLY_SHADOW_ENABLED env var is truthy.
+
+    Read on every check so flipping the flag in launchd takes effect on the
+    next 5-min poll without a process restart. Defaults False.
+    """
+    return os.getenv("SCOUT_HOURLY_SHADOW_ENABLED", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _row_is_dq_bad(row: dict) -> str | None:
+    """Return a short reason string if a row hits a known-bad DQ pattern, else None.
+
+    Patterns:
+      - cvr_today == 100%                      → postback misfire
+      - sessions_today == 0                    → no traffic
+      - rpc < $0.50 AND conversions > 1000     → postback storm
+    Accepts cvr_today either as fraction (1.0) or percent (100.0).
+    """
+    if not isinstance(row, dict):
+        return None
+
+    def _f(key: str) -> float | None:
+        v = row.get(key)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    cvr_today = _f("cvr_today")
+    if cvr_today is not None and (
+        0.9999 <= cvr_today <= 1.0001 or 99.9 <= cvr_today <= 100.1
+    ):
+        return "cvr_today=100% (postback misfire)"
+
+    sessions_today = _f("sessions_today")
+    if sessions_today is not None and sessions_today == 0:
+        return "sessions_today=0 (no traffic)"
+
+    rpc = _f("rpc")
+    conversions = _f("conversions")
+    if rpc is not None and conversions is not None and rpc < 0.50 and conversions > 1000:
+        return f"rpc=${rpc:.2f} with {int(conversions)} conversions (postback storm)"
+
+    return None
+
+
+def _apply_dq_filter(rows: list) -> tuple[list, list[tuple[dict, str]]]:
+    """Split rows into (clean, dropped). `dropped` is [(row, reason), ...]."""
+    if not rows:
+        return [], []
+    clean: list = []
+    dropped: list[tuple[dict, str]] = []
+    for r in rows:
+        reason = _row_is_dq_bad(r) if isinstance(r, dict) else None
+        if reason:
+            dropped.append((r, reason))
+        else:
+            clean.append(r)
+    return clean, dropped
+
+
+def _post_dq_advisory(web, monitor_name: str, dropped: list[tuple[dict, str]]) -> None:
+    """Post a gray advisory to #sidd-qa (shadow) listing dropped rows.
+
+    Best-effort: failures are logged but never raise — DQ advisories are
+    informational and must not break the monitor.
+    """
+    if not dropped:
+        return
+    try:
+        lines = []
+        for row, reason in dropped[:8]:
+            label = (
+                row.get("publisher_name")
+                or row.get("adv_name")
+                or row.get("campaign_id")
+                or "unknown"
+            )
+            lines.append(f"• `{label}` — {reason}")
+        body = "\n".join(lines)
+        text = (
+            f":grey_question: *{monitor_name}* DQ pre-filter dropped "
+            f"{len(dropped)} row(s):\n{body}"
+        )
+        web.chat_postMessage(
+            channel=_route_channel("revenue", force=True),
+            text=text,
+        )
+    except Exception as e:
+        log.warning(f"[{monitor_name}] DQ advisory post failed: {e}")
+
+
 # ── Feedback buttons ──────────────────────────────────────────────────────────
 
 
@@ -1118,9 +1220,15 @@ def _run_with_web(
 
     while True:  # outer restart wrapper
         try:
-            CT_TZ   = pytz.timezone("America/Chicago")
-            channel = _route_channel(channel_topic)
-            tag     = f"[{monitor_name}]"
+            CT_TZ           = pytz.timezone("America/Chicago")
+            channel         = _route_channel(channel_topic)
+            shadow_channel  = _route_channel("revenue", force=True)
+            tag             = f"[{monitor_name}]"
+            # In-process per-hour idempotency for the hourly shadow cadence.
+            # Keyed by (date, hour); reset on each new hour. Survives crashes only
+            # within the inner loop — outer-wrapper restart will re-fire current
+            # hour at most once, which is acceptable for shadow traffic.
+            last_shadow_slot: str | None = None
 
             while True:  # inner poll loop
                 _time.sleep(300)
@@ -1135,34 +1243,90 @@ def _run_with_web(
                         )
                     )
 
-                    now_ct = _dt.now(CT_TZ)
-                    if not (now_ct.hour == check_hour and now_ct.minute < 10):
+                    now_ct      = _dt.now(CT_TZ)
+                    today_str   = now_ct.date().isoformat()
+                    shadow_on   = _hourly_shadow_enabled()
+                    in_shadow_window = shadow_on
+                    in_prod_window   = (
+                        now_ct.hour == check_hour and now_ct.minute < 10
+                    )
+
+                    # Skip iff nothing to do this tick.
+                    if not in_prod_window and not in_shadow_window:
                         continue
 
-                    today_str = now_ct.date().isoformat()
-                    if load_state_fn() == today_str:
+                    # Production batch is idempotent per calendar day.
+                    prod_already_fired = (
+                        in_prod_window and load_state_fn() == today_str
+                    )
+                    # Shadow cadence is idempotent per (date, hour) in-process.
+                    shadow_slot = f"{today_str}T{now_ct.hour:02d}"
+                    shadow_already_fired = (
+                        in_shadow_window and last_shadow_slot == shadow_slot
+                    )
+
+                    if (
+                        (not in_prod_window or prod_already_fired)
+                        and (not in_shadow_window or shadow_already_fired)
+                    ):
                         continue
 
                     try:
-                        results = signal_fn(_get_ch_client())
+                        raw_results = signal_fn(_get_ch_client())
                     except Exception as e:
                         log.warning(f"{tag} signal query failed: {e}")
-                        save_state_fn(today_str)
+                        # Do NOT persist on query failure — let the next slot
+                        # try again instead of silencing for 24h.
+                        if in_shadow_window and not shadow_already_fired:
+                            last_shadow_slot = shadow_slot
                         continue
 
+                    # DQ pre-filter: drop known-bad postback patterns and post a
+                    # gray advisory to the shadow channel if anything was dropped.
+                    results, dropped = _apply_dq_filter(raw_results or [])
+                    if dropped:
+                        _post_dq_advisory(web, monitor_name, dropped)
+
+                    # Where does this fire route?
+                    is_shadow_tick = (
+                        in_shadow_window
+                        and not shadow_already_fired
+                        and (not in_prod_window or prod_already_fired)
+                    )
+                    target_channel = shadow_channel if is_shadow_tick else channel
+
                     if not results:
-                        save_state_fn(today_str)
+                        # Empty result = nothing to report this slot. Do NOT
+                        # persist today_str on production ticks — that was the
+                        # save-on-empty silencer (AT&T May 9 incident).
+                        if is_shadow_tick:
+                            last_shadow_slot = shadow_slot
                         log.info(f"{tag} no anomalies — staying silent.")
                         continue
 
                     fallback, blocks = format_fn(results)
                     if not fallback:
-                        save_state_fn(today_str)
+                        # Formatter chose to suppress — same rule, do not persist.
+                        if is_shadow_tick:
+                            last_shadow_slot = shadow_slot
                         continue
 
-                    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
-                    save_state_fn(today_str)
-                    log.info(f"{tag} posted alert for {today_str} ({len(results)} items).")
+                    web.chat_postMessage(
+                        channel=target_channel, text=fallback, blocks=blocks,
+                    )
+                    if is_shadow_tick:
+                        last_shadow_slot = shadow_slot
+                        log.info(
+                            f"{tag} shadow-posted {shadow_slot} "
+                            f"({len(results)} items) → {target_channel}."
+                        )
+                    else:
+                        # Only persist on a real production fire.
+                        save_state_fn(today_str)
+                        log.info(
+                            f"{tag} posted alert for {today_str} "
+                            f"({len(results)} items)."
+                        )
 
                 except Exception as e:
                     log.warning(f"{tag} unexpected error: {e}")
