@@ -1434,7 +1434,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
             try:
                 response = _ask_with_timeout(query)
             except AskTimeout:
-                stop_rotating()
+                # stop_rotating() handled by finally below
                 web.chat_update(
                     channel=dm_channel, ts=_placeholder_ts_ah,
                     text="ClickHouse is under pressure — try again in 10–15 minutes.",
@@ -2450,7 +2450,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
             _uname = user_id
         _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
     except AskTimeout:
-        stop_rotating()
+        # stop_rotating() handled by finally below
         web.chat_update(
             channel=channel, ts=placeholder["ts"],
             text="ClickHouse is under pressure — try again in 10–15 minutes.",
@@ -2460,10 +2460,10 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
         return
     except Exception as e:
         log.error(f"Agent error: {e}")
-        stop_rotating()
         _post_error_update(web, channel, placeholder["ts"], e)
         return
     finally:
+        # Single point of cleanup — the rotating status always stops here.
         stop_rotating()
 
     # ── Route response: brief (Block Kit) vs text_with_context vs plain text ────
