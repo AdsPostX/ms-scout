@@ -1283,15 +1283,41 @@ def _fmt_delta_pct(today: int, baseline: int) -> str:
     return f"{arrow} {sign}{pct}%"
 
 
+def _build_sparkline_url(series: "list[int]") -> "str | None":
+    """Return a quickchart.io sparkline URL for the 7-day revenue series.
+
+    `series` is a list of revenue values in cents. Returns None if the
+    series is empty or all-zero (no point rendering a flat line).
+    """
+    if not series or all(v == 0 for v in series):
+        return None
+    # Scale to dollars for a readable y-axis (not shown, but avoids float noise)
+    data_str = ",".join(str(round(v / 100, 2)) for v in series)
+    return (
+        "https://quickchart.io/sparkline"
+        f"?data={data_str}"
+        "&width=640&height=80"
+        "&backgroundColor=transparent"
+        "&lineColor=%2300875a"
+        "&fill=true"
+        "&fillColor=rgba(0%2C135%2C90%2C0.12)"
+        "&lineWidth=2"
+    )
+
+
 def _build_home_scoreboard_blocks(rollup, alerts) -> list:
     """Headline pulse + alert health line for App Home.
 
     `rollup` is a ScoreboardRollup (or None on data failure).
     `alerts` is a list[AlertState] of currently-firing alerts (or [] / None).
 
-    PR 1 scope: headline revenue + two deltas + one health line. No quad
-    tile, no Winners/Worry, no drill modals — see plan PR 2 for the rest.
+    Slack-native v2 additions over PR 1:
+    - Move 1: image block with 7-day sparkline (quickchart.io)
+    - Move 2: <!date> token on context so timestamps show in viewer's TZ
+    - Move 3: overflow accessory on health section (3-dot menu)
+    - Move 4: "See details" button when alerts are firing
     """
+    import calendar
     blocks: list = []
 
     # ── Headline pulse ───────────────────────────────────────────────────
@@ -1311,27 +1337,78 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
             "type": "header",
             "text": {"type": "plain_text", "text": f"{rev} today", "emoji": False},
         })
+
+        # Move 1 — sparkline image
+        sparkline_url = _build_sparkline_url(getattr(rollup, "revenue_7d_series", []))
+        if sparkline_url:
+            blocks.append({
+                "type": "image",
+                "image_url": sparkline_url,
+                "alt_text": "7-day revenue trend",
+            })
+
+        # Move 2 — datetime token so freshness shows in viewer's local TZ
+        from datetime import timezone as _tz
+        generated_at = getattr(rollup, "generated_at", None)
+        if generated_at is not None:
+            ts = int(generated_at.replace(tzinfo=_tz.utc).timestamp())
+            freshness = f"<!date^{ts}^Updated {{ago}}|just now>"
+        else:
+            freshness = "just now"
         blocks.append({
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": f"{d_yest} vs yesterday  ·  {d_7d} vs 7d avg",
+                "text": f"{d_yest} vs yesterday  ·  {d_7d} vs 7d avg  ·  {freshness}",
             }],
         })
 
-    # ── Alert health line ────────────────────────────────────────────────
+    # ── Alert health line + overflow menu (Move 3) ───────────────────────
     firing = list(alerts or [])
     if not firing:
-        health_text = "🟢 *All systems normal.*"
+        health_text = "🟢  *All systems normal.*"
     elif len(firing) == 1:
         name = firing[0].alert_name.replace("_", " ")
-        health_text = f"🟠 *1 alert firing:* {name}"
+        health_text = f"🟠  *1 alert firing:* {name}"
     else:
-        health_text = f"🔴 *{len(firing)} alerts firing.*"
+        health_text = f"🔴  *{len(firing)} alerts firing.*"
+
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": health_text},
+        # Move 3 — overflow (3-dot) menu: zero extra rows, fully native
+        "accessory": {
+            "type": "overflow",
+            "action_id": "home_overflow_menu",
+            "options": [
+                {
+                    "text": {"type": "plain_text", "text": "View revenue brief", "emoji": False},
+                    "value": "brief",
+                },
+                {
+                    "text": {"type": "plain_text", "text": "Subscribe to daily DM", "emoji": False},
+                    "value": "subscribe",
+                },
+                {
+                    "text": {"type": "plain_text", "text": "Open in dashboard", "emoji": False},
+                    "value": "dashboard",
+                },
+            ],
+        },
     })
+
+    # Move 4 — "See details" button when alerts are actually firing
+    if firing:
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "See details →", "emoji": False},
+                "action_id": "home_alert_drill",
+                "style": "primary",
+            }],
+        })
+
     blocks.append({"type": "divider"})
     return blocks
 

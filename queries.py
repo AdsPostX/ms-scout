@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ class ScoreboardRollup:
     conversions_7d_avg: int
     winners: list[PublisherDelta] = field(default_factory=list)  # top 3 by revenue Δ%
     worry:   list[PublisherDelta] = field(default_factory=list)  # bottom 3 by revenue Δ%
+    revenue_7d_series: list[int] = field(default_factory=list)   # 8 daily cents [D-7..D-1, today]
     generated_at: datetime = field(default_factory=datetime.utcnow)
 
 
@@ -157,6 +159,43 @@ HAVING rev_today >= 50 OR rev_baseline >= 50
     win_ids = {d.publisher_id for d in winners}
     worry = [d for d in worry if d.publisher_id not in win_ids][:3]
 
+    # ── 7-day daily revenue series (sparkline data) ──
+    # Fetches one row per completed day (D-7 through D-1); fills missing days
+    # with 0; appends today's partial as the 8th point.
+    series_sql = """
+WITH today_start_ct AS (toStartOfDay(toTimeZone(now(), 'America/Chicago')))
+SELECT
+    toDate(toTimeZone(c.created_at, 'America/Chicago')) AS day,
+    round(sum(toFloat64OrNull(c.revenue)), 2)           AS daily_rev
+FROM adpx_conversionsdetails c
+PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(today_start_ct - INTERVAL 8 DAY)
+WHERE toDate(toTimeZone(c.created_at, 'America/Chicago')) >= today_start_ct - INTERVAL 7 DAY
+  AND toDate(toTimeZone(c.created_at, 'America/Chicago')) < today_start_ct
+GROUP BY day
+ORDER BY day
+""".strip()
+
+    series_map: dict[date, int] = {}
+    series_query_ok = True
+    try:
+        for row in ch.query(series_sql).result_rows:
+            day_val, rev_val = row
+            if hasattr(day_val, "date"):
+                day_val = day_val.date()
+            series_map[day_val] = int(float(rev_val or 0) * 100)
+    except Exception:
+        series_query_ok = False
+        log.exception("scoreboard_rollup: series query failed, sparkline will be empty")
+
+    # Use CT wall-clock date to match the CH query's toDate(toTimeZone(..., 'America/Chicago'))
+    today_ct = datetime.now(ZoneInfo("America/Chicago")).date()
+    series: list[int] = []
+    if series_query_ok:
+        for offset in range(7, 0, -1):
+            d = today_ct - timedelta(days=offset)
+            series.append(series_map.get(d, 0))
+        series.append(int(float(rev_today or 0) * 100))
+
     return ScoreboardRollup(
         revenue_today_cents=int(float(rev_today or 0) * 100),
         revenue_yesterday_same_time_cents=int(float(rev_yest or 0) * 100),
@@ -166,6 +205,7 @@ HAVING rev_today >= 50 OR rev_baseline >= 50
         conversions_7d_avg=int(float(conv_7d_avg or 0)),
         winners=winners,
         worry=worry,
+        revenue_7d_series=series,
         generated_at=datetime.utcnow(),
     )
 
