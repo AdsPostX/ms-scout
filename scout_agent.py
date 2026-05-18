@@ -7,6 +7,7 @@ Performance benchmarks: queried from ClickHouse at startup, cached in memory.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
@@ -2460,6 +2461,22 @@ def set_threshold(section: str = "", key: str = "", value=None, reason: str = ""
     if not reason or not reason.strip():
         return {"ok": False, "error": "missing_reason",
                 "message": "reason is required so the changelog stays useful."}
+
+    # Reject unknown keys with closest-match suggestion. Without this gate the
+    # override file accepts any typo, which silently shadows a real threshold.
+    known_section = SCOUT_THRESHOLDS.get(section)
+    if not isinstance(known_section, dict):
+        sections = list(SCOUT_THRESHOLDS.keys())
+        suggestions = difflib.get_close_matches(section, sections, n=1, cutoff=0.6)
+        hint = f" Did you mean `{suggestions[0]}`?" if suggestions else ""
+        return {"ok": False, "error": "unknown_section",
+                "message": f"Unknown section `{section}` (valid: {', '.join(sections)}).{hint}"}
+    if key not in known_section:
+        keys = list(known_section.keys())
+        suggestions = difflib.get_close_matches(key, keys, n=1, cutoff=0.6)
+        hint = f" Did you mean `{section}.{suggestions[0]}`?" if suggestions else ""
+        return {"ok": False, "error": "unknown_key",
+                "message": f"Unknown key `{section}.{key}`.{hint}"}
 
     # Capture prior value (post-override merge — what callers actually saw)
     prior = SCOUT_THRESHOLDS.get(section, {}).get(key) if isinstance(SCOUT_THRESHOLDS.get(section), dict) else None
