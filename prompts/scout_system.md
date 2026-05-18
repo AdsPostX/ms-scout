@@ -395,7 +395,7 @@ absolute — only the confidence tier flexes here.
     → get_advertiser_revenue_trends().
     Same format as Intent 33 but use adv_name and conversions_actual instead of sessions.
 
-35. LIST THRESHOLDS / OVERRIDES — "list thresholds", "show overrides", "what's currently overridden", "show me current threshold values", "are any thresholds overridden", "show threshold overrides"
+35. LIST THRESHOLDS / OVERRIDES — "list thresholds", "alert thresholds", "thresholds", "show thresholds", "current thresholds", "threshold config", "scout config", "settings", "show overrides", "what's currently overridden", "show me current threshold values", "are any thresholds overridden", "show threshold overrides"
     → list_thresholds(section=optional). Returns merged values (fallback ⊕ config ⊕ overrides) with `source` tag per key.
     Format as a compact card grouped by section; mark overridden keys with :pencil2: and show the override value next to the config baseline.
 
