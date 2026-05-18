@@ -70,10 +70,11 @@ def _run_one_iteration(
     now_hour = fire_hour if in_fire_window else (fire_hour + 3) % 24
     fixed_now = _real_dt(2026, 5, 18, now_hour, 1, 0)
 
-    class _FakeDt:
-        @staticmethod
-        def now(tz=None):
-            # Return tz-aware datetime in the same tz to satisfy CT_TZ access.
+    class _FakeDt(_real_dt):
+        # Subclass so construction (pytz's _epoch = datetime(1970,1,1))
+        # still works while we override now().
+        @classmethod
+        def now(cls, tz=None):
             if tz is None:
                 return fixed_now
             return tz.localize(fixed_now)
