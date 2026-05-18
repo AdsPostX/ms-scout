@@ -1130,53 +1130,52 @@ def cvr_anomaly(
     rows = ch.query(
         """
         WITH imp_7d AS (
+                -- adpx_impressions_details.pid is the publisher ID (string) —
+                -- no session join needed; eliminates the FillingRightJoinSide OOM.
                 SELECT
-                    s.user_id                         AS publisher_id,
-                    i.campaign_id                     AS campaign_id,
+                    toUInt64OrZero(pid)               AS publisher_id,
+                    campaign_id,
                     count()                           AS impressions_7d
-                FROM adpx_impressions_details i
-                JOIN adpx_sdk_sessions s ON i.session_id = s.session_id
-                WHERE toYYYYMM(i.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
-                  AND i.created_at >= today() - INTERVAL 7 DAY
-                GROUP BY s.user_id, i.campaign_id
+                FROM adpx_impressions_details
+                WHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
+                  AND created_at >= today() - INTERVAL 7 DAY
+                GROUP BY publisher_id, campaign_id
                 HAVING impressions_7d >= {min_impressions_7d: Int64}
             ),
             imp_yesterday AS (
                 SELECT
-                    s.user_id                         AS publisher_id,
-                    i.campaign_id                     AS campaign_id,
+                    toUInt64OrZero(pid)               AS publisher_id,
+                    campaign_id,
                     count()                           AS impressions_yesterday
-                FROM adpx_impressions_details i
-                JOIN adpx_sdk_sessions s ON i.session_id = s.session_id
-                WHERE toYYYYMM(i.created_at) >= toYYYYMM(yesterday())
-                  AND i.created_at >= yesterday()
-                  AND i.created_at < today()
-                GROUP BY s.user_id, i.campaign_id
+                FROM adpx_impressions_details
+                WHERE toYYYYMM(created_at) >= toYYYYMM(yesterday())
+                  AND created_at >= yesterday()
+                  AND created_at < today()
+                GROUP BY publisher_id, campaign_id
             ),
             conv_7d AS (
+                -- adpx_conversionsdetails.user_id is already the publisher ID (UInt64).
                 SELECT
-                    s.user_id                         AS publisher_id,
-                    cv.campaign_id                    AS campaign_id,
+                    user_id                           AS publisher_id,
+                    campaign_id,
                     count()                           AS conversions_7d,
-                    avg(toFloat64OrNull(cv.payout))   AS payout_per_conversion
-                FROM adpx_conversionsdetails cv
-                JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
-                WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
-                  AND cv.created_at >= today() - INTERVAL 7 DAY
-                GROUP BY s.user_id, cv.campaign_id
+                    avg(toFloat64OrNull(payout))       AS payout_per_conversion
+                FROM adpx_conversionsdetails
+                WHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
+                  AND created_at >= today() - INTERVAL 7 DAY
+                GROUP BY publisher_id, campaign_id
                 HAVING payout_per_conversion >= {min_payout: Float64}
             ),
             conv_yesterday AS (
                 SELECT
-                    s.user_id                         AS publisher_id,
-                    cv.campaign_id                    AS campaign_id,
+                    user_id                           AS publisher_id,
+                    campaign_id,
                     count()                           AS conversions_yesterday
-                FROM adpx_conversionsdetails cv
-                JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
-                WHERE toYYYYMM(cv.created_at) >= toYYYYMM(yesterday())
-                  AND cv.created_at >= yesterday()
-                  AND cv.created_at < today()
-                GROUP BY s.user_id, cv.campaign_id
+                FROM adpx_conversionsdetails
+                WHERE toYYYYMM(created_at) >= toYYYYMM(yesterday())
+                  AND created_at >= yesterday()
+                  AND created_at < today()
+                GROUP BY publisher_id, campaign_id
             ),
             names AS (
                 SELECT
@@ -1288,14 +1287,14 @@ def expiring_campaigns(ch, warning_days: int = 7) -> list[dict]:
             FROM expiring_raw
         ),
         imp_agg AS (
+            -- pid is the publisher ID (string) — no session join needed.
             SELECT
-                toInt64(i.campaign_id)                AS campaign_id,
-                count()                               AS impressions_7d,
-                count(DISTINCT s.user_id)             AS publisher_count
-            FROM adpx_impressions_details i
-            JOIN adpx_sdk_sessions s ON i.session_id = s.session_id
-            WHERE toYYYYMM(i.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
-              AND i.created_at >= today() - INTERVAL 7 DAY
+                toInt64(campaign_id)                      AS campaign_id,
+                count()                                   AS impressions_7d,
+                count(DISTINCT toUInt64OrZero(pid))       AS publisher_count
+            FROM adpx_impressions_details
+            WHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
+              AND created_at >= today() - INTERVAL 7 DAY
             GROUP BY campaign_id
         ),
         rev_agg AS (
@@ -1487,19 +1486,19 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
     rows = ch.query(
         """
         WITH actual AS (
+            -- adpx_conversionsdetails.user_id is the publisher ID — no session join needed.
             SELECT
-                s.user_id                                              AS publisher_id,
+                cv.user_id                                             AS publisher_id,
                 round(sum(toFloat64OrNull(cv.revenue)), 2)            AS revenue_actual,
                 count(DISTINCT cv.session_id)                         AS sessions_actual
             FROM adpx_conversionsdetails cv
-            JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
             WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {days: Int32} DAY)
               AND cv.created_at >= today() - INTERVAL {days: Int32} DAY
             GROUP BY publisher_id
         ),
         historical_daily AS (
             SELECT
-                s.user_id                                              AS publisher_id,
+                cv.user_id                                             AS publisher_id,
                 toDate(cv.created_at, 'America/Chicago')              AS rev_date,
                 round(sum(toFloat64OrNull(cv.revenue)), 2)            AS daily_revenue,
                 intDiv(dateDiff('day',
@@ -1507,7 +1506,6 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
                        rev_date),
                        {days: Int32}) + 1                              AS period_idx
             FROM adpx_conversionsdetails cv
-            JOIN adpx_sdk_sessions s ON cv.session_id = s.session_id
             WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {lookback: Int32} DAY)
               AND cv.created_at >= today() - INTERVAL {lookback: Int32} DAY
               AND cv.created_at < today() - INTERVAL {days: Int32} DAY
