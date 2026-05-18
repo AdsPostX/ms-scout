@@ -1276,6 +1276,22 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
             _handle_home_try_query(web, user_id, query)
         return
 
+    # ── App Home scoreboard — alert drill modal ───────────────────────────────
+    # "See details →" button on the health line opens a modal listing all
+    # currently-firing alerts. Requires trigger_id from the block_actions event.
+    if action_id == "home_alert_drill":
+        trigger_id = payload.get("trigger_id", "")
+        if trigger_id:
+            _handle_home_alert_drill(web, trigger_id)
+        return
+
+    # ── App Home scoreboard — overflow (3-dot) menu ───────────────────────────
+    if action_id == "home_overflow_menu":
+        user_id    = payload.get("user", {}).get("id", "")
+        option_val = (action.get("selected_option") or {}).get("value", "")
+        _handle_home_overflow(web, user_id, option_val)
+        return
+
     # ── Feedback buttons (👍 / 👎 / ✏️) ──────────────────────────────────────
     if action_id in ("scout_feedback_good", "scout_feedback_bad", "scout_feedback_correct"):
         _handle_feedback(action, payload, web)
@@ -1520,6 +1536,82 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str):
         log.info(f"App Home try-it: ran '{query[:50]}' for {user_id}")
     except Exception:
         log.exception("_handle_home_try_query failed for %s query=%r", user_id, query[:80])
+
+def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
+    """Open a modal listing all currently-firing alerts (Move 4).
+
+    Called when the user taps "See details →" on the App Home health line.
+    Uses views_open so the modal slides over Home without a channel jump.
+    """
+    try:
+        from alert_registry import current_state
+        firing = current_state()
+    except Exception:
+        log.exception("_handle_home_alert_drill: current_state failed")
+        firing = []
+
+    if not firing:
+        blocks = [{"type": "section",
+                   "text": {"type": "mrkdwn", "text": "🟢  *All systems normal.* No alerts firing."}}]
+    else:
+        from datetime import timezone as _tz
+        blocks = []
+        for alert in firing:
+            name = alert.alert_name.replace("_", " ").title()
+            ts   = int(alert.last_change.replace(tzinfo=_tz.utc).timestamp())
+            ctx  = alert.context or {}
+            detail_parts = [f"*{name}*"]
+            if ctx:
+                for k, v in list(ctx.items())[:3]:
+                    detail_parts.append(f"{k.replace('_', ' ')}: {v}")
+            detail_parts.append(f"_Since <!date^{ts}^{{time}} on {{date_short}}|just now>_")
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "\n".join(detail_parts)},
+            })
+            blocks.append({"type": "divider"})
+
+    try:
+        web.views_open(
+            trigger_id=trigger_id,
+            view={
+                "type": "modal",
+                "title": {"type": "plain_text", "text": "Firing Alerts", "emoji": False},
+                "close": {"type": "plain_text", "text": "Close", "emoji": False},
+                "blocks": blocks,
+            },
+        )
+    except Exception:
+        log.exception("_handle_home_alert_drill: views_open failed")
+
+
+def _handle_home_overflow(web: WebClient, user_id: str, option_val: str) -> None:
+    """Handle the App Home scoreboard overflow (3-dot) menu (Move 3).
+
+    Dispatches on option value: brief | subscribe | dashboard.
+    All responses are best-effort ephemeral DMs — failures are logged, not surfaced.
+    """
+    if not user_id:
+        return
+    try:
+        if option_val == "brief":
+            web.chat_postMessage(
+                channel=user_id,
+                text="Revenue brief coming up — ask Scout anything, e.g. `@Scout how is revenue trending this week?`",
+            )
+        elif option_val == "subscribe":
+            web.chat_postMessage(
+                channel=user_id,
+                text="Daily DM digest is on the roadmap. Reply here to let us know what metrics matter most to you.",
+            )
+        elif option_val == "dashboard":
+            web.chat_postMessage(
+                channel=user_id,
+                text="ClickHouse dashboard link coming soon. In the meantime: `@Scout show me today's revenue by publisher`",
+            )
+    except Exception:
+        log.exception("_handle_home_overflow: postMessage failed (user=%s val=%s)", user_id, option_val)
+
 
 def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
     """
