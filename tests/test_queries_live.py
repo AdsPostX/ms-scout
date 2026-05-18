@@ -60,51 +60,69 @@ class TestQueriesLive(unittest.TestCase):
         """HAVING in nested CTE. Needs a real pub_id; we sample one cheaply."""
         import queries
         # Sample any active publisher to drive the query — we just need the
-        # SQL to parse + execute, not specific data
+        # SQL to parse + execute, not specific data.
+        # Use default.adpx_sdk_sessions (user_id UInt64) + string(user_id) as pub_pid stand-in.
         rows = self.ch.query(
-            "SELECT publisher_id, pub_pid FROM ms_events.sessions "
-            "WHERE publisher_id != 0 LIMIT 1"
+            "SELECT user_id FROM default.adpx_sdk_sessions "
+            "WHERE user_id != 0 LIMIT 1"
         ).result_rows
         if not rows:
             self.skipTest("No publishers in sessions table to sample")
-        pub_id, pub_pid = rows[0]
-        result = queries.supply_dead_weight(self.ch, int(pub_id), str(pub_pid))
+        pub_id = int(rows[0][0])
+        result = queries.supply_dead_weight(self.ch, pub_id, str(pub_id))
         self.assertIsInstance(result, list)
 
     def test_publisher_health_sessions(self):
         import queries
+        from datetime import date, timedelta
         rows = self.ch.query(
-            "SELECT publisher_id FROM ms_events.sessions "
-            "WHERE publisher_id != 0 LIMIT 1"
+            "SELECT user_id FROM default.adpx_sdk_sessions "
+            "WHERE user_id != 0 LIMIT 1"
         ).result_rows
         if not rows:
             self.skipTest("No publishers to sample")
         pid = int(rows[0][0])
-        result = queries.publisher_health_sessions(self.ch, pid)
+        days = 30
+        start = date.today() - timedelta(days=days)
+        partition = start.year * 100 + start.month
+        result = queries.publisher_health_sessions(self.ch, pid, partition, days)
         self.assertIsNotNone(result)
 
     def test_publisher_health_ad_metrics(self):
         import queries
+        from datetime import date, timedelta
         rows = self.ch.query(
-            "SELECT publisher_id FROM ms_events.sessions "
-            "WHERE publisher_id != 0 LIMIT 1"
+            "SELECT user_id FROM default.adpx_sdk_sessions "
+            "WHERE user_id != 0 LIMIT 1"
         ).result_rows
         if not rows:
             self.skipTest("No publishers to sample")
         pid = int(rows[0][0])
-        result = queries.publisher_health_ad_metrics(self.ch, pid)
+        pid_str = str(pid)
+        days = 30
+        start = date.today() - timedelta(days=days)
+        partition = start.year * 100 + start.month
+        ext_start = date.today() - timedelta(days=days + 14)
+        extended_partition = ext_start.year * 100 + ext_start.month
+        result = queries.publisher_health_ad_metrics(
+            self.ch, pid, pid_str, partition, extended_partition, days
+        )
         self.assertIsNotNone(result)
 
     def test_publisher_health_click_metrics(self):
         import queries
+        from datetime import date, timedelta
         rows = self.ch.query(
-            "SELECT publisher_id FROM ms_events.sessions "
-            "WHERE publisher_id != 0 LIMIT 1"
+            "SELECT user_id FROM default.adpx_sdk_sessions "
+            "WHERE user_id != 0 LIMIT 1"
         ).result_rows
         if not rows:
             self.skipTest("No publishers to sample")
         pid = int(rows[0][0])
-        result = queries.publisher_health_click_metrics(self.ch, pid)
+        days = 30
+        start = date.today() - timedelta(days=days)
+        partition = start.year * 100 + start.month
+        result = queries.publisher_health_click_metrics(self.ch, pid, partition, days)
         self.assertIsNotNone(result)
 
     def test_cvr_anomaly(self):
