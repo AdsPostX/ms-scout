@@ -649,13 +649,13 @@ def _is_icon_url(url: str) -> bool:
     return False
 
 
-def _clearbit_logo_url(offer: dict) -> str:
+def _advertiser_favicon_url(offer: dict) -> str:
     """
-    Return a Clearbit Logo API URL for the offer's advertiser domain.
+    Return a Google Favicon API URL for the offer's advertiser domain.
     Extracts the root domain from preview_url (available on CJ, Impact, MaxBounty).
+    Google's favicon API always returns a valid image (fallback globe icon when
+    no favicon is found), so Slack never shows a broken-image placeholder.
     Returns "" when no usable domain can be found.
-    Clearbit returns a 200 square PNG for known companies and 404 for unknowns;
-    Slack silently omits the accessory if the URL 404s, so no pre-validation needed.
     """
     import urllib.parse
     raw = offer.get("preview_url") or offer.get("tracking_url") or ""
@@ -669,7 +669,7 @@ def _clearbit_logo_url(offer: dict) -> str:
         domain = ".".join(parts[-2:]) if len(parts) >= 2 else host
         if not domain or "." not in domain:
             return ""
-        return f"https://logo.clearbit.com/{domain}"
+        return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
     except Exception:
         return ""
 
@@ -681,8 +681,8 @@ def _prefetch_offer_images(scored_offers: list[tuple[float, dict]]) -> dict[str,
     Priority:
       1. icon_url / hero_url if _is_icon_url() confirms it's a genuine square logo
          (FlexOffers programsquarelogo, Awin merchant/profile — NOT MaxBounty lp thumbnails)
-      2. Clearbit Logo API derived from preview_url domain
-         (works for CJ, Impact, MaxBounty — all have preview_url pointing to advertiser site)
+      2. Google Favicon API derived from preview_url domain — always returns a valid
+         image (never 404s), so Slack never shows a broken-image placeholder.
 
     No OG-image scraping: og:image is a wide social-preview banner, wrong shape
     for a 75 px square Slack accessory slot.
@@ -695,7 +695,7 @@ def _prefetch_offer_images(scored_offers: list[tuple[float, dict]]) -> dict[str,
         chosen   = (
             icon if _is_icon_url(icon)
             else hero if _is_icon_url(hero)
-            else _clearbit_logo_url(o)
+            else _advertiser_favicon_url(o)
         )
         results[offer_id] = chosen
     return results
@@ -1342,9 +1342,10 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             payout_type = _normalize_payout_type(o.get("payout_type") or "")
             payout_str  = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
             geo         = o.get("geo") or o.get("country") or ""
-            # Only use verified square-logo URLs — same filter as _prefetch_offer_images
+            # Same priority as _prefetch_offer_images: icon/hero if square logo,
+            # otherwise Google favicon (always returns valid image, never 404).
             _icon_candidates = [o.get("icon_url") or "", o.get("hero_url") or "", o.get("banner_url") or ""]
-            img_url = next((u for u in _icon_candidates if _is_icon_url(u)), "")
+            img_url = next((u for u in _icon_candidates if _is_icon_url(u)), _advertiser_favicon_url(o))
             tier        = o.get("fit_tier") or ""
             tier_badge  = f"  _{tier}_" if tier else ""
             why         = context_fn(o) if context_fn else ""
