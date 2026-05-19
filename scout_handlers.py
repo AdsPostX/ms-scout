@@ -2784,7 +2784,7 @@ def _handle_event_impl(req: SocketModeRequest):
             _uname = user_id
         _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
     except AskTimeout:
-        # stop_rotating() handled by finally below
+        stop_rotating()  # join the rotating thread before updating to avoid race
         web.chat_update(
             channel=channel, ts=placeholder["ts"],
             text="ClickHouse is under pressure — try again in 10–15 minutes.",
@@ -2794,10 +2794,11 @@ def _handle_event_impl(req: SocketModeRequest):
         return
     except Exception as e:
         log.error(f"Agent error: {e}")
+        stop_rotating()  # join the rotating thread before updating to avoid race
         _post_error_update(web, channel, placeholder["ts"], e)
         return
     finally:
-        # Single point of cleanup — the rotating status always stops here.
+        # Idempotent cleanup — stop_rotating() is safe to call multiple times.
         stop_rotating()
 
     # ── Route response: brief (Block Kit) vs text_with_context vs plain text ────
