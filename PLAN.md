@@ -39,7 +39,7 @@ Falsifiable: re-ask Ali's exact questions ("how much do you estimate our revenue
 - **Success criterion expanded.** Lead with one number, but include (a) confidence/error band, (b) pace vs typical at this hour, (c) same-weekday EOD comparison. "$X projected, likely $Y–$Z, currently $A, tracking B% of typical for this hour, typical Monday lands ~$C."
 - **Rollout hardened.** Pre-public gate = 10-day backtest report (projected EOD vs actual EOD at multiple CT hours, median + 90th percentile error). Tool returns "not enough confidence to project" when sample size or error band fails the gate. Only after the report is reviewed does the tool become visible in #revenue-operations.
 - **Per-publisher breakdown moved fully OUT for v1.** Total only. Publisher-level projection re-enters after total earns trust.
-- **Hard guardrail.** If new projection diverges > 25% from daemon's last reading on the same day, return "projection unstable, defer to daemon" rather than a number.
+- **Hard guardrail (SUPERSEDED).** Original CEO ask was: if new projection diverges > 25% from the daemon's last reading on the same day, return "projection unstable". Eng review dropped this (see line 28) because the daemon does not persist its projected number; we rely on `status="too_early"`, `sample_days < 4` → `insufficient_history`, and the Step 6 backtest gate instead. The `"unstable"` status enum value on line 26 remains as a reserved code path for future use but is not emitted by v1.
 - **Hard-coded too-early string.** "Too early to project reliably — ask after 10am CT." Smoke test asserts verbatim surface, not paraphrased.
 
 ## Proposed Plan (7 steps)

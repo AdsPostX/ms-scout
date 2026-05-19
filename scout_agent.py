@@ -1191,7 +1191,7 @@ TOOLS = [
     {
         "name": "get_revenue_today_projection",
         "description": (
-            "Project today's END-OF-DAY revenue using a 60-day hour-of-day arrival curve and "
+            "Project today's END-OF-DAY revenue using a 90-day hour-of-day arrival curve and "
             "8-week same-weekday median baseline. Returns a pre-formatted Slack mrkdwn string — "
             "deliver verbatim. Leads with one number plus a confidence range, pace vs typical at "
             "this hour, and typical same-weekday EOD comparison. Refuses to project before 10am CT "
@@ -4401,7 +4401,7 @@ def get_revenue_today_projection() -> dict:
     deliver verbatim, do not reformat.
 
     Status dispatch:
-        ok                    → "Projected EOD: *$X* (range $Y–$Z based on ±10% pace error).
+        ok                    → "Projected EOD: *$X* (range $Y-$Z based on ±10% pace error).
                                  Currently *$A* — tracking *B%* of typical for this hour.
                                  Typical {weekday} lands ~*$C*."
         too_early             → verbatim helper string (before 10am CT)
@@ -4454,7 +4454,7 @@ def get_revenue_today_projection() -> dict:
         )
 
         lines = [
-            f"Projected EOD: *{_fmt_rev(projected)}* (range {_fmt_rev(low)}–{_fmt_rev(high)} based on ±10% pace error).",
+            f"Projected EOD: *{_fmt_rev(projected)}* (range {_fmt_rev(low)}-{_fmt_rev(high)} based on ±10% pace error).",
             pace_line,
         ]
         if median_line:

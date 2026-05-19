@@ -1137,6 +1137,8 @@ def test_projection_autocheck_monitor_registered():
     routed = scout_bot._route_channel("qa")
     if routed != scout_bot._SCOUT_HQ_CHANNEL:
         return False, f"_route_channel('qa') returned {routed!r}, expected _SCOUT_HQ_CHANNEL"
+    if "qa" not in scout_bot._PRODUCTION_CHANNELS:
+        return False, "_PRODUCTION_CHANNELS missing 'qa' key — _route_channel fallback would mask the gap"
 
     import scout_agent
     sig = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
@@ -2835,7 +2837,7 @@ def test_too_early_string_verbatim():
         src = inspect.getsource(scout_ch.project_today_revenue)
         expected = "Too early to project reliably — ask after 10am CT."
         if expected not in src:
-            return False, f"verbatim too_early string drifted in source"
+            return False, "verbatim too_early string drifted in source"
         # Also verify the hour<10 branch exists
         if "hour_ct < 10" not in src:
             return False, "hour_ct < 10 too_early guard missing"
