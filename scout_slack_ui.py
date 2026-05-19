@@ -1284,25 +1284,41 @@ def _fmt_delta_pct(today: int, baseline: int) -> str:
 
 
 def _build_sparkline_url(series: "list[int]") -> "str | None":
-    """Return a quickchart.io sparkline URL for the 7-day revenue series.
+    """Return a quickchart.io chart URL for the 7-day revenue sparkline.
 
-    `series` is a list of revenue values in cents. Returns None if the
-    series is empty or all-zero (no point rendering a flat line).
+    Uses /chart (not the defunct /sparkline) with a minimal line config so
+    Slack can download the image for the image block. Returns None when the
+    series is empty or all-zero.
     """
     if not series or all(v == 0 for v in series):
         return None
-    # Scale to dollars for a readable y-axis (not shown, but avoids float noise)
-    data_str = ",".join(str(round(v / 100, 2)) for v in series)
-    return (
-        "https://quickchart.io/sparkline"
-        f"?data={data_str}"
-        "&width=640&height=80"
-        "&backgroundColor=transparent"
-        "&lineColor=%2300875a"
-        "&fill=true"
-        "&fillColor=rgba%280%2C135%2C90%2C0.12%29"
-        "&lineWidth=2"
-    )
+    import json as _json
+    import urllib.parse as _up
+    data_vals = [round(v / 100, 2) for v in series]
+    chart_cfg = {
+        "type": "line",
+        "data": {
+            "labels": [""] * len(data_vals),
+            "datasets": [{
+                "data": data_vals,
+                "fill": True,
+                "borderColor": "#00875a",
+                "backgroundColor": "rgba(0,135,90,0.12)",
+                "borderWidth": 2,
+                "pointRadius": 0,
+                "tension": 0.4,
+            }],
+        },
+        "options": {
+            "legend": {"display": False},
+            "scales": {
+                "xAxes": [{"display": False}],
+                "yAxes": [{"display": False}],
+            },
+        },
+    }
+    cfg_enc = _up.quote(_json.dumps(chart_cfg, separators=(",", ":")))
+    return f"https://quickchart.io/chart?c={cfg_enc}&w=640&h=80&bkg=transparent"
 
 
 def _build_home_scoreboard_blocks(rollup, alerts) -> list:
