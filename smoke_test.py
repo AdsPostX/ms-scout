@@ -2967,6 +2967,63 @@ def test_skip_friction_ephemeral():
         return False, str(e)
 
 
+@test("offer_card_view_button_uses_tracking_url")
+def test_offer_card_view_button_uses_tracking_url():
+    """View button prefers tracking_url over network_portal_url (which is broken/gated)."""
+    from scout_digest import _build_offer_card_blocks
+    blocks = _build_offer_card_blocks(
+        advertiser="BrandX",
+        offer_summary="",
+        payout_str="$10.00 CPS",
+        geo="US",
+        tier_badge="",
+        img_url="",
+        why="Great offer",
+        action_value='{"offer_id":"x"}',
+        network_portal_url="https://app.impact.com",  # broken portal
+        view_url="https://swagbucks.7eer.net/c/12345/67890/999",  # real tracking URL
+    )
+    actions_block = next((b for b in blocks if b.get("type") == "actions"), None)
+    if actions_block is None:
+        return False, "no actions block found"
+    elements = actions_block.get("elements", [])
+    view_btn = next((e for e in elements if e.get("action_id") == "scout_view_offer"), None)
+    if view_btn is None:
+        return False, "no View button in actions"
+    url = view_btn.get("url", "")
+    if "swagbucks.7eer.net" not in url:
+        return False, f"View button URL is {url!r}, expected tracking_url"
+    if "app.impact.com" in url:
+        return False, "View button still pointing to broken portal URL"
+    return True, f"View button uses tracking_url: {url}"
+
+
+@test("offer_card_no_view_button_when_no_urls")
+def test_offer_card_no_view_button_when_no_urls():
+    """No View button rendered when both view_url and network_portal_url are empty."""
+    from scout_digest import _build_offer_card_blocks
+    blocks = _build_offer_card_blocks(
+        advertiser="MaxBounty Co",
+        offer_summary="",
+        payout_str="$8.00 CPS",
+        geo="US",
+        tier_badge="",
+        img_url="",
+        why="Worth a look",
+        action_value='{"offer_id":"y"}',
+        network_portal_url="",
+        view_url="",
+    )
+    actions_block = next((b for b in blocks if b.get("type") == "actions"), None)
+    if actions_block is None:
+        return False, "no actions block found"
+    elements = actions_block.get("elements", [])
+    view_btn = next((e for e in elements if e.get("action_id") == "scout_view_offer"), None)
+    if view_btn is not None:
+        return False, f"View button rendered despite no URL: {view_btn}"
+    return True, "no View button when both URLs empty — correct"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

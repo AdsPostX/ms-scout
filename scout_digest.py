@@ -775,6 +775,7 @@ def build_digest_blocks(
                 network_portal_url=portal_url,
                 fit_tier=offer.get("fit_tier", ""),
                 rpm=_score,
+                view_url=tracking_url,
             )
 
     return blocks
@@ -800,6 +801,7 @@ def _build_offer_card_blocks(
     network_portal_url: str = "",
     fit_tier:           str = "",
     rpm:                float = 0.0,
+    view_url:           str = "",
 ) -> list[dict]:
     """Shared card renderer — returns [offer_block, rationale_block, actions_block, divider]."""
     badge      = _FIT_TIER_BADGE.get(fit_tier.upper(), "⚫") + " " if fit_tier else ""
@@ -841,11 +843,12 @@ def _build_offer_card_blocks(
             "value":     action_value,
         },
     ]
-    if network_portal_url:
+    _view_target = view_url or network_portal_url
+    if _view_target:
         action_elements.append({
             "type":      "button",
             "text":      {"type": "plain_text", "text": "↗ View"},
-            "url":       network_portal_url,
+            "url":       _view_target,
             "action_id": "scout_view_offer",
         })
 
@@ -1314,6 +1317,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
                 tier_badge=tier_badge, img_url=img_url,
                 why=why, action_value=action_value,
                 network_portal_url=portal_url,
+                view_url=o.get("tracking_url") or o.get("deep_link_url") or "",
             )
 
     return blocks
