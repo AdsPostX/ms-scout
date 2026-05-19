@@ -407,7 +407,8 @@ def fetch_impact() -> list:
 
         # geo: ShippingRegions is a list ["AUSTRALIA", "CANADA", "UK", "US"]
         regions = c.get("ShippingRegions", [])
-        geo = ", ".join(r.title() for r in regions) if regions else "US"
+        geo_raw_str = ", ".join(r.upper() for r in regions) if regions else "US"
+        geo = normalize_geo(geo_raw_str)
 
         # Creative URLs — start with campaign-level logos, then override with richer
         # /Ads creative data (MediaUrl = actual ad banner, not just brand logo)
@@ -428,7 +429,7 @@ def fetch_impact() -> list:
         o["currency"]          = "USD"
         o["category"]          = cat_map.get(cid, "")
         o["geo"]               = geo
-        o["geo_raw"]           = ", ".join(regions) if regions else ""
+        o["geo_raw"]           = geo_raw_str
         o["os_targeting"]      = c.get("MobileOptimized", "")  # True/False string
         o["platform_targeting"] = "Mobile" if c.get("MobileOptimized") else "All"
         o["tracking_url"]      = c.get("TrackingLink", "")
@@ -718,10 +719,32 @@ _EU_COUNTRIES   = {"france", "germany", "spain", "italy", "portugal", "netherlan
                    "belgium", "austria", "sweden", "denmark", "finland", "norway",
                    "poland", "czechrepublic", "hungary", "romania", "greece", "ireland"}
 
+# Fast-path for already-normalized display strings. Without this, the cleanup
+# pass in normalize_all_offers() would re-normalize its own output — e.g.
+# normalize_geo("US + CA") → "Other" because "us+ca" isn't in any variant set.
+_ALREADY_NORMALIZED = {
+    "us only":       "US Only",
+    "us + ca":       "US + CA",
+    "north america": "North America",
+    "global":        "Global",
+    "uk":            "UK",
+    "eu":            "EU",
+    "other":         "Other",
+    "unknown":       "Unknown",
+}
+
 def normalize_geo(raw: str) -> str:
-    """Collapse country-list blobs into a clean Notion select value."""
+    """Collapse country-list blobs into a clean Notion select value.
+
+    Idempotent: calling normalize_geo on its own output returns the same value.
+    The _ALREADY_NORMALIZED fast-path prevents double-normalization in the
+    normalize_all_offers() cleanup pass.
+    """
     if not raw or not raw.strip():
         return "Unknown"
+    # Fast path: already a canonical display string
+    if raw.strip().lower() in _ALREADY_NORMALIZED:
+        return _ALREADY_NORMALIZED[raw.strip().lower()]
     parts = {p.strip().lower().replace(" ", "") for p in raw.split(",")}
     parts = {p for p in parts if p}
     n = len(parts)
@@ -1600,7 +1623,7 @@ def fetch_shareasale() -> list:
             o["_raw_payout"]       = raw[:120]
             o["currency"]          = "USD"
             o["category"]          = category
-            o["geo"]               = "US"
+            o["geo"]               = "US"   # ShareASale is a US-only network; "US" → "US Only" in cleanup pass
             o["geo_raw"]           = "US"
             o["os_targeting"]      = "All"
             o["platform_targeting"] = "All"
@@ -1712,7 +1735,7 @@ def fetch_rakuten() -> list:
             o["_raw_payout"]       = raw[:120]
             o["currency"]          = "USD"
             o["category"]          = category
-            o["geo"]               = "US"
+            o["geo"]               = "US"   # Rakuten is a US-only network; "US" → "US Only" in cleanup pass
             o["geo_raw"]           = "US"
             o["os_targeting"]      = "All"
             o["platform_targeting"] = "All"
