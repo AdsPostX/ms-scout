@@ -558,7 +558,7 @@ def fetch_flexoffers() -> list:
             o["_raw_payout"]       = raw_payout[:120]
             o["currency"]          = "USD"
             o["category"]          = a.get("categoryNames", "")
-            o["geo"]               = a.get("country", "US")
+            o["geo"]               = normalize_geo(str(geo_raw))
             o["geo_raw"]           = geo_raw
             o["os_targeting"]      = a.get("mobileSupportedTypes") or a.get("deviceType", "All")
             o["platform_targeting"] = a.get("networkType", "All")
@@ -711,9 +711,9 @@ def fetch_maxbounty() -> list:
 # DATA NORMALIZATION — applied before writing to any destination
 # ---------------------------------------------------------------------------
 
-_US_VARIANTS    = {"us", "usa", "unitedstates"}
-_CA_VARIANTS    = {"ca", "canada"}
-_UK_VARIANTS    = {"uk", "gb", "unitedkingdom", "greatbritain"}
+_US_VARIANTS    = {"us", "usa", "unitedstates", "usonly", "unitedstatesonly"}
+_CA_VARIANTS    = {"ca", "canada", "caonly", "canadaonly"}
+_UK_VARIANTS    = {"uk", "gb", "unitedkingdom", "greatbritain", "ukonly"}
 _EU_COUNTRIES   = {"france", "germany", "spain", "italy", "portugal", "netherlands",
                    "belgium", "austria", "sweden", "denmark", "finland", "norway",
                    "poland", "czechrepublic", "hungary", "romania", "greece", "ireland"}
