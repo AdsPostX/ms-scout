@@ -616,7 +616,10 @@ def test_scout_thresholds_loaded():
         import scout_agent
         if not hasattr(scout_agent, "SCOUT_THRESHOLDS"):
             return False, "SCOUT_THRESHOLDS missing"
-        cfg = scout_agent.SCOUT_THRESHOLDS
+        # Check _BASE_THRESHOLDS (JSON file only, no runtime overrides) — SCOUT_THRESHOLDS
+        # includes any live set_threshold overrides from data/threshold_overrides.json, so
+        # asserting a hardcoded value there would break whenever an admin adjusts a threshold.
+        cfg = scout_agent._BASE_THRESHOLDS
         for section in ("digest", "signals", "health"):
             if section not in cfg:
                 return False, f"section missing: {section}"
@@ -2096,6 +2099,18 @@ def test_cold_start_label_when_all_offers_seeded_today():
     return True, "Cold-start label shows 'top PRIME' instead of 'new in last 48h' ✓"
 
 
+def _extract_blockquote_texts(blocks):
+    """Extract text from section/mrkdwn blocks with a '>' blockquote prefix."""
+    texts = []
+    for b in blocks:
+        if b.get("type") != "section":
+            continue
+        txt = (b.get("text") or {})
+        if txt.get("type") == "mrkdwn" and txt.get("text", "").startswith(">"):
+            texts.append(txt["text"].lstrip("> "))
+    return texts
+
+
 @test("sourcing_context_line_shows_age_not_tier")
 def test_sourcing_context_line_shows_age_not_tier():
     """Context line under each offer card shows category + age ('2d ago'), not the tier badge."""
@@ -2109,24 +2124,10 @@ def test_sourcing_context_line_shows_age_not_tier():
     ]
     signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
     blocks = scout_digest._build_sourcing_intel_blocks(signals)
-    # Find rich_text_quote blocks that are per-offer (contain age-style or category text)
-    def _extract_rich_text_quote_texts(blocks):
-        texts = []
-        for b in blocks:
-            if b.get("type") != "rich_text":
-                continue
-            for el in (b.get("elements") or []):
-                if el.get("type") != "rich_text_quote":
-                    continue
-                for leaf in (el.get("elements") or []):
-                    if leaf.get("type") == "text":
-                        texts.append(leaf.get("text", ""))
-        return texts
-
-    offer_context_texts = [t for t in _extract_rich_text_quote_texts(blocks)
+    offer_context_texts = [t for t in _extract_blockquote_texts(blocks)
                            if "ago" in t or "today" in t]
     if not offer_context_texts:
-        offer_context_texts = [t for t in _extract_rich_text_quote_texts(blocks)
+        offer_context_texts = [t for t in _extract_blockquote_texts(blocks)
                                if "Software" in t]
     if not offer_context_texts:
         return False, "No per-offer context line found with age or category text"
@@ -2208,16 +2209,7 @@ def test_sourcing_category_multi_value_shows_first_value_only():
     ]
     signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
     blocks = scout_digest._build_sourcing_intel_blocks(signals)
-    offer_context_texts = []
-    for b in blocks:
-        if b.get("type") != "rich_text":
-            continue
-        for el in (b.get("elements") or []):
-            if el.get("type") != "rich_text_quote":
-                continue
-            for leaf in (el.get("elements") or []):
-                if leaf.get("type") == "text" and "Business" in leaf.get("text", ""):
-                    offer_context_texts.append(leaf["text"])
+    offer_context_texts = [t for t in _extract_blockquote_texts(blocks) if "Business" in t]
     if not offer_context_texts:
         return False, "No context line containing category text found"
     combined = " ".join(offer_context_texts)
