@@ -1220,6 +1220,8 @@ def _projection_autocheck_monitor(web) -> None:
     from scout_state import (
         _load_projection_autocheck_slot,
         _save_projection_autocheck_slot,
+        _load_eod_posted_date,
+        _save_eod_posted_date,
     )
 
     while True:  # outer restart wrapper
@@ -1233,13 +1235,14 @@ def _projection_autocheck_monitor(web) -> None:
             last_slot: str | None = _load_projection_autocheck_slot()
             consecutive_errors    = 0
             paused_for_date: str | None = None
-            eod_posted_for_date: str | None = None
+            # Seed EOD-posted marker from disk so a restart after 17:30 CT
+            # does not re-post the same day's EOD summary.
+            eod_posted_for_date: str | None = _load_eod_posted_date()
             # Per-day in-memory log of fires for the EOD rollup. Keyed by
             # date string; cleared at midnight CT.
             fires_log: dict[str, list[dict]] = {}
 
             while True:  # inner poll loop
-                _time.sleep(300)
                 try:
                     if not _monitor_enabled("projection_autocheck"):
                         continue
@@ -1280,10 +1283,18 @@ def _projection_autocheck_monitor(web) -> None:
                             )
                             web.chat_postMessage(channel=channel, text=text, blocks=blocks)
                             eod_posted_for_date = today_str
+                            try:
+                                _save_eod_posted_date(today_str)
+                            except Exception as _e:
+                                log.warning(f"{tag} persist eod_posted_date failed: {_e}")
                             log.info(f"{tag} posted EOD rollup for {today_str} ({len(entries)} fires).")
                         except Exception as e:
                             log.warning(f"{tag} EOD rollup post failed: {e}")
                             eod_posted_for_date = today_str  # don't retry-spam
+                            try:
+                                _save_eod_posted_date(today_str)
+                            except Exception as _e:
+                                log.warning(f"{tag} persist eod_posted_date failed: {_e}")
 
                     # Hourly fire gate.
                     in_window = win_start <= now_ct.hour <= win_end
@@ -1361,8 +1372,12 @@ def _projection_autocheck_monitor(web) -> None:
                                         "Resumes at midnight CT."
                                     ),
                                 )
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                log.error(
+                                    f"{tag} kill-switch notification failed — "
+                                    f"daemon paused but Slack was not told: {_e}",
+                                    exc_info=True,
+                                )
                             log.warning(
                                 f"{tag} kill-switch tripped ({consecutive_errors} errors) — "
                                 f"paused for {today_str}."
@@ -1372,6 +1387,10 @@ def _projection_autocheck_monitor(web) -> None:
 
                 except Exception as e:
                     log.warning(f"{tag} unexpected error: {e}")
+                finally:
+                    # Sleep at the END of each iteration so a restart between
+                    # :05–:09 CT does not skip that hour's autocheck slot.
+                    _time.sleep(300)
 
         except Exception as e:
             log.error(f"[projection-autocheck] fatal crash — restarting in 30s: {e}", exc_info=True)

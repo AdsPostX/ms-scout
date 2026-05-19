@@ -256,6 +256,20 @@ def _save_projection_autocheck_slot(slot: str) -> None:
     _save_pulse_state(state)
 
 
+# ── Projection autocheck EOD-posted marker ────────────────────────────────────
+# CT date ("YYYY-MM-DD") of the last day the 17:30 CT EOD rollup posted.
+# Persisted so a restart after EOD does not re-post the EOD summary.
+
+def _load_eod_posted_date() -> str | None:
+    return _load_pulse_state().get("last_projection_autocheck_eod_date")
+
+
+def _save_eod_posted_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_projection_autocheck_eod_date"] = date_str
+    _save_pulse_state(state)
+
+
 # ── Pulse state ────────────────────────────────────────────────────────────────
 
 def _load_pulse_state() -> dict:
