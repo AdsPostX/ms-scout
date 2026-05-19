@@ -1950,6 +1950,25 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     # Acknowledge immediately — Slack requires <3s ack
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
 
+    # Arrival breadcrumb — proves the envelope reached the worker even if a
+    # downstream branch silently returns. Surface event type + user + a
+    # truncated text snippet so Render logs can be grep'd for missed mentions.
+    try:
+        _ev = req.payload.get("event", {}) if isinstance(req.payload, dict) else {}
+        _et = _ev.get("type") or req.type
+        _eu = _ev.get("user") or req.payload.get("user_id") if isinstance(req.payload, dict) else ""
+        _esnip = (_ev.get("text") or "")[:80]
+        log.info(f"[socket] req.type={req.type} event.type={_et} user={_eu} text={_esnip!r}")
+    except Exception:
+        pass
+
+    try:
+        _handle_event_impl(req)
+    except Exception:
+        log.exception("[socket] handle_event crashed — event dropped")
+
+
+def _handle_event_impl(req: SocketModeRequest):
     web = WebClient(token=os.getenv("SLACK_BOT_TOKEN", ""), retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
 
     # ── Button clicks ─────────────────────────────────────────────────────────
