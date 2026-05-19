@@ -855,7 +855,8 @@ def _build_offer_card_blocks(
     view_url:           str = "",
 ) -> list[dict]:
     """Shared card renderer — returns [offer_block, rationale_block, actions_block, divider]."""
-    badge      = _FIT_TIER_BADGE.get(fit_tier.upper(), "⚫") + " " if fit_tier else ""
+    tier_key   = (fit_tier or "").upper()
+    badge      = f"{_FIT_TIER_BADGE.get(tier_key, '⚫')} "
     rpm_text   = f"  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
     left_text  = f"{badge}*{advertiser}*\n_{offer_summary}_" if offer_summary else f"{badge}*{advertiser}*"
     right_text = f"*{payout_str}*{tier_badge}{rpm_text}\n{geo}" if geo else f"*{payout_str}*{tier_badge}{rpm_text}"

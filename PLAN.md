@@ -27,7 +27,7 @@ Scout Signal Phase A just landed (PR #164 Impact payout fix, PR #165 Tier 4 CVR 
 
 ### What the digest currently shows per offer card:
 
-```
+```text
 [section/fields]
   *Advertiser Name*               $12.50 CPS
   Electronics · Impact             US Only
@@ -107,25 +107,18 @@ RPM display: computed from the offer's `scout_score` field (already populated). 
 
 ---
 
-### Step 3 — Add overflow menu (Investigate, Copy URL) (20 min)
+### Step 3 — Skip friction ephemeral ~~Add overflow menu~~ (shipped as skip friction)
 
-**File:** `scout_digest.py` — `_build_offer_card_blocks()` (line ~788)
+**Status:** SHIPPED (as skip friction — overflow menu cut, see below)
 
-**Current actions block:** `[Add to Queue]` `[Skip]`
+**File:** `scout_handlers.py` — `_handle_reject()`
 
-**New actions block:** `[Add to Queue]` `[Skip]` `[⋮]`
+After every Skip, the handler posts an ephemeral confirmation:
+> *OfferX* won't appear for ~3 weeks unless payout improves ≥15%.
 
-The `[⋮]` is a Slack `overflow` action element. Options:
-- `investigate` → "🔍 Investigate this offer"
-- `copy_url` → "🔗 Copy tracking URL" (value = tracking URL)
-- `remind` → "🔔 Remind me next week"
+This replaces the proposed overflow menu (⋮). The overflow menu was cut because Investigate/Copy URL/Remind are hollow without Phase C backend infrastructure — ephemeral confirmations provide the minimum viable friction and triage signal with zero new state.
 
-Overflow handler in `scout_handlers.py` (near existing button handlers): 
-- `investigate`: posts ephemeral message "Offer flagged for investigation. Tracking URL: `{url}`" — zero-cost for v1, just confirms the action
-- `copy_url`: posts ephemeral with URL in a code block
-- `remind`: posts ephemeral "You'll see this offer again next digest" + writes offer_id to a `remind_next_week` set in `scout_state.py`
-
-**No backend queue** for v1 — all ephemeral responses. The value is capturing intent.
+**Not shipped — overflow menu:** No `overflow` action element in `_build_offer_card_blocks()`. No `overflow_action` handler in `scout_handlers.py`. No `remind_next_week` set in `scout_state.py`. Deferred to Phase C.
 
 ---
 
@@ -136,7 +129,7 @@ Overflow handler in `scout_handlers.py` (near existing button handlers):
 **Current:** Single `context` block with comma-separated advertiser names ("NEW: AdvertiserA, AdvertiserB, AdvertiserC from Impact, MaxBounty")
 
 **New:** Per-network header context showing new count + names, using emoji network indicator:
-```
+```text
 🆕  *3 new this week*
 ▸ Impact: RetailerX, BrandY
 ▸ MaxBounty: OfferZ
@@ -146,17 +139,9 @@ Implementation: group new offers by network, render one line per network with �
 
 ---
 
-### Step 5 — Make payout upgrade cards actionable (30 min)
+### Step 5 — ~~Make payout upgrade cards actionable~~ (cut from this PR)
 
-**File:** `scout_digest.py` — `_build_sourcing_intel_blocks()` (line ~1193)
-
-**Current:** Plain mrkdwn text for payout upgrades: "↑ AdvertiserX raised payout from $8.00 → $10.00 CPS"
-
-**New:** Same text + `actions` block with:
-- `[Add to Queue]` button (same action_id as main cards, offer payload in value)
-- `[Skip upgrade]` button
-
-The payout upgrade section already has the offer object. Add the same button construction logic used in `_build_offer_card_blocks()`.
+**Status:** CUT — payout upgrade records in `_build_sourcing_intel_blocks()` don't carry `offer_id` or `tracking_url` at this layer. Adding buttons requires upstream data plumbing. Deferred to Phase C.
 
 ---
 
@@ -167,7 +152,7 @@ The payout upgrade section already has the offer object. Add the same button con
 **Current:** `"4,662 offers scored · 9 qualifying · 3 networks with results · 2 pipeline errors"`
 
 **New:** Two-field section:
-```
+```text
 Left:  📊 *4,662 scored*  ·  *9 qualifying*
 Right: ✅ 3 networks  ·  ⚠️ 2 errors
 ```
@@ -188,12 +173,12 @@ Add tests:
 
 ---
 
-## What Is NOT in This Plan
+## What Is NOT in This Plan (deferred / cut)
 
-- Phase B observation layer (Slack reactions → `digest_decisions` ClickHouse table) — separate PR
-- Skip friction/confirmation dialog — deferred (Slack doesn't support confirmation modals for button clicks natively without async round-trips; needs Phase B event infra first)
-- Backend queue integration for Investigate — v1 is ephemeral; real queue in Phase C
-- `remind_next_week` persistence beyond `scout_state.py` in-memory set — deferred (survives restart via existing `_save_pulse_state` pattern but cross-restart durability is Phase B work)
+- **Overflow menu (⋮)** — cut entirely; no `overflow` element in cards, no overflow handler in `scout_handlers.py`, no `remind_next_week` state. Phase C.
+- **Payout upgrade buttons** — cut; upgrade records lack `offer_id`/`tracking_url`. Phase C.
+- **Phase B observation layer** (Slack reactions → `digest_decisions` ClickHouse table) — separate PR
+- **Backend queue for Investigate** — v1 would be ephemeral only; real queue in Phase C
 
 ---
 
@@ -201,10 +186,9 @@ Add tests:
 
 | File | Changes |
 |------|---------|
-| `scout_digest.py` | Steps 1, 2, 4, 5, 6 — card rendering + section redesigns |
-| `scout_handlers.py` | Step 3 — overflow menu handler |
-| `scout_state.py` | Step 3 — `remind_next_week` set (minimal) |
-| `smoke_test.py` | Step 7 — 4 new deterministic tests |
+| `scout_digest.py` | Steps 1, 2, 4, 6 + post-open fixes: View button (`view_url`), truncation (78→160), Clearbit logo pipeline, `⚫` badge fix |
+| `scout_handlers.py` | Step 3 (skip friction ephemeral) — no overflow handler added |
+| `smoke_test.py` | Step 7 — 6 new deterministic tests (markdown, badge, RPM, skip friction, view button priority, no-URL case) |
 
 ---
 
