@@ -396,6 +396,220 @@ WHERE user_id > 0
     return results[:5]
 
 
+# Module-scope cache for the 90-day hour-of-day curve.
+# The curve is the same for ~10 min across users; avoids fanning out the
+# ~90-day aggregate scan when several @Scout mentions arrive in a burst.
+_HOUR_CURVE_CACHE: dict = {"ts": 0.0, "data": None}
+_HOUR_CURVE_TTL_SEC = 600  # 10 minutes
+
+
+def _build_hour_curve(ch) -> dict:
+    """Return per-DOW cumulative-share curve and per-DOW full-day median from
+    the last 90 CT calendar days (excluding today).
+
+    Per-DOW share at hour H is the **median** of `cum_through_H / full_day`
+    across qualifying same-weekday days. Median (not mean) + 90d window
+    cleared the backtest gate (median |% err| 7.25%, P90 17.3% across 40
+    cells); 60d/mean systematically undershot (~12% / 26%).
+
+    Returns:
+        {
+            "share_by_dow": { dow_int: { hour_int: float (0..1) } },
+            "dow_median":   { dow_int: float },
+            "sample_days":  { dow_int: int },  # qualifying full-day samples
+        }
+
+    All datetime math is anchored in America/Chicago. dow values match
+    ClickHouse `toDayOfWeek`: Monday=1 .. Sunday=7.
+    """
+    import time as _time
+
+    now = _time.time()
+    if _HOUR_CURVE_CACHE["data"] is not None and (now - _HOUR_CURVE_CACHE["ts"]) < _HOUR_CURVE_TTL_SEC:
+        return _HOUR_CURVE_CACHE["data"]
+
+    sql = """
+SELECT
+    toDate(toTimeZone(created_at, 'America/Chicago'))                AS ct_day,
+    toDayOfWeek(toDate(toTimeZone(created_at, 'America/Chicago')))   AS dow,
+    toHour(toTimeZone(created_at, 'America/Chicago'))                AS ct_hour,
+    sum(toFloat64OrNull(revenue))                                    AS hour_rev
+FROM adpx_conversionsdetails
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(
+    toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 95 DAY
+)
+WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
+        >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 90 DAY
+  AND toDate(toTimeZone(created_at, 'America/Chicago'))
+        <  toDate(toTimeZone(now(), 'America/Chicago'))
+GROUP BY ct_day, dow, ct_hour
+""".strip()
+
+    rows = ch.query(sql).result_rows
+
+    # Aggregate to per-day full + per-day cumulative-through-hour
+    days: dict = {}  # ct_day -> {"dow": int, "by_hour": {h: rev}, "full": float}
+    for ct_day, dow, ct_hour, hour_rev in rows:
+        rec = days.setdefault(ct_day, {"dow": int(dow), "by_hour": {}, "full": 0.0})
+        rev = float(hour_rev or 0)
+        rec["by_hour"][int(ct_hour)] = rec["by_hour"].get(int(ct_hour), 0.0) + rev
+        rec["full"] += rev
+
+    # Per-DOW: for each hour H, median of (cum_through_H / full_day) across
+    # qualifying days (full_day > 0) in the 90d window.
+    share_acc: dict = {dow: {h: [] for h in range(24)} for dow in range(1, 8)}
+    # For dow_median we want an 8-week same-weekday baseline (distinct concern
+    # from the share curve). Keep (ct_day, full) tuples so we can take the
+    # 8 most recent same-weekday samples per DOW.
+    full_days_dated: dict = {dow: [] for dow in range(1, 8)}
+    sample_days: dict = {dow: 0 for dow in range(1, 8)}
+
+    for ct_day, rec in days.items():
+        if rec["full"] <= 0:
+            continue
+        dow = rec["dow"]
+        sample_days[dow] += 1
+        full_days_dated[dow].append((ct_day, rec["full"]))
+        cum = 0.0
+        for h in range(24):
+            cum += rec["by_hour"].get(h, 0.0)
+            share_acc[dow][h].append(cum / rec["full"])
+
+    def _median(xs: list[float]) -> float:
+        if not xs:
+            return 0.0
+        s = sorted(xs)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+    share_by_dow: dict = {}
+    for dow, by_hour in share_acc.items():
+        share_by_dow[dow] = {
+            h: _median(vals) if vals else None
+            for h, vals in by_hour.items()
+        }
+
+    # 8-week same-weekday baseline: pick the 8 most recent qualifying same-DOW
+    # full-day totals (within the 90d window) and median those. Keeps the
+    # share curve's 90d statistical bedrock independent from a tighter
+    # recency baseline for "what's a normal day".
+    dow_median: dict = {}
+    for dow, dated in full_days_dated.items():
+        recent = sorted(dated, key=lambda t: t[0], reverse=True)[:8]
+        dow_median[dow] = _median([v for _, v in recent])
+
+    data = {
+        "share_by_dow": share_by_dow,
+        "dow_median":   dow_median,
+        "sample_days":  sample_days,
+    }
+    _HOUR_CURVE_CACHE["data"] = data
+    _HOUR_CURVE_CACHE["ts"] = now
+    return data
+
+
+def project_today_revenue(ch) -> dict:
+    """Project today's full-day platform revenue from the intraday total and a
+    90-day hour-of-day cumulative-share curve. Purely additive — daemon code
+    path `_query_intraday_revenue_total` is unchanged.
+
+    Returns a dict with `status` always set:
+        ok                  — projection available
+        too_early           — current CT hour < 10 (curve thin at dawn)
+        insufficient_history— sample_days for today's DOW < 4
+        error               — internal failure (raised by helper to caller normally;
+                              this status is reserved for the agent wrapper)
+
+    Numeric fields are None when not applicable.
+
+    Raises on ClickHouse error — callers must catch (see scout_agent wrapper).
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _Zi
+
+    too_early_msg = "Too early to project reliably — ask after 10am CT."
+
+    now_ct = _dt.now(_Zi("America/Chicago"))
+    hour_ct = now_ct.hour
+    as_of_ct = now_ct.strftime("%Y-%m-%d %H:%M %Z")
+    # dow matches ClickHouse toDayOfWeek (Mon=1..Sun=7)
+    py_weekday = now_ct.weekday()  # Mon=0..Sun=6
+    dow = py_weekday + 1
+    weekday_name = ["Monday", "Tuesday", "Wednesday", "Thursday",
+                    "Friday", "Saturday", "Sunday"][py_weekday]
+
+    base = {
+        "status":             "ok",
+        "formatted":          "",
+        "today_revenue":      None,
+        "projected_full_day": None,
+        "dow_median":         None,
+        "pct_of_expected":    None,
+        "as_of_ct":           as_of_ct,
+        "hour_ct":            hour_ct,
+        "curve_share":        None,
+        "curve_source":       None,
+        "sample_days":        0,
+        "warning":            None,
+        "weekday":            weekday_name,
+    }
+
+    if hour_ct < 10:
+        base["status"] = "too_early"
+        base["formatted"] = too_early_msg
+        return base
+
+    # Today's revenue from CT midnight to now.
+    today_sql = """
+SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS today_revenue
+FROM adpx_conversionsdetails
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(
+    toDate(toTimeZone(now(), 'America/Chicago'))
+)
+WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
+      = toDate(toTimeZone(now(), 'America/Chicago'))
+  AND toTimeZone(created_at, 'America/Chicago')
+      < toTimeZone(now(), 'America/Chicago')
+""".strip()
+    today_rows = ch.query(today_sql).result_rows
+    today_revenue = float(today_rows[0][0] or 0) if today_rows else 0.0
+    base["today_revenue"] = today_revenue
+
+    curve = _build_hour_curve(ch)
+    sample = int(curve["sample_days"].get(dow, 0))
+    base["sample_days"] = sample
+
+    share = curve["share_by_dow"].get(dow, {}).get(hour_ct)
+    dow_median = float(curve["dow_median"].get(dow, 0) or 0)
+    base["dow_median"] = dow_median if dow_median > 0 else None
+
+    if sample < 4:
+        base["status"] = "insufficient_history"
+        base["formatted"] = (
+            f"Not enough same-{weekday_name} history to project reliably "
+            f"({sample} qualifying days in last 90; need 4)."
+        )
+        return base
+
+    # Pick curve share; if missing for this hour or implausibly small, fall back.
+    if share is None or share < 0.01:
+        share = 0.70
+        base["curve_source"] = "fallback_0.70"
+        base["warning"] = "Hour-of-day curve unavailable; used fallback 0.70."
+    else:
+        base["curve_source"] = "90d"
+
+    base["curve_share"] = round(float(share), 4)
+
+    projected = today_revenue / float(share) if share > 0 else today_revenue
+    base["projected_full_day"] = projected
+
+    if dow_median > 0:
+        base["pct_of_expected"] = round(100.0 * projected / dow_median, 1)
+
+    return base
+
+
 def _query_advertiser_rpm_context(ch, adv_name: str) -> dict:
     """
     Return 30-day platform RPM history for an advertiser across all active campaigns.

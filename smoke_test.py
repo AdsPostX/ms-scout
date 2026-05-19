@@ -1108,6 +1108,69 @@ def test_intraday_revenue_total_query_exists():
     return True, "_query_intraday_revenue_total callable, shared _query_revenue_baseline present"
 
 
+@test("projection_autocheck_monitor_registered")
+def test_projection_autocheck_monitor_registered():
+    """PLAN.md Step 7 — autonomous projection autocheck wired end-to-end.
+
+    Asserts:
+      (a) _projection_autocheck_monitor + formatters live on scout_bot
+      (b) state helpers live on scout_state
+      (c) _route_channel('qa') resolves to #sidd-qa (_SCOUT_HQ_CHANNEL)
+      (d) threshold config keys are present
+      (e) _start_daemon registration line exists in scout_bot.py source
+    """
+    import scout_bot, scout_state, pathlib
+
+    if not hasattr(scout_bot, "_projection_autocheck_monitor"):
+        return False, "_projection_autocheck_monitor missing on scout_bot"
+    if not callable(scout_bot._projection_autocheck_monitor):
+        return False, "_projection_autocheck_monitor not callable"
+
+    for fn in ("_format_projection_autocheck_fire", "_format_projection_autocheck_eod"):
+        if not hasattr(scout_bot, fn) or not callable(getattr(scout_bot, fn)):
+            return False, f"{fn} missing/not callable on scout_bot"
+
+    for fn in ("_load_projection_autocheck_slot", "_save_projection_autocheck_slot"):
+        if not hasattr(scout_state, fn) or not callable(getattr(scout_state, fn)):
+            return False, f"{fn} missing/not callable on scout_state"
+
+    # Assert production-mapping directly so the dev-env fallback can't mask a
+    # missing / wrong "qa" entry. Patch _SCOUT_ENV to "production" for the call.
+    if scout_bot._PRODUCTION_CHANNELS.get("qa") != scout_bot._SCOUT_HQ_CHANNEL:
+        return False, (
+            f"_PRODUCTION_CHANNELS['qa']={scout_bot._PRODUCTION_CHANNELS.get('qa')!r}, "
+            f"expected {scout_bot._SCOUT_HQ_CHANNEL!r}"
+        )
+    _saved_env = scout_bot._SCOUT_ENV
+    try:
+        scout_bot._SCOUT_ENV = "production"
+        routed = scout_bot._route_channel("qa")
+    finally:
+        scout_bot._SCOUT_ENV = _saved_env
+    if routed != scout_bot._SCOUT_HQ_CHANNEL:
+        return False, f"_route_channel('qa') under SCOUT_ENV=production returned {routed!r}, expected _SCOUT_HQ_CHANNEL"
+
+    import scout_agent
+    sig = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+    required_keys = [
+        "projection_autocheck_monitor_enabled",
+        "projection_autocheck_window_start_ct",
+        "projection_autocheck_window_end_ct",
+        "projection_autocheck_eod_rollup_hour_ct",
+        "projection_autocheck_apples_compare_hour_ct",
+        "projection_autocheck_max_consecutive_errors",
+    ]
+    for k in required_keys:
+        if k not in sig:
+            return False, f"signals config missing {k!r}"
+
+    src = pathlib.Path(scout_bot.__file__).read_text()
+    if "_start_daemon(_projection_autocheck_monitor" not in src:
+        return False, "_start_daemon registration for _projection_autocheck_monitor not found"
+
+    return True, "autocheck monitor + helpers + qa route + config + registration all wired"
+
+
 @test("intraday_revenue_by_publisher_query_function_exists_on_scout_agent")
 def test_intraday_revenue_by_publisher_query_exists():
     import scout_agent
@@ -2724,6 +2787,73 @@ def test_qa_suite_minimum_coverage():
     if len(_QA_SUITE) < 19:
         return False, f"Expected ≥19 entries, got {len(_QA_SUITE)}"
     return True, f"{len(_QA_SUITE)} entries ≥ 19 minimum ✓"
+
+
+# ── Revenue projection tool (Step 7 — additive, no live SQL) ────────────────
+
+@test("project_today_revenue_helper_exists_and_reexported")
+def test_project_today_revenue_helper_exists():
+    try:
+        import scout_agent
+        import scout_ch
+        if not hasattr(scout_ch, "project_today_revenue"):
+            return False, "scout_ch.project_today_revenue missing"
+        if not hasattr(scout_agent, "project_today_revenue"):
+            return False, "scout_agent re-export of project_today_revenue missing"
+        return True, "helper present in scout_ch and re-exported via scout_agent"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("revenue_projection_tool_registered_with_all_pieces")
+def test_revenue_projection_tool_registered():
+    try:
+        import scout_agent
+        if not hasattr(scout_agent, "get_revenue_today_projection"):
+            return False, "get_revenue_today_projection wrapper missing"
+        if scout_agent.TOOL_MAP.get("get_revenue_today_projection") is not scout_agent.get_revenue_today_projection:
+            return False, "TOOL_MAP['get_revenue_today_projection'] not bound"
+        names = {t["name"] for t in scout_agent.TOOLS}
+        if "get_revenue_today_projection" not in names:
+            return False, f"TOOLS schema missing get_revenue_today_projection; have: {sorted(names)}"
+        return True, "wrapper + TOOL_MAP + TOOLS schema all present"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("revenue_today_description_has_anti_routing")
+def test_revenue_today_anti_routing():
+    try:
+        import scout_agent
+        entry = next((t for t in scout_agent.TOOLS if t["name"] == "get_revenue_today"), None)
+        if not entry:
+            return False, "get_revenue_today tool entry missing"
+        desc = entry["description"]
+        if "Do NOT use" not in desc:
+            return False, "anti-routing 'Do NOT use' phrase missing from description"
+        if "project" not in desc.lower() or "forecast" not in desc.lower():
+            return False, "anti-routing must mention project/forecast"
+        return True, "anti-routing language present"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("project_today_revenue_too_early_string_verbatim")
+def test_too_early_string_verbatim():
+    """Verbatim too_early surface text is load-bearing for routing fidelity."""
+    try:
+        import inspect
+        import scout_ch
+        src = inspect.getsource(scout_ch.project_today_revenue)
+        expected = "Too early to project reliably — ask after 10am CT."
+        if expected not in src:
+            return False, "verbatim too_early string drifted in source"
+        # Also verify the hour<10 branch exists
+        if "hour_ct < 10" not in src:
+            return False, "hour_ct < 10 too_early guard missing"
+        return True, "verbatim too_early string preserved in source"
+    except Exception as e:
+        return False, str(e)
 
 
 if __name__ == "__main__":

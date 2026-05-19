@@ -32,6 +32,7 @@ from scout_ch import (  # noqa: F401 — backward compat re-exports
     _run_parallel, _get_ch_client, _LoggingCHClient,
     _query_ghost_campaigns, _query_revenue_baseline,
     _query_intraday_revenue_total, _query_intraday_revenue_by_publisher,
+    project_today_revenue,
     _query_advertiser_rpm_context,
     _query_cvr_anomaly, _query_expiring_campaigns,
     _query_publisher_revenue_trends, _query_advertiser_revenue_trends,
@@ -1175,9 +1176,30 @@ TOOLS = [
         "description": (
             "Return today's intraday revenue vs 30-day daily average, broken down by publisher. "
             "Returns a pre-formatted Slack mrkdwn string — deliver verbatim. "
+            "Use ONLY for 'how is revenue today / right now / so far'. "
+            "Do NOT use for 'project / estimate / forecast / EOD / end of day / how will today land / "
+            "after it ends' — use get_revenue_today_projection for those. "
             "Use for: 'how is revenue today', 'how are we doing today', 'how we looking', "
             "'today's revenue', 'revenue so far today', 'what's revenue at', 'how we doing'. "
             "Do NOT use run_sql_query for today's revenue — this tool exists specifically for this question."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_revenue_today_projection",
+        "description": (
+            "Project today's END-OF-DAY revenue using a 90-day hour-of-day arrival curve and "
+            "8-week same-weekday median baseline. Returns a pre-formatted Slack mrkdwn string — "
+            "deliver verbatim. Leads with one number plus a confidence range, pace vs typical at "
+            "this hour, and typical same-weekday EOD comparison. Refuses to project before 10am CT "
+            "or when the curve sample is thin. "
+            "Use for: 'project today's revenue', 'estimate today's revenue', 'EOD revenue', "
+            "'what will today land at', 'how much will we make today', 'forecast today', "
+            "'after it ends', 'how much do you estimate our revenue for today'. "
+            "Do NOT use for 'revenue so far today' — that's get_revenue_today."
         ),
         "input_schema": {
             "type": "object",
@@ -4372,6 +4394,88 @@ GROUP BY c.user_id
         }
 
 
+def get_revenue_today_projection() -> dict:
+    """
+    Project today's end-of-day revenue using a 60-day hour-of-day arrival curve
+    and 8-week same-weekday median baseline. Pre-formatted Slack mrkdwn —
+    deliver verbatim, do not reformat.
+
+    Status dispatch:
+        ok                    → "Projected EOD: *$X* (range $Y-$Z based on ±10% pace error).
+                                 Currently *$A* — tracking *B%* of typical for this hour.
+                                 Typical {weekday} lands ~*$C*."
+        too_early             → verbatim helper string (before 10am CT)
+        insufficient_history  → verbatim helper string
+        unstable / error      → verbatim helper string
+    """
+    def _fmt_rev(amount: float) -> str:
+        if amount is None:
+            return "$?"
+        if amount >= 10_000:
+            return f"${round(amount / 100) * 100 / 1000:.0f}K"
+        elif amount >= 1_000:
+            rounded = round(amount / 100) * 100
+            return f"${rounded:,.0f}"
+        else:
+            return f"${amount:,.0f}"
+
+    try:
+        ch = _get_ch_client()
+        result = project_today_revenue(ch)
+        status = result.get("status")
+
+        if status != "ok":
+            formatted = result.get("formatted") or "⚠️ Projection unavailable."
+            return {"formatted": formatted, "pre_formatted": True}
+
+        projected = result.get("projected_full_day") or 0.0
+        today_rev = result.get("today_revenue") or 0.0
+        dow_median = result.get("dow_median")
+        pct_expected = result.get("pct_of_expected")
+        as_of_ct = result.get("as_of_ct", "")
+
+        # ±10% pace error band (gates loosen post-backtest in Step 6)
+        low = projected * 0.90
+        high = projected * 1.10
+
+        import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+        weekday = _dt.datetime.now(_ZI("America/Chicago")).strftime("%A")
+
+        pace_line = (
+            f"Currently *{_fmt_rev(today_rev)}* — tracking *{pct_expected:.0f}%* of typical for this hour."
+            if pct_expected is not None
+            else f"Currently *{_fmt_rev(today_rev)}*."
+        )
+        median_line = (
+            f"Typical {weekday} lands ~*{_fmt_rev(dow_median)}*."
+            if dow_median
+            else ""
+        )
+
+        lines = [
+            f"Projected EOD: *{_fmt_rev(projected)}* (range {_fmt_rev(low)}-{_fmt_rev(high)} based on ±10% pace error).",
+            pace_line,
+        ]
+        if median_line:
+            lines.append(median_line)
+        if as_of_ct:
+            lines.append(f"_As of {as_of_ct} CT._")
+
+        warning = result.get("warning")
+        if warning:
+            lines.append(f"⚠️ {warning}")
+
+        return {"formatted": "\n".join(lines), "pre_formatted": True}
+
+    except Exception:
+        log.exception("get_revenue_today_projection failed")
+        return {
+            "formatted": "⚠️ Projection unavailable — query failed. Try again or check ClickHouse.",
+            "pre_formatted": True,
+        }
+
+
 def get_cvr_anomalies(
     min_impressions_7d: int = None,
     min_payout: float = None,
@@ -4487,6 +4591,7 @@ TOOL_MAP = {
     "get_demand_queue_status": get_demand_queue_status,
     "mark_offer_launched": mark_offer_launched,
     "get_revenue_today": get_revenue_today,
+    "get_revenue_today_projection": get_revenue_today_projection,
     "get_publisher_health": get_publisher_health,
     "get_campaign_status": get_campaign_status,
     "get_perkswall_engagement": get_perkswall_engagement,

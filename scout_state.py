@@ -241,6 +241,38 @@ def _save_expiration_alert_date(date_str: str) -> None:
     _save_pulse_state(state)
 
 
+# ── Projection autocheck slot ─────────────────────────────────────────────────
+# Hourly CT-anchored slot key ("YYYY-MM-DDTHH") for the projection autocheck
+# monitor — fires once per CT hour into #sidd-qa. Persisted so a mid-hour
+# restart does not re-fire the current slot.
+
+def _load_projection_autocheck_slot() -> str | None:
+    return _load_pulse_state().get("last_projection_autocheck_slot")
+
+
+def _save_projection_autocheck_slot(slot: str) -> None:
+    state = _load_pulse_state()
+    state["last_projection_autocheck_slot"] = slot
+    _save_pulse_state(state)
+
+
+# ── Projection autocheck EOD-posted marker ────────────────────────────────────
+# CT date ("YYYY-MM-DD") of the last day the 17:30 CT EOD rollup posted.
+# Persisted so a restart after EOD does not re-post the EOD summary.
+
+def _load_eod_posted_date() -> str | None:
+    return _load_pulse_state().get("last_projection_autocheck_eod_date")
+
+
+def _save_eod_posted_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_projection_autocheck_eod_date"] = date_str
+    _save_pulse_state(state)
+
+
+# ── Digest poster state ───────────────────────────────────────────────────────
+# CT date ("YYYY-MM-DD") of the last day the morning digest posted.
+
 def _load_digest_post_state() -> str | None:
     return _load_pulse_state().get("last_digest_post_date")
 
