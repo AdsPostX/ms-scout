@@ -1503,23 +1503,20 @@ def _format_projection_autocheck_fire(
 
         med_line = f" vs ${float(med):,.0f} {wd} median ({pct}%)" if med else ""
         text = (
-            f":bar_chart: *Projection autocheck* `{slot}`\n"
+            f"[projection-autocheck] :bar_chart: *Projection autocheck* `{slot}`\n"
             f"• Today so far: ${today_rev:,.0f}\n"
             f"• Projected EOD: ${proj:,.0f}{med_line}\n"
             f"• Curve share: {share} ({source})"
             f"{cmp_line}"
         )
-    elif status == "too_early":
-        text = f":hourglass: *Projection autocheck* `{slot}` — too early to project."
-    elif status == "insufficient_history":
-        text = (
-            f":warning: *Projection autocheck* `{slot}` — "
-            f"insufficient same-weekday history "
-            f"(sample_days={result.get('sample_days', 0)})."
-        )
+    elif status in ("too_early", "insufficient_history", "unstable"):
+        # Emit the helper's pre-formatted string verbatim (CEO review:
+        # "smoke test asserts verbatim surface, not paraphrased").
+        formatted = result.get("formatted") or f"status={status}"
+        text = f"[projection-autocheck] `{slot}` {formatted}"
     else:
         err = result.get("error") or "unknown"
-        text = f":x: *Projection autocheck* `{slot}` — error: {err}"
+        text = f"[projection-autocheck] :x: `{slot}` error: {err}"
 
     blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
     return text, blocks
@@ -1532,7 +1529,7 @@ def _format_projection_autocheck_eod(
     the path of least resistance. Trust visibility = one read."""
     if not entries:
         text = (
-            f":bar_chart: *Projection autocheck EOD* {date_str}\n"
+            f"[projection-autocheck] :bar_chart: *Projection autocheck EOD* {date_str}\n"
             "• No fires recorded today (monitor disabled, paused, or restarted late)."
         )
         return text, [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
@@ -1541,7 +1538,7 @@ def _format_projection_autocheck_eod(
     errors  = [e for e in entries if e["status"] == "error"]
     last_ok = ok[-1] if ok else None
 
-    lines = [f":bar_chart: *Projection autocheck EOD* {date_str}"]
+    lines = [f"[projection-autocheck] :bar_chart: *Projection autocheck EOD* {date_str}"]
     lines.append(f"• Fires: {len(entries)} (ok={len(ok)}, errors={len(errors)})")
     if last_ok:
         proj = last_ok.get("projected_full_day")

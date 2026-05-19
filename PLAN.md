@@ -28,7 +28,7 @@ Falsifiable: re-ask Ali's exact questions ("how much do you estimate our revenue
 - **Drop the >25% divergence guardrail.** Daemon doesn't persist its projected number (`scout_bot.py:858-864` calls helper, only `_save_revenue_alert_date` writes state). Rely on `status="too_early"`, `sample_days < 4` → `insufficient_history`, and the Step 6 backtest gate.
 - **All SQL CT-correct.** Use `toTimeZone(created_at, 'America/Chicago')` and `toTimeZone(now(), 'America/Chicago')` everywhere — do not inherit the daemon's bare `today()` at scout_ch.py:189.
 - **Curve query shape:** exclude today, group by CT day, require `full_day_revenue > 0`, share = `sumIf(revenue, ct_hour <= H) / full_day_revenue`, average across same-weekday days; `sample_days` = number of qualifying days, not rows.
-- **Module-scope TTL cache** on the curve array (10-min TTL) so a 5-user Slack burst doesn't fan out into 5 × 60-day scans.
+- **Module-scope TTL cache** on the curve array (10-min TTL) so a 5-user Slack burst doesn't fan out into 5 × 90-day scans.
 - **Tool registration touches three sites** in scout_agent.py: schema near `get_revenue_today` (~L1174), import alongside other `scout_ch` helpers (~L31-38), `TOOL_MAP` binding near `"get_revenue_today"` (~L4477-4490). Update `get_revenue_today`'s description for anti-routing (~L1176-1180).
 - **Error handling:** helper may raise; tool wrapper catches and returns Slack-safe pre-formatted mrkdwn like `get_revenue_today` (~scout_agent.py:4367-4372). Never let exceptions bubble through `TOOL_MAP` dispatch.
 - **Smoke tests are deterministic** (no live SQL). Pattern matches smoke_test.py:636-658: `hasattr` checks for the helper (via `scout_agent` re-export), `TOOLS` schema presence, `TOOL_MAP` binding, anti-routing text on old tool, exact `too_early` string via stubbed CH client. Add `project_today_revenue` to the `scout_agent.py` re-export list (~L34).
@@ -110,7 +110,7 @@ Applied in `_build_hour_curve` (scout_ch.py): `INTERVAL 60 DAY` → `INTERVAL
 
 ## Risks
 
-- **Hour-of-day curve has thin tails.** Early-morning hours have few full-day reference points; floor at 8am CT, require `sample_days >= 4`, otherwise return "too early to project reliably."
+- **Hour-of-day curve has thin tails.** Early-morning hours have few full-day reference points; floor at 10am CT (per Step 2 `too_early` gate), require `sample_days >= 4`, otherwise return "too early to project reliably."
 - **Daemon baseline (8-week same-weekday median) vs summary tool (30-day calendar avg)** are deliberately different. The projection tool uses the *daemon* baseline — this aligns projection with the alert it pairs with, and avoids two different "expected today" numbers floating around.
 - **No daemon behavior change.** `_query_intraday_revenue_total` is untouched; the daemon's 3pm alert path is byte-for-byte preserved. Unification deferred to a separate ticket post-validation.
 - **Trust deficit** — Scout's first-impression fragility means a wrong projection in #revenue-operations is worse than no tool. Mitigation: gate the tool to dev-Scout / Sidd DM until Step 6 backtest passes (median error < 8%, 90th pct error < 18%), then enable channel-wide.
