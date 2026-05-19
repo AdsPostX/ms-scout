@@ -688,7 +688,7 @@ def fetch_maxbounty() -> list:
         o["payout_type"]       = rate_type
         o["currency"]          = "USD"
         o["category"]          = category
-        o["geo"]               = "US"
+        o["geo"]               = normalize_geo(geo_raw)
         o["geo_raw"]           = geo_raw
         o["os_targeting"]      = os_raw
         o["platform_targeting"] = "All"
@@ -1273,9 +1273,11 @@ def write_notion(offers: list):
 
 def fetch_cj() -> list:
     """
-    CJ Affiliate — two-source scraper:
+    CJ Affiliate — three-step scraper:
     1. publisherCommissions GraphQL → actual commission rates per advertiser (best payout signal)
-    2. REST link-search → real tracking URLs (3,755 text links across joined programs)
+    2. CA-filtered link-search pre-flight → set of CA-eligible advertiser IDs (no country field
+       in link-search response, so we infer geo by running a country=CA filtered pass first)
+    3. Main link-search loop → full text-link catalog with geo labeled from step 2
 
     Auth: Authorization: Bearer {CJ_API_KEY}
     CID (CJ_WEBSITE_ID): company account ID — for commission query
@@ -1329,7 +1331,48 @@ def fetch_cj() -> list:
         except Exception as e:
             log.warning(f"CJ: commission query failed (non-fatal) — {e}")
 
-    # ── Step 2: Text links with real tracking URLs ────────────────────────────
+    # ── Step 2: CA-eligible advertiser IDs (pre-flight pass) ─────────────────
+    # link-search accepts a `country` filter that returns links from advertisers
+    # targeting that market, but the response XML has no country field per-link.
+    # Strategy: run a CA-filtered pass first to collect advertiser IDs, then
+    # label each offer as "US + CA" if its advertiser_id appears in this set.
+    ca_adv_ids: set[str] = set()
+    if pid or cid:
+        log.info("CJ: pre-flight CA pass — collecting CA-eligible advertiser IDs...")
+        ca_page = 1
+        while True:
+            ca_params: dict = {
+                "website-id":       pid or cid,
+                "advertiser-ids":   "joined",
+                "link-type":        "Text Link",
+                "country":          "CA",
+                "records-per-page": 100,
+                "page-number":      ca_page,
+            }
+            try:
+                ca_resp = requests.get(
+                    "https://linksearch.api.cj.com/v2/link-search",
+                    headers=HEADERS, params=ca_params, timeout=30,
+                )
+                if ca_resp.status_code in (400, 401, 403):
+                    log.warning(f"CJ CA pass: {ca_resp.status_code} — skipping geo enrichment")
+                    break
+                ca_resp.raise_for_status()
+                ca_root = ET.fromstring(ca_resp.text)
+                ca_links = list(ca_root.iter("link"))
+                for cl in ca_links:
+                    aid = cl.findtext("advertiser-id", "").strip()
+                    if aid:
+                        ca_adv_ids.add(aid)
+                if len(ca_links) < 100:
+                    break
+                ca_page += 1
+            except Exception as e:
+                log.warning(f"CJ CA pass failed (page {ca_page}): {e} — skipping geo enrichment")
+                break
+        log.info(f"CJ: {len(ca_adv_ids)} CA-eligible advertisers found")
+
+    # ── Step 3: Text links with real tracking URLs ────────────────────────────
     if not pid:
         log.warning("CJ: CJ_PUBLISHER_ID not set — using program URLs only (no tracked links)")
 
@@ -1428,9 +1471,10 @@ def fetch_cj() -> list:
             o["payout_type"]       = payout_type
             o["_raw_payout"]       = raw_payout[:120]
             o["currency"]          = "USD"
+            geo_label              = "US + CA" if adv_id in ca_adv_ids else "US Only"
             o["category"]          = category
-            o["geo"]               = "US"
-            o["geo_raw"]           = "US"
+            o["geo"]               = geo_label
+            o["geo_raw"]           = "US, CA" if adv_id in ca_adv_ids else "US"
             o["os_targeting"]      = "All"
             o["platform_targeting"] = "All"
             o["tracking_url"]      = tracking_url
@@ -1773,7 +1817,7 @@ def fetch_awin() -> list:
         o["_raw_payout"]       = raw[:120]
         o["currency"]          = "USD"
         o["category"]          = category
-        o["geo"]               = "US"
+        o["geo"]               = normalize_geo(str(geo_raw))
         o["geo_raw"]           = geo_raw
         o["os_targeting"]      = "All"
         o["platform_targeting"] = "All"
@@ -1914,7 +1958,7 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
             o["_raw_payout"]       = raw_payout[:120]
             o["currency"]          = "USD"
             o["category"]          = category
-            o["geo"]               = "US"
+            o["geo"]               = normalize_geo(str(geo_raw))
             o["geo_raw"]           = str(geo_raw)
             o["os_targeting"]      = str(os_raw)
             o["platform_targeting"] = "All"
@@ -2039,7 +2083,7 @@ def fetch_everflow_instance(label: str, api_key: str, base_url: str) -> list:
             o["_raw_payout"]       = raw_payout[:120]
             o["currency"]          = "USD"
             o["category"]          = category
-            o["geo"]               = "US"
+            o["geo"]               = normalize_geo(str(geo_raw))
             o["geo_raw"]           = str(geo_raw)
             o["os_targeting"]      = str(os_raw)
             o["platform_targeting"] = "All"
