@@ -914,12 +914,14 @@ def _digest_poster(web) -> None:
     while True:
         try:
             CT_TZ = pytz.timezone("America/Chicago")
-            check_hour = int(
-                SCOUT_THRESHOLDS.get("signals", {}).get("digest_post_hour_ct", 7)
-            )
 
             while True:
                 try:
+                    # Re-read both knobs each tick so live config changes apply
+                    # without a crash/restart (matches digest_daemon_enabled).
+                    check_hour = int(
+                        SCOUT_THRESHOLDS.get("signals", {}).get("digest_post_hour_ct", 7)
+                    )
                     if not SCOUT_THRESHOLDS.get("signals", {}).get(
                         "digest_daemon_enabled", False
                     ):
