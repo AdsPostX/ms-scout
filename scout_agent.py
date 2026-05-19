@@ -5122,6 +5122,15 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
                         log.info(f"Parsed BRIEF_JSON for {brief_data.get('advertiser')}")
                     except Exception as e:
                         log.warning(f"Failed to parse BRIEF_JSON: {e} — extracting from plain text")
+                    # Strip the sentinel block from text so it never leaks into Slack
+                    # when a caller (e.g. App Home Try-it modal) renders response.text
+                    # instead of response.payload.
+                    text = re.sub(
+                        r"<<<BRIEF_JSON.*?BRIEF_JSON>>>",
+                        "",
+                        text,
+                        flags=re.DOTALL,
+                    ).strip()
 
                 # Fallback: extract copy from Claude's plain-text response.
                 # Check both new schema (title) and old schema (titles) — either means we have copy.
