@@ -3016,6 +3016,51 @@ def test_offer_card_no_view_button_when_no_urls():
     return True, "no View button when both URLs empty — correct"
 
 
+@test("normalize_geo idempotent — US + CA round-trips")
+def test_normalize_geo_idempotent_us_plus_ca():
+    """normalize_geo('US + CA') must return 'US + CA', not 'Other'.
+    CJ hardcodes o["geo"] = "US + CA"; the cleanup pass re-calls normalize_geo
+    on it, so if normalize_geo isn't idempotent, CA-eligible CJ offers get
+    their geo silently dropped to 'Other' and suppressed in the digest.
+    """
+    from offer_scraper import normalize_geo
+    result = normalize_geo("US + CA")
+    if result != "US + CA":
+        return False, f"normalize_geo('US + CA') returned {result!r}, expected 'US + CA'"
+    return True, f"normalize_geo('US + CA') = {result!r} — idempotency holds"
+
+
+@test("normalize_geo double-pass stable for US, CA")
+def test_normalize_geo_double_pass():
+    """normalize_geo is idempotent: calling it twice gives the same result."""
+    from offer_scraper import normalize_geo
+    first  = normalize_geo("US, CA")
+    second = normalize_geo(first)
+    if first != second:
+        return False, f"double-pass changed value: {first!r} → {second!r}"
+    if first != "US + CA":
+        return False, f"expected 'US + CA', got {first!r}"
+    return True, f"double-pass stable: 'US, CA' → {first!r} → {second!r}"
+
+
+@test("normalize_geo all canonical display strings are idempotent")
+def test_normalize_geo_already_normalized_values():
+    """All canonical display strings must round-trip through normalize_geo unchanged."""
+    from offer_scraper import normalize_geo
+    cases = [
+        "US Only", "US + CA", "North America", "Global",
+        "UK", "EU", "Other", "Unknown",
+    ]
+    failures = []
+    for val in cases:
+        result = normalize_geo(val)
+        if result != val:
+            failures.append(f"  {val!r} → {result!r}")
+    if failures:
+        return False, "idempotency broken for:\n" + "\n".join(failures)
+    return True, f"all {len(cases)} canonical display strings are stable under normalize_geo"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
