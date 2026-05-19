@@ -688,7 +688,7 @@ def fetch_maxbounty() -> list:
         o["payout_type"]       = rate_type
         o["currency"]          = "USD"
         o["category"]          = category
-        o["geo"]               = "US"
+        o["geo"]               = normalize_geo(geo_raw)
         o["geo_raw"]           = geo_raw
         o["os_targeting"]      = os_raw
         o["platform_targeting"] = "All"
@@ -1773,7 +1773,7 @@ def fetch_awin() -> list:
         o["_raw_payout"]       = raw[:120]
         o["currency"]          = "USD"
         o["category"]          = category
-        o["geo"]               = "US"
+        o["geo"]               = normalize_geo(str(geo_raw))
         o["geo_raw"]           = geo_raw
         o["os_targeting"]      = "All"
         o["platform_targeting"] = "All"
@@ -1914,7 +1914,7 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
             o["_raw_payout"]       = raw_payout[:120]
             o["currency"]          = "USD"
             o["category"]          = category
-            o["geo"]               = "US"
+            o["geo"]               = normalize_geo(str(geo_raw))
             o["geo_raw"]           = str(geo_raw)
             o["os_targeting"]      = str(os_raw)
             o["platform_targeting"] = "All"
@@ -2039,7 +2039,7 @@ def fetch_everflow_instance(label: str, api_key: str, base_url: str) -> list:
             o["_raw_payout"]       = raw_payout[:120]
             o["currency"]          = "USD"
             o["category"]          = category
-            o["geo"]               = "US"
+            o["geo"]               = normalize_geo(str(geo_raw))
             o["geo_raw"]           = str(geo_raw)
             o["os_targeting"]      = str(os_raw)
             o["platform_targeting"] = "All"
