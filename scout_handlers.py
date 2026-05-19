@@ -1462,11 +1462,42 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             return
 
         def _run_modal(v_id: str = view_id) -> None:
+            import itertools as _it
+
+            _heartbeat_stop = threading.Event()
+
+            def _heartbeat() -> None:
+                """Pulse loading message every 6s so the modal doesn't look frozen."""
+                _STEPS = [
+                    _pick_loading_message(query),
+                    "Still working…",
+                    "Crunching the numbers…",
+                    "Almost there…",
+                ]
+                for step in _it.cycle(_STEPS):
+                    if _heartbeat_stop.wait(timeout=6.0):
+                        break
+                    try:
+                        web.views_update(
+                            view_id=v_id,
+                            view={
+                                "type": "modal",
+                                "title": {"type": "plain_text", "text": "Scout", "emoji": False},
+                                "close": {"type": "plain_text", "text": "Close", "emoji": False},
+                                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{step}"}}],
+                            },
+                        )
+                    except Exception:
+                        pass  # best-effort — never crash the modal over a heartbeat
+
+            threading.Thread(target=_heartbeat, daemon=True).start()
+
             try:
                 _t0 = time.monotonic()
                 try:
                     response = _ask_with_timeout(query)
                 except AskTimeout:
+                    _heartbeat_stop.set()
                     web.views_update(
                         view_id=v_id,
                         view={
@@ -1480,6 +1511,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 _elapsed = int(time.monotonic() - _t0)
                 _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
 
+                _heartbeat_stop.set()
                 response_text = (response.text or "")[:3000]
                 content_blocks = _text_to_blocks(response_text)[:45]
                 footer_block = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
@@ -1494,6 +1526,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 )
                 log.info("home_try_query modal: ran %r for %s in %ss", query[:50], user_id, _elapsed)
             except Exception:
+                _heartbeat_stop.set()
                 log.exception("_handle_home_try_query: modal update failed for %s query=%r", user_id, query[:80])
                 try:
                     web.views_update(

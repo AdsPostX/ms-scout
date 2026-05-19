@@ -88,14 +88,14 @@ _HOME_HERO = {
     "jtbd":        "Prep for a publisher call",
     "description": "Full account picture — provisioned offers, what's serving, "
                    "revenue health, what to pitch.",
-    "query":       "Give me a health check on TuitionHero",
-    "cta":         "Health check on TuitionHero",
+    "query":       "Give me a health check on AT&T",
+    "cta":         "Health check on AT&T",
 }
 
 _HOME_SECONDARY = [
     {"jtbd": "Morning triage",            "query": "What happened today?"},
     {"jtbd": "Understand a revenue drop", "query": "What happened to Pinger this week?"},
-    {"jtbd": "Build a campaign brief",    "query": "Build a brief for Square"},
+    {"jtbd": "Top publishers today",      "query": "Who are the top publishers by revenue today?"},
     {"jtbd": "Find better payouts",
      "query": "Find Capital One Shopping on other networks — is there a better payout?"},
 ]
