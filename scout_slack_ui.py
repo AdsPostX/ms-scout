@@ -86,8 +86,7 @@ _INLINE_RE = re.compile(
 # the view — see tests/test_kit_lint.py.
 _HOME_HERO = {
     "jtbd":        "Prep for a publisher call",
-    "description": "Full account picture — provisioned offers, what's serving, "
-                   "revenue health, what to pitch.",
+    "description": "Publisher health, provisioned offers, and what to pitch.",
     "query":       "Give me a health check on AT&T",
     "cta":         "Health check on AT&T",
 }
@@ -1375,19 +1374,19 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": f"{d_yest} vs yesterday  ·  {d_7d} vs 7d avg  ·  {freshness}",
+                "text": f"{d_yest} vs yesterday · {d_7d} vs 7d avg · {freshness}",
             }],
         })
 
     # ── Alert health line + overflow menu (Move 3) ───────────────────────
     firing = list(alerts or [])
     if not firing:
-        health_text = "🟢  *All systems normal.*"
+        health_text = "🟢 *All systems normal.*"
     elif len(firing) == 1:
         name = firing[0].alert_name.replace("_", " ")
-        health_text = f"🟠  *1 alert firing:* {name}"
+        health_text = f"🟠 *1 alert firing:* {name}"
     else:
-        health_text = f"🔴  *{len(firing)} alerts firing.*"
+        health_text = f"🔴 *{len(firing)} alerts firing.*"
 
     blocks.append({
         "type": "section",
@@ -1465,14 +1464,11 @@ def _build_home_view(queue_items: "list[dict] | None" = None,
         "text": {
             "type": "mrkdwn",
             "text": (
-                "*Ask Scout anything about your publishers, advertisers, "
-                "and revenue — in plain English.*\n"
-                "Mention `@Scout` in any channel or thread. Scout remembers "
-                "context within the thread, so you can follow up."
+                "*Revenue intelligence — plain English.*\n"
+                "Mention `@Scout` in any channel. Context carries through the thread."
             ),
         },
     })
-    blocks.append({"type": "divider"})
 
     # ── Hero example (primary CTA) ────────────────────────────────────────────
     blocks.append({
@@ -1514,8 +1510,7 @@ def _build_home_view(queue_items: "list[dict] | None" = None,
         "type": "context",
         "elements": [{
             "type": "mrkdwn",
-            "text": "Need more? Type `/scout-help` for the full command list, "
-                    "or `/scout-status` for system health.",
+            "text": "`/scout-help` for all commands · `/scout-status` for system health",
         }],
     })
 
