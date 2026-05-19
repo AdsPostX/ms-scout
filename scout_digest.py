@@ -422,7 +422,7 @@ def is_already_in_ms(offer: dict, ms_campaigns: list[dict]) -> bool:
 # One model, one truth: estimated_RPM = payout × predicted_CVR × 1000 × reliability.
 # CVR is sourced from (in order): real MS ClickHouse data → category benchmark → payout-type baseline.
 
-def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, force: bool = False) -> float | None:
+def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, force: bool = False, reason_sink: dict | None = None) -> float | None:
     """
     Returns estimated RPM (Scout Score), or None to exclude.
 
@@ -444,12 +444,20 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     """
     from scout_agent import _scout_score, SCOUT_THRESHOLDS
 
+    def _reject(reason: str) -> None:
+        # Per-gate diagnostic: lets select_offers() answer "why is Impact 100% no_score?"
+        # without another deploy. Reason taxonomy lives only here so it stays in sync
+        # with the gates below.
+        if reason_sink is not None:
+            reason_sink[reason] = reason_sink.get(reason, 0) + 1
+        return None
+
     offer_id = str(offer.get("offer_id", ""))
 
     if not force:
         # Already approved — don't resurface
         if offer_id in state.get("approved", {}):
-            return None
+            return _reject("already_approved")
 
     # Rejected — only resurface if payout improved ≥15%
     rejected = state.get("rejected", {})
@@ -459,9 +467,9 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
             current = _parse_payout(payout_data.get("payout"))
             old     = _parse_payout(rejected[offer_id].get("payout_at_action"))
         except (ValueError, TypeError):
-            return None
+            return _reject("rejected_parse_error")
         if old <= 0 or (current - old) / old < 0.15:
-            return None
+            return _reject("rejected_no_lift")
 
     # Build enriched offer: use payout_cache amount (Impact API, more accurate)
     # over scraper-normalised _payout_num where available.
@@ -474,11 +482,14 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
         enriched["_payout_num"] = cache_payout
 
     if not enriched.get("_payout_num"):
-        return None
+        return _reject("no_payout")
 
     rpm = _scout_score(enriched, benchmarks)
     if rpm <= 0:
-        return None
+        # _scout_score returns 0 for: payout==0 (caught above), high-friction risk
+        # flag (B2B/Loan/Medical/Biz-opp/Insurance), or no benchmark match at any
+        # of 4 tiers (offer_id / advertiser / category / fallthrough).
+        return _reject("scout_score_zero")
 
     # Post-transaction context fit — encodes MS's business model.
     # Disqualifying multipliers (0.02–0.05) accurately model near-zero conversion
@@ -495,7 +506,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     rpm *= _CONVERSION_COMPLEXITY.get(payout_type, 1.0)
 
     if rpm <= 0:
-        return None
+        return _reject("context_or_complexity_zero")
 
     # Minimum quality floor: offers scoring below this estimated RPM aren't worth
     # surfacing regardless of network inventory size. Default $20 effective score
@@ -504,7 +515,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     # a code change. Falls back to 20.0 if config or key is missing.
     _MIN_RPM = float(SCOUT_THRESHOLDS.get("digest", {}).get("min_rpm_floor", 20.0))
     if rpm < _MIN_RPM:
-        return None
+        return _reject("below_min_rpm")
 
     # Tiny tiebreaker: integration-ready offers preferred
     if offer.get("tracking_url"):
@@ -1363,6 +1374,10 @@ def select_offers(
     # Per-network attribution so we can diagnose "only CJ surfaced" issues:
     # which network is losing offers, and at which gate (in_ms vs no_score).
     per_net_stats: dict[str, dict[str, int]] = {}
+    # Per-network no_score reason breakdown: lets us tell "Impact lost 175 offers at
+    # scout_score_zero" vs "below_min_rpm" without instrumenting another deploy.
+    # Reason taxonomy is defined inside score_offer().
+    no_score_reasons: dict[str, dict[str, int]] = {}
 
     def _bump(net: str, key: str):
         per_net_stats.setdefault(net, {"total": 0, "in_ms": 0, "no_score": 0, "scored": 0})[key] += 1
@@ -1379,7 +1394,8 @@ def select_offers(
             _bump(network, "in_ms")
             continue
 
-        s = score_offer(offer, payout_cache, state, benchmarks, force=force)
+        reasons = no_score_reasons.setdefault(network, {})
+        s = score_offer(offer, payout_cache, state, benchmarks, force=force, reason_sink=reasons)
         if s is None:
             skipped_no_score += 1
             _bump(network, "no_score")
@@ -1463,7 +1479,16 @@ def select_offers(
             "[digest] %s: total=%d in_ms=%d no_score=%d scored=%d selected=%d",
             net, s["total"], s["in_ms"], s["no_score"], s["scored"], len(result.get(net, [])),
         )
+        # Reason breakdown only when there's actually something to diagnose,
+        # sorted desc so the dominant gate is the first thing in the log line.
+        reasons = no_score_reasons.get(net) or {}
+        if reasons:
+            breakdown = ", ".join(
+                f"{k}={v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])
+            )
+            log.info("[digest] %s no_score_reasons: %s", net, breakdown)
     meta["per_network"] = per_net_stats
+    meta["no_score_reasons"] = no_score_reasons
     return result, meta
 
 
