@@ -889,6 +889,68 @@ def _revenue_tracker(web, ch) -> None:
             _time.sleep(30)
 
 
+def _digest_poster(web) -> None:
+    """
+    Daemon: daily Scout Signal offers digest poster.
+
+    PR-26 split the scraper into ms-demand-feed, but the assumed handoff
+    ('Scout's own daemon handles the digest') was never wired. This daemon
+    closes that gap — runs once per day at digest_post_hour_ct (default 7am CT,
+    one hour after ms-demand-feed's 06:00 CT scrape) and calls
+    scout_digest.post_digest(). post_digest() already pulls offers from
+    DEMAND_FEED_URL with a disk-snapshot fallback, so this just needs to
+    schedule it.
+
+    Feature flag: SCOUT_THRESHOLDS["signals"]["digest_daemon_enabled"] (default False).
+    Idempotent per calendar day via _load/_save_digest_post_state.
+    Outer restart wrapper so any unhandled crash self-heals.
+    """
+    import time as _time
+    import pytz
+    from datetime import datetime as _dt
+    from scout_agent import SCOUT_THRESHOLDS
+    from scout_state import _load_digest_post_state, _save_digest_post_date
+
+    while True:
+        try:
+            CT_TZ = pytz.timezone("America/Chicago")
+            check_hour = int(
+                SCOUT_THRESHOLDS.get("signals", {}).get("digest_post_hour_ct", 7)
+            )
+
+            while True:
+                _time.sleep(300)  # 5-min poll
+                try:
+                    if not SCOUT_THRESHOLDS.get("signals", {}).get(
+                        "digest_daemon_enabled", False
+                    ):
+                        continue
+
+                    now_ct = _dt.now(CT_TZ)
+                    if not (now_ct.hour == check_hour and now_ct.minute < 10):
+                        continue
+
+                    today_str = now_ct.date().isoformat()
+                    if _load_digest_post_state() == today_str:
+                        continue
+
+                    import scout_digest
+                    log.info("[digest-poster] posting Scout Signal digest...")
+                    scout_digest.post_digest()
+                    _save_digest_post_date(today_str)
+                    log.info(f"[digest-poster] Digest run complete for {today_str}.")
+
+                except Exception as e:
+                    log.warning(f"[digest-poster] Unexpected error: {e}")
+
+        except Exception as e:
+            log.error(
+                f"[digest-poster] Fatal crash — restarting in 30s: {e}",
+                exc_info=True,
+            )
+            _time.sleep(30)
+
+
 # ── Silent per-signal monitors (decomposed pulse) ────────────────────────────
 # Each monitor mirrors the _revenue_tracker shape:
 #   outer restart wrapper + inner 5-min poll loop
@@ -2548,6 +2610,7 @@ def main():
     _start_daemon(_fill_monitor,          name="fill-monitor",          args=(web_client,))
     _start_daemon(_cvr_anomaly_monitor,   name="cvr-anomaly-monitor",   args=(web_client,))
     _start_daemon(_expiration_monitor,    name="expiration-monitor",    args=(web_client,))
+    _start_daemon(_digest_poster,         name="digest-poster",         args=(web_client,))
     _start_daemon(_nightly_harvest,       name="context-harvest")
     _start_daemon(_notion_watcher_loop,   name="notion-watcher",      args=(web_client,))
     _start_daemon(_copy_coalescer_loop,   name="copy-coalescer")

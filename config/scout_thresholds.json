@@ -1,7 +1,7 @@
 {
   "_doc": "Scout's tunable thresholds. Edit + redeploy on Render to change live values. The @Scout config tool reads from here at runtime so the team can audit what's currently active without reading source.",
   "digest": {
-    "min_rpm_floor": 20,
+    "min_rpm_floor": 5,
     "offers_per_network": 3,
     "max_per_category": 2,
     "max_per_payout_type": 2
@@ -38,6 +38,8 @@
     "cvr_anomaly_monitor_check_hour_ct": 2,
     "expiration_monitor_enabled": true,
     "expiration_monitor_check_hour_ct": 2,
+    "digest_daemon_enabled": true,
+    "digest_post_hour_ct": 7,
     "revenue_trend_min_periods": 4
   },
   "health": {

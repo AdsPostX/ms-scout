@@ -241,6 +241,16 @@ def _save_expiration_alert_date(date_str: str) -> None:
     _save_pulse_state(state)
 
 
+def _load_digest_post_state() -> str | None:
+    return _load_pulse_state().get("last_digest_post_date")
+
+
+def _save_digest_post_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_digest_post_date"] = date_str
+    _save_pulse_state(state)
+
+
 # ── Pulse state ────────────────────────────────────────────────────────────────
 
 def _load_pulse_state() -> dict:
