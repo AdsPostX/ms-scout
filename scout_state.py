@@ -270,6 +270,19 @@ def _save_eod_posted_date(date_str: str) -> None:
     _save_pulse_state(state)
 
 
+# ── Digest poster state ───────────────────────────────────────────────────────
+# CT date ("YYYY-MM-DD") of the last day the morning digest posted.
+
+def _load_digest_post_state() -> str | None:
+    return _load_pulse_state().get("last_digest_post_date")
+
+
+def _save_digest_post_date(date_str: str) -> None:
+    state = _load_pulse_state()
+    state["last_digest_post_date"] = date_str
+    _save_pulse_state(state)
+
+
 # ── Pulse state ────────────────────────────────────────────────────────────────
 
 def _load_pulse_state() -> dict:
