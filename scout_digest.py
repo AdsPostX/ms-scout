@@ -66,7 +66,7 @@ _STOP_WORDS = {"the", "and", "for", "inc", "llc", "corp", "ltd", "co", "via"}
 # Description filtering / truncation
 _SENTENCE_END        = re.compile(r'(?<=[.!?])\s')
 _BAD_SUMMARIES       = frozenset({"default", "n/a", "tbd", "none", "null", ""})
-_SUMMARY_TRUNCATE_LEN     = 78   # max chars for main-digest offer summary
+_SUMMARY_TRUNCATE_LEN     = 160  # max chars for main-digest offer summary
 _ALT_SUMMARY_TRUNCATE_LEN = 120  # max chars for sourcing-intel description teaser
 
 # ── Post-transaction context fit ───────────────────────────────────────────────
