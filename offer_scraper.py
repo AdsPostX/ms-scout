@@ -213,13 +213,30 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
     if existing_cache is None:
         existing_cache = _load_payout_cache()
 
-    missing = [cid for cid in campaign_ids if str(cid) not in existing_cache]
+    # Re-fetch entries that have a payout_type but no amount — these are CPS/SALE
+    # campaigns where a previous version of this function only read PayoutAmount and
+    # missed the Percentage field. Skip "Rate TBD" entries (legitimate 404s) so we
+    # don't hammer the API for campaigns Impact knows have no active contract.
+    def _needs_refetch(entry: dict) -> bool:
+        if entry.get("payout"):
+            return False
+        if entry.get("payout_note"):  # Rate TBD — leave alone
+            return False
+        return bool(entry.get("payout_type"))  # had a type but empty amount = CPS bug
+
+    missing = [
+        cid for cid in campaign_ids
+        if str(cid) not in existing_cache or _needs_refetch(existing_cache[str(cid)])
+    ]
     if not missing:
         log.info("Impact payout enrichment: all campaigns already cached — nothing to fetch")
         return existing_cache
 
-    log.info(f"Impact payout enrichment: fetching Actions for {len(missing)} new campaigns "
-             f"({len(existing_cache)} already cached)...")
+    new_count = sum(1 for cid in missing if str(cid) not in existing_cache)
+    refetch_count = len(missing) - new_count
+    log.info(f"Impact payout enrichment: fetching Active contract for {len(missing)} campaigns "
+             f"({new_count} new, {refetch_count} re-fetch for missing payouts; "
+             f"{len(existing_cache)} already cached)...")
 
     merged = dict(existing_cache)
     _CATEGORY_TO_PTYPE = {
@@ -244,12 +261,23 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
                 payouts = data.get("PayoutTermsList", [])
                 if payouts:
                     best = payouts[0]  # first action type is the primary conversion
-                    payout = str(best.get("PayoutAmount", ""))
+                    payout = str(best.get("PayoutAmount", "") or "").strip()
                     category = best.get("TrackerType", "")
                     payout_type = _CATEGORY_TO_PTYPE.get(category, category)
+                    # SALE/CPS contracts often leave PayoutAmount blank and put the
+                    # rate in Percentage instead. Without this, every revshare campaign
+                    # silently fails the no_payout gate downstream.
+                    if (not payout or payout in ("0", "0.00")) and category == "SALE":
+                        pct = (best.get("Percentage") or best.get("PercentPayout")
+                               or best.get("PayoutPercent") or "")
+                        if pct:
+                            payout = f"{pct}%"
                     merged[str(cid)] = {"payout": payout, "payout_type": payout_type}
                     if DEBUG and idx % 25 == 0:
-                        log.info(f"  [{idx}/{len(missing)}] {cid}: ${payout} {payout_type}")
+                        log.info(f"  [{idx}/{len(missing)}] {cid}: {payout} {payout_type}")
+                else:
+                    # 200 OK but no contract terms — treat like 404 to avoid re-fetching forever
+                    merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": "Rate TBD"}
             elif resp.status_code == 404:
                 merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": "Rate TBD"}
             else:
