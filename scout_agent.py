@@ -2017,6 +2017,9 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
             if img_rows:
                 platform_image = img_rows[0][0] or ""
     except Exception as e:
+        from scout_ch import CHBusyError
+        if isinstance(e, CHBusyError):
+            raise
         log.warning(f"draft_campaign_brief: platform lookup failed: {e}")
 
     # Image sourcing — see _clearbit_domain / _app_store_icon / _google_favicon for source rationale
@@ -2269,6 +2272,9 @@ def get_publisher_competitive_landscape(
         return result
 
     except Exception as e:
+        from scout_ch import CHBusyError
+        if isinstance(e, CHBusyError):
+            raise
         log.warning(f"get_publisher_competitive_landscape failed: {e}")
         return {"error": str(e)}
 
@@ -4410,6 +4416,9 @@ GROUP BY c.user_id
         return {"formatted": "\n".join(lines), "pre_formatted": True}
 
     except Exception as e:
+        from scout_ch import CHBusyError
+        if isinstance(e, CHBusyError):
+            raise
         log.exception("get_revenue_today failed")
         return {
             "formatted": "⚠️ Revenue data unavailable — query failed. Try again or check ClickHouse.",

@@ -18,8 +18,38 @@ log = logging.getLogger(__name__)
 # tool executor can otherwise stack 6-10 queries simultaneously on the same
 # CH cluster, which surfaces to users as "ClickHouse is under pressure".
 # Queue (block briefly) instead of failing — most queries finish in <2s.
-_CH_MAX_CONCURRENT = int(os.getenv("CH_MAX_CONCURRENT", "4"))
-_CH_ACQUIRE_TIMEOUT_S = float(os.getenv("CH_ACQUIRE_TIMEOUT_S", "10"))
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        log.warning("[CH] bad %s=%r — falling back to %d", name, raw, default)
+        return default
+    if value < minimum:
+        log.warning("[CH] %s=%d below minimum %d — using %d", name, value, minimum, minimum)
+        return minimum
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float = 0.1) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        log.warning("[CH] bad %s=%r — falling back to %s", name, raw, default)
+        return default
+    if value < minimum:
+        log.warning("[CH] %s=%s below minimum %s — using %s", name, value, minimum, minimum)
+        return minimum
+    return value
+
+
+_CH_MAX_CONCURRENT = _env_int("CH_MAX_CONCURRENT", 4, minimum=1)
+_CH_ACQUIRE_TIMEOUT_S = _env_float("CH_ACQUIRE_TIMEOUT_S", 10.0, minimum=0.1)
 _CH_QUERY_SEMAPHORE = threading.BoundedSemaphore(_CH_MAX_CONCURRENT)
 
 
@@ -378,6 +408,8 @@ WHERE user_id > 0
         sess_rows  = ch.query(sessions_sql).result_rows
         base_rows  = ch.query(baseline_sql, parameters={"min_days": min_days}).result_rows
         names_rows = ch.query(names_sql).result_rows
+    except CHBusyError:
+        raise
     except Exception as e:
         log.warning(f"_query_intraday_revenue_by_publisher query failed: {e}")
         return []
