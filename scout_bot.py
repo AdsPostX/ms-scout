@@ -919,19 +919,21 @@ def _digest_poster(web) -> None:
             )
 
             while True:
-                _time.sleep(300)  # 5-min poll
                 try:
                     if not SCOUT_THRESHOLDS.get("signals", {}).get(
                         "digest_daemon_enabled", False
                     ):
+                        _time.sleep(300)
                         continue
 
                     now_ct = _dt.now(CT_TZ)
                     if not (now_ct.hour == check_hour and now_ct.minute < 10):
+                        _time.sleep(300)
                         continue
 
                     today_str = now_ct.date().isoformat()
                     if _load_digest_post_state() == today_str:
+                        _time.sleep(300)
                         continue
 
                     import scout_digest
@@ -939,9 +941,11 @@ def _digest_poster(web) -> None:
                     scout_digest.post_digest()
                     _save_digest_post_date(today_str)
                     log.info(f"[digest-poster] Digest run complete for {today_str}.")
+                    _time.sleep(300)
 
                 except Exception as e:
                     log.warning(f"[digest-poster] Unexpected error: {e}")
+                    _time.sleep(300)
 
         except Exception as e:
             log.error(

@@ -1951,16 +1951,16 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
 
     # Arrival breadcrumb — proves the envelope reached the worker even if a
-    # downstream branch silently returns. Surface event type + user + a
-    # truncated text snippet so Render logs can be grep'd for missed mentions.
+    # downstream branch silently returns. We log event type + user only; the
+    # query text is already logged by the mention/DM branch at "Query from ...",
+    # so emitting it here would duplicate content and broaden surface area.
     try:
         _ev = req.payload.get("event", {}) if isinstance(req.payload, dict) else {}
         _et = _ev.get("type") or req.type
-        _eu = _ev.get("user") or req.payload.get("user_id") if isinstance(req.payload, dict) else ""
-        _esnip = (_ev.get("text") or "")[:80]
-        log.info(f"[socket] req.type={req.type} event.type={_et} user={_eu} text={_esnip!r}")
+        _eu = _ev.get("user") or (req.payload.get("user_id") if isinstance(req.payload, dict) else "")
+        log.info(f"[socket] req.type={req.type} event.type={_et} user={_eu}")
     except Exception:
-        pass
+        log.debug("[socket] arrival breadcrumb logging failed", exc_info=True)
 
     try:
         _handle_event_impl(req)
