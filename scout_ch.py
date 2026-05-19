@@ -5,10 +5,30 @@ from __future__ import annotations
 
 import os
 import logging
+import threading
+import time
 
 import queries as _q
 
 log = logging.getLogger(__name__)
+
+
+# Global cap on concurrent ClickHouse queries across the whole process.
+# Background workers (_run_ghost, _run_fill, etc.) and the agent's parallel
+# tool executor can otherwise stack 6-10 queries simultaneously on the same
+# CH cluster, which surfaces to users as "ClickHouse is under pressure".
+# Queue (block briefly) instead of failing — most queries finish in <2s.
+_CH_MAX_CONCURRENT = int(os.getenv("CH_MAX_CONCURRENT", "4"))
+_CH_ACQUIRE_TIMEOUT_S = float(os.getenv("CH_ACQUIRE_TIMEOUT_S", "10"))
+_CH_QUERY_SEMAPHORE = threading.BoundedSemaphore(_CH_MAX_CONCURRENT)
+
+
+class CHBusyError(RuntimeError):
+    """Raised when the CH concurrency cap is saturated past the acquire timeout.
+
+    Callers (handlers, agent tools) catch this and surface the friendly
+    "ClickHouse is under pressure" message instead of an infinite spinner.
+    """
 
 
 def _run_parallel(fns: list):
@@ -50,7 +70,22 @@ class _LoggingCHClient:
         preview = query.strip().replace("\n", " ")
         preview = " ".join(preview.split())  # collapse whitespace
         log.info(f"[CH] {preview[:400]}{'…' if len(preview) > 400 else ''}")
-        return self._client.query(query, parameters=parameters, **kwargs)
+        t0 = time.monotonic()
+        if not _CH_QUERY_SEMAPHORE.acquire(timeout=_CH_ACQUIRE_TIMEOUT_S):
+            log.warning(
+                f"[CH] busy: gave up after {_CH_ACQUIRE_TIMEOUT_S}s waiting for slot "
+                f"(cap={_CH_MAX_CONCURRENT}); query={preview[:160]}"
+            )
+            raise CHBusyError(
+                f"ClickHouse is busy (>{_CH_MAX_CONCURRENT} concurrent queries); try again shortly."
+            )
+        wait_ms = int((time.monotonic() - t0) * 1000)
+        if wait_ms > 500:
+            log.info(f"[CH] queued {wait_ms}ms before slot")
+        try:
+            return self._client.query(query, parameters=parameters, **kwargs)
+        finally:
+            _CH_QUERY_SEMAPHORE.release()
 
     def __getattr__(self, name):
         # Proxy everything else (command, insert, etc.) directly to real client
