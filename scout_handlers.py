@@ -1490,14 +1490,20 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     except Exception:
                         pass  # best-effort — never crash the modal over a heartbeat
 
-            threading.Thread(target=_heartbeat, daemon=True).start()
+            _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+            _hb_thread.start()
+
+            def _stop_heartbeat() -> None:
+                """Signal heartbeat to exit and wait for any in-flight views_update to finish."""
+                _heartbeat_stop.set()
+                _hb_thread.join(timeout=8.0)
 
             try:
                 _t0 = time.monotonic()
                 try:
                     response = _ask_with_timeout(query)
                 except AskTimeout:
-                    _heartbeat_stop.set()
+                    _stop_heartbeat()
                     web.views_update(
                         view_id=v_id,
                         view={
@@ -1511,7 +1517,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 _elapsed = int(time.monotonic() - _t0)
                 _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
 
-                _heartbeat_stop.set()
+                _stop_heartbeat()
                 response_text = (response.text or "")[:3000]
                 content_blocks = _text_to_blocks(response_text)[:45]
                 footer_block = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
@@ -1526,7 +1532,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 )
                 log.info("home_try_query modal: ran %r for %s in %ss", query[:50], user_id, _elapsed)
             except Exception:
-                _heartbeat_stop.set()
+                _stop_heartbeat()
                 log.exception("_handle_home_try_query: modal update failed for %s query=%r", user_id, query[:80])
                 try:
                     web.views_update(
