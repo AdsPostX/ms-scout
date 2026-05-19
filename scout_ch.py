@@ -396,9 +396,9 @@ WHERE user_id > 0
     return results[:5]
 
 
-# Module-scope cache for the 60-day hour-of-day curve.
+# Module-scope cache for the 90-day hour-of-day curve.
 # The curve is the same for ~10 min across users; avoids fanning out the
-# ~60-day aggregate scan when several @Scout mentions arrive in a burst.
+# ~90-day aggregate scan when several @Scout mentions arrive in a burst.
 _HOUR_CURVE_CACHE: dict = {"ts": 0.0, "data": None}
 _HOUR_CURVE_TTL_SEC = 600  # 10 minutes
 
@@ -455,10 +455,13 @@ GROUP BY ct_day, dow, ct_hour
         rec["by_hour"][int(ct_hour)] = rec["by_hour"].get(int(ct_hour), 0.0) + rev
         rec["full"] += rev
 
-    # Per-DOW: for each hour H, average of (cum_through_H / full_day) across
-    # qualifying days (full_day > 0).
+    # Per-DOW: for each hour H, median of (cum_through_H / full_day) across
+    # qualifying days (full_day > 0) in the 90d window.
     share_acc: dict = {dow: {h: [] for h in range(24)} for dow in range(1, 8)}
-    full_days: dict = {dow: [] for dow in range(1, 8)}
+    # For dow_median we want an 8-week same-weekday baseline (distinct concern
+    # from the share curve). Keep (ct_day, full) tuples so we can take the
+    # 8 most recent same-weekday samples per DOW.
+    full_days_dated: dict = {dow: [] for dow in range(1, 8)}
     sample_days: dict = {dow: 0 for dow in range(1, 8)}
 
     for ct_day, rec in days.items():
@@ -466,7 +469,7 @@ GROUP BY ct_day, dow, ct_hour
             continue
         dow = rec["dow"]
         sample_days[dow] += 1
-        full_days[dow].append(rec["full"])
+        full_days_dated[dow].append((ct_day, rec["full"]))
         cum = 0.0
         for h in range(24):
             cum += rec["by_hour"].get(h, 0.0)
@@ -486,7 +489,14 @@ GROUP BY ct_day, dow, ct_hour
             for h, vals in by_hour.items()
         }
 
-    dow_median = {dow: _median(vals) for dow, vals in full_days.items()}
+    # 8-week same-weekday baseline: pick the 8 most recent qualifying same-DOW
+    # full-day totals (within the 90d window) and median those. Keeps the
+    # share curve's 90d statistical bedrock independent from a tighter
+    # recency baseline for "what's a normal day".
+    dow_median: dict = {}
+    for dow, dated in full_days_dated.items():
+        recent = sorted(dated, key=lambda t: t[0], reverse=True)[:8]
+        dow_median[dow] = _median([v for _, v in recent])
 
     data = {
         "share_by_dow": share_by_dow,
@@ -500,7 +510,7 @@ GROUP BY ct_day, dow, ct_hour
 
 def project_today_revenue(ch) -> dict:
     """Project today's full-day platform revenue from the intraday total and a
-    60-day hour-of-day cumulative-share curve. Purely additive — daemon code
+    90-day hour-of-day cumulative-share curve. Purely additive — daemon code
     path `_query_intraday_revenue_total` is unchanged.
 
     Returns a dict with `status` always set:
@@ -553,7 +563,7 @@ def project_today_revenue(ch) -> dict:
     today_sql = """
 SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS today_revenue
 FROM adpx_conversionsdetails
-PREWHERE toYYYYMM(created_at) = toYYYYMM(
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(
     toDate(toTimeZone(now(), 'America/Chicago'))
 )
 WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
@@ -577,7 +587,7 @@ WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
         base["status"] = "insufficient_history"
         base["formatted"] = (
             f"Not enough same-{weekday_name} history to project reliably "
-            f"({sample} qualifying days in last 60; need 4)."
+            f"({sample} qualifying days in last 90; need 4)."
         )
         return base
 
@@ -587,7 +597,7 @@ WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
         base["curve_source"] = "fallback_0.70"
         base["warning"] = "Hour-of-day curve unavailable; used fallback 0.70."
     else:
-        base["curve_source"] = "60d"
+        base["curve_source"] = "90d"
 
     base["curve_share"] = round(float(share), 4)
 

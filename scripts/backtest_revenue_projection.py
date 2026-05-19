@@ -50,7 +50,7 @@ def _revenue_at(ch, target_date: date, max_hour: int | None) -> float:
     sql = f"""
 SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS rev
 FROM adpx_conversionsdetails
-PREWHERE toYYYYMM(created_at) = toYYYYMM(toDate('{target_date.isoformat()}'))
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(toDate('{target_date.isoformat()}'))
 WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate('{target_date.isoformat()}')
 {hour_clause}
 """.strip()
@@ -60,7 +60,7 @@ WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate('{target_date.i
 
 def _project(curve: dict, today_rev: float, dow: int, hour: int) -> tuple[float | None, str]:
     share = curve["share_by_dow"].get(dow, {}).get(hour)
-    source = "60d"
+    source = "90d"
     if share is None or share < 0.01:
         share = 0.70
         source = "fallback_0.70"
@@ -76,10 +76,12 @@ def main() -> int:
     curve = _build_hour_curve(ch)
 
     rows: list[dict] = []
+    sampled_dates: set[str] = set()
     for d in days:
         actual_eod = _revenue_at(ch, d, None)
         if actual_eod <= 0:
             continue
+        sampled_dates.add(d.isoformat())
         dow = d.weekday() + 1
         for h in HOURS:
             rev_so_far = _revenue_at(ch, d, h)
@@ -118,12 +120,19 @@ def main() -> int:
     p90 = pct_errs[p90_idx]
 
     print()
-    print(f"Samples: {len(rows)}")
+    print(f"Samples: {len(rows)} across {len(sampled_dates)} business days")
     print(f"Median |% err|: {median:.1f}%")
     print(f"P90    |% err|: {p90:.1f}%")
     print()
     gate_median = 8.0
     gate_p90 = 18.0
+    gate_min_dates = 10
+    if len(sampled_dates) < gate_min_dates:
+        print(
+            f"GATE: FAIL (only {len(sampled_dates)} business days with EOD > 0; "
+            f"need {gate_min_dates}) — extend lookback window."
+        )
+        return 2
     if median <= gate_median and p90 <= gate_p90:
         print(f"GATE: PASS (median ≤ {gate_median}%, p90 ≤ {gate_p90}%) — safe to enable channel-wide.")
         return 0
