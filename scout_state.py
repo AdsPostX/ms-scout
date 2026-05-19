@@ -565,8 +565,14 @@ def _rotating_status(
                 pass
             idx[0] += 1
 
-    threading.Thread(target=_run, daemon=True).start()
-    return stop_event.set
+    _t = threading.Thread(target=_run, daemon=True)
+    _t.start()
+
+    def _stop():
+        stop_event.set()
+        _t.join(timeout=0.5)  # wait for any in-flight chat_update to complete
+
+    return _stop
 
 
 def _post_error_update(web, channel: str, ts: str, err: Exception) -> None:
