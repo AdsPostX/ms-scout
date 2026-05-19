@@ -2034,6 +2034,9 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
             if img_rows:
                 platform_image = img_rows[0][0] or ""
     except Exception as e:
+        from scout_ch import CHBusyError
+        if isinstance(e, CHBusyError):
+            raise
         log.warning(f"draft_campaign_brief: platform lookup failed: {e}")
 
     # Image sourcing — see _clearbit_domain / _app_store_icon / _google_favicon for source rationale
@@ -2286,6 +2289,9 @@ def get_publisher_competitive_landscape(
         return result
 
     except Exception as e:
+        from scout_ch import CHBusyError
+        if isinstance(e, CHBusyError):
+            raise
         log.warning(f"get_publisher_competitive_landscape failed: {e}")
         return {"error": str(e)}
 
@@ -4484,6 +4490,9 @@ GROUP BY c.user_id
         return {"formatted": "\n".join(lines), "pre_formatted": True}
 
     except Exception as e:
+        from scout_ch import CHBusyError
+        if isinstance(e, CHBusyError):
+            raise
         log.exception("get_revenue_today failed")
         return {
             "formatted": "⚠️ Revenue data unavailable — query failed. Try again or check ClickHouse.",
@@ -4917,7 +4926,17 @@ def _run_tool(name: str, inputs: dict, _caller_user_id: str = "",
     # tool can check SCOUT_THRESHOLD_ADMINS without the LLM supplying user_id.
     if name in {"set_threshold", "force_run_monitor"}:
         inputs = {**inputs, "_caller_user_id": _caller_user_id}
-    return fn(**inputs)
+    try:
+        return fn(**inputs)
+    except Exception as e:
+        # Catch CHBusyError (and any other CH-layer signal) so a saturated
+        # ClickHouse pool surfaces as a tool-level error the LLM can summarize
+        # — not an uncaught exception that kills the whole agent turn.
+        from scout_ch import CHBusyError
+        if isinstance(e, CHBusyError):
+            log.warning(f"_run_tool({name}): CH busy — {e}")
+            return {"error": "ClickHouse is under pressure right now; the query was queued past the timeout. Try again in a minute or narrow the scope."}
+        raise
 
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
