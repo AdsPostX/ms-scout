@@ -1362,11 +1362,13 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
                 "alt_text": "7-day revenue trend",
             })
 
-        # Move 2 — datetime token so freshness shows in viewer's local TZ
+        # Move 2 — freshness label. Use <!date> token for TZ-aware display;
+        # nudge ts +5s so Slack never renders the awkward "in 0 seconds" edge
+        # case when the scoreboard is brand-new.
         from datetime import timezone as _tz
         generated_at = getattr(rollup, "generated_at", None)
         if generated_at is not None:
-            ts = int(generated_at.replace(tzinfo=_tz.utc).timestamp())
+            ts = int(generated_at.replace(tzinfo=_tz.utc).timestamp()) + 5
             freshness = f"<!date^{ts}^Updated {{ago}}|just now>"
         else:
             freshness = "just now"
@@ -1391,25 +1393,6 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": health_text},
-        # Move 3 — overflow (3-dot) menu: zero extra rows, fully native
-        "accessory": {
-            "type": "overflow",
-            "action_id": "home_overflow_menu",
-            "options": [
-                {
-                    "text": {"type": "plain_text", "text": "View revenue brief", "emoji": False},
-                    "value": "brief",
-                },
-                {
-                    "text": {"type": "plain_text", "text": "Subscribe to daily DM", "emoji": False},
-                    "value": "subscribe",
-                },
-                {
-                    "text": {"type": "plain_text", "text": "Open in dashboard", "emoji": False},
-                    "value": "dashboard",
-                },
-            ],
-        },
     })
 
     # Move 4 — "See details" button when alerts are actually firing
