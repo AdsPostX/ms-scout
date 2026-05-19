@@ -1285,8 +1285,8 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "days":  {"type": "integer", "description": "Lookback window in days (default 30)."},
-                "limit": {"type": "integer", "description": "Max entries to return (default 200, newest last)."},
+                "days":  {"type": "integer", "description": "Lookback window in days (default 30, clamped to 1..365).", "minimum": 1, "maximum": 365},
+                "limit": {"type": "integer", "description": "Max entries to return (default 200, newest last; clamped to 1..500).", "minimum": 1, "maximum": 500},
                 "requesting_user_id": {"type": "string", "description": "Slack user ID for admin gate."}
             },
         },
@@ -4042,7 +4042,16 @@ def export_usage_log(days: int = 30, limit: int = 200,
     if not log_path.exists():
         return "No usage log yet."
 
-    cutoff = datetime.utcnow() - timedelta(days=max(1, int(days)))
+    try:
+        days_i = max(1, min(int(days or 30), 365))
+    except (TypeError, ValueError):
+        days_i = 30
+    try:
+        limit_i = max(1, min(int(limit or 200), 500))
+    except (TypeError, ValueError):
+        limit_i = 200
+
+    cutoff = datetime.utcnow() - timedelta(days=days_i)
     rows = []
     for line in log_path.read_text().splitlines():
         line = line.strip()
@@ -4052,14 +4061,15 @@ def export_usage_log(days: int = 30, limit: int = 200,
             r = _json.loads(line)
             if datetime.fromisoformat(r["ts"]) >= cutoff:
                 rows.append(r)
-        except Exception:
+        except (ValueError, KeyError, TypeError, _json.JSONDecodeError) as e:
+            log.debug("export_usage_log malformed row skipped: %s", e)
             continue
 
-    rows = rows[-max(1, int(limit)):]
+    rows = rows[-limit_i:]
     if not rows:
-        return f"No usage entries in the last {days} days."
+        return f"No usage entries in the last {days_i} days."
 
-    lines = [f"*Scout usage export — last {days}d, {len(rows)} entries (newest last):*", "```"]
+    lines = [f"*Scout usage export — last {days_i}d, {len(rows)} entries (newest last):*", "```"]
     for r in rows:
         ts    = r.get("ts", "")[:19]
         who   = r.get("user_name") or r.get("user_id", "?")
