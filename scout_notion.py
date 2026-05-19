@@ -643,6 +643,12 @@ def _write_to_notion_queue(
         "children": children,
     }
 
+    # Notion's create-page is slow when children includes many blocks (we ship 30+
+    # including an external image fetch). 10s was tight enough that the API
+    # finished creating the page server-side but the HTTP read timed out — we'd
+    # return None and the Slack confirm card would lose its "Notion →" link even
+    # though the page existed. 30s leaves plenty of headroom; on real failure
+    # Notion responds in <2s.
     try:
         resp = requests.post(
             "https://api.notion.com/v1/pages",
@@ -652,7 +658,7 @@ def _write_to_notion_queue(
                 "Notion-Version": "2022-06-28",
             },
             json=payload,
-            timeout=10,
+            timeout=30,
         )
         if resp.status_code == 200:
             page_id = resp.json().get("id", "").replace("-", "")
@@ -662,8 +668,58 @@ def _write_to_notion_queue(
         else:
             log.warning(f"Notion queue write failed {resp.status_code}: {resp.text[:200]}")
             return None
+    except requests.Timeout:
+        # Page may have been created server-side; best-effort recovery by
+        # querying the DB for the just-written advertiser. Keeps the Slack
+        # confirm card's "Notion →" link populated even on slow Notion API.
+        log.warning(
+            "Notion queue write timed out after 30s — page may exist; attempting recovery for %s",
+            brief_data.get("advertiser", "?"),
+        )
+        return _recover_recent_notion_page(notion_token, queue_db_id, brief_data.get("advertiser", ""))
     except Exception as e:
         log.warning(f"Notion queue write error: {e}")
+        return None
+
+
+def _recover_recent_notion_page(notion_token: str, queue_db_id: str, advertiser: str) -> str | None:
+    """Best-effort: find a page just created in the queue DB for `advertiser`.
+
+    Used only after a timeout — keeps the Slack card link working when Notion
+    actually created the page but the HTTP read hung. Returns None on any
+    failure; never raises.
+    """
+    if not advertiser:
+        return None
+    try:
+        resp = requests.post(
+            f"https://api.notion.com/v1/databases/{queue_db_id}/query",
+            headers={
+                "Authorization": f"Bearer {notion_token}",
+                "Content-Type":  "application/json",
+                "Notion-Version": "2022-06-28",
+            },
+            json={
+                "filter": {"property": "Name", "title": {"contains": advertiser}},
+                "sorts":  [{"timestamp": "created_time", "direction": "descending"}],
+                "page_size": 1,
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            log.warning("Notion recovery query failed %s: %s", resp.status_code, resp.text[:200])
+            return None
+        results = resp.json().get("results", [])
+        if not results:
+            return None
+        page_id = results[0].get("id", "").replace("-", "")
+        if not page_id:
+            return None
+        notion_url = f"https://www.notion.so/{page_id}"
+        log.info("Notion recovery succeeded for %s: %s", advertiser, notion_url)
+        return notion_url
+    except Exception as e:
+        log.warning("Notion recovery error for %s: %s", advertiser, e)
         return None
 
 def _update_notion_status(notion_url: str, new_status: str) -> bool:
