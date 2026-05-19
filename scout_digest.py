@@ -677,16 +677,10 @@ def build_digest_blocks(
         },
         {
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"*{total_selected} offer{'s' if total_selected != 1 else ''} "
-                    f"worth a look this week* — evaluated {len(_DIGEST_NETWORKS)} networks, "
-                    f"{total_screened} offers scored, "
-                    f"{networks_active} network{'s' if networks_active != 1 else ''} with qualifying results. "
-                    f"Filtered existing inventory and zero-payout campaigns.{dedup_note}"
-                ),
-            },
+            "fields": [
+                {"type": "mrkdwn", "text": f"📊 *{total_selected} qualifying*  ·  *{total_screened} scored*"},
+                {"type": "mrkdwn", "text": f"✅ {networks_active} network{'s' if networks_active != 1 else ''}  ·  {len(_DIGEST_NETWORKS)} evaluated{dedup_note}"},
+            ],
         },
         {"type": "divider"},
     ]
@@ -773,16 +767,25 @@ def build_digest_blocks(
                 )
 
             img_url    = (offer_images or {}).get(offer_id, "")
-            why_plain  = re.sub(r'[*_]', '', why)
             portal_url = _portal_url(network, offer_id)
             blocks    += _build_offer_card_blocks(
                 advertiser, offer_summary, payout_str, geo,
                 tier_badge="", img_url=img_url,
-                why=why_plain, action_value=action_value,
+                why=why, action_value=action_value,
                 network_portal_url=portal_url,
+                fit_tier=offer.get("fit_tier", ""),
+                rpm=_score,
             )
 
     return blocks
+
+
+_FIT_TIER_BADGE = {
+    "PRIME":    "🔵",
+    "STRONG":   "🟢",
+    "STANDARD": "⚪",
+    "WEAK":     "🔴",
+}
 
 
 def _build_offer_card_blocks(
@@ -795,10 +798,14 @@ def _build_offer_card_blocks(
     why:                str,
     action_value:       str,
     network_portal_url: str = "",
+    fit_tier:           str = "",
+    rpm:                float = 0.0,
 ) -> list[dict]:
     """Shared card renderer — returns [offer_block, rationale_block, actions_block, divider]."""
-    left_text  = f"*{advertiser}*\n_{offer_summary}_" if offer_summary else f"*{advertiser}*"
-    right_text = f"*{payout_str}*{tier_badge}\n{geo}" if geo else f"*{payout_str}*{tier_badge}"
+    badge      = _FIT_TIER_BADGE.get(fit_tier.upper(), "⚫") + " " if fit_tier else ""
+    rpm_text   = f"  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
+    left_text  = f"{badge}*{advertiser}*\n_{offer_summary}_" if offer_summary else f"{badge}*{advertiser}*"
+    right_text = f"*{payout_str}*{tier_badge}{rpm_text}\n{geo}" if geo else f"*{payout_str}*{tier_badge}{rpm_text}"
 
     offer_block: dict = {
         "type": "section",
@@ -815,13 +822,8 @@ def _build_offer_card_blocks(
         }
 
     rationale_block = {
-        "type": "rich_text",
-        "elements": [
-            {
-                "type": "rich_text_quote",
-                "elements": [{"type": "text", "text": why}],
-            }
-        ],
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f">{why}"},
     }
 
     action_elements = [
@@ -1306,12 +1308,11 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
                 "source":       "sourcing_signal",
             }, separators=(",", ":"))
 
-            why_plain  = re.sub(r'[*_]', '', why)
             portal_url = _portal_url(network, str(offer_id))
             blocks    += _build_offer_card_blocks(
                 advertiser, summary, payout_str, geo,
                 tier_badge=tier_badge, img_url=img_url,
-                why=why_plain, action_value=action_value,
+                why=why, action_value=action_value,
                 network_portal_url=portal_url,
             )
 
@@ -1563,16 +1564,20 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
     # Prepend NEW THIS WEEK section
     new_block: list = []
     if new_offer_keys:
-        new_offers_flat = [
-            o for item in offers_by_network.values() for o in item
-            if o.get("_unique_key") in new_offer_keys
-        ]
-        new_names = ", ".join(o.get("offer_name") or o.get("adv_name", "Unknown") for o in new_offers_flat[:8])
-        if len(new_offers_flat) > 8:
-            new_names += f" +{len(new_offers_flat) - 8} more"
+        # Group new offers by network for per-network display lines
+        new_by_network: dict[str, list[str]] = {}
+        for network, scored in offers_by_network.items():
+            for _s, o in scored:
+                if o.get("_unique_key") in new_offer_keys:
+                    net_label = _NETWORK_LABEL.get(network, network.title())
+                    name = o.get("offer_name") or o.get("adv_name") or o.get("advertiser", "Unknown")
+                    new_by_network.setdefault(net_label, []).append(name)
+        network_lines = "\n".join(
+            f"▸ {net}: {', '.join(names[:4])}"
+            for net, names in new_by_network.items()
+        )
         new_block = [
-            {"type": "section", "text": {"type": "mrkdwn", "text": f":new:  *NEW THIS WEEK*  ({len(new_offer_keys)} offers)"}},
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": new_names}]},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"🆕  *{len(new_offer_keys)} new this week*\n{network_lines}"}},
             {"type": "divider"},
         ]
     elif is_force:

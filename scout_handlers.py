@@ -1059,6 +1059,20 @@ def _handle_reject(action: dict, payload: dict, web: WebClient):
         thread_ts=message_ts,
         text=f":x: *{advertiser}* skipped by <@{user_id}>",
     )
+
+    # Skip friction — ephemeral notice so accidental skips are visible before they stick
+    try:
+        web.chat_postEphemeral(
+            channel=channel,
+            user=user_id,
+            text=(
+                f"⚠️ *{advertiser}* won't appear for ~3 weeks unless their payout improves ≥15%. "
+                f"If that was a fat-finger, DM me `undo skip {advertiser}` and I'll re-surface them."
+            ),
+        )
+    except Exception as _e:
+        log.debug(f"skip ephemeral failed (non-fatal): {_e}")
+
     log.info(f"Rejected: {advertiser} ({offer_id}) by {user_id}")
 
 def _handle_suggestion(action: dict, payload: dict, web: WebClient):

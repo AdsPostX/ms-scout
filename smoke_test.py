@@ -2856,6 +2856,117 @@ def test_too_early_string_verbatim():
         return False, str(e)
 
 
+# ── Digest UX improvements (markdown + fit_tier + rpm + skip friction) ────────
+
+@test("offer_card_preserves_markdown_in_why_text")
+def test_offer_card_no_markdown_strip():
+    """Markdown in why text must survive — no re.sub stripping before card render."""
+    try:
+        from scout_digest import _build_offer_card_blocks
+        why = "*$3.40 est. RPM* at _Tier 1_ CVR — strong signal"
+        blocks = _build_offer_card_blocks(
+            "TestCo", "Electronics", "$10.00 CPS", "US",
+            tier_badge="", img_url="", why=why, action_value="{}",
+        )
+        # Find the rationale block (section with mrkdwn >text)
+        rationale = next(
+            (b for b in blocks if b.get("type") == "section" and ">" in (b.get("text") or {}).get("text", "")),
+            None,
+        )
+        if rationale is None:
+            return False, "no mrkdwn rationale block found — rich_text_quote may still be in use"
+        text = rationale["text"]["text"]
+        if "*$3.40" not in text:
+            return False, f"markdown stripped from why text: {text!r}"
+        if "_Tier 1_" not in text:
+            return False, f"italic stripped from why text: {text!r}"
+        return True, "markdown preserved in why text"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("offer_card_shows_fit_tier_badge")
+def test_offer_card_has_fit_tier_badge():
+    """PRIME fit_tier renders as 🔵 prefix in the advertiser name field."""
+    try:
+        from scout_digest import _build_offer_card_blocks
+        blocks = _build_offer_card_blocks(
+            "BrandX", "Apparel", "$12.00 CPS", "US",
+            tier_badge="", img_url="", why="Good signal.", action_value="{}",
+            fit_tier="PRIME",
+        )
+        fields_block = next((b for b in blocks if b.get("type") == "section" and "fields" in b), None)
+        if fields_block is None:
+            return False, "no fields block found in card"
+        left = fields_block["fields"][0]["text"]
+        if "🔵" not in left:
+            return False, f"PRIME badge missing from left field: {left!r}"
+        return True, "🔵 PRIME badge present"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("offer_card_shows_estimated_rpm")
+def test_offer_card_has_rpm():
+    """Non-zero rpm renders as ~$X.XX est. RPM in the payout field."""
+    try:
+        from scout_digest import _build_offer_card_blocks
+        blocks = _build_offer_card_blocks(
+            "OfferCo", "Tech", "$8.50 CPS", "US",
+            tier_badge="", img_url="", why="Decent signal.", action_value="{}",
+            rpm=3.40,
+        )
+        fields_block = next((b for b in blocks if b.get("type") == "section" and "fields" in b), None)
+        if fields_block is None:
+            return False, "no fields block found in card"
+        right = fields_block["fields"][1]["text"]
+        if "est. RPM" not in right:
+            return False, f"est. RPM missing from right field: {right!r}"
+        if "3.40" not in right:
+            return False, f"RPM value incorrect in right field: {right!r}"
+        return True, f"est. RPM present: {right!r}"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("skip_handler_posts_ephemeral_friction_message")
+def test_skip_friction_ephemeral():
+    """_handle_reject posts an ephemeral consequence notice after recording the rejection."""
+    try:
+        from unittest.mock import MagicMock, patch
+        import scout_handlers
+
+        ephemeral_calls = []
+
+        mock_web = MagicMock()
+        mock_web.chat_postEphemeral.side_effect = lambda **kw: ephemeral_calls.append(kw)
+        mock_web.chat_postMessage.return_value = {"ts": "123"}
+
+        action = {"value": '{"offer_id":"o1","advertiser":"SkipCo","payout":"10.00","payout_type":"CPS","category":"Tech","geo":"US"}'}
+        payload = {
+            "channel": {"id": "C123"},
+            "message": {"ts": "456"},
+            "user": {"id": "U789"},
+        }
+
+        import sys
+        mock_digest = MagicMock()
+        mock_digest.record_rejection.return_value = None
+        with patch.dict(sys.modules, {"scout_digest": mock_digest}):
+            scout_handlers._handle_reject(action, payload, mock_web)
+
+        if not ephemeral_calls:
+            return False, "no ephemeral posted after skip — friction missing"
+        text = ephemeral_calls[0].get("text", "")
+        if "SkipCo" not in text:
+            return False, f"ephemeral doesn't mention advertiser: {text!r}"
+        if "3 weeks" not in text:
+            return False, f"ephemeral doesn't mention suppression duration: {text!r}"
+        return True, "skip friction ephemeral posted with advertiser name + duration"
+    except Exception as e:
+        return False, str(e)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
