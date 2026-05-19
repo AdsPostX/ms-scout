@@ -938,8 +938,15 @@ def _digest_poster(web) -> None:
 
                     import scout_digest
                     log.info("[digest-poster] posting Scout Signal digest...")
-                    scout_digest.post_digest()
+                    # Save state first so a transient post failure can't trigger
+                    # duplicate same-day posts on the next 5-min poll. If the
+                    # post itself fails, revert so the next poll retries.
                     _save_digest_post_date(today_str)
+                    try:
+                        scout_digest.post_digest()
+                    except Exception:
+                        _save_digest_post_date("")
+                        raise
                     log.info(f"[digest-poster] Digest run complete for {today_str}.")
                     _time.sleep(300)
 
