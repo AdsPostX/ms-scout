@@ -614,39 +614,90 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
     return text[0].upper() + text[1:] if text else text
 
 
-# ── OG image prefetch ──────────────────────────────────────────────────────────
+# ── Icon image selection ───────────────────────────────────────────────────────
+# Slack's section `accessory` image renders at ~75×75 px — suitable only for
+# square logos/icons.  OG images and landing-page thumbnails are wide marketing
+# banners that look wrong at that size, so we reject them here.
+#
+# Accepted patterns (known sources that serve genuine square logos):
+#   flexlinks.com …programsquarelogo…     ← FlexOffers square logos
+#   ui.awin.com …merchant/profile/…       ← Awin merchant profile icons
+# Rejected patterns:
+#   cdn.mb1-content.com …creative/lp…    ← MaxBounty landing-page thumbnails
+#   anything that looks like a banner/hero/promo creative
+
+_ICON_ACCEPT_RE = re.compile(
+    r"(programsquarelogo|merchant/profile/|/icon[s/_]|[/_]logo[s/_.-]|square.?logo)",
+    re.IGNORECASE,
+)
+_ICON_REJECT_RE = re.compile(
+    r"(creative/lp|/banner|/hero|/promo|/creative)",
+    re.IGNORECASE,
+)
+
+
+def _is_icon_url(url: str) -> bool:
+    """Return True only if the URL is likely a square logo suitable for a 75px card thumbnail."""
+    if not url or not url.startswith("http"):
+        return False
+    if _ICON_REJECT_RE.search(url):
+        return False
+    if _ICON_ACCEPT_RE.search(url):
+        return True
+    # Unknown CDN — reject rather than guess wrong.
+    # OG images from tracking URLs land here and are filtered out.
+    return False
+
+
+def _clearbit_logo_url(offer: dict) -> str:
+    """
+    Return a Clearbit Logo API URL for the offer's advertiser domain.
+    Extracts the root domain from preview_url (available on CJ, Impact, MaxBounty).
+    Returns "" when no usable domain can be found.
+    Clearbit returns a 200 square PNG for known companies and 404 for unknowns;
+    Slack silently omits the accessory if the URL 404s, so no pre-validation needed.
+    """
+    import urllib.parse
+    raw = offer.get("preview_url") or offer.get("tracking_url") or ""
+    if not raw or not raw.startswith("http"):
+        return ""
+    try:
+        host = urllib.parse.urlparse(raw).hostname or ""
+        # Strip leading www. / rec. / discover. / static. etc.
+        parts = host.split(".")
+        # Take last two segments as root domain (e.g. lifelinescreening.com)
+        domain = ".".join(parts[-2:]) if len(parts) >= 2 else host
+        if not domain or "." not in domain:
+            return ""
+        return f"https://logo.clearbit.com/{domain}"
+    except Exception:
+        return ""
+
 
 def _prefetch_offer_images(scored_offers: list[tuple[float, dict]]) -> dict[str, str]:
     """
-    Scrape og:image from each offer's tracking URL in parallel (4s timeout per offer).
-    Returns {offer_id: image_url}. Empty string for offers where scrape fails.
-    Only called for offers without an existing icon_url/hero_url.
+    Resolve a square logo URL for each offer.  Returns {offer_id: image_url}.
+
+    Priority:
+      1. icon_url / hero_url if _is_icon_url() confirms it's a genuine square logo
+         (FlexOffers programsquarelogo, Awin merchant/profile — NOT MaxBounty lp thumbnails)
+      2. Clearbit Logo API derived from preview_url domain
+         (works for CJ, Impact, MaxBounty — all have preview_url pointing to advertiser site)
+
+    No OG-image scraping: og:image is a wide social-preview banner, wrong shape
+    for a 75 px square Slack accessory slot.
     """
-    from scout_agent import _scrape_og_image
-
-    def _fetch(args):
-        offer_id, tracking_url, existing_url = args
-        if existing_url:
-            return offer_id, existing_url
-        if not tracking_url:
-            return offer_id, ""
-        url = _scrape_og_image(tracking_url)
-        return offer_id, url
-
-    tasks = [
-        (str(o.get("offer_id", "")), o.get("tracking_url", ""), o.get("icon_url") or o.get("hero_url") or "")
-        for _, o in scored_offers
-    ]
-
     results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-        futs = {pool.submit(_fetch, t): t[0] for t in tasks}
-        for fut in concurrent.futures.as_completed(futs, timeout=10):
-            try:
-                offer_id, img_url = fut.result()
-                results[offer_id] = img_url
-            except Exception:
-                results[futs[fut]] = ""
+    for _, o in scored_offers:
+        offer_id = str(o.get("offer_id", ""))
+        icon     = o.get("icon_url") or ""
+        hero     = o.get("hero_url") or ""
+        chosen   = (
+            icon if _is_icon_url(icon)
+            else hero if _is_icon_url(hero)
+            else _clearbit_logo_url(o)
+        )
+        results[offer_id] = chosen
     return results
 
 
@@ -1290,8 +1341,9 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             payout_type = _normalize_payout_type(o.get("payout_type") or "")
             payout_str  = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
             geo         = o.get("geo") or o.get("country") or ""
-            # Fix: use actual image fields (icon_url/hero_url/banner_url), not non-existent image_url
-            img_url     = o.get("icon_url") or o.get("hero_url") or o.get("banner_url") or ""
+            # Only use verified square-logo URLs — same filter as _prefetch_offer_images
+            _icon_candidates = [o.get("icon_url") or "", o.get("hero_url") or "", o.get("banner_url") or ""]
+            img_url = next((u for u in _icon_candidates if _is_icon_url(u)), "")
             tier        = o.get("fit_tier") or ""
             tier_badge  = f"  _{tier}_" if tier else ""
             why         = context_fn(o) if context_fn else ""
