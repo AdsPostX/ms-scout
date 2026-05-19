@@ -49,9 +49,10 @@ class ScoreboardRollup:
     conversions_today: int
     conversions_yesterday_same_time: int
     conversions_7d_avg: int
-    winners: list[PublisherDelta] = field(default_factory=list)  # top 3 by revenue Δ%
-    worry:   list[PublisherDelta] = field(default_factory=list)  # bottom 3 by revenue Δ%
-    revenue_7d_series: list[int] = field(default_factory=list)   # 8 daily cents [D-7..D-1, today]
+    winners: list[PublisherDelta] = field(default_factory=list)   # top 3 by revenue Δ%
+    worry:   list[PublisherDelta] = field(default_factory=list)   # bottom 3 by revenue Δ%
+    revenue_7d_series: list[int] = field(default_factory=list)    # 8 daily cents [D-7..D-1, today]
+    revenue_eod_projection_cents: int = 0                         # linear EOD extrapolation; 0 = too early
     generated_at: datetime = field(default_factory=datetime.utcnow)
 
 
@@ -196,8 +197,17 @@ ORDER BY day
             series.append(series_map.get(d, 0))
         series.append(int(float(rev_today or 0) * 100))
 
+    # ── EOD pace projection ──
+    # Linear extrapolation: cents/second × 86400. Suppressed before the first
+    # hour (elapsed < 3600s) — too volatile and not actionable at 12:05am CT.
+    today_rev_cents = int(float(rev_today or 0) * 100)
+    now_ct_for_proj = datetime.now(ZoneInfo("America/Chicago"))
+    midnight_ct     = now_ct_for_proj.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed_s       = (now_ct_for_proj - midnight_ct).total_seconds()
+    eod_projection  = int(today_rev_cents / elapsed_s * 86400) if elapsed_s >= 3600 else 0
+
     return ScoreboardRollup(
-        revenue_today_cents=int(float(rev_today or 0) * 100),
+        revenue_today_cents=today_rev_cents,
         revenue_yesterday_same_time_cents=int(float(rev_yest or 0) * 100),
         revenue_7d_avg_cents=int(float(rev_7d_avg or 0) * 100),
         conversions_today=int(conv_today or 0),
@@ -206,6 +216,7 @@ ORDER BY day
         winners=winners,
         worry=worry,
         revenue_7d_series=series,
+        revenue_eod_projection_cents=eod_projection,
         generated_at=datetime.utcnow(),
     )
 

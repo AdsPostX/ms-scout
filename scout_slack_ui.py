@@ -1362,7 +1362,27 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
                 "alt_text": "7-day revenue trend",
             })
 
-        # Move 2 — freshness label. Use <!date> token for TZ-aware display;
+        # Move 2a — EOD projection line. Shows only after the first hour of
+        # the day (projection == 0 means suppressed). Arrow reflects today's
+        # current pace vs yesterday at the same time of day.
+        proj_cents = getattr(rollup, "revenue_eod_projection_cents", 0)
+        if proj_cents > 0:
+            proj_str = _fmt_money_short(proj_cents)
+            if rollup.revenue_today_cents > rollup.revenue_yesterday_same_time_cents:
+                pace_arrow = "↗"
+            elif rollup.revenue_today_cents < rollup.revenue_yesterday_same_time_cents:
+                pace_arrow = "↘"
+            else:
+                pace_arrow = "→"
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"On pace for *{proj_str}* by end of day {pace_arrow}",
+                },
+            })
+
+        # Move 2b — freshness label. Use <!date> token for TZ-aware display;
         # nudge ts +5s so Slack never renders the awkward "in 0 seconds" edge
         # case when the scoreboard is brand-new.
         from datetime import timezone as _tz
