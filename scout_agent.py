@@ -1275,6 +1275,23 @@ TOOLS = [
         },
     },
     {
+        "name": "export_usage_log",
+        "description": (
+            "Dump raw (query → tools fired) pairs from usage_log so an admin can audit "
+            "whether Scout's tool routing matched user intent. Admin-only. "
+            "Use for: 'export usage', 'dump usage log', 'show usage entries', 'audit tool routing', "
+            "'what tools fired for recent queries'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days":  {"type": "integer", "description": "Lookback window in days (default 30, clamped to 1..365).", "minimum": 1, "maximum": 365},
+                "limit": {"type": "integer", "description": "Max entries to return (default 200, newest last; clamped to 1..500).", "minimum": 1, "maximum": 500},
+                "requesting_user_id": {"type": "string", "description": "Slack user ID for admin gate."}
+            },
+        },
+    },
+    {
         "name": "record_entity_note",
         "description": (
             "Record publisher or advertiser knowledge in Scout's persistent learning store. "
@@ -4007,6 +4024,63 @@ def get_usage_report(requesting_user_id: str = "") -> str:
     return "\n".join(lines)
 
 
+def export_usage_log(days: int = 30, limit: int = 200,
+                     requesting_user_id: str = "") -> str:
+    """
+    Dump raw (query → tools fired) pairs from usage_log.jsonl so an admin can
+    eyeball whether Scout's tool routing is matching user intent. Admin-only.
+    Returns a Slack-formatted block: one line per query, newest last.
+    """
+    import os, pathlib, json as _json
+    from datetime import datetime, timedelta
+
+    admin_uid = os.getenv("SCOUT_ADMIN_USER_ID", "")
+    if not admin_uid or requesting_user_id != admin_uid:
+        return ":lock: Usage export is admin-only."
+
+    log_path = pathlib.Path(__file__).parent / "data" / "usage_log.jsonl"
+    if not log_path.exists():
+        return "No usage log yet."
+
+    try:
+        days_i = max(1, min(int(days or 30), 365))
+    except (TypeError, ValueError):
+        days_i = 30
+    try:
+        limit_i = max(1, min(int(limit or 200), 500))
+    except (TypeError, ValueError):
+        limit_i = 200
+
+    cutoff = datetime.utcnow() - timedelta(days=days_i)
+    rows = []
+    for line in log_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = _json.loads(line)
+            if datetime.fromisoformat(r["ts"]) >= cutoff:
+                rows.append(r)
+        except (ValueError, KeyError, TypeError, _json.JSONDecodeError) as e:
+            log.debug("export_usage_log malformed row skipped: %s", e)
+            continue
+
+    rows = rows[-limit_i:]
+    if not rows:
+        return f"No usage entries in the last {days_i} days."
+
+    lines = [f"*Scout usage export — last {days_i}d, {len(rows)} entries (newest last):*", "```"]
+    for r in rows:
+        ts    = r.get("ts", "")[:19]
+        who   = r.get("user_name") or r.get("user_id", "?")
+        q     = (r.get("query") or "").replace("\n", " ")[:140]
+        tools = ",".join(r.get("tools") or []) or "<none>"
+        ms    = r.get("ms", 0)
+        lines.append(f"{ts}  {who:<14}  [{tools}]  ({ms}ms)  {q}")
+    lines.append("```")
+    return "\n".join(lines)
+
+
 def record_entity_note(entity_name: str, entity_type: str, note: str,
                        exclude_from_fill_rate: bool = False,
                        _caller_user_id: str = "",
@@ -4628,6 +4702,7 @@ TOOL_MAP = {
     "run_offer_scraper": run_offer_scraper,
     "get_pipeline_health": get_pipeline_health,
     "get_usage_report": get_usage_report,
+    "export_usage_log": export_usage_log,
     "record_entity_note": record_entity_note,
     "forget_entity_note": forget_entity_note,
     "why_entity_note": why_entity_note,
@@ -4831,7 +4906,7 @@ def _run_tool(name: str, inputs: dict, _caller_user_id: str = "",
         return {"error": f"Unknown tool: {name}"}
     # Inject caller identity for admin-gated tools so the model doesn't need to
     # manually extract and pass the user_id from the injected context prefix.
-    if name == "get_usage_report" and not inputs.get("requesting_user_id"):
+    if name in {"get_usage_report", "export_usage_log"} and not inputs.get("requesting_user_id"):
         inputs = {**inputs, "requesting_user_id": _caller_user_id}
     # Plan v3 §3.4: inject Slack provenance (caller user_id + permalink) into
     # entity-note tools so `added_by` and `permalink` are populated automatically.
