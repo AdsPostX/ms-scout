@@ -739,7 +739,14 @@ def build_digest_blocks(
 
             why = build_why_text(offer, payout_cache, ms_campaigns, benchmarks, adjusted_rpm=_score)
 
-            # Action value — full offer payload for approve/reject handlers
+            # Action value — minimal payload so we stay well under Slack's 2000-char
+            # button-value limit. Long descriptions + tracking URLs (Impact/Affise
+            # links with params can run 800-1500 chars) used to push the JSON past
+            # 2000 chars on offers like ShipStation, causing Slack to silently drop
+            # the click. Handlers re-hydrate description + tracking_url via
+            # _fetch_brief_for_approve, so we only need the keys that identify the
+            # offer + the rate metadata used for state persistence and the reject
+            # confirmation card.
             action_value = json.dumps({
                 "offer_id":     offer_id,
                 "advertiser":   advertiser,
@@ -747,9 +754,12 @@ def build_digest_blocks(
                 "payout_type":  payout_type,
                 "category":     category,
                 "geo":          geo,
-                "tracking_url": tracking_url,
-                "description":  offer.get("description", ""),
             })
+            if len(action_value) > 1800:
+                log.warning(
+                    "[digest] action_value still %d bytes for %s/%s — clicks may drop",
+                    len(action_value), advertiser, offer_id,
+                )
 
             img_url    = (offer_images or {}).get(offer_id, "")
             why_plain  = re.sub(r'[*_]', '', why)
@@ -1350,20 +1360,32 @@ def select_offers(
     by_network: dict[str, list] = {}
     skipped_in_ms, skipped_no_score = 0, 0
 
+    # Per-network attribution so we can diagnose "only CJ surfaced" issues:
+    # which network is losing offers, and at which gate (in_ms vs no_score).
+    per_net_stats: dict[str, dict[str, int]] = {}
+
+    def _bump(net: str, key: str):
+        per_net_stats.setdefault(net, {"total": 0, "in_ms": 0, "no_score": 0, "scored": 0})[key] += 1
+
     for offer in offers:
         network = offer.get("network", "")
         if not network:
             continue
 
+        _bump(network, "total")
+
         if not force and is_already_in_ms(offer, ms_campaigns):
             skipped_in_ms += 1
+            _bump(network, "in_ms")
             continue
 
         s = score_offer(offer, payout_cache, state, benchmarks, force=force)
         if s is None:
             skipped_no_score += 1
+            _bump(network, "no_score")
             continue
 
+        _bump(network, "scored")
         by_network.setdefault(network, []).append((s, offer))
 
     # Sort each network and apply diversity cap (max 2 per named category)
@@ -1431,6 +1453,17 @@ def select_offers(
         f"(skipped: {skipped_in_ms} in-platform, {skipped_no_score} below-threshold/state) "
         f"→ {total_selected} selected"
     )
+    # Per-network breakdown — surfaces which network is being gutted at which
+    # gate so "only CJ in the digest" investigations don't need a code change.
+    for net in _DIGEST_NETWORKS:
+        s = per_net_stats.get(net)
+        if not s:
+            continue
+        log.info(
+            "[digest] %s: total=%d in_ms=%d no_score=%d scored=%d selected=%d",
+            net, s["total"], s["in_ms"], s["no_score"], s["scored"], len(result.get(net, [])),
+        )
+    meta["per_network"] = per_net_stats
     return result, meta
 
 
