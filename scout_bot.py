@@ -233,6 +233,7 @@ _PRODUCTION_CHANNELS = {
     "watchdog": os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
     "offers":   os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL),   # #scout-offers
     "revenue":  os.getenv("REVENUE_OPS_CHANNEL", _SCOUT_HQ_CHANNEL),    # #revenue-operations
+    "qa":       _SCOUT_HQ_CHANNEL,                                      # #sidd-qa — projection autocheck etc.
 }
 
 def _route_channel(purpose: str, force: bool = False) -> str:
@@ -1194,6 +1195,279 @@ def _expiration_monitor(web) -> None:
         load_state_fn=_load_expiration_alert_state,
         save_state_fn=_save_expiration_alert_date,
     )
+
+
+def _projection_autocheck_monitor(web) -> None:
+    """Autonomous projection autocheck — fires once per CT hour into #sidd-qa
+    across the 10:00→17:00 CT window, then a 17:30 CT EOD rollup summarizing
+    the day's projections vs the daemon's raw intraday total for trust.
+
+    Why this exists: replaces the manual 11am/3pm CT validation checks that
+    would never actually get run. Reads back the next day (or notices silence)
+    instead of requiring a human to remember to look.
+
+    Shape: mirrors _run_with_web's outer-restart + inner-5-min-poll structure
+    but customizes firing logic for hourly cadence + persisted slot dedup
+    (mid-hour restart safe) + kill-switch (≥2 consecutive errors → auto-pause
+    for the rest of the day, one notice posted) + 15:00 apples-to-apples
+    comparison against the daemon's raw _query_intraday_revenue_total.
+    """
+    import time as _time
+    import pytz
+    from datetime import datetime as _dt
+    from scout_agent import _get_ch_client
+    from scout_ch import project_today_revenue, _query_intraday_revenue_total
+    from scout_state import (
+        _load_projection_autocheck_slot,
+        _save_projection_autocheck_slot,
+    )
+
+    while True:  # outer restart wrapper
+        try:
+            CT_TZ   = pytz.timezone("America/Chicago")
+            channel = _route_channel("qa")
+            tag     = "[projection-autocheck]"
+
+            # Seed in-memory slot from persisted state so a mid-hour restart
+            # does not re-fire the current slot.
+            last_slot: str | None = _load_projection_autocheck_slot()
+            consecutive_errors    = 0
+            paused_for_date: str | None = None
+            eod_posted_for_date: str | None = None
+            # Per-day in-memory log of fires for the EOD rollup. Keyed by
+            # date string; cleared at midnight CT.
+            fires_log: dict[str, list[dict]] = {}
+
+            while True:  # inner poll loop
+                _time.sleep(300)
+                try:
+                    if not _monitor_enabled("projection_autocheck"):
+                        continue
+
+                    from scout_agent import SCOUT_THRESHOLDS as _ST
+                    sig         = _ST.get("signals", {})
+                    win_start   = int(sig.get("projection_autocheck_window_start_ct", 10))
+                    win_end     = int(sig.get("projection_autocheck_window_end_ct", 17))
+                    eod_hour    = int(sig.get("projection_autocheck_eod_rollup_hour_ct", 17))
+                    eod_minute  = int(sig.get("projection_autocheck_eod_rollup_minute_ct", 30))
+                    cmp_hour    = int(sig.get("projection_autocheck_apples_compare_hour_ct", 15))
+                    cmp_tol     = float(sig.get("projection_autocheck_apples_tolerance_usd", 500))
+                    max_errs    = int(sig.get("projection_autocheck_max_consecutive_errors", 2))
+
+                    now_ct    = _dt.now(CT_TZ)
+                    today_str = now_ct.date().isoformat()
+                    slot      = f"{today_str}T{now_ct.hour:02d}"
+
+                    # Reset kill-switch + per-day log on date rollover.
+                    if paused_for_date and paused_for_date != today_str:
+                        paused_for_date = None
+                        consecutive_errors = 0
+                    for stale in [d for d in fires_log if d != today_str]:
+                        fires_log.pop(stale, None)
+
+                    # EOD rollup — once per day, after eod_hour:eod_minute CT.
+                    if (
+                        eod_posted_for_date != today_str
+                        and (
+                            now_ct.hour > eod_hour
+                            or (now_ct.hour == eod_hour and now_ct.minute >= eod_minute)
+                        )
+                    ):
+                        try:
+                            entries = fires_log.get(today_str, [])
+                            text, blocks = _format_projection_autocheck_eod(
+                                today_str, entries
+                            )
+                            web.chat_postMessage(channel=channel, text=text, blocks=blocks)
+                            eod_posted_for_date = today_str
+                            log.info(f"{tag} posted EOD rollup for {today_str} ({len(entries)} fires).")
+                        except Exception as e:
+                            log.warning(f"{tag} EOD rollup post failed: {e}")
+                            eod_posted_for_date = today_str  # don't retry-spam
+
+                    # Hourly fire gate.
+                    in_window = win_start <= now_ct.hour <= win_end
+                    if not in_window:
+                        continue
+                    if paused_for_date == today_str:
+                        continue
+                    if last_slot == slot:
+                        continue
+                    # Top-of-hour only (first 10 min of the hour).
+                    if now_ct.minute >= 10:
+                        continue
+
+                    # Fire.
+                    try:
+                        ch = _get_ch_client()
+                        result = project_today_revenue(ch)
+                        status = result.get("status", "error")
+                    except Exception as e:
+                        log.warning(f"{tag} projection query failed: {e}")
+                        result = {"status": "error", "error": str(e)}
+                        status = "error"
+
+                    # Apples-to-apples comparison at the configured hour.
+                    daemon_raw = None
+                    delta_abs = None
+                    if status == "ok" and now_ct.hour == cmp_hour:
+                        try:
+                            daemon_dict = _query_intraday_revenue_total(_get_ch_client())
+                            if daemon_dict and daemon_dict.get("today_revenue") is not None:
+                                daemon_raw = float(daemon_dict["today_revenue"])
+                                helper_raw = float(result.get("today_revenue") or 0)
+                                delta_abs  = abs(daemon_raw - helper_raw)
+                        except Exception as e:
+                            log.warning(f"{tag} daemon-compare query failed: {e}")
+
+                    fallback, blocks = _format_projection_autocheck_fire(
+                        slot, result, daemon_raw, delta_abs, cmp_tol,
+                    )
+
+                    try:
+                        web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
+                        last_slot = slot
+                        _save_projection_autocheck_slot(slot)
+                        fires_log.setdefault(today_str, []).append({
+                            "slot": slot,
+                            "status": status,
+                            "today_revenue":      result.get("today_revenue"),
+                            "projected_full_day": result.get("projected_full_day"),
+                            "dow_median":         result.get("dow_median"),
+                            "pct_of_expected":    result.get("pct_of_expected"),
+                            "daemon_raw":         daemon_raw,
+                            "delta_abs":          delta_abs,
+                        })
+                        log.info(f"{tag} posted slot={slot} status={status} → {channel}.")
+                    except Exception as e:
+                        log.warning(f"{tag} slack post failed: {e}")
+                        # Treat post failure like an error for kill-switch purposes.
+                        status = "error"
+
+                    # Kill-switch accounting.
+                    if status == "error":
+                        consecutive_errors += 1
+                        if (
+                            consecutive_errors >= max_errs
+                            and paused_for_date != today_str
+                        ):
+                            paused_for_date = today_str
+                            try:
+                                web.chat_postMessage(
+                                    channel=channel,
+                                    text=(
+                                        f"{tag} ≥{max_errs} consecutive errors — "
+                                        f"pausing for the rest of {today_str}. "
+                                        "Resumes at midnight CT."
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                            log.warning(
+                                f"{tag} kill-switch tripped ({consecutive_errors} errors) — "
+                                f"paused for {today_str}."
+                            )
+                    else:
+                        consecutive_errors = 0
+
+                except Exception as e:
+                    log.warning(f"{tag} unexpected error: {e}")
+
+        except Exception as e:
+            log.error(f"[projection-autocheck] fatal crash — restarting in 30s: {e}", exc_info=True)
+            _time.sleep(30)
+
+
+def _format_projection_autocheck_fire(
+    slot: str,
+    result: dict,
+    daemon_raw: float | None,
+    delta_abs: float | None,
+    cmp_tol: float,
+) -> tuple[str, list[dict]]:
+    """Compact Slack fire for one autocheck slot. Routed to #sidd-qa."""
+    status = result.get("status", "error")
+    if status == "ok":
+        today_rev = float(result.get("today_revenue") or 0)
+        proj      = float(result.get("projected_full_day") or 0)
+        med       = result.get("dow_median")
+        pct       = result.get("pct_of_expected")
+        share     = result.get("curve_share")
+        source    = result.get("curve_source") or "?"
+        wd        = result.get("weekday") or "?"
+
+        cmp_line = ""
+        if daemon_raw is not None and delta_abs is not None:
+            in_tol = delta_abs <= cmp_tol
+            cmp_line = (
+                f"\n• Apples vs daemon raw: helper=${today_rev:,.0f} "
+                f"daemon=${daemon_raw:,.0f} Δ=${delta_abs:,.0f} "
+                f"{'within' if in_tol else 'OUT OF'} ±${cmp_tol:,.0f} tolerance"
+            )
+            if not in_tol:
+                cmp_line += " ⚠️"
+
+        med_line = f" vs ${float(med):,.0f} {wd} median ({pct}%)" if med else ""
+        text = (
+            f":bar_chart: *Projection autocheck* `{slot}`\n"
+            f"• Today so far: ${today_rev:,.0f}\n"
+            f"• Projected EOD: ${proj:,.0f}{med_line}\n"
+            f"• Curve share: {share} ({source})"
+            f"{cmp_line}"
+        )
+    elif status == "too_early":
+        text = f":hourglass: *Projection autocheck* `{slot}` — too early to project."
+    elif status == "insufficient_history":
+        text = (
+            f":warning: *Projection autocheck* `{slot}` — "
+            f"insufficient same-weekday history "
+            f"(sample_days={result.get('sample_days', 0)})."
+        )
+    else:
+        err = result.get("error") or "unknown"
+        text = f":x: *Projection autocheck* `{slot}` — error: {err}"
+
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    return text, blocks
+
+
+def _format_projection_autocheck_eod(
+    date_str: str, entries: list[dict],
+) -> tuple[str, list[dict]]:
+    """17:30 CT EOD rollup — one summary message so muting the channel is not
+    the path of least resistance. Trust visibility = one read."""
+    if not entries:
+        text = (
+            f":bar_chart: *Projection autocheck EOD* {date_str}\n"
+            "• No fires recorded today (monitor disabled, paused, or restarted late)."
+        )
+        return text, [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+    ok      = [e for e in entries if e["status"] == "ok"]
+    errors  = [e for e in entries if e["status"] == "error"]
+    last_ok = ok[-1] if ok else None
+
+    lines = [f":bar_chart: *Projection autocheck EOD* {date_str}"]
+    lines.append(f"• Fires: {len(entries)} (ok={len(ok)}, errors={len(errors)})")
+    if last_ok:
+        proj = last_ok.get("projected_full_day")
+        med  = last_ok.get("dow_median")
+        pct  = last_ok.get("pct_of_expected")
+        proj_s = f"${float(proj):,.0f}" if proj else "—"
+        med_s  = f"${float(med):,.0f}" if med else "—"
+        pct_s  = f"{pct}%" if pct is not None else "—"
+        lines.append(f"• Last projection: {proj_s} vs {med_s} median ({pct_s})")
+
+    apples = [e for e in entries if e.get("delta_abs") is not None]
+    if apples:
+        deltas = [float(e["delta_abs"]) for e in apples]
+        lines.append(
+            f"• Apples-vs-daemon Δ: min=${min(deltas):,.0f} max=${max(deltas):,.0f} "
+            f"(n={len(apples)})"
+        )
+
+    text = "\n".join(lines)
+    return text, [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
 def _run_with_web(
@@ -2548,6 +2822,11 @@ def main():
     _start_daemon(_fill_monitor,          name="fill-monitor",          args=(web_client,))
     _start_daemon(_cvr_anomaly_monitor,   name="cvr-anomaly-monitor",   args=(web_client,))
     _start_daemon(_expiration_monitor,    name="expiration-monitor",    args=(web_client,))
+    # Hourly autocheck of project_today_revenue → #sidd-qa across 10-17 CT,
+    # plus a 17:30 CT EOD rollup. Replaces the manual 11am/3pm validation
+    # checks — Scout fires into #sidd-qa, Sidd reads back the next day.
+    _start_daemon(_projection_autocheck_monitor,
+                  name="projection-autocheck-monitor", args=(web_client,))
     _start_daemon(_nightly_harvest,       name="context-harvest")
     _start_daemon(_notion_watcher_loop,   name="notion-watcher",      args=(web_client,))
     _start_daemon(_copy_coalescer_loop,   name="copy-coalescer")

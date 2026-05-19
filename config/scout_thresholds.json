@@ -38,6 +38,14 @@
     "cvr_anomaly_monitor_check_hour_ct": 2,
     "expiration_monitor_enabled": true,
     "expiration_monitor_check_hour_ct": 2,
+    "projection_autocheck_monitor_enabled": true,
+    "projection_autocheck_window_start_ct": 10,
+    "projection_autocheck_window_end_ct": 17,
+    "projection_autocheck_eod_rollup_hour_ct": 17,
+    "projection_autocheck_eod_rollup_minute_ct": 30,
+    "projection_autocheck_apples_compare_hour_ct": 15,
+    "projection_autocheck_apples_tolerance_usd": 500,
+    "projection_autocheck_max_consecutive_errors": 2,
     "revenue_trend_min_periods": 4
   },
   "health": {
