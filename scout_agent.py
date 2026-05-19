@@ -594,16 +594,29 @@ def _load_performance_benchmarks() -> dict:
                 "Verified Apr 2026: data lives in `tags`, not `categories`."
             )
 
+        # Tier 4: network-agnostic overall CVR baseline.
+        # Used when no offer/advertiser/category match exists — the case for every
+        # MaxBounty, FlexOffers, ShareASale, Rakuten, and Awin offer (MS has never run them).
+        # Low confidence (0.35) so they rank below real-data offers but still surface.
+        overall = _q.benchmark_overall_cvr(ch)
+        by_payout_type = {"_all": overall} if overall else {}
+        if overall:
+            log.info(
+                f"Tier 4 baseline: {overall['cvr_pct']:.4f}% CVR / "
+                f"${overall['rpm']:.2f} RPM across {overall['campaigns']} MS campaigns"
+            )
+
         result = {
             "by_offer_impact_id":    by_offer,
             "by_adv_name":           by_adv,
             "by_category_payout":    {},          # not available without payout_type column
-            "by_payout_type":        {},          # not available without payout_type column
+            "by_payout_type":        by_payout_type,
             "by_category":           category_benchmarks,
         }
         log.info(
             f"Benchmarks loaded: {len(by_offer)} offers, {len(by_adv)} advertisers, "
-            f"{len(category_benchmarks)} categories"
+            f"{len(category_benchmarks)} categories, "
+            f"{'Tier4 baseline active' if by_payout_type else 'Tier4 unavailable'}"
         )
         return result
 
@@ -685,6 +698,16 @@ def _scout_score(offer: dict, benchmarks: dict) -> float:
         cvr   = bench["avg_cvr_pct"] / 100
         confidence = 0.65
         source = f"{category} category benchmark ({bench['sample_campaigns']} offers)"
+
+    # ── Tier 4: overall MS CVR baseline — covers all non-MS-run networks ─────
+    # MaxBounty / FlexOffers / ShareASale / Rakuten / Awin advertisers have no
+    # offer/advertiser/category match. Use the aggregate CVR across 670+ MS campaigns
+    # as a low-confidence prior so they rank against each other (and below real-data offers).
+    elif benchmarks.get("by_payout_type", {}).get("_all"):
+        base = benchmarks["by_payout_type"]["_all"]
+        cvr  = base["cvr_pct"] / 100
+        confidence = 0.35
+        source = f"MS overall baseline ({base['campaigns']} campaigns, low confidence)"
 
     else:
         # No real data at any tier — return 0 so caller shows "Not estimated"

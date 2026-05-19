@@ -1714,3 +1714,55 @@ def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[d
         }
         for r in rows
     ]
+
+
+# ===========================================================================
+# Tier 4 baseline CVR — network-agnostic fallback for unknown advertisers
+# ===========================================================================
+
+def benchmark_overall_cvr(ch) -> dict:
+    """
+    Aggregate CVR + RPM across ALL MS campaigns (500+ impressions, since 2025-01).
+    Used as Tier 4 (lowest-confidence) fallback in _scout_score() when an offer has
+    no offer/advertiser/category match — e.g. every MaxBounty and FlexOffers offer.
+
+    Returns {"cvr_pct": float, "rpm": float, "campaigns": int} or {} on error.
+
+    Empirically measured 2026-05-19: 0.4514% CVR, $40.29 RPM across 670 campaigns.
+    The live query keeps this fresh as MS's book of business evolves.
+    """
+    try:
+        rows = ch.query(
+            """
+            WITH conv AS (
+                SELECT campaign_id,
+                       count()                          AS conversions,
+                       sum(toFloat64OrNull(revenue))    AS revenue
+                FROM adpx_conversionsdetails
+                WHERE toYYYYMM(created_at) >= 202501
+                GROUP BY campaign_id
+            ),
+            imp AS (
+                SELECT campaign_id, count() AS impressions
+                FROM adpx_impressions_details
+                WHERE toYYYYMM(created_at) >= 202501
+                GROUP BY campaign_id
+            )
+            SELECT
+                count(DISTINCT c.id)                                              AS campaigns,
+                round(sum(conv.conversions) / sum(imp.impressions) * 100, 4)     AS cvr_pct,
+                round(sum(conv.revenue)     / sum(imp.impressions) * 1000, 2)    AS rpm
+            FROM from_airbyte_campaigns c
+            JOIN conv ON toInt64(c.id) = toInt64(conv.campaign_id)
+            JOIN imp  ON toInt64(c.id) = toInt64(imp.campaign_id)
+            WHERE c.deleted_at IS NULL
+              AND imp.impressions > 500
+            """
+        ).result_rows
+        if rows and rows[0][0]:
+            campaigns, cvr_pct, rpm = rows[0]
+            return {"cvr_pct": float(cvr_pct or 0), "rpm": float(rpm or 0), "campaigns": int(campaigns or 0)}
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"benchmark_overall_cvr failed: {e}")
+    return {}
