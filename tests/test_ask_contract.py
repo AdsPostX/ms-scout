@@ -56,6 +56,16 @@ class TestAskContract(unittest.TestCase):
         with self.assertRaises(TypeError):
             r.payload["k"] = "z"  # type: ignore[index]
 
+    def test_askresult_payload_nested_dicts_are_read_only(self):
+        """Nested dicts inside payload must also be frozen — handlers used to .pop() and crash."""
+        payload = {"type": "text_with_context", "extracted_context": {"launched_offer": {"a": 1}}}
+        r = AskResult(text="x", tools_called=(), duration_ms=0, payload=payload)
+        nested = r.payload["extracted_context"]
+        with self.assertRaises(AttributeError):
+            nested.pop("launched_offer", None)  # type: ignore[attr-defined]
+        with self.assertRaises(TypeError):
+            nested["launched_offer"] = None  # type: ignore[index]
+
     def test_askresult_payload_defaults_to_none(self):
         """Payload field is optional — plain-text responses must not require it."""
         r = AskResult(text="hello", tools_called=("q",), duration_ms=42)
