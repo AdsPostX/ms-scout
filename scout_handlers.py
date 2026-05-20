@@ -1195,6 +1195,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     if response.payload and response.payload.get("type") == "text_with_context":
         extracted = response.payload.get("extracted_context", {})
         if extracted:
+            extracted = dict(extracted)  # unfreeze nested MappingProxy for local pop
             launched_offer_sg = extracted.pop("launched_offer", None)
             _merge_thread_context(thread_ts, extracted)
         sugg = response.payload.get("suggestions", [])
@@ -2679,6 +2680,7 @@ def _handle_event_impl(req: SocketModeRequest):
         if response.payload and response.payload.get("type") == "text_with_context":
             extracted = response.payload.get("extracted_context", {})
             if extracted:
+                extracted = dict(extracted)  # unfreeze nested MappingProxy for local pop
                 launched_offer_dm = extracted.pop("launched_offer", None)
                 _merge_thread_context(thread_ts or msg_ts, extracted)
             suggestions = response.payload.get("suggestions", [])
@@ -2812,6 +2814,7 @@ def _handle_event_impl(req: SocketModeRequest):
     if response.payload and response.payload.get("type") == "text_with_context":
         extracted = response.payload.get("extracted_context", {})
         if extracted:
+            extracted = dict(extracted)  # unfreeze nested MappingProxy for local pop
             launched_offer = extracted.pop("launched_offer", None)
             _merge_thread_context(thread_ts, extracted)
             log.info(f"Saved thread context for {thread_ts}: {list(extracted.keys())}")
