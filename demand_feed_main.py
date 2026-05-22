@@ -164,10 +164,12 @@ class _OffersHandler(http.server.BaseHTTPRequestHandler):
             state = _load_state()
             offers_mtime = None
             offers_size = None
-            if _OFFERS_FILE.exists():
+            try:
                 st = _OFFERS_FILE.stat()
                 offers_mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
                 offers_size = st.st_size
+            except FileNotFoundError:
+                pass
             _write_json(self, 200, {
                 "last_run_date":      state.get("last_run_date"),
                 "last_success_ts":    state.get("last_success_ts"),
@@ -232,7 +234,9 @@ def main() -> None:
                     _alert_slack(f":rotating_light: scrape failed — retrying in 1h: {e}")
                     # Don't update last_run_date — retry next cycle
                     state["last_failure_ts"]     = datetime.now(timezone.utc).isoformat()
-                    state["last_failure_reason"] = repr(e)[:500]
+                    # Only expose exception type — repr(e) can leak tokens, URLs, paths
+                    # through the unauthenticated /last-run endpoint.
+                    state["last_failure_reason"] = type(e).__name__
                     _save_state(state)
                     time.sleep(3600)
                     continue

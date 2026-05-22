@@ -92,6 +92,7 @@ def _start_server(tmp_dir: Path):
 
     dm._DATA_DIR   = tmp_dir
     dm._OFFERS_FILE = tmp_dir / "offers_latest.json"
+    dm._SCRAPER_STATE = tmp_dir / "scraper_state.json"
 
     server = socketserver.TCPServer(("", 0), dm._OffersHandler)
     port = server.server_address[1]
