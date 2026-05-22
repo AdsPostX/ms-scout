@@ -244,6 +244,8 @@ def _harvest_inner() -> dict:
         return {}
 
     web = WebClient(token=_BOT_TOKEN)
+    from scout_slack_safe import guard_web_client
+    guard_web_client(web)
     channels = _get_channels(web)
     log.info(f"[harvest] found {len(channels)} channels Scout is a member of")
 
