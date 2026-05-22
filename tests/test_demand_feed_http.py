@@ -307,6 +307,39 @@ class TestLoadOffers(unittest.TestCase):
         # Data must come from the disk file
         self.assertEqual(result, _FAKE_OFFERS)
 
+    # ------------------------------------------------------------------
+    # T6: _load_offers() falls back to disk when HTTP fetch fails
+    # ------------------------------------------------------------------
+    def test_load_offers_falls_back_to_disk_when_http_fails(self):
+        """When DEMAND_FEED_URL is set but the fetch raises, _load_offers() reads disk."""
+        import scout_agent
+        importlib.reload(scout_agent)
+
+        os.environ["DEMAND_FEED_URL"] = "http://broken-host"
+
+        fake_snapshot = self.tmp / "offers_latest.json"
+        fake_snapshot.write_text(json.dumps(_FAKE_OFFERS))
+
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")), \
+             patch.object(scout_agent, "SNAPSHOT_PATH", fake_snapshot):
+            result = scout_agent._load_offers()
+
+        self.assertEqual(result, _FAKE_OFFERS)
+
+    # ------------------------------------------------------------------
+    # T7: _load_offers() returns [] when URL unset and disk missing
+    # ------------------------------------------------------------------
+    def test_load_offers_returns_empty_when_no_source(self):
+        """When DEMAND_FEED_URL is unset and the disk snapshot is missing, return []."""
+        import scout_agent
+        importlib.reload(scout_agent)
+
+        missing = self.tmp / "does_not_exist.json"
+        with patch.object(scout_agent, "SNAPSHOT_PATH", missing):
+            result = scout_agent._load_offers()
+
+        self.assertEqual(result, [])
+
 
 if __name__ == "__main__":
     unittest.main()
