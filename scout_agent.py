@@ -1657,13 +1657,19 @@ def _load_offers() -> list:
         if _p.port:
             _netloc = f"{_netloc}:{_p.port}"
         safe_endpoint = urllib.parse.urlunparse((_p.scheme, _netloc, _p.path, "", "", ""))
-        try:
-            with urllib.request.urlopen(endpoint, timeout=10) as resp:
-                offers = json.loads(resp.read())
-            log.info(f"[scout_agent] loaded {len(offers)} offers from {safe_endpoint}")
-            return offers
-        except Exception as exc:
-            log.warning(f"[scout_agent] DEMAND_FEED_URL fetch failed ({type(exc).__name__}: {exc}); falling back to disk snapshot at {SNAPSHOT_PATH}")
+        # Reject non-http(s) schemes — urlopen() otherwise accepts file://,
+        # ftp://, etc., which would let a misconfigured env var read local
+        # files or hit arbitrary hosts.
+        if _p.scheme not in ("http", "https"):
+            log.warning(f"[scout_agent] DEMAND_FEED_URL has unsupported scheme {_p.scheme!r}; falling back to disk snapshot at {SNAPSHOT_PATH}")
+        else:
+            try:
+                with urllib.request.urlopen(endpoint, timeout=10) as resp:
+                    offers = json.loads(resp.read())
+                log.info(f"[scout_agent] loaded {len(offers)} offers from {safe_endpoint}")
+                return offers
+            except Exception as exc:
+                log.warning(f"[scout_agent] DEMAND_FEED_URL fetch failed ({type(exc).__name__}: {exc}); falling back to disk snapshot at {SNAPSHOT_PATH}")
     if not SNAPSHOT_PATH.exists():
         log.warning(f"[scout_agent] no offers source available — DEMAND_FEED_URL unset and {SNAPSHOT_PATH} missing")
         return []
