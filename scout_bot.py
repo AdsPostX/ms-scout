@@ -1297,6 +1297,9 @@ def _projection_autocheck_monitor(web) -> None:
         _save_projection_autocheck_slot,
         _load_eod_posted_date,
         _save_eod_posted_date,
+        _load_projection_autocheck_fires,
+        _append_projection_autocheck_fire,
+        _evict_stale_projection_autocheck_fires,
     )
 
     while True:  # outer restart wrapper
@@ -1313,9 +1316,9 @@ def _projection_autocheck_monitor(web) -> None:
             # Seed EOD-posted marker from disk so a restart after 17:30 CT
             # does not re-post the same day's EOD summary.
             eod_posted_for_date: str | None = _load_eod_posted_date()
-            # Per-day in-memory log of fires for the EOD rollup. Keyed by
-            # date string; cleared at midnight CT.
-            fires_log: dict[str, list[dict]] = {}
+            # Per-day log of fires for the EOD rollup, persisted to
+            # pulse_state.json so a mid-day restart preserves accumulated
+            # fires for the 17:30 CT rollup. Read from disk at each use.
 
             while True:  # inner poll loop
                 try:
@@ -1340,8 +1343,7 @@ def _projection_autocheck_monitor(web) -> None:
                     if paused_for_date and paused_for_date != today_str:
                         paused_for_date = None
                         consecutive_errors = 0
-                    for stale in [d for d in fires_log if d != today_str]:
-                        fires_log.pop(stale, None)
+                    _evict_stale_projection_autocheck_fires(today_str)
 
                     # EOD rollup — once per day, after eod_hour:eod_minute CT.
                     if (
@@ -1352,7 +1354,7 @@ def _projection_autocheck_monitor(web) -> None:
                         )
                     ):
                         try:
-                            entries = fires_log.get(today_str, [])
+                            entries = _load_projection_autocheck_fires(today_str)
                             text, blocks = _format_projection_autocheck_eod(
                                 today_str, entries
                             )
@@ -1414,16 +1416,19 @@ def _projection_autocheck_monitor(web) -> None:
                         web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
                         last_slot = slot
                         _save_projection_autocheck_slot(slot)
-                        fires_log.setdefault(today_str, []).append({
-                            "slot": slot,
-                            "status": status,
-                            "today_revenue":      result.get("today_revenue"),
-                            "projected_full_day": result.get("projected_full_day"),
-                            "dow_median":         result.get("dow_median"),
-                            "pct_of_expected":    result.get("pct_of_expected"),
-                            "daemon_raw":         daemon_raw,
-                            "delta_abs":          delta_abs,
-                        })
+                        try:
+                            _append_projection_autocheck_fire(today_str, {
+                                "slot": slot,
+                                "status": status,
+                                "today_revenue":      result.get("today_revenue"),
+                                "projected_full_day": result.get("projected_full_day"),
+                                "dow_median":         result.get("dow_median"),
+                                "pct_of_expected":    result.get("pct_of_expected"),
+                                "daemon_raw":         daemon_raw,
+                                "delta_abs":          delta_abs,
+                            })
+                        except Exception as _e:
+                            log.warning(f"{tag} persist fires_log failed: {_e}")
                         log.info(f"{tag} posted slot={slot} status={status} → {channel}.")
                     except Exception as e:
                         log.warning(f"{tag} slack post failed: {e}")
