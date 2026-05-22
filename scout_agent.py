@@ -1650,10 +1650,17 @@ def _load_offers() -> list:
     url = os.getenv("DEMAND_FEED_URL")
     if url:
         endpoint = f"{url.rstrip('/')}/offers"
+        # Strip userinfo/query/fragment before logging — endpoint may contain
+        # credentials or tokens that must not leak to Render logs.
+        _p = urllib.parse.urlparse(endpoint)
+        _netloc = _p.hostname or ""
+        if _p.port:
+            _netloc = f"{_netloc}:{_p.port}"
+        safe_endpoint = urllib.parse.urlunparse((_p.scheme, _netloc, _p.path, "", "", ""))
         try:
             with urllib.request.urlopen(endpoint, timeout=10) as resp:
                 offers = json.loads(resp.read())
-            log.info(f"[scout_agent] loaded {len(offers)} offers from {endpoint}")
+            log.info(f"[scout_agent] loaded {len(offers)} offers from {safe_endpoint}")
             return offers
         except Exception as exc:
             log.warning(f"[scout_agent] DEMAND_FEED_URL fetch failed ({type(exc).__name__}: {exc}); falling back to disk snapshot at {SNAPSHOT_PATH}")
