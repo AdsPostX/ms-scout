@@ -1642,18 +1642,41 @@ TOOLS = [
 
 
 def _load_offers() -> list:
-    """Load offers from DEMAND_FEED_URL when set; fall back to disk snapshot."""
+    """Load offers from DEMAND_FEED_URL when set; fall back to disk snapshot.
+
+    Logs source + offer count so the P1.2 cutover is verifiable from Render
+    logs without grepping for stale-file timestamps.
+    """
     url = os.getenv("DEMAND_FEED_URL")
     if url:
-        try:
-            with urllib.request.urlopen(f"{url.rstrip('/')}/offers", timeout=10) as resp:
-                return json.loads(resp.read())
-        except Exception as exc:
-            log.warning(f"[scout_agent] DEMAND_FEED_URL fetch failed ({exc}); falling back to disk")
+        endpoint = f"{url.rstrip('/')}/offers"
+        # Strip userinfo/query/fragment before logging — endpoint may contain
+        # credentials or tokens that must not leak to Render logs.
+        _p = urllib.parse.urlparse(endpoint)
+        _netloc = _p.hostname or ""
+        if _p.port:
+            _netloc = f"{_netloc}:{_p.port}"
+        safe_endpoint = urllib.parse.urlunparse((_p.scheme, _netloc, _p.path, "", "", ""))
+        # Reject non-http(s) schemes — urlopen() otherwise accepts file://,
+        # ftp://, etc., which would let a misconfigured env var read local
+        # files or hit arbitrary hosts.
+        if _p.scheme not in ("http", "https"):
+            log.warning(f"[scout_agent] DEMAND_FEED_URL has unsupported scheme {_p.scheme!r}; falling back to disk snapshot at {SNAPSHOT_PATH}")
+        else:
+            try:
+                with urllib.request.urlopen(endpoint, timeout=10) as resp:
+                    offers = json.loads(resp.read())
+                log.info(f"[scout_agent] loaded {len(offers)} offers from {safe_endpoint}")
+                return offers
+            except Exception as exc:
+                log.warning(f"[scout_agent] DEMAND_FEED_URL fetch failed ({type(exc).__name__}: {exc}); falling back to disk snapshot at {SNAPSHOT_PATH}")
     if not SNAPSHOT_PATH.exists():
+        log.warning(f"[scout_agent] no offers source available — DEMAND_FEED_URL unset and {SNAPSHOT_PATH} missing")
         return []
     with open(SNAPSHOT_PATH) as f:
-        return json.load(f)
+        offers = json.load(f)
+    log.info(f"[scout_agent] loaded {len(offers)} offers from disk snapshot {SNAPSHOT_PATH}")
+    return offers
 
 
 def _norm(s: str) -> str:
