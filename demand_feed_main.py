@@ -25,6 +25,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+_PROCESS_START_TS = time.time()
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -128,20 +130,55 @@ def _run() -> None:
         raise q.get()
 
 
+def _write_json(handler: http.server.BaseHTTPRequestHandler, status: int, payload: dict) -> None:
+    body = json.dumps(payload).encode()
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 class _OffersHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != "/offers":
-            self.send_error(404)
+        if self.path == "/offers":
+            try:
+                data = _OFFERS_FILE.read_bytes()
+            except FileNotFoundError:
+                self.send_error(503, "offers not yet available")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(data)
             return
-        try:
-            data = _OFFERS_FILE.read_bytes()
-        except FileNotFoundError:
-            self.send_error(503, "offers not yet available")
+
+        if self.path == "/health":
+            _write_json(self, 200, {
+                "status": "ok",
+                "uptime_secs": int(time.time() - _PROCESS_START_TS),
+            })
             return
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(data)
+
+        if self.path == "/last-run":
+            state = _load_state()
+            offers_mtime = None
+            offers_size = None
+            if _OFFERS_FILE.exists():
+                st = _OFFERS_FILE.stat()
+                offers_mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+                offers_size = st.st_size
+            _write_json(self, 200, {
+                "last_run_date":      state.get("last_run_date"),
+                "last_success_ts":    state.get("last_success_ts"),
+                "last_failure_ts":    state.get("last_failure_ts"),
+                "last_failure_reason": state.get("last_failure_reason"),
+                "offers_mtime":       offers_mtime,
+                "offers_size":        offers_size,
+            })
+            return
+
+        self.send_error(404)
 
     def log_message(self, *args):  # suppress request logs
         pass
@@ -183,7 +220,10 @@ def main() -> None:
                 log.info(f"[demand-feed] running offer fetch ({reason})")
                 try:
                     _run()
-                    state["last_run_date"] = today_str
+                    state["last_run_date"]    = today_str
+                    state["last_success_ts"]  = datetime.now(timezone.utc).isoformat()
+                    state["last_failure_ts"]    = None
+                    state["last_failure_reason"] = None
                     _save_state(state)
                     log.info("[demand-feed] done — offers_latest.json updated")
                     _alert_slack(":white_check_mark: daily scrape complete — offers_latest.json updated")
@@ -191,6 +231,9 @@ def main() -> None:
                     log.error(f"[demand-feed] scraper failed: {e}", exc_info=True)
                     _alert_slack(f":rotating_light: scrape failed — retrying in 1h: {e}")
                     # Don't update last_run_date — retry next cycle
+                    state["last_failure_ts"]     = datetime.now(timezone.utc).isoformat()
+                    state["last_failure_reason"] = repr(e)[:500]
+                    _save_state(state)
                     time.sleep(3600)
                     continue
 

@@ -163,13 +163,77 @@ class TestOffersHTTPEndpoint(unittest.TestCase):
         """Any path other than /offers must return 404."""
         server, port = _start_server(self.tmp)
         try:
-            for path in ["/", "/health", "/offers/", "/foo"]:
+            for path in ["/", "/offers/", "/foo"]:
                 with self.subTest(path=path):
                     with self.assertRaises(urllib.error.HTTPError) as ctx:
                         urllib.request.urlopen(f"http://localhost:{port}{path}", timeout=5)
                     self.assertEqual(ctx.exception.code, 404)
         finally:
             server.shutdown()
+
+
+    # ------------------------------------------------------------------
+    # T3b: GET /health → 200 with uptime + status
+    # ------------------------------------------------------------------
+    def test_health_endpoint_returns_200(self):
+        server, port = _start_server(self.tmp)
+        try:
+            with urllib.request.urlopen(f"http://localhost:{port}/health", timeout=5) as resp:
+                status = resp.status
+                body = json.loads(resp.read())
+        finally:
+            server.shutdown()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "ok")
+        self.assertIn("uptime_secs", body)
+        self.assertIsInstance(body["uptime_secs"], int)
+
+    # ------------------------------------------------------------------
+    # T3c: GET /last-run → 200 with empty-state shape when no run yet
+    # ------------------------------------------------------------------
+    def test_last_run_endpoint_empty_state(self):
+        server, port = _start_server(self.tmp)
+        try:
+            with urllib.request.urlopen(f"http://localhost:{port}/last-run", timeout=5) as resp:
+                status = resp.status
+                body = json.loads(resp.read())
+        finally:
+            server.shutdown()
+
+        self.assertEqual(status, 200)
+        for key in ("last_run_date", "last_success_ts", "last_failure_ts",
+                    "last_failure_reason", "offers_mtime", "offers_size"):
+            self.assertIn(key, body)
+        self.assertIsNone(body["last_run_date"])
+        self.assertIsNone(body["offers_mtime"])
+
+    # ------------------------------------------------------------------
+    # T3d: GET /last-run → reflects state file + offers file metadata
+    # ------------------------------------------------------------------
+    def test_last_run_endpoint_with_state(self):
+        import demand_feed_main as dm
+        server, port = _start_server(self.tmp)
+        try:
+            # Seed scraper_state.json and offers_latest.json
+            dm._save_state({
+                "last_run_date":       "2026-05-22",
+                "last_success_ts":     "2026-05-22T06:00:00+00:00",
+                "last_failure_ts":     None,
+                "last_failure_reason": None,
+            })
+            (self.tmp / "offers_latest.json").write_bytes(_FAKE_OFFERS_BYTES)
+
+            with urllib.request.urlopen(f"http://localhost:{port}/last-run", timeout=5) as resp:
+                body = json.loads(resp.read())
+        finally:
+            server.shutdown()
+
+        self.assertEqual(body["last_run_date"], "2026-05-22")
+        self.assertEqual(body["last_success_ts"], "2026-05-22T06:00:00+00:00")
+        self.assertIsNone(body["last_failure_reason"])
+        self.assertEqual(body["offers_size"], len(_FAKE_OFFERS_BYTES))
+        self.assertIsNotNone(body["offers_mtime"])
 
 
 # ---------------------------------------------------------------------------
