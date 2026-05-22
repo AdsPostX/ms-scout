@@ -276,10 +276,12 @@ def _save_eod_posted_date(date_str: str) -> None:
 # Stored under pulse_state.json as {"projection_autocheck_fires": {date: [...]}}.
 
 def _load_projection_autocheck_fires(date_str: str) -> list[dict]:
+    """Return persisted autocheck fire records for the given CT date."""
     return _load_pulse_state().get("projection_autocheck_fires", {}).get(date_str, [])
 
 
 def _append_projection_autocheck_fire(date_str: str, entry: dict) -> None:
+    """Append a single autocheck fire record under the given CT date."""
     state = _load_pulse_state()
     fires = state.setdefault("projection_autocheck_fires", {})
     fires.setdefault(date_str, []).append(entry)
@@ -287,6 +289,7 @@ def _append_projection_autocheck_fire(date_str: str, entry: dict) -> None:
 
 
 def _evict_stale_projection_autocheck_fires(today_str: str) -> None:
+    """Drop fire records for any CT date other than today_str."""
     state = _load_pulse_state()
     fires = state.get("projection_autocheck_fires")
     if not fires:
