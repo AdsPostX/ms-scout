@@ -168,7 +168,8 @@ class _OffersHandler(http.server.BaseHTTPRequestHandler):
                 st = _OFFERS_FILE.stat()
                 offers_mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
                 offers_size = st.st_size
-            except FileNotFoundError:
+            except OSError:
+                # FileNotFoundError, PermissionError, etc. — keep endpoint resilient
                 pass
             _write_json(self, 200, {
                 "last_run_date":      state.get("last_run_date"),
