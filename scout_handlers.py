@@ -1999,6 +1999,8 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
 def _handle_event_impl(req: SocketModeRequest):
     web = WebClient(token=os.getenv("SLACK_BOT_TOKEN", ""), retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
+    from scout_slack_safe import guard_web_client
+    guard_web_client(web)
 
     # ── Button clicks ─────────────────────────────────────────────────────────
     if req.type == "interactive":

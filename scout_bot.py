@@ -2872,6 +2872,8 @@ def main():
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env")
 
     web_client    = WebClient(token=BOT_TOKEN, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
+    from scout_slack_safe import guard_web_client
+    guard_web_client(web_client)
     _BOT_USER_ID  = web_client.auth_test()["user_id"]
     # Inject shared state into scout_handlers (avoids circular import — handlers don't import scout_bot)
     _set_bot_user_id(_BOT_USER_ID)

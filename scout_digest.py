@@ -1679,6 +1679,8 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
 
     channel = _digest_channel(force=is_force)
     web  = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+    from scout_slack_safe import guard_web_client
+    guard_web_client(web)
     resp = web.chat_postMessage(
         channel=channel,
         text=fallback,
