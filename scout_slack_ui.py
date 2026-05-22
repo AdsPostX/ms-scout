@@ -1326,11 +1326,14 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
     `rollup` is a ScoreboardRollup (or None on data failure).
     `alerts` is a list[AlertState] of currently-firing alerts (or [] / None).
 
-    Slack-native v2 additions over PR 1:
-    - Move 1: image block with 7-day sparkline (quickchart.io)
-    - Move 2: <!date> token on context so timestamps show in viewer's TZ
-    - Move 3: overflow accessory on health section (3-dot menu)
-    - Move 4: "See details" button when alerts are firing
+    Block layout:
+    - header: "$XX.XK today"
+    - image: 7-day sparkline (quickchart.io)
+    - section: EOD projection (suppressed before first hour)
+    - context: vs-yesterday · vs-7d · "Data from {time}" in viewer's TZ
+    - section: alert health line (🟢/🟠/🔴)
+    - actions: "See details →" button (only when alerts firing)
+    - divider
     """
     import calendar
     blocks: list = []
@@ -1382,14 +1385,15 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
                 },
             })
 
-        # Move 2b — freshness label. Use <!date> token for TZ-aware display;
-        # nudge ts +5s so Slack never renders the awkward "in 0 seconds" edge
-        # case when the scoreboard is brand-new.
+        # Move 2b — freshness label. Use <!date^ts^{time}> for TZ-aware clock
+        # display (e.g. "Data from 9:47 AM"). {ago} was avoided because Slack
+        # renders it as "in X seconds" on fresh publishes — ambiguous to readers.
         from datetime import timezone as _tz
         generated_at = getattr(rollup, "generated_at", None)
         if generated_at is not None:
-            ts = int(generated_at.replace(tzinfo=_tz.utc).timestamp()) + 5
-            freshness = f"<!date^{ts}^Updated {{ago}}|just now>"
+            _ts = int(generated_at.replace(tzinfo=_tz.utc).timestamp())
+            _fallback = generated_at.strftime("%-I:%M %p UTC")
+            freshness = f"<!date^{_ts}^Data from {{time}}|{_fallback}>"
         else:
             freshness = "just now"
         blocks.append({
@@ -1428,6 +1432,12 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
         })
 
     blocks.append({"type": "divider"})
+
+    # Enforce kit budget on the scoreboard section so future additions can't
+    # silently push the Home view past Slack's 100-block hard limit.
+    if _KIT_AVAILABLE and _KIT_ENABLED:
+        blocks = enforce(blocks, Surface.HOME)
+
     return blocks
 
 

@@ -1301,13 +1301,6 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
             _handle_home_alert_drill(web, trigger_id)
         return
 
-    # ── App Home scoreboard — overflow (3-dot) menu ───────────────────────────
-    if action_id == "home_overflow_menu":
-        user_id    = payload.get("user", {}).get("id", "")
-        option_val = (action.get("selected_option") or {}).get("value", "")
-        _handle_home_overflow(web, user_id, option_val)
-        return
-
     # ── Feedback buttons (👍 / 👎 / ✏️) ──────────────────────────────────────
     if action_id in ("scout_feedback_good", "scout_feedback_bad", "scout_feedback_correct"):
         _handle_feedback(action, payload, web)
@@ -1482,16 +1475,23 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             _heartbeat_stop = threading.Event()
 
             def _heartbeat() -> None:
-                """Pulse loading message every 6s so the modal doesn't look frozen."""
+                """Pulse loading message every 6s so the modal doesn't look frozen.
+
+                Shows elapsed time in a context footer so the user knows how long
+                the query has been running — prevents "is this frozen?" anxiety.
+                """
                 _STEPS = [
                     _pick_loading_message(query),
                     "Still working…",
                     "Crunching the numbers…",
                     "Almost there…",
                 ]
+                _hb_start = time.monotonic()
                 for step in _it.cycle(_STEPS):
                     if _heartbeat_stop.wait(timeout=6.0):
                         break
+                    elapsed = int(time.monotonic() - _hb_start)
+                    elapsed_str = f"{elapsed}s" if elapsed < 60 else f"{elapsed // 60}m {elapsed % 60}s"
                     try:
                         web.views_update(
                             view_id=v_id,
@@ -1499,7 +1499,10 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                                 "type": "modal",
                                 "title": {"type": "plain_text", "text": "Scout", "emoji": False},
                                 "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{step}"}}],
+                                "blocks": [
+                                    {"type": "section", "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{step}"}},
+                                    {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {elapsed_str}_"}]},
+                                ],
                             },
                         )
                     except Exception:
@@ -1726,34 +1729,6 @@ def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
         )
     except Exception:
         log.exception("_handle_home_alert_drill: views_open failed")
-
-
-def _handle_home_overflow(web: WebClient, user_id: str, option_val: str) -> None:
-    """Handle the App Home scoreboard overflow (3-dot) menu (Move 3).
-
-    Dispatches on option value: brief | subscribe | dashboard.
-    All responses are best-effort ephemeral DMs — failures are logged, not surfaced.
-    """
-    if not user_id:
-        return
-    try:
-        if option_val == "brief":
-            web.chat_postMessage(
-                channel=user_id,
-                text="Revenue brief coming up — ask Scout anything, e.g. `@Scout how is revenue trending this week?`",
-            )
-        elif option_val == "subscribe":
-            web.chat_postMessage(
-                channel=user_id,
-                text="Daily DM digest is on the roadmap. Reply here to let us know what metrics matter most to you.",
-            )
-        elif option_val == "dashboard":
-            web.chat_postMessage(
-                channel=user_id,
-                text="ClickHouse dashboard link coming soon. In the meantime: `@Scout show me today's revenue by publisher`",
-            )
-    except Exception:
-        log.exception("_handle_home_overflow: postMessage failed (user=%s val=%s)", user_id, option_val)
 
 
 def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
