@@ -15,6 +15,7 @@ from scout_core.contracts import (
     QueueDraft,
     RawOffer,
     SlackDigestBlock,
+    set_geo_normalizer,
 )
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "QueueDraft",
     "RawOffer",
     "SlackDigestBlock",
+    "set_geo_normalizer",
 ]

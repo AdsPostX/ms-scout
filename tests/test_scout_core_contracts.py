@@ -10,11 +10,6 @@ These tests pin behavior we'll rely on across services:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import pytest
 
 from scout_core.contracts import (

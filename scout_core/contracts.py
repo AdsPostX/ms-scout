@@ -20,7 +20,22 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+# Geo normalization is injected by the producer (offer_scraper registers
+# itself at import time). Keeping the dependency one-way means scout_core
+# stays import-cheap and free of producer-side imports.
+_geo_normalizer: Optional[Callable[[str], str]] = None
+
+
+def set_geo_normalizer(fn: Callable[[str], str]) -> None:
+    """Register the canonical geo-normalization function.
+
+    ms-scout / ms-demand-feed call this once at startup with
+    `offer_scraper.normalize_geo`. Tests can register a stub.
+    """
+    global _geo_normalizer
+    _geo_normalizer = fn
 
 
 # ── RawOffer ──────────────────────────────────────────────────────────
@@ -97,11 +112,16 @@ class NormalizedOffer:
 
     @classmethod
     def normalize_geo(cls, raw: str) -> str:
-        """Canonical geo string. Delegates to offer_scraper.normalize_geo
-        so there is exactly one implementation in the codebase. Imported
-        lazily to keep scout_core import-cheap and dependency-free."""
-        from offer_scraper import normalize_geo as _ng
-        return _ng(raw)
+        """Canonical geo string. Delegates to the producer-registered
+        normalizer (see `set_geo_normalizer`). Producers (ms-scout,
+        ms-demand-feed) must register `offer_scraper.normalize_geo` at
+        startup; tests may register a stub."""
+        if _geo_normalizer is None:
+            raise RuntimeError(
+                "scout_core.contracts: no geo normalizer registered. "
+                "Call scout_core.contracts.set_geo_normalizer(fn) at startup."
+            )
+        return _geo_normalizer(raw)
 
     @classmethod
     def from_raw(cls, raw: RawOffer) -> "NormalizedOffer":
@@ -251,6 +271,8 @@ class CampaignRequest:
             raise ValueError(f"draft {draft.draft_id} is not approved (state={draft.approval.state})")
         if not draft.approval.approved_at:
             raise ValueError(f"approved draft {draft.draft_id} missing approved_at")
+        if not draft.approval.approver:
+            raise ValueError(f"approved draft {draft.draft_id} missing approver")
         return cls(
             draft_id=draft.draft_id,
             offer=draft.offer,
