@@ -271,7 +271,7 @@ class CampaignRequest:
             raise ValueError(f"draft {draft.draft_id} is not approved (state={draft.approval.state})")
         if not draft.approval.approved_at:
             raise ValueError(f"approved draft {draft.draft_id} missing approved_at")
-        if not draft.approval.approver:
+        if not (draft.approval.approver or "").strip():
             raise ValueError(f"approved draft {draft.draft_id} missing approver")
         return cls(
             draft_id=draft.draft_id,
