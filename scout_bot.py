@@ -949,29 +949,38 @@ def _digest_poster(web) -> None:
                         _digest_source = os.getenv("DIGEST_SOURCE", "local")
                         if _digest_source == "remote":
                             _demand_url = os.getenv("DEMAND_FEED_URL", "").rstrip("/")
+                            _used_remote = False
                             if not _demand_url:
-                                raise RuntimeError("DIGEST_SOURCE=remote but DEMAND_FEED_URL is unset")
-                            import requests as _req
-                            from slack_sdk.web import WebClient as _WC
-                            from scout_slack_safe import guard_web_client as _gwc
-                            _r = _req.get(f"{_demand_url}/digest/blocks", timeout=120)
-                            if _r.status_code == 204:
-                                log.info("[digest-poster] demand-feed: no payload (event gate skipped)")
-                            elif _r.ok:
-                                _payload = _r.json()
-                                _channel = scout_digest._digest_channel(force=False)
-                                _web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
-                                _gwc(_web)
-                                _resp = _web.chat_postMessage(
-                                    channel=_channel,
-                                    text=_payload["fallback"],
-                                    blocks=_payload["blocks"],
-                                    unfurl_links=False,
-                                    unfurl_media=False,
-                                )
-                                log.info(f"[digest-poster] remote digest posted → {_channel} ts={_resp['ts']}")
+                                log.warning("[digest-poster] DIGEST_SOURCE=remote but DEMAND_FEED_URL is unset — falling back to local")
                             else:
-                                raise RuntimeError(f"demand-feed /digest/blocks returned {_r.status_code}")
+                                try:
+                                    import requests as _req
+                                    from slack_sdk.web import WebClient as _WC
+                                    from scout_slack_safe import guard_web_client as _gwc
+                                    _r = _req.get(f"{_demand_url}/digest/blocks", timeout=120)
+                                    if _r.status_code == 204:
+                                        log.info("[digest-poster] demand-feed: no payload (event gate skipped)")
+                                        _used_remote = True
+                                    elif _r.ok:
+                                        _payload = _r.json()
+                                        _channel = _route_channel("offers")
+                                        _web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
+                                        _gwc(_web)
+                                        _resp = _web.chat_postMessage(
+                                            channel=_channel,
+                                            text=_payload["fallback"],
+                                            blocks=_payload["blocks"],
+                                            unfurl_links=False,
+                                            unfurl_media=False,
+                                        )
+                                        log.info(f"[digest-poster] remote digest posted → {_channel} ts={_resp['ts']}")
+                                        _used_remote = True
+                                    else:
+                                        log.error("[digest-poster] demand-feed /digest/blocks returned %s — falling back to local", _r.status_code)
+                                except Exception as _rem_exc:
+                                    log.error("[digest-poster] remote fetch failed: %s — falling back to local", _rem_exc)
+                            if not _used_remote:
+                                scout_digest.post_digest()
                         else:
                             scout_digest.post_digest()
                     except Exception:

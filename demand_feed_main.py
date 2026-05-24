@@ -191,10 +191,11 @@ class _OffersHandler(http.server.BaseHTTPRequestHandler):
                 payload = scout_digest.build_digest_payload(is_force=is_force)
             except Exception as exc:
                 log.error("[demand-feed] /digest/blocks error: %s", exc, exc_info=True)
-                _write_json(self, 500, {"error": type(exc).__name__, "detail": str(exc)[:400]})
+                _write_json(self, 500, {"error": "InternalServerError"})
                 return
             if payload is None:
-                _write_json(self, 204, {})
+                self.send_response(204)
+                self.end_headers()
                 return
             _write_json(self, 200, payload)
             return

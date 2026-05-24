@@ -43,7 +43,9 @@ def _stub(name: str, **attrs) -> types.ModuleType:
 
 
 # anthropic — not in test venv; scout_agent imports it at module level
-if "anthropic" not in sys.modules:
+try:
+    importlib.import_module("anthropic")
+except ImportError:
     _ant = _stub("anthropic")
     _ant.Anthropic = MagicMock
     _ant.types = _stub("anthropic.types")
@@ -51,7 +53,9 @@ if "anthropic" not in sys.modules:
 
 # clickhouse_connect / queries / scout_types — not needed in test venv
 for _dep in ("clickhouse_connect", "queries", "scout_types"):
-    if _dep not in sys.modules:
+    try:
+        importlib.import_module(_dep)
+    except ImportError:
         _stub(_dep)
 
 
@@ -158,6 +162,7 @@ class TestDigestBlocksEndpoint(unittest.TestCase):
                     self.assertEqual(resp.status, 204)
         finally:
             server.shutdown()
+            server.server_close()
 
     def test_200_with_payload_json(self):
         """build_digest_payload returns payload → endpoint responds 200 + JSON."""
@@ -172,6 +177,7 @@ class TestDigestBlocksEndpoint(unittest.TestCase):
                     body = json.loads(resp.read())
         finally:
             server.shutdown()
+            server.server_close()
 
         self.assertEqual(status, 200)
         self.assertIn("blocks", body)
@@ -190,6 +196,7 @@ class TestDigestBlocksEndpoint(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, 500)
         finally:
             server.shutdown()
+            server.server_close()
 
     def test_force_param_forwarded(self):
         """?force=1 query param → build_digest_payload called with is_force=True."""
@@ -208,6 +215,7 @@ class TestDigestBlocksEndpoint(unittest.TestCase):
                 )
         finally:
             server.shutdown()
+            server.server_close()
 
         self.assertTrue(captured.get("is_force"), "is_force should be True when ?force=1")
 
