@@ -15,7 +15,6 @@ Scout once ms-demand-feed is confirmed stable.
 State: data/scraper_state.json  (same key as Scout's daemon — no conflict,
        different disk volumes on Render)
 """
-from __future__ import annotations
 
 import http.server
 import json
