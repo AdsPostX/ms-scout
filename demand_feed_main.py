@@ -190,6 +190,25 @@ class _OffersHandler(http.server.BaseHTTPRequestHandler):
             })
             return
 
+        if self.path.startswith("/digest/blocks"):
+            # Query params: ?force=1 to bypass event gate
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            is_force = qs.get("force", ["0"])[0] == "1"
+            try:
+                import scout_digest
+                payload = scout_digest.build_digest_payload(is_force=is_force)
+            except Exception as exc:
+                log.error("[demand-feed] /digest/blocks error: %s", exc, exc_info=True)
+                _write_json(self, 500, {"error": "InternalServerError"})
+                return
+            if payload is None:
+                self.send_response(204)
+                self.end_headers()
+                return
+            _write_json(self, 200, payload)
+            return
+
         self.send_error(404)
 
     def log_message(self, *args):  # suppress request logs
