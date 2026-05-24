@@ -508,6 +508,11 @@ def _nightly_harvest_daemon() -> None:
 
     while True:
         try:
+            # Kill switch — default false; set HARVESTER_AUTO_WRITE_ENABLED=true to activate
+            if os.getenv("HARVESTER_AUTO_WRITE_ENABLED", "false").strip().lower() != "true":
+                _time.sleep(300)
+                continue
+
             now = _now_chicago()
             tomorrow_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + _td(days=1)
             sleep_secs = (tomorrow_midnight - now).total_seconds()
