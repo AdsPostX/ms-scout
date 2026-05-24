@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 demand_feed_main.py — ms-demand-feed Render service entrypoint
 
@@ -24,6 +26,7 @@ import socketserver
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 _PROCESS_START_TS = time.time()
 
@@ -224,6 +227,12 @@ def _start_http_server() -> None:
 
 def main() -> None:
     _start_http_server()
+    threading.Thread(
+        target=_revenue_tracker_daemon,
+        daemon=True,
+        name="revenue-tracker",
+    ).start()
+    log.info("[demand-feed] revenue-tracker daemon started (kill switch: REVENUE_TRACKER_ENABLED)")
     log.info("[demand-feed] starting")
 
     while True:
@@ -281,6 +290,206 @@ def main() -> None:
         except Exception as e:
             log.error(f"[demand-feed] cycle error: {e}", exc_info=True)
             time.sleep(3600)
+
+
+def _format_revenue_alert(total: dict, publishers: list, as_of: Optional[str] = None) -> tuple:
+    """Format the proactive revenue alert Slack message.
+
+    Inlined from scout_bot._format_revenue_alert to avoid cross-service coupling.
+    Produces Block Kit blocks when possible; falls back to plain-text list.
+
+    total: dict with today_revenue, projected_full_day, dow_median,
+           pct_of_expected, weekday, sample_days
+    publishers: list of dicts with publisher_name, publisher_id, delta, root_cause
+    as_of: human-readable time string; defaults to current CT time
+    """
+    import pytz
+    from datetime import datetime as _dt
+
+    if as_of is None:
+        _ct = _dt.now(pytz.timezone("America/Chicago"))
+        as_of = _ct.strftime("%-I:%M%p CT").lower()
+
+    pct       = round(total["pct_of_expected"])
+    today_rev = total["today_revenue"]
+    projected = total["projected_full_day"]
+    expected  = total["dow_median"]
+    weekday   = total["weekday"]
+    samples   = total["sample_days"]
+
+    _ROOT_LABELS = {
+        "ghost_campaign": "impressions ✓, $0 revenue → ghost campaign",
+        "fill_rate":      "zero impressions → fill rate or cap hit",
+        "traffic":        "zero sessions → no upstream traffic",
+        "revenue_down":   "revenue below expected, specific cause unclear",
+    }
+
+    lines = [
+        f"Platform so far ({as_of}): *${today_rev:,.0f}* | projected: *${projected:,.0f}* | expected [{weekday}]: ~*${expected:,.0f}*",
+        f"Tracking at *{pct}%* of expected ({samples} same-weekday samples)",
+    ]
+
+    if publishers:
+        lines.append("*Where the gap is:*")
+        for p in publishers:
+            name   = p.get("publisher_name") or f"pub {p.get('publisher_id', '?')}"
+            pub_id = p.get("publisher_id", "")
+            delta  = p.get("delta", 0.0)
+            cause  = p.get("root_cause", "normal")
+            label  = _ROOT_LABELS.get(cause, cause)
+            id_str = f" *(pub {pub_id})*" if pub_id else ""
+            lines.append(f"{name}{id_str}: *−${abs(delta):,.0f}* below expected · {label}")
+        lines.append("All other publishers within normal range.")
+        top_cause = publishers[0].get("root_cause", "normal")
+        top_pub   = publishers[0].get("publisher_name", "")
+        if top_cause == "ghost_campaign":
+            lines.append(f"Immediate: `@Scout ghost campaigns` — {top_pub} matches ghost detection criteria.")
+        elif top_cause == "fill_rate":
+            lines.append(f"Immediate: `@Scout fill rate` — {top_pub} has zero impressions despite active sessions.")
+        elif top_cause == "revenue_down":
+            lines.append(
+                f"Immediate: `@Scout {top_pub}` — revenue is below expected with no single dominant signal; "
+                f"check traffic, fill rate, and ghost-campaign indicators."
+            )
+        elif top_cause == "traffic":
+            lines.append(f"Immediate: `@Scout {top_pub}` — no sessions; confirm SDK is sending traffic.")
+    else:
+        lines.append(
+            "No single publisher accounts for the gap — revenue is spread-down across the platform.\n"
+            "Likely causes: session volume drop, fill rate platform-wide, or a slow day.\n"
+            "Run `@Scout fill rate` to check publisher-level session health."
+        )
+
+    fallback = "🔴 Revenue alert — today is tracking soft"
+    body = "\n".join(lines)
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f":red_circle: *Revenue alert — today is tracking soft*"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": body},
+        },
+    ]
+    return fallback, blocks
+
+
+def _revenue_tracker_daemon() -> None:
+    """Demand-feed port of scout_bot._revenue_tracker.
+
+    Proactive intraday revenue alert at 3pm CT on weekdays.
+    Kill switch: REVENUE_TRACKER_ENABLED env var (default false — off).
+    Wired to job_runs telemetry via scout_core.job_runs.record_job_run.
+
+    Runs every 5 minutes. Fires at most once per calendar day (state in
+    pulse_state.json via scout_state). Posts to REVENUE_ALERT_CHANNEL
+    (default: #revenue-operations channel id from REVENUE_OPS_CHANNEL env var).
+
+    Outer restart wrapper: any unhandled crash logs the traceback and restarts
+    after 30s so the thread stays alive indefinitely without a Render redeploy.
+    """
+    import time as _time
+    import pytz
+    from datetime import datetime as _dt
+    from slack_sdk.web import WebClient
+    from scout_agent import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher
+    from scout_state import _load_revenue_alert_state, _save_revenue_alert_date
+    from scout_ch import _get_ch_client
+    from scout_core.job_runs import record_job_run
+
+    _HQ_CHANNEL = "C0AQEECF800"  # #bot-qa fallback (matches scout_bot._SCOUT_HQ_CHANNEL)
+
+    def _get_channel() -> str:
+        scout_env = os.getenv("SCOUT_ENV", "development")
+        if scout_env != "production":
+            return _HQ_CHANNEL
+        return os.getenv("REVENUE_OPS_CHANNEL", _HQ_CHANNEL)
+
+    while True:  # outer restart wrapper — self-heals any unhandled crash
+        try:
+            CT_TZ      = pytz.timezone("America/Chicago")
+            check_hour = int(os.getenv("REVENUE_TRACKER_CHECK_HOUR_CT", "15"))
+
+            while True:  # inner poll loop
+                _time.sleep(300)  # 5-min poll
+                try:
+                    # Kill switch — default false; set REVENUE_TRACKER_ENABLED=true to activate
+                    if os.getenv("REVENUE_TRACKER_ENABLED", "false").strip().lower() != "true":
+                        continue
+
+                    now_ct = _dt.now(CT_TZ)
+
+                    # Weekdays only (Mon=0 … Fri=4)
+                    if now_ct.weekday() >= 5:
+                        continue
+
+                    # Fire window: target hour ± 10 minutes
+                    if not (now_ct.hour == check_hour and now_ct.minute < 10):
+                        continue
+
+                    today_str = now_ct.date().isoformat()
+                    if _load_revenue_alert_state() == today_str:
+                        continue  # already posted today
+
+                    channel = _get_channel()
+                    web = WebClient(token=os.getenv("SLACK_BOT_TOKEN", ""))
+                    ch  = _get_ch_client()
+
+                    _t0 = _time.monotonic()
+
+                    # Phase 1: fast platform total
+                    try:
+                        total = _query_intraday_revenue_total(ch)
+                    except Exception as e:
+                        log.warning("[revenue-tracker] Phase 1 query failed: %s", e)
+                        _save_revenue_alert_date(today_str)  # avoid hammering on CH error
+                        record_job_run(
+                            "revenue_tracker",
+                            status="error",
+                            error=str(e)[:400],
+                            duration_ms=int((_time.monotonic() - _t0) * 1000),
+                        )
+                        continue
+
+                    if total is None:
+                        # Revenue within normal range — mark checked, stay silent
+                        _save_revenue_alert_date(today_str)
+                        log.info("[revenue-tracker] Revenue on pace — no alert needed.")
+                        record_job_run(
+                            "revenue_tracker",
+                            status="success",
+                            duration_ms=int((_time.monotonic() - _t0) * 1000),
+                        )
+                        continue
+
+                    # Phase 2: per-publisher decomposition
+                    try:
+                        publishers = _query_intraday_revenue_by_publisher(ch, total)
+                    except Exception as e:
+                        log.warning("[revenue-tracker] Phase 2 query failed: %s", e)
+                        publishers = []
+
+                    fallback, blocks = _format_revenue_alert(total, publishers)
+                    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
+                    _save_revenue_alert_date(today_str)
+                    duration_ms = int((_time.monotonic() - _t0) * 1000)
+                    log.info(
+                        "[revenue-tracker] Alert posted for %s (%.0f%% of expected).",
+                        today_str, total["pct_of_expected"],
+                    )
+                    record_job_run(
+                        "revenue_tracker",
+                        status="success",
+                        duration_ms=duration_ms,
+                    )
+
+                except Exception as e:
+                    log.warning("[revenue-tracker] Unexpected error: %s", e)
+
+        except Exception as e:
+            log.error("[revenue-tracker] Fatal crash — restarting in 30s: %s", e, exc_info=True)
+            _time.sleep(30)
 
 
 if __name__ == "__main__":

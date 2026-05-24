@@ -2970,9 +2970,14 @@ def main():
     # PR 19a — benchmark warmer: keep CVR/RPM benchmarks warm so `@Scout status`
     # never surfaces "Benchmarks not loaded" except in actual CH outage scenarios
     _start_daemon(_benchmarks_warmer,     name="benchmarks-warmer")
-    # PR 25 — revenue tracker: proactive 3pm CT intraday alert when revenue tracks soft
-    from scout_agent import _get_ch_client as _ch_factory
-    _start_daemon(_revenue_tracker, name="revenue-tracker", args=(web_client, _ch_factory()))
+    # PR 25 / P2.5 — revenue tracker moved to demand-feed.
+    # SCOUT_INPROC_REVENUE_TRACKER=true re-enables the in-process daemon for
+    # parallel validation (2-week window) before full cutover.
+    if os.getenv("SCOUT_INPROC_REVENUE_TRACKER", "false").lower() != "false":
+        from scout_agent import _get_ch_client as _ch_factory
+        _start_daemon(_revenue_tracker, name="revenue-tracker", args=(web_client, _ch_factory()))
+    else:
+        log.info("[scout] revenue-tracker moved to demand-feed (SCOUT_INPROC_REVENUE_TRACKER=false)")
 
     # Background: daily launch health watchdog (no register — campaign-level, not infrastructure)
     threading.Thread(target=_launch_watchdog, args=(web_client,), daemon=True, name="launch-watchdog").start()
