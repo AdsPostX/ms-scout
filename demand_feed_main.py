@@ -214,6 +214,10 @@ class _OffersHandler(http.server.BaseHTTPRequestHandler):
             _write_json(self, 200, payload)
             return
 
+        if self.path == "/queue/config":
+            _handle_queue_config(self)
+            return
+
         if self.path == "/queue/pending":
             drafts = _load_queue()
             pending = [d for d in drafts.values()
@@ -588,6 +592,14 @@ def main() -> None:
     ]:
         threading.Thread(target=_monitor_fn, daemon=True, name=_monitor_name).start()
     log.info("[demand-feed] hourly-shadow monitors started (kill switch: SCOUT_HOURLY_SHADOW_ENABLED)")
+    _wh  = os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "").strip()
+    _dry = os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes")
+    _cc_mode = "live" if (_wh and not _dry) else "dry_run"
+    log.info(
+        "[demand-feed] campaign-creation mode=%s webhook_url_set=%s "
+        "(MS_PLATFORM_TODO: set CAMPAIGN_CREATE_WEBHOOK_URL + CAMPAIGN_CREATE_DRY_RUN=false to go live)",
+        _cc_mode, bool(_wh),
+    )
     log.info("[demand-feed] starting")
 
     while True:
@@ -1166,47 +1178,176 @@ def _read_body(handler: http.server.BaseHTTPRequestHandler) -> Optional[dict]:
         return None
 
 
+
+# ── MS Platform integration — env vars needed before going live ────────────────
+#
+# MS_PLATFORM_TODO: Ask Vamsee to provide the following before flipping live:
+#
+#   CAMPAIGN_CREATE_WEBHOOK_URL
+#       POST endpoint on MS Platform that accepts a CampaignRequest JSON body.
+#       Shape posted (see _fire_campaign_creation):
+#         {
+#           "draft_id":    "<uuid>",
+#           "offer":       { network, offer_id, advertiser, title, payout_num, ... },
+#           "ai_copy":     { headline, description, cta_yes, cta_no, ... },
+#           "approver":    "sidd",
+#           "approved_at": "2026-05-24T14:00:00+00:00",
+#           "dry_run":     false
+#         }
+#       Expected success response: any 2xx, body is relayed back to caller as-is.
+#       Leave unset → dry_run mode (default, safe for staging).
+#
+#   CAMPAIGN_CREATE_API_KEY
+#       Bearer token sent as Authorization: Bearer <token>.
+#       Leave unset → no auth header (dev / local only).
+#
+#   CAMPAIGN_CREATE_DRY_RUN
+#       "true" (default) → log + return preview, no HTTP call.
+#       Set "false" AND set WEBHOOK_URL to go live.
+#       GET /queue/config shows current state without exposing secrets.
+#
+# Flip order once Vamsee provides the endpoint:
+#   1. Set CAMPAIGN_CREATE_WEBHOOK_URL in Render
+#   2. Set CAMPAIGN_CREATE_API_KEY in Render  (if platform requires auth)
+#   3. Keep CAMPAIGN_CREATE_DRY_RUN=true — test one approve, check /queue/config
+#   4. Verify the "would_send" payload in the dry_run response looks right
+#   5. Set CAMPAIGN_CREATE_DRY_RUN=false → live
+# ──────────────────────────────────────────────────────────────────────────────
+
+
 def _fire_campaign_creation(draft: dict) -> dict:
     """Hand a QueueDraft to the MS Platform campaign creation webhook.
 
-    Returns {"status": "dry_run"} when CAMPAIGN_CREATE_DRY_RUN=true or
-    when CAMPAIGN_CREATE_WEBHOOK_URL is unset — which is the default for
-    safety. Set both env vars in Render after Vamsee signs off on dry-run output.
+    Safe-by-default: returns {"status": "dry_run"} when
+    CAMPAIGN_CREATE_DRY_RUN=true (the default) or when
+    CAMPAIGN_CREATE_WEBHOOK_URL is not set. In dry-run mode the full payload
+    that *would* be sent is included as "would_send" so Vamsee can review
+    it before flipping live.
+
+    Auth: if CAMPAIGN_CREATE_API_KEY is set, it is sent as
+    "Authorization: Bearer <key>".  Uses stdlib urllib — no extra dep.
+
+    See the MS_PLATFORM_TODO block above for flip-live instructions.
     """
-    webhook_url = os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "")
-    dry_run = os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes")
+    webhook_url = os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "").strip()
+    api_key     = os.getenv("CAMPAIGN_CREATE_API_KEY", "").strip()
+    dry_run     = os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes")
+
+    # Build the CampaignRequest payload regardless — used for both dry_run
+    # preview and the real POST so there's one source of truth.
+    payload: dict = {
+        "draft_id":    draft.get("draft_id"),
+        "offer":       draft.get("offer", {}),
+        "ai_copy":     draft.get("ai_copy", {}),
+        "approver":    draft.get("approval", {}).get("approver", ""),
+        "approved_at": draft.get("approval", {}).get("approved_at", ""),
+        "dry_run":     False,
+    }
 
     if dry_run or not webhook_url:
+        mode = (
+            "CAMPAIGN_CREATE_DRY_RUN=true"
+            if dry_run
+            else "CAMPAIGN_CREATE_WEBHOOK_URL not set"
+        )
         log.info(
-            "[queue] DRY_RUN campaign creation for draft_id=%s offer=%s",
+            "[queue] dry_run campaign creation (%s) draft_id=%s offer=%s/%s",
+            mode,
             draft.get("draft_id"),
+            draft.get("offer", {}).get("network"),
             draft.get("offer", {}).get("offer_id"),
         )
-        return {"status": "dry_run", "draft_id": draft.get("draft_id")}
+        # MS_PLATFORM_TODO: review "would_send" in the response, then flip live.
+        return {
+            "status":    "dry_run",
+            "draft_id":  draft.get("draft_id"),
+            "mode":      mode,
+            "would_send": payload,
+        }
+
+    import urllib.request as _ur
+    import urllib.error as _ue
 
     try:
-        import requests as _req
-        payload = {
-            "draft_id": draft.get("draft_id"),
-            "offer": draft.get("offer", {}),
-            "ai_copy": draft.get("ai_copy", {}),
-            "approver": draft.get("approval", {}).get("approver", ""),
-            "approved_at": draft.get("approval", {}).get("approved_at", ""),
-            "dry_run": False,
-        }
-        resp = _req.post(webhook_url, json=payload, timeout=10)
-        resp.raise_for_status()
-        log.info("[queue] campaign creation fired for draft_id=%s → %s",
-                 draft.get("draft_id"), resp.status_code)
-        return {"status": "fired", "draft_id": draft.get("draft_id"),
-                "platform_status": resp.status_code}
+        body_bytes = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = _ur.Request(webhook_url, data=body_bytes, headers=headers, method="POST")
+        with _ur.urlopen(req, timeout=10) as resp:
+            try:
+                resp_body = json.loads(resp.read() or b"{}")
+            except Exception:
+                resp_body = {}
+            log.info(
+                "[queue] campaign creation fired draft_id=%s → HTTP %s",
+                draft.get("draft_id"), resp.status,
+            )
+            return {
+                "status":            "fired",
+                "draft_id":          draft.get("draft_id"),
+                "platform_status":   resp.status,
+                "platform_response": resp_body,
+            }
+    except _ue.HTTPError as exc:
+        log.error("[queue] campaign creation webhook HTTP %s: %s", exc.code, exc)
+        return {"status": "error", "error": f"HTTP {exc.code}", "draft_id": draft.get("draft_id")}
     except Exception as exc:
         log.error("[queue] campaign creation webhook failed: %s", exc)
-        return {"status": "error", "error": str(exc)}
+        return {"status": "error", "error": str(exc), "draft_id": draft.get("draft_id")}
 
 
 # ── Queue HTTP endpoints ───────────────────────────────────────────────────────
 # Wired into _OffersHandler.do_POST / do_GET below.
+# GET  /queue/config          → platform integration status (no secrets)
+# GET  /queue/pending         → drafts awaiting approval
+# GET  /queue/<id>            → single draft by id
+# POST /queue/draft           → create new draft
+# POST /queue/approve         → approve + fire campaign creation
+# POST /queue/reject          → reject draft
+# POST /campaigns/create      → fire campaign from approved draft directly
+
+def _handle_queue_config(handler: http.server.BaseHTTPRequestHandler) -> None:
+    """GET /queue/config — returns current MS Platform integration status.
+
+    No secrets are exposed — only booleans for set/unset and the current mode.
+    The platform team (or Vamsee) can hit this to verify the connection is
+    configured before flipping CAMPAIGN_CREATE_DRY_RUN=false.
+
+    Example response:
+        {
+          "campaign_creation": {
+            "mode": "dry_run",
+            "webhook_url_set": false,
+            "api_key_set": false,
+            "dry_run_flag": true
+          },
+          "queue_depth": { "pending": 3, "approved": 1, "rejected": 0 }
+        }
+    """
+    webhook_url = os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "").strip()
+    api_key     = os.getenv("CAMPAIGN_CREATE_API_KEY", "").strip()
+    dry_run     = os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes")
+    live        = bool(webhook_url) and not dry_run
+
+    drafts = _load_queue()
+    depth: dict = {"pending": 0, "approved": 0, "rejected": 0}
+    for d in drafts.values():
+        state = d.get("approval", {}).get("state", "pending")
+        if state in depth:
+            depth[state] += 1
+
+    _write_json(handler, 200, {
+        "campaign_creation": {
+            # MS_PLATFORM_TODO: mode should read "live" before launch.
+            "mode":            "live" if live else "dry_run",
+            "webhook_url_set": bool(webhook_url),
+            "api_key_set":     bool(api_key),
+            "dry_run_flag":    dry_run,
+        },
+        "queue_depth": depth,
+    })
+
 
 def _handle_queue_create_draft(handler: http.server.BaseHTTPRequestHandler) -> None:
     """POST /queue/draft — create a new QueueDraft from offer JSON + optional copy."""
