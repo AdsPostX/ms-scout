@@ -1075,27 +1075,19 @@ def test_get_queue_status_tool_registered():
     return True, "get_queue_status registered in TOOLS, TOOL_MAP, and module"
 
 
-@test("revenue_tracker_daemon_function_exists_with_formatter")
+@test("revenue_tracker_config_keys_present")
 def test_revenue_tracker_daemon_function_exists():
-    import scout_bot
-    # 1. _revenue_tracker daemon exists and is callable
-    if not hasattr(scout_bot, "_revenue_tracker"):
-        return False, "_revenue_tracker function not found on scout_bot module"
-    if not callable(scout_bot._revenue_tracker):
-        return False, "_revenue_tracker is not callable"
-    # 2. _format_revenue_alert formatter exists
-    if not hasattr(scout_bot, "_format_revenue_alert"):
-        return False, "_format_revenue_alert formatter not found on scout_bot module"
-    if not callable(scout_bot._format_revenue_alert):
-        return False, "_format_revenue_alert is not callable"
-    # 3. Threshold key for check hour is wired
+    # _revenue_tracker background daemon was removed in P4.1 (was behind
+    # REVENUE_TRACKER_ENABLED=false and never ran in production).  The
+    # threshold config keys must still be present because the force-run path
+    # (@Scout force revenue) reads them at call time.
     import scout_agent
     thresholds = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
     if "revenue_tracker_check_hour_ct" not in thresholds:
         return False, "revenue_tracker_check_hour_ct missing from signals config"
     if "revenue_tracker_publisher_min_delta" not in thresholds:
         return False, "revenue_tracker_publisher_min_delta missing from signals config"
-    return True, "_revenue_tracker daemon and _format_revenue_alert formatter registered with config keys"
+    return True, "revenue_tracker threshold config keys present for force-run path"
 
 
 @test("intraday_revenue_total_query_function_exists_on_scout_agent")
@@ -1111,27 +1103,18 @@ def test_intraday_revenue_total_query_exists():
     return True, "_query_intraday_revenue_total callable, shared _query_revenue_baseline present"
 
 
-@test("projection_autocheck_monitor_registered")
+@test("projection_autocheck_config_and_state_intact")
 def test_projection_autocheck_monitor_registered():
-    """PLAN.md Step 7 — autonomous projection autocheck wired end-to-end.
+    """Projection autocheck state helpers, routing, and config keys must survive P4.1.
 
-    Asserts:
-      (a) _projection_autocheck_monitor + formatters live on scout_bot
-      (b) state helpers live on scout_state
-      (c) _route_channel('qa') resolves to #sidd-qa (_SCOUT_HQ_CHANNEL)
-      (d) threshold config keys are present
-      (e) _start_daemon registration line exists in scout_bot.py source
+    The _projection_autocheck_monitor background daemon was removed in P4.1
+    (was behind PROJECTION_AUTOCHECK_ENABLED=false and never ran in production).
+    The durable pieces that still matter are verified here:
+      (a) state helpers live on scout_state (persist slot across restarts)
+      (b) _route_channel('qa') resolves to #sidd-qa (_SCOUT_HQ_CHANNEL)
+      (c) threshold config keys are present
     """
-    import scout_bot, scout_state, pathlib
-
-    if not hasattr(scout_bot, "_projection_autocheck_monitor"):
-        return False, "_projection_autocheck_monitor missing on scout_bot"
-    if not callable(scout_bot._projection_autocheck_monitor):
-        return False, "_projection_autocheck_monitor not callable"
-
-    for fn in ("_format_projection_autocheck_fire", "_format_projection_autocheck_eod"):
-        if not hasattr(scout_bot, fn) or not callable(getattr(scout_bot, fn)):
-            return False, f"{fn} missing/not callable on scout_bot"
+    import scout_bot, scout_state
 
     for fn in ("_load_projection_autocheck_slot", "_save_projection_autocheck_slot"):
         if not hasattr(scout_state, fn) or not callable(getattr(scout_state, fn)):
@@ -1167,11 +1150,7 @@ def test_projection_autocheck_monitor_registered():
         if k not in sig:
             return False, f"signals config missing {k!r}"
 
-    src = pathlib.Path(scout_bot.__file__).read_text()
-    if "_start_daemon(_projection_autocheck_monitor" not in src:
-        return False, "_start_daemon registration for _projection_autocheck_monitor not found"
-
-    return True, "autocheck monitor + helpers + qa route + config + registration all wired"
+    return True, "autocheck state helpers + qa route + config keys intact after P4.1 cleanup"
 
 
 @test("intraday_revenue_by_publisher_query_function_exists_on_scout_agent")
@@ -2276,26 +2255,30 @@ def test_export_surface_importable_from_scout_agent():
     return True, f"All {len(expected)} extraction-surface symbols importable & callable ✓"
 
 
-@test("cvr_anomaly_monitor_registered_as_required_daemon")
+@test("cvr_anomaly_expiration_force_run_query_functions_present")
 def test_cvr_anomaly_monitor_registered_as_required_daemon():
-    """cvr-anomaly-monitor and expiration-monitor must register via _start_daemon in main().
-
-    _start_daemon adds daemons to _REQUIRED_DAEMONS so thread watchdog and health
-    status both see them. Bypassing it with raw threading.Thread makes silent breakage
-    invisible to the health system. Verified via source inspection (runtime set is
-    empty at import time — same pattern as the existing heartbeat registration test).
+    """cvr/expiration background daemons were removed in P4.1 (SCOUT_INPROC_*=false,
+    never ran in production).  The force-run path (@Scout force cvr/expiration) must
+    still work — verified by confirming the query functions are importable and that
+    _set_force_monitor_fn wires them in main().
     """
     import pathlib
+    import scout_bot
+    # Query functions must still be reachable (imported from scout_ch)
+    for fn in ("_query_cvr_anomaly", "_query_expiring_campaigns"):
+        if not hasattr(scout_bot, fn):
+            return False, f"{fn} missing on scout_bot — force-run path broken"
+    # _set_force_monitor_fn calls for cvr and expiration must exist in main()
     src = (pathlib.Path(__file__).parent / "scout_bot.py").read_text()
     main_section = src.split("def main()")[1].split("\ndef ")[0]
     missing = []
-    if 'name="cvr-anomaly-monitor"' not in main_section:
-        missing.append("cvr-anomaly-monitor")
-    if 'name="expiration-monitor"' not in main_section:
-        missing.append("expiration-monitor")
+    if '"cvr"' not in main_section:
+        missing.append("cvr force-monitor registration")
+    if '"expiration"' not in main_section:
+        missing.append("expiration force-monitor registration")
     if missing:
-        return False, f"Not registered via _start_daemon in main(): {missing}"
-    return True, "cvr-anomaly-monitor and expiration-monitor registered via _start_daemon ✓"
+        return False, f"force-run wiring absent from main(): {missing}"
+    return True, "cvr + expiration force-run query functions present and wired in main() ✓"
 
 
 @test("cvr_anomaly_and_expiration_agent_tools_in_tool_map")
