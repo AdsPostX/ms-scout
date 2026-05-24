@@ -1553,63 +1553,84 @@ def select_offers(
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-def post_digest(dry_run: bool = False, is_force: bool = False):
-    """Select top offers and post the offer digest to Slack.
+def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) -> dict | None:
+    """Run the digest pipeline and return Slack blocks as a serializable dict.
 
-    Event-driven: posts when new offers are detected OR on Mondays (weekly review).
-    Force=True bypasses all gates and always posts to #scout-qa.
-    Channel: #scout-offers in production, #scout-qa in dev/force.
+    Returns None when the event gate decides there is nothing to post (no new
+    offers, not Monday, not forced).  The caller is responsible for posting to
+    Slack.
+
+    Return shape::
+
+        {
+            "blocks":          list,   # Slack Block Kit JSON
+            "fallback":        str,    # plain-text fallback
+            "total_selected":  int,
+            "new_offer_count": int,
+            "networks_active": int,
+            "run_date":        str,    # e.g. "Jun 3"
+        }
     """
-    from slack_sdk.web import WebClient
-
-    now      = datetime.now()
-    is_monday = now.weekday() == 0  # Monday = 0
-
-    # ── Load all external data once — no redundant calls ─────────────────────
     from scout_agent import _get_benchmarks, SCOUT_THRESHOLDS
 
-    payout_cache     = json.loads(PAYOUT_CACHE.read_text()) if PAYOUT_CACHE.exists() else {}
-    ms_campaigns     = get_active_ms_campaigns()
-    benchmarks       = _get_benchmarks()
-    # PR 18: offers_per_network now from config so the team can tune without code change.
+    now = datetime.now()
+    is_monday = now.weekday() == 0
+
+    payout_cache = json.loads(PAYOUT_CACHE.read_text()) if PAYOUT_CACHE.exists() else {}
+    ms_campaigns = get_active_ms_campaigns()
+    benchmarks   = _get_benchmarks()
     _offers_per_network = int(SCOUT_THRESHOLDS.get("digest", {}).get("offers_per_network", 3))
     offers_by_network, sel_meta = select_offers(
-        n_per_network=_offers_per_network, ms_campaigns=ms_campaigns, benchmarks=benchmarks, force=is_force
+        n_per_network=_offers_per_network, ms_campaigns=ms_campaigns,
+        benchmarks=benchmarks, force=is_force,
     )
 
     total_selected = sel_meta["total_selected"]
     if total_selected == 0:
-        log.info("No offers to surface — skipping digest.")
+        log.info("No offers to surface — digest payload empty.")
         if is_force:
             raise RuntimeError(
                 f"0 offers selected from {sel_meta['total_offers']} total "
                 f"({sel_meta['skipped_in_ms']} in-platform filtered, "
                 f"{sel_meta['skipped_no_score']} below-threshold/state)"
             )
-        return
+        return None
 
-    # ── Diff detection: new offers since last scraper run ────────────────────
+    # Diff detection: new offers since last scraper run
     new_offer_keys: set = set()
     try:
         prev_data = json.loads(OFFERS_PREVIOUS_FILE.read_text())
         prev_keys = {o["_unique_key"] for o in prev_data if o.get("_unique_key")}
-        curr_keys = {o["_unique_key"] for item in offers_by_network.values() for _, o in item if o.get("_unique_key")}
+        curr_keys = {
+            o["_unique_key"]
+            for item in offers_by_network.values()
+            for _, o in item
+            if o.get("_unique_key")
+        }
         new_offer_keys = curr_keys - prev_keys
     except FileNotFoundError:
         log.warning("[digest] offers_previous.json missing — treating all offers as new")
-        new_offer_keys = {o["_unique_key"] for item in offers_by_network.values() for _, o in item if o.get("_unique_key")}
+        new_offer_keys = {
+            o["_unique_key"]
+            for item in offers_by_network.values()
+            for _, o in item
+            if o.get("_unique_key")
+        }
     except json.JSONDecodeError:
         log.warning("[digest] offers_previous.json corrupt — treating all offers as new")
-        new_offer_keys = {o["_unique_key"] for item in offers_by_network.values() for _, o in item if o.get("_unique_key")}
+        new_offer_keys = {
+            o["_unique_key"]
+            for item in offers_by_network.values()
+            for _, o in item
+            if o.get("_unique_key")
+        }
 
-    # ── Event-driven gate: post only when meaningful ──────────────────────────
-    # Skip if: no new offers AND not Monday (weekly review) AND not forced
-    if not dry_run and not is_force:
+    # Event-driven gate: skip when no new offers, not Monday, not forced
+    if not is_force and not skip_event_gate:
         if not new_offer_keys and not is_monday:
-            log.info("[digest] no new offers and not Monday — skipping post")
-            return
+            log.info("[digest] no new offers and not Monday — skipping payload")
+            return None
 
-    # Flatten for image prefetch
     all_scored = [item for v in offers_by_network.values() for item in v]
     log.info("Prefetching offer images…")
     offer_images = _prefetch_offer_images(all_scored)
@@ -1617,12 +1638,14 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
     log.info(f"Images found: {found}/{len(all_scored)}")
 
     run_date = now.strftime("%b %-d")
-    blocks   = build_digest_blocks(offers_by_network, payout_cache, ms_campaigns, benchmarks, run_date, offer_images=offer_images, sel_meta=sel_meta)
+    blocks = build_digest_blocks(
+        offers_by_network, payout_cache, ms_campaigns, benchmarks,
+        run_date, offer_images=offer_images, sel_meta=sel_meta,
+    )
 
     # Prepend NEW THIS WEEK section
     new_block: list = []
     if new_offer_keys:
-        # Group new offers by network for per-network display lines
         new_by_network: dict[str, list[str]] = {}
         for network, scored in offers_by_network.items():
             for _s, o in scored:
@@ -1650,10 +1673,7 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
         ]
     blocks = new_block + blocks
 
-    # ── Sourcing intelligence section (appended after offer list) ─────────────
-    # Runs 3 signals against the full offer inventory (not just this week's
-    # selected offers).  Fatigue budget: at most ONE proactive section per post.
-    # Priority: new_offers → seasonal → payout_upgrades.
+    # Sourcing intelligence (appended after offer list, at most one section)
     try:
         all_offers_flat = _load_offers()
         sourcing_signals = _run_sourcing_signals(all_offers_flat)
@@ -1673,18 +1693,41 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
         f"🎯 Scout Signal — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
     )
 
+    return {
+        "blocks":          blocks,
+        "fallback":        fallback,
+        "total_selected":  total_selected,
+        "new_offer_count": len(new_offer_keys),
+        "networks_active": len(offers_by_network),
+        "run_date":        run_date,
+    }
+
+
+def post_digest(dry_run: bool = False, is_force: bool = False):
+    """Select top offers and post the offer digest to Slack.
+
+    Event-driven: posts when new offers are detected OR on Mondays (weekly review).
+    Force=True bypasses all gates and always posts to #scout-qa.
+    Channel: #scout-offers in production, #scout-qa in dev/force.
+    """
+    from slack_sdk.web import WebClient
+
+    payload = build_digest_payload(is_force=is_force, skip_event_gate=dry_run)
+    if payload is None:
+        return
+
     if dry_run:
-        print(json.dumps(blocks, indent=2))
+        print(json.dumps(payload["blocks"], indent=2))
         return
 
     channel = _digest_channel(force=is_force)
-    web  = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+    web = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
     from scout_slack_safe import guard_web_client
     guard_web_client(web)
     resp = web.chat_postMessage(
         channel=channel,
-        text=fallback,
-        blocks=blocks,
+        text=payload["fallback"],
+        blocks=payload["blocks"],
         unfurl_links=False,
         unfurl_media=False,
     )
