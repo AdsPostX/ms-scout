@@ -265,9 +265,8 @@ _ENTITY_OVERRIDES_PATH = pathlib.Path(__file__).parent / "data" / "entity_overri
 def _load_entity_overrides() -> dict:
     """Load publisher/advertiser knowledge store. Returns empty structure if missing or corrupt.
 
-    Harvester-authored entries (added_by == "harvester") are silently excluded at read time.
-    The harvester auto-write path is separately gated by HARVESTER_AUTO_WRITE_ENABLED, but
-    legacy harvester rows on disk are filtered here so they never reach LLM context.
+    Harvester-authored entries (added_by == "harvester") are silently excluded at read time
+    so any legacy rows on disk never reach LLM context.
     """
     try:
         if _ENTITY_OVERRIDES_PATH.exists():

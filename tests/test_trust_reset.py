@@ -6,7 +6,6 @@ Pins the behavior of:
   - forget_entity_note: drops the row and writes an audit jsonl
   - why_entity_note: returns the stored note with provenance + Slack receipt
   - _run_tool: injects _caller_user_id / _caller_permalink for record_/forget_
-  - context_harvester: HARVESTER_AUTO_WRITE_ENABLED gate (default off)
   - feedback helpers (scout_handlers): _maybe_append_ps, _feedback_log_row
 
 These tests do not require Slack or Anthropic API access. Filesystem-only.
@@ -162,26 +161,6 @@ class TestRunToolInjectsCaller(unittest.TestCase):
 
         self.assertNotIn("_caller_user_id", captured)
         self.assertNotIn("_caller_permalink", captured)
-
-
-class TestHarvesterAutoWriteGate(unittest.TestCase):
-    """Part 3.1 — HARVESTER_AUTO_WRITE_ENABLED defaults off; flipping it on
-    is the ONLY way the harvester can write to entity_overrides.json."""
-
-    def test_gate_default_false_does_not_save(self):
-        import context_harvester as ch
-        called = {"saved": False}
-
-        def fake_save(_overrides):
-            called["saved"] = True
-
-        with unittest.mock.patch.object(ch, "_save_entity_overrides", fake_save, create=True):
-            # Direct flag inspection — the env var default is "false"
-            self.assertNotEqual(
-                os.getenv("HARVESTER_AUTO_WRITE_ENABLED", "false").lower(),
-                "true",
-            )
-        self.assertFalse(called["saved"])
 
 
 class TestFeedbackHelpers(unittest.TestCase):
