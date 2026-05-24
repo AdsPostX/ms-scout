@@ -45,6 +45,15 @@ from scout_images import (  # noqa: F401 — backward compat re-exports
 
 load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 
+# Register the canonical geo normalizer with scout_core.contracts so any
+# NormalizedOffer.normalize_geo(...) call resolves to the same implementation
+# offer_scraper uses for Notion writes. Producers (this module + demand_feed_main)
+# own this wiring — scout_core stays unaware of offer_scraper to keep the
+# contracts layer import-cheap and dependency-free.
+from scout_core.contracts import set_geo_normalizer as _set_geo_normalizer
+from offer_scraper import normalize_geo as _normalize_geo
+_set_geo_normalizer(_normalize_geo)
+
 log = logging.getLogger("scout_agent")
 
 

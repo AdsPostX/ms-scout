@@ -40,6 +40,15 @@ log = logging.getLogger("demand_feed")
 _DATA_DIR = pathlib.Path(__file__).parent / "data"
 _DATA_DIR.mkdir(exist_ok=True)
 
+# Register the canonical geo normalizer with scout_core.contracts so any
+# NormalizedOffer.normalize_geo(...) call resolves to the same implementation
+# offer_scraper uses. Producers (this module + scout_agent) own this wiring;
+# scout_core stays unaware of offer_scraper to keep the contracts layer
+# import-cheap.
+from scout_core.contracts import set_geo_normalizer as _set_geo_normalizer
+from offer_scraper import normalize_geo as _normalize_geo
+_set_geo_normalizer(_normalize_geo)
+
 _SCRAPER_STATE = _DATA_DIR / "scraper_state.json"
 _OFFERS_FILE   = _DATA_DIR / "offers_latest.json"
 
