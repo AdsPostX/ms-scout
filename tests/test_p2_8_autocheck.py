@@ -138,8 +138,10 @@ class TestKillSwitchOff(unittest.TestCase):
                                        SCOUT_THRESHOLDS={})
         scout_ch_stub = _make_stub(
             "scout_ch",
+            _get_ch_client=ch_get_mock,
             project_today_revenue=MagicMock(return_value={"status": "ok"}),
             _query_intraday_revenue_total=MagicMock(return_value={}),
+            _query_intraday_revenue_by_publisher=MagicMock(return_value=[]),
         )
         scout_state_stub = _make_stub(
             "scout_state",

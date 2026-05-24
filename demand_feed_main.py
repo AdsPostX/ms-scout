@@ -315,7 +315,7 @@ def _projection_autocheck_daemon() -> None:
     import time as _time
     import pytz
     from datetime import datetime as _dt
-    from scout_agent import _get_ch_client
+    from scout_ch import _get_ch_client
     from scout_ch import project_today_revenue, _query_intraday_revenue_total
     from scout_state import (
         _load_projection_autocheck_slot,
@@ -577,16 +577,27 @@ def main() -> None:
                 else:
                     reason = "daily run"
                 log.info(f"[demand-feed] running offer fetch ({reason})")
+                _t0 = time.monotonic()
                 try:
+                    from scout_core.job_runs import record_job_run
                     _run()
+                    _dur = int((time.monotonic() - _t0) * 1000)
                     state["last_run_date"]    = today_str
                     state["last_success_ts"]  = datetime.now(timezone.utc).isoformat()
                     state["last_failure_ts"]    = None
                     state["last_failure_reason"] = None
                     _save_state(state)
+                    record_job_run("offer_scraper", status="success", duration_ms=_dur)
                     log.info("[demand-feed] done — offers_latest.json updated")
                     _alert_slack(":white_check_mark: daily scrape complete — offers_latest.json updated")
                 except Exception as e:
+                    _dur = int((time.monotonic() - _t0) * 1000)
+                    try:
+                        from scout_core.job_runs import record_job_run
+                        record_job_run("offer_scraper", status="error",
+                                       error=type(e).__name__, duration_ms=_dur)
+                    except Exception:
+                        pass
                     log.error(f"[demand-feed] scraper failed: {e}", exc_info=True)
                     _alert_slack(f":rotating_light: scrape failed — retrying in 1h: {e}")
                     # Don't update last_run_date — retry next cycle
@@ -712,9 +723,8 @@ def _revenue_tracker_daemon() -> None:
     import pytz
     from datetime import datetime as _dt
     from slack_sdk.web import WebClient
-    from scout_agent import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher
+    from scout_ch import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher, _get_ch_client
     from scout_state import _load_revenue_alert_state, _save_revenue_alert_date
-    from scout_ch import _get_ch_client
     from scout_core.job_runs import record_job_run
 
     _HQ_CHANNEL = "C0AQEECF800"  # #bot-qa fallback (matches scout_bot._SCOUT_HQ_CHANNEL)
@@ -911,7 +921,8 @@ def _run_shadow_monitor(
     import time as _time
     import pytz
     from datetime import datetime as _dt
-    from scout_agent import _get_ch_client, SCOUT_THRESHOLDS as _ST
+    from scout_ch import _get_ch_client
+    from scout_agent import SCOUT_THRESHOLDS as _ST
 
     while True:  # outer restart wrapper
         try:
