@@ -541,6 +541,17 @@ def main() -> None:
         "[demand-feed] projection-autocheck daemon started "
         "(kill switch: PROJECTION_AUTOCHECK_ENABLED)"
     )
+
+    for _monitor_fn, _monitor_name in [
+        (_cap_monitor_daemon, "cap-monitor"),
+        (_velocity_down_monitor_daemon, "velocity-down-monitor"),
+        (_ghost_monitor_daemon, "ghost-monitor"),
+        (_fill_monitor_daemon, "fill-monitor"),
+        (_cvr_anomaly_monitor_daemon, "cvr-anomaly-monitor"),
+        (_expiration_monitor_daemon, "expiration-monitor"),
+    ]:
+        threading.Thread(target=_monitor_fn, daemon=True, name=_monitor_name).start()
+    log.info("[demand-feed] hourly-shadow monitors started (kill switch: SCOUT_HOURLY_SHADOW_ENABLED)")
     log.info("[demand-feed] starting")
 
     while True:
@@ -885,6 +896,190 @@ def _post_harvest_audit(harvest_result: dict) -> None:
         log.info(f"[harvest] audit posted — {len(written)} written, {len(skipped)} skipped")
     except Exception as e:
         log.warning(f"[harvest] audit post failed (non-fatal): {e}")
+
+
+def _run_shadow_monitor(
+    *,
+    monitor_name: str,
+    config_key: str,
+    signal_fn,
+    format_fn,
+    load_state_fn,
+    save_state_fn,
+) -> None:
+    """Generic demand-feed daemon for hourly shadow monitors."""
+    import time as _time
+    import pytz
+    from datetime import datetime as _dt
+    from scout_agent import _get_ch_client, SCOUT_THRESHOLDS as _ST
+
+    while True:  # outer restart wrapper
+        try:
+            CT_TZ          = pytz.timezone("America/Chicago")
+            channel        = os.getenv("SCOUT_MONITOR_CHANNEL", "#scout-offers")
+            shadow_channel = os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa")
+            tag            = f"[{monitor_name}]"
+            last_shadow_slot = None
+
+            while True:  # inner poll loop
+                _time.sleep(300)
+                try:
+                    # Outer kill switch — entire framework disabled by default
+                    if os.getenv("SCOUT_HOURLY_SHADOW_ENABLED", "false").strip().lower() not in ("1", "true", "yes"):
+                        continue
+
+                    # Per-monitor kill switch
+                    if not _ST.get("signals", {}).get(f"{config_key}_monitor_enabled", False):
+                        continue
+
+                    check_hour = int(_ST.get("signals", {}).get(f"{config_key}_monitor_check_hour_ct", 9))
+                    now_ct      = _dt.now(CT_TZ)
+                    today_str   = now_ct.date().isoformat()
+                    shadow_on   = os.getenv("SCOUT_HOURLY_SHADOW_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+                    in_prod_window = (now_ct.hour == check_hour and now_ct.minute < 10)
+                    in_shadow_window = shadow_on
+
+                    if not in_prod_window and not in_shadow_window:
+                        continue
+
+                    prod_already_fired = in_prod_window and load_state_fn() == today_str
+                    shadow_slot = f"{today_str}T{now_ct.hour:02d}"
+                    shadow_already_fired = in_shadow_window and last_shadow_slot == shadow_slot
+
+                    if (
+                        (not in_prod_window or prod_already_fired)
+                        and (not in_shadow_window or shadow_already_fired)
+                    ):
+                        continue
+
+                    t0 = _time.monotonic()
+                    try:
+                        raw_results = signal_fn(_get_ch_client())
+                    except Exception as e:
+                        log.warning(f"{tag} signal query failed: {e}")
+                        from scout_core.job_runs import record_job_run
+                        record_job_run(monitor_name, status="error",
+                                       duration_ms=int((_time.monotonic() - t0) * 1000),
+                                       error=str(e)[:400])
+                        if in_shadow_window and not shadow_already_fired:
+                            last_shadow_slot = shadow_slot
+                        continue
+
+                    results = raw_results or []
+                    is_shadow_tick = (
+                        in_shadow_window
+                        and not shadow_already_fired
+                        and (not in_prod_window or prod_already_fired)
+                    )
+                    target_channel = shadow_channel if is_shadow_tick else channel
+
+                    duration_ms = int((_time.monotonic() - t0) * 1000)
+
+                    if not results:
+                        from scout_core.job_runs import record_job_run
+                        record_job_run(monitor_name, status="success", duration_ms=duration_ms)
+                        if is_shadow_tick:
+                            last_shadow_slot = shadow_slot
+                        log.info(f"{tag} no anomalies — staying silent.")
+                        continue
+
+                    fallback, blocks = format_fn(results)
+                    if not fallback:
+                        from scout_core.job_runs import record_job_run
+                        record_job_run(monitor_name, status="success", duration_ms=duration_ms)
+                        if is_shadow_tick:
+                            last_shadow_slot = shadow_slot
+                        continue
+
+                    from slack_sdk.web import WebClient as _WC
+                    web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
+                    web.chat_postMessage(channel=target_channel, text=fallback, blocks=blocks)
+
+                    from scout_core.job_runs import record_job_run
+                    record_job_run(monitor_name, status="success", duration_ms=duration_ms)
+
+                    if is_shadow_tick:
+                        last_shadow_slot = shadow_slot
+                        log.info(f"{tag} shadow-posted {shadow_slot} ({len(results)} items) → {target_channel}.")
+                    else:
+                        save_state_fn(today_str)
+                        log.info(f"{tag} posted alert for {today_str} ({len(results)} items).")
+
+                except Exception as e:
+                    log.warning(f"{tag} unexpected error: {e}")
+
+        except Exception as e:
+            log.error(f"{tag} fatal crash — restarting in 30s: {e}", exc_info=True)
+            import time as _t2; _t2.sleep(30)
+
+
+def _cap_monitor_daemon() -> None:
+    from scout_state import _load_cap_alert_state, _save_cap_alert_date
+    from scout_agent import _pulse_signal_cap
+    from scout_bot import _format_cap_alert
+    _run_shadow_monitor(
+        monitor_name="cap-monitor", config_key="cap",
+        signal_fn=_pulse_signal_cap, format_fn=_format_cap_alert,
+        load_state_fn=_load_cap_alert_state, save_state_fn=_save_cap_alert_date,
+    )
+
+
+def _velocity_down_monitor_daemon() -> None:
+    from scout_state import _load_velocity_down_alert_state, _save_velocity_down_alert_date
+    from scout_agent import _pulse_signal_velocity
+    from scout_bot import _format_velocity_down_alert
+    def _signal_down_only(ch):
+        rows = _pulse_signal_velocity(ch)
+        return [v for v in rows if v.get("direction") == "down"]
+    _run_shadow_monitor(
+        monitor_name="velocity-down-monitor", config_key="velocity_down",
+        signal_fn=_signal_down_only, format_fn=_format_velocity_down_alert,
+        load_state_fn=_load_velocity_down_alert_state, save_state_fn=_save_velocity_down_alert_date,
+    )
+
+
+def _ghost_monitor_daemon() -> None:
+    from scout_state import _load_ghost_alert_state, _save_ghost_alert_date
+    from scout_agent import _pulse_signal_ghost
+    from scout_bot import _format_ghost_alert
+    _run_shadow_monitor(
+        monitor_name="ghost-monitor", config_key="ghost",
+        signal_fn=_pulse_signal_ghost, format_fn=_format_ghost_alert,
+        load_state_fn=_load_ghost_alert_state, save_state_fn=_save_ghost_alert_date,
+    )
+
+
+def _fill_monitor_daemon() -> None:
+    from scout_state import _load_fill_alert_state, _save_fill_alert_date
+    from scout_agent import _pulse_signal_fill_rate
+    from scout_bot import _format_fill_alert
+    _run_shadow_monitor(
+        monitor_name="fill-monitor", config_key="fill",
+        signal_fn=_pulse_signal_fill_rate, format_fn=_format_fill_alert,
+        load_state_fn=_load_fill_alert_state, save_state_fn=_save_fill_alert_date,
+    )
+
+
+def _cvr_anomaly_monitor_daemon() -> None:
+    from scout_state import _load_cvr_anomaly_alert_state, _save_cvr_anomaly_alert_date
+    from scout_ch import _query_cvr_anomaly
+    from scout_bot import _format_cvr_alert
+    _run_shadow_monitor(
+        monitor_name="cvr-anomaly-monitor", config_key="cvr_anomaly",
+        signal_fn=_query_cvr_anomaly, format_fn=_format_cvr_alert,
+        load_state_fn=_load_cvr_anomaly_alert_state, save_state_fn=_save_cvr_anomaly_alert_date,
+    )
+
+
+def _expiration_monitor_daemon() -> None:
+    from scout_state import _load_expiration_alert_state, _save_expiration_alert_date
+    from scout_ch import _query_expiring_campaigns
+    from scout_bot import _format_expiration_alert
+    _run_shadow_monitor(
+        monitor_name="expiration-monitor", config_key="expiration",
+        signal_fn=_query_expiring_campaigns, format_fn=_format_expiration_alert,
+        load_state_fn=_load_expiration_alert_state, save_state_fn=_save_expiration_alert_date,
+    )
 
 
 if __name__ == "__main__":
