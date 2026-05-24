@@ -2950,7 +2950,8 @@ def main():
     # Silent per-signal monitors — migrated to demand-feed (P2.6).
     # Only run in-process when SCOUT_INPROC_SHADOW=true (staging validation only).
     # Default is false: monitors run in demand_feed_main, gated by SCOUT_HOURLY_SHADOW_ENABLED.
-    if os.getenv("SCOUT_INPROC_SHADOW", "false").lower() != "false":
+    _ON = ("1", "true", "yes")
+    if os.getenv("SCOUT_INPROC_SHADOW", "false").strip().lower() in _ON:
         _start_daemon(_cap_monitor,           name="cap-monitor",           args=(web_client,))
         _start_daemon(_velocity_down_monitor, name="velocity-down-monitor", args=(web_client,))
         _start_daemon(_ghost_monitor,         name="ghost-monitor",         args=(web_client,))
@@ -2962,13 +2963,13 @@ def main():
     # Hourly autocheck of project_today_revenue → #sidd-qa across 10-17 CT,
     # plus a 17:30 CT EOD rollup. Moved to demand-feed (P2.8).
     # Set SCOUT_INPROC_AUTOCHECK=true to re-enable in-process (e.g. local dev).
-    if os.getenv("SCOUT_INPROC_AUTOCHECK", "false").lower() != "false":
+    if os.getenv("SCOUT_INPROC_AUTOCHECK", "false").strip().lower() in _ON:
         _start_daemon(_projection_autocheck_monitor,
                       name="projection-autocheck-monitor", args=(web_client,))
     else:
         log.info("[scout] projection-autocheck moved to demand-feed (SCOUT_INPROC_AUTOCHECK=false)")
     _start_daemon(_digest_poster,         name="digest-poster",         args=(web_client,))
-    if os.getenv("SCOUT_INPROC_HARVESTER", "false").lower() != "false":
+    if os.getenv("SCOUT_INPROC_HARVESTER", "false").strip().lower() in _ON:
         _start_daemon(_nightly_harvest, name="context-harvest")
     else:
         log.info("[scout] nightly-harvest moved to demand-feed (SCOUT_INPROC_HARVESTER=false)")
@@ -2982,8 +2983,8 @@ def main():
     # PR 25 / P2.5 — revenue tracker moved to demand-feed.
     # SCOUT_INPROC_REVENUE_TRACKER=true re-enables the in-process daemon for
     # parallel validation (2-week window) before full cutover.
-    if os.getenv("SCOUT_INPROC_REVENUE_TRACKER", "false").lower() != "false":
-        from scout_agent import _get_ch_client as _ch_factory
+    if os.getenv("SCOUT_INPROC_REVENUE_TRACKER", "false").strip().lower() in _ON:
+        from scout_ch import _get_ch_client as _ch_factory
         _start_daemon(_revenue_tracker, name="revenue-tracker", args=(web_client, _ch_factory()))
     else:
         log.info("[scout] revenue-tracker moved to demand-feed (SCOUT_INPROC_REVENUE_TRACKER=false)")
