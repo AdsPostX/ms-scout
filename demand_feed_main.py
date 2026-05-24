@@ -25,6 +25,7 @@ import pathlib
 import socketserver
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -54,6 +55,7 @@ _set_geo_normalizer(_normalize_geo)
 
 _SCRAPER_STATE = _DATA_DIR / "scraper_state.json"
 _OFFERS_FILE   = _DATA_DIR / "offers_latest.json"
+_QUEUE_FILE    = _DATA_DIR / "queue.json"
 
 # 06:00 CT in UTC offset hours (CST = UTC-6, CDT = UTC-5).
 # zoneinfo handles DST automatically; fall back to a month-based approximation
@@ -212,6 +214,40 @@ class _OffersHandler(http.server.BaseHTTPRequestHandler):
             _write_json(self, 200, payload)
             return
 
+        if self.path == "/queue/pending":
+            drafts = _load_queue()
+            pending = [d for d in drafts.values()
+                       if d.get("approval", {}).get("state") == "pending"]
+            _write_json(self, 200, {"drafts": pending, "count": len(pending)})
+            return
+
+        if self.path.startswith("/queue/"):
+            # GET /queue/<draft_id>
+            draft_id = self.path[len("/queue/"):]
+            if draft_id:
+                drafts = _load_queue()
+                draft = drafts.get(draft_id)
+                if draft is None:
+                    _write_json(self, 404, {"error": f"draft not found: {draft_id}"})
+                else:
+                    _write_json(self, 200, draft)
+                return
+
+        self.send_error(404)
+
+    def do_POST(self):
+        if self.path == "/queue/draft":
+            _handle_queue_create_draft(self)
+            return
+        if self.path == "/queue/approve":
+            _handle_queue_approve(self)
+            return
+        if self.path == "/queue/reject":
+            _handle_queue_reject(self)
+            return
+        if self.path == "/campaigns/create":
+            _handle_campaigns_create(self)
+            return
         self.send_error(404)
 
     def log_message(self, *args):  # suppress request logs
@@ -1091,6 +1127,246 @@ def _expiration_monitor_daemon() -> None:
         signal_fn=_query_expiring_campaigns, format_fn=_format_expiration_alert,
         load_state_fn=_load_expiration_alert_state, save_state_fn=_save_expiration_alert_date,
     )
+
+
+# ── Queue storage ─────────────────────────────────────────────────────────────
+# Persists QueueDraft rows to data/queue.json on Render disk.
+# Atomic writes via a .tmp rename so a crash mid-write never corrupts state.
+# Concurrency: the HTTP server runs in a single-threaded socketserver loop
+# (socketserver.TCPServer defaults to non-threaded), so no lock is needed here.
+# If the server is ever switched to ThreadingTCPServer, add threading.Lock().
+
+_QUEUE_LOCK = threading.Lock()
+
+
+def _load_queue() -> dict:
+    """Return {draft_id: draft_dict} from queue.json, or {} on any error."""
+    try:
+        return json.loads(_QUEUE_FILE.read_text()).get("drafts", {})
+    except Exception:
+        return {}
+
+
+def _save_queue(drafts: dict) -> None:
+    """Atomically persist the drafts dict to queue.json."""
+    tmp = _QUEUE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"drafts": drafts}, indent=2))
+    tmp.replace(_QUEUE_FILE)
+
+
+def _read_body(handler: http.server.BaseHTTPRequestHandler) -> Optional[dict]:
+    """Read and parse JSON body from a request. Returns None on bad input."""
+    try:
+        length = int(handler.headers.get("Content-Length", 0))
+        if length <= 0:
+            return {}
+        raw = handler.rfile.read(length)
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _fire_campaign_creation(draft: dict) -> dict:
+    """Hand a QueueDraft to the MS Platform campaign creation webhook.
+
+    Returns {"status": "dry_run"} when CAMPAIGN_CREATE_DRY_RUN=true or
+    when CAMPAIGN_CREATE_WEBHOOK_URL is unset — which is the default for
+    safety. Set both env vars in Render after Vamsee signs off on dry-run output.
+    """
+    webhook_url = os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "")
+    dry_run = os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes")
+
+    if dry_run or not webhook_url:
+        log.info(
+            "[queue] DRY_RUN campaign creation for draft_id=%s offer=%s",
+            draft.get("draft_id"),
+            draft.get("offer", {}).get("offer_id"),
+        )
+        return {"status": "dry_run", "draft_id": draft.get("draft_id")}
+
+    try:
+        import requests as _req
+        payload = {
+            "draft_id": draft.get("draft_id"),
+            "offer": draft.get("offer", {}),
+            "ai_copy": draft.get("ai_copy", {}),
+            "approver": draft.get("approval", {}).get("approver", ""),
+            "approved_at": draft.get("approval", {}).get("approved_at", ""),
+            "dry_run": False,
+        }
+        resp = _req.post(webhook_url, json=payload, timeout=10)
+        resp.raise_for_status()
+        log.info("[queue] campaign creation fired for draft_id=%s → %s",
+                 draft.get("draft_id"), resp.status_code)
+        return {"status": "fired", "draft_id": draft.get("draft_id"),
+                "platform_status": resp.status_code}
+    except Exception as exc:
+        log.error("[queue] campaign creation webhook failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
+# ── Queue HTTP endpoints ───────────────────────────────────────────────────────
+# Wired into _OffersHandler.do_POST / do_GET below.
+
+def _handle_queue_create_draft(handler: http.server.BaseHTTPRequestHandler) -> None:
+    """POST /queue/draft — create a new QueueDraft from offer JSON + optional copy."""
+    body = _read_body(handler)
+    if body is None:
+        _write_json(handler, 400, {"error": "invalid JSON body"})
+        return
+
+    offer_dict = body.get("offer")
+    if not offer_dict or not isinstance(offer_dict, dict):
+        _write_json(handler, 400, {"error": "missing required field: offer"})
+        return
+
+    # Require at minimum network + offer_id so the draft is addressable.
+    if not offer_dict.get("network") or not offer_dict.get("offer_id"):
+        _write_json(handler, 400, {"error": "offer must include network and offer_id"})
+        return
+
+    draft_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    draft = {
+        "draft_id": draft_id,
+        "offer": offer_dict,
+        "ai_copy": body.get("ai_copy") or {},
+        "estimated_rpm": body.get("estimated_rpm"),
+        "perf_ctx": body.get("perf_ctx") or "",
+        "risk_flag": body.get("risk_flag") or "",
+        "approval": {
+            "state": "pending",
+            "approver": "",
+            "approved_at": None,
+            "note": "",
+        },
+        "created_at": now,
+    }
+
+    with _QUEUE_LOCK:
+        drafts = _load_queue()
+        drafts[draft_id] = draft
+        _save_queue(drafts)
+
+    log.info("[queue] created draft_id=%s offer=%s/%s",
+             draft_id, offer_dict.get("network"), offer_dict.get("offer_id"))
+    _write_json(handler, 201, {"draft_id": draft_id, "status": "pending", "created_at": now})
+
+
+def _handle_queue_approve(handler: http.server.BaseHTTPRequestHandler) -> None:
+    """POST /queue/approve — approve a pending draft; fires campaign creation."""
+    body = _read_body(handler)
+    if body is None:
+        _write_json(handler, 400, {"error": "invalid JSON body"})
+        return
+
+    draft_id = (body.get("draft_id") or "").strip()
+    approver = (body.get("approver") or "").strip()
+    if not draft_id:
+        _write_json(handler, 400, {"error": "missing required field: draft_id"})
+        return
+    if not approver:
+        _write_json(handler, 400, {"error": "missing required field: approver"})
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    with _QUEUE_LOCK:
+        drafts = _load_queue()
+        draft = drafts.get(draft_id)
+        if draft is None:
+            _write_json(handler, 404, {"error": f"draft not found: {draft_id}"})
+            return
+
+        current_state = draft.get("approval", {}).get("state", "pending")
+        if current_state == "approved":
+            _write_json(handler, 409, {"error": "draft already approved"})
+            return
+        if current_state == "rejected":
+            _write_json(handler, 409, {"error": "draft is rejected; create a new draft"})
+            return
+
+        draft["approval"]["state"] = "approved"
+        draft["approval"]["approver"] = approver
+        draft["approval"]["approved_at"] = now
+        draft["approval"]["note"] = body.get("note") or ""
+        drafts[draft_id] = draft
+        _save_queue(drafts)
+
+    log.info("[queue] approved draft_id=%s by %s", draft_id, approver)
+
+    campaign_result = _fire_campaign_creation(draft)
+    _write_json(handler, 200, {
+        "draft_id": draft_id,
+        "status": "approved",
+        "approved_at": now,
+        "campaign": campaign_result,
+    })
+
+
+def _handle_queue_reject(handler: http.server.BaseHTTPRequestHandler) -> None:
+    """POST /queue/reject — reject a pending draft."""
+    body = _read_body(handler)
+    if body is None:
+        _write_json(handler, 400, {"error": "invalid JSON body"})
+        return
+
+    draft_id = (body.get("draft_id") or "").strip()
+    approver = (body.get("approver") or "").strip()
+    if not draft_id:
+        _write_json(handler, 400, {"error": "missing required field: draft_id"})
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    with _QUEUE_LOCK:
+        drafts = _load_queue()
+        draft = drafts.get(draft_id)
+        if draft is None:
+            _write_json(handler, 404, {"error": f"draft not found: {draft_id}"})
+            return
+
+        current_state = draft.get("approval", {}).get("state", "pending")
+        if current_state == "rejected":
+            _write_json(handler, 409, {"error": "draft already rejected"})
+            return
+
+        draft["approval"]["state"] = "rejected"
+        draft["approval"]["approver"] = approver
+        draft["approval"]["approved_at"] = now
+        draft["approval"]["note"] = body.get("note") or ""
+        drafts[draft_id] = draft
+        _save_queue(drafts)
+
+    log.info("[queue] rejected draft_id=%s by %s", draft_id, approver or "(anonymous)")
+    _write_json(handler, 200, {"draft_id": draft_id, "status": "rejected", "rejected_at": now})
+
+
+def _handle_campaigns_create(handler: http.server.BaseHTTPRequestHandler) -> None:
+    """POST /campaigns/create — fire a campaign from an approved draft.
+
+    Callers may use this directly (platform page, Slack /scout queue launch)
+    instead of going through POST /queue/approve. If draft_id is provided and
+    the draft is in the queue, it is marked approved before firing.
+    """
+    body = _read_body(handler)
+    if body is None:
+        _write_json(handler, 400, {"error": "invalid JSON body"})
+        return
+
+    draft_id = (body.get("draft_id") or "").strip()
+
+    with _QUEUE_LOCK:
+        drafts = _load_queue()
+        draft = drafts.get(draft_id) if draft_id else None
+
+    if draft_id and draft is None:
+        _write_json(handler, 404, {"error": f"draft not found: {draft_id}"})
+        return
+
+    target = draft if draft is not None else body
+    result = _fire_campaign_creation(target)
+    _write_json(handler, 200 if result.get("status") != "error" else 502, result)
 
 
 if __name__ == "__main__":
