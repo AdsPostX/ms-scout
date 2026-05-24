@@ -10,12 +10,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-# Patch environment before importing scout_slack_ui so module-level code doesn't crash
 os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-fake")
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-fake")
 os.environ.setdefault("CLICKHOUSE_HOST", "localhost")
 
-from scout_slack_ui import _build_queue_card, _MAX_QUEUE_ITEMS_RENDERED  # noqa: E402
+from scout_ui_kit import _build_queue_card, _MAX_QUEUE_ITEMS_RENDERED  # noqa: E402
 
 
 def _all_text(blocks: list) -> str:

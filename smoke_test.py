@@ -201,7 +201,7 @@ def test_rpm_context_blocks():
     Block Kit structure for both has_history=True and has_history=False cases.
     """
     try:
-        from scout_slack_ui import _build_advertiser_rpm_context_blocks
+        from scout_ui_kit import _build_advertiser_rpm_context_blocks
         # has_history=False → empty list
         empty = _build_advertiser_rpm_context_blocks({"has_history": False}, scout_estimate=50)
         if empty != []:
@@ -289,7 +289,7 @@ def test_pulse_summary_shape():
 @test("_build_signal_header() — correct block structure with and without context")
 def test_build_signal_header():
     try:
-        from scout_slack_ui import _build_signal_header
+        from scout_ui_kit import _build_signal_header
         # With context — should return 2 blocks
         blocks = _build_signal_header("🔴", "DARK OFFERS — 3 active", "6K impressions burning")
         if len(blocks) != 2:
@@ -312,7 +312,7 @@ def test_build_signal_header():
 @test("_build_item_card() — fields layout when right_body set, plain text when empty")
 def test_build_item_card():
     try:
-        from scout_slack_ui import _build_item_card
+        from scout_ui_kit import _build_item_card
         # With right_body → section.fields
         blocks = _build_item_card("TextNow", "*-50%*  ·  $20K/mo", "*Top Advertiser*\nCapital One", "TextNow paused")
         if blocks[0]["type"] != "section":
@@ -341,7 +341,7 @@ def test_build_item_card():
 @test("_build_publisher_card() — type guard, attribution branch, context join")
 def test_build_publisher_card():
     try:
-        from scout_slack_ui import _build_publisher_card
+        from scout_ui_kit import _build_publisher_card
         # With attribution — should use section.fields
         blocks = _build_publisher_card("TextNow", "-50", "$20K", attribution="Capital One",
                                         hypothesis="TextNow paused", gaps=[("Capital One", 2.50)])

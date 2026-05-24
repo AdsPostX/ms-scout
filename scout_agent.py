@@ -2682,11 +2682,8 @@ def get_queue_status() -> dict:
     Shared render path with App Home tab and /scout-queue — same data, same view.
     Returns a dict with 'blocks' (list) and 'text' (fallback string).
     """
-    # Deferred import — scout_slack_ui imports from scout_agent inside a function body
-    # (see _build_home_view at line ~1556), so we mirror that pattern here to avoid
-    # creating a circular import at module load time.
     from scout_notion import _fetch_notion_queue_items
-    from scout_slack_ui import _build_queue_card
+    from scout_ui_kit import _build_queue_card
 
     items = _fetch_notion_queue_items()
     blocks = _build_queue_card(items)
