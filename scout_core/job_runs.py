@@ -20,6 +20,18 @@ from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
+_UINT32_MAX = 2**32 - 1
+
+
+def _to_u32(value: Any) -> int:
+    """Clamp value into the ClickHouse UInt32 range so a bad input never
+    causes the entire row insert to be swallowed as a schema violation."""
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(n, _UINT32_MAX))
+
 
 # Column order matches the CREATE TABLE in migrations/2026_05_p2_3_job_runs.sql.
 # Keep these in sync if you add columns (additive only — never remove).
@@ -93,7 +105,7 @@ def record_job_run(
         status,
         error or "",
         payload_hash or "",
-        int(duration_ms or 0),
+        _to_u32(duration_ms),
     ]
     try:
         ch.insert("job_runs", [row], column_names=list(_JOB_RUNS_COLS))
@@ -129,7 +141,7 @@ def update_network_status(
             now,                              # last_successful_scrape
             None,                             # last_failure_ts
             "",                               # last_failure_reason
-            int(offer_count or 0),
+            _to_u32(offer_count),
             now,                              # updated_at
         ]
     else:
@@ -142,7 +154,7 @@ def update_network_status(
             epoch,
             now,
             (error or "")[:2000],             # cap reason length defensively
-            int(offer_count or 0),
+            _to_u32(offer_count),
             now,
         ]
     try:

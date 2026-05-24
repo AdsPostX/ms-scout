@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS per_network_status
     last_failure_ts          Nullable(DateTime64(3, 'UTC')),
     last_failure_reason      String DEFAULT '',
     last_offer_count         UInt32 DEFAULT 0,
-    updated_at               DateTime64(3, 'UTC') DEFAULT now64(3)
+    updated_at               DateTime64(6, 'UTC') DEFAULT now64(6)
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY network;
