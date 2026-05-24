@@ -2272,9 +2272,9 @@ def test_cvr_anomaly_monitor_registered_as_required_daemon():
     src = (pathlib.Path(__file__).parent / "scout_bot.py").read_text()
     main_section = src.split("def main()")[1].split("\ndef ")[0]
     missing = []
-    if '"cvr"' not in main_section:
+    if '_set_force_monitor_fn("cvr"' not in main_section and "_set_force_monitor_fn('cvr'" not in main_section:
         missing.append("cvr force-monitor registration")
-    if '"expiration"' not in main_section:
+    if '_set_force_monitor_fn("expiration"' not in main_section and "_set_force_monitor_fn('expiration'" not in main_section:
         missing.append("expiration force-monitor registration")
     if missing:
         return False, f"force-run wiring absent from main(): {missing}"
