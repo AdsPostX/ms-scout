@@ -127,13 +127,21 @@ class TestKillSwitchOff(unittest.TestCase):
 
         ch_get_mock = MagicMock(return_value=MagicMock())
 
-        scout_agent_stub = _stub("scout_agent", _get_ch_client=ch_get_mock)
-        scout_ch_stub = _stub(
+        def _make_stub(name: str, **attrs) -> types.ModuleType:
+            """Create a stub module WITHOUT installing it into sys.modules."""
+            mod = types.ModuleType(name)
+            for k, v in attrs.items():
+                setattr(mod, k, v)
+            return mod
+
+        scout_agent_stub = _make_stub("scout_agent", _get_ch_client=ch_get_mock,
+                                       SCOUT_THRESHOLDS={})
+        scout_ch_stub = _make_stub(
             "scout_ch",
             project_today_revenue=MagicMock(return_value={"status": "ok"}),
             _query_intraday_revenue_total=MagicMock(return_value={}),
         )
-        scout_state_stub = _stub(
+        scout_state_stub = _make_stub(
             "scout_state",
             _load_projection_autocheck_slot=MagicMock(return_value=None),
             _save_projection_autocheck_slot=MagicMock(),
@@ -143,7 +151,7 @@ class TestKillSwitchOff(unittest.TestCase):
             _append_projection_autocheck_fire=MagicMock(),
             _evict_stale_projection_autocheck_fires=MagicMock(),
         )
-        job_runs_stub = _stub("scout_core.job_runs", record_job_run=MagicMock())
+        job_runs_stub = _make_stub("scout_core.job_runs", record_job_run=MagicMock())
 
         with patch.dict("os.environ", {"PROJECTION_AUTOCHECK_ENABLED": "false"}), \
              patch.dict(sys.modules, {
