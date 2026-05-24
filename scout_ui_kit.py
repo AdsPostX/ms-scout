@@ -1049,11 +1049,15 @@ def _text_to_blocks(text: str) -> list:
                     code_text = "\n".join(fence_buf)
                     fence_buf = []
                     if list_buf:
-                        el = _flush_list(list_buf); list_buf = []
-                        if el: rt_elems.append(el)
+                        el = _flush_list(list_buf)
+                        list_buf = []
+                        if el:
+                            rt_elems.append(el)
                     if line_buf:
-                        el = _flush_section(line_buf); line_buf = []
-                        if el: rt_elems.append(el)
+                        el = _flush_section(line_buf)
+                        line_buf = []
+                        if el:
+                            rt_elems.append(el)
                     rt_elems.append({
                         "type": "rich_text_preformatted",
                         "elements": [{"type": "text", "text": code_text}],
@@ -1090,19 +1094,25 @@ def _text_to_blocks(text: str) -> list:
             if _BULLET_RE.match(stripped):
                 item_text = _BULLET_RE.sub('', stripped)
                 if line_buf:
-                    el = _flush_section(line_buf); line_buf = []
-                    if el: rt_elems.append(el)
+                    el = _flush_section(line_buf)
+                    line_buf = []
+                    if el:
+                        rt_elems.append(el)
                 list_buf.append(item_text)
                 continue
 
             if list_buf:
-                el = _flush_list(list_buf); list_buf = []
-                if el: rt_elems.append(el)
+                el = _flush_list(list_buf)
+                list_buf = []
+                if el:
+                    rt_elems.append(el)
 
             if not stripped:
                 if line_buf:
-                    el = _flush_section(line_buf); line_buf = []
-                    if el: rt_elems.append(el)
+                    el = _flush_section(line_buf)
+                    line_buf = []
+                    if el:
+                        rt_elems.append(el)
             else:
                 line_buf.append(stripped)
 
@@ -1115,10 +1125,12 @@ def _text_to_blocks(text: str) -> list:
             })
         if list_buf:
             el = _flush_list(list_buf)
-            if el: rt_elems.append(el)
+            if el:
+                rt_elems.append(el)
         if line_buf:
             el = _flush_section(line_buf)
-            if el: rt_elems.append(el)
+            if el:
+                rt_elems.append(el)
 
         return rt_elems, ctx_lines
 

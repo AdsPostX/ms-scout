@@ -1169,9 +1169,10 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
             feedback="reaction", query_hash=_placeholder_ts_sg,
             elapsed_seconds=_elapsed,
         )
+        _sg_final = [*_sg_blocks[:1], *offer_cards, *_sg_blocks[1:]] if offer_cards else _sg_blocks
         web.chat_update(
             channel=channel, ts=_placeholder_ts_sg,
-            text=_sg_fallback, blocks=_sg_blocks,
+            text=_sg_fallback, blocks=_sg_final,
         )
         log.info(f"Suggestion answered (opportunities) in {channel} (thread {thread_ts}): {query!r}")
         return
@@ -1603,9 +1604,10 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 feedback="reaction", query_hash=_placeholder_ts_ah,
                 elapsed_seconds=_elapsed,
             )
+            _ah3_final = [*_ah3_blocks[:1], *offer_cards, *_ah3_blocks[1:]] if offer_cards else _ah3_blocks
             web.chat_update(
                 channel=dm_channel, ts=_placeholder_ts_ah,
-                text=_ah3_fallback, blocks=_ah3_blocks,
+                text=_ah3_fallback, blocks=_ah3_final,
             )
         else:
             if response.payload and response.payload.get("type") == "text_with_context":
@@ -2642,9 +2644,10 @@ def _handle_event_impl(req: SocketModeRequest):
                 feedback="reaction", query_hash=msg_ts,
                 elapsed_seconds=_elapsed,
             )
+            _dm5_final = [*_dm5_blocks[:1], *offer_cards, *_dm5_blocks[1:]] if offer_cards else _dm5_blocks
             _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
-                text=_dm5_fallback, blocks=_dm5_blocks,
+                text=_dm5_fallback, blocks=_dm5_final,
                 unfurl_links=False,
             )
             _seed_feedback_reactions(web, channel, _post.get("ts", ""))
@@ -2796,10 +2799,11 @@ def _handle_event_impl(req: SocketModeRequest):
             feedback="reaction", query_hash=_placeholder_ts,
             elapsed_seconds=_elapsed,
         )
+        _ch7_final = [*_ch7_blocks[:1], *offer_cards, *_ch7_blocks[1:]] if offer_cards else _ch7_blocks
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
-            text=_ch7_fallback, blocks=_ch7_blocks,
+            text=_ch7_fallback, blocks=_ch7_final,
         )
         _seed_feedback_reactions(web, channel, _placeholder_ts)
         log.info(f"Posted opportunity cards ({len(response.payload.get('offers', []))} offers) in {channel}")
