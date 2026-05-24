@@ -2957,10 +2957,13 @@ def main():
     _start_daemon(_cvr_anomaly_monitor,   name="cvr-anomaly-monitor",   args=(web_client,))
     _start_daemon(_expiration_monitor,    name="expiration-monitor",    args=(web_client,))
     # Hourly autocheck of project_today_revenue → #sidd-qa across 10-17 CT,
-    # plus a 17:30 CT EOD rollup. Replaces the manual 11am/3pm validation
-    # checks — Scout fires into #sidd-qa, Sidd reads back the next day.
-    _start_daemon(_projection_autocheck_monitor,
-                  name="projection-autocheck-monitor", args=(web_client,))
+    # plus a 17:30 CT EOD rollup. Moved to demand-feed (P2.8).
+    # Set SCOUT_INPROC_AUTOCHECK=true to re-enable in-process (e.g. local dev).
+    if os.getenv("SCOUT_INPROC_AUTOCHECK", "false").lower() != "false":
+        _start_daemon(_projection_autocheck_monitor,
+                      name="projection-autocheck-monitor", args=(web_client,))
+    else:
+        log.info("[scout] projection-autocheck moved to demand-feed (SCOUT_INPROC_AUTOCHECK=false)")
     _start_daemon(_digest_poster,         name="digest-poster",         args=(web_client,))
     if os.getenv("SCOUT_INPROC_HARVESTER", "false").lower() != "false":
         _start_daemon(_nightly_harvest, name="context-harvest")

@@ -218,6 +218,301 @@ class _OffersHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def _format_projection_autocheck_fire(
+    slot: str,
+    result: dict,
+    daemon_raw: Optional[float],
+    delta_abs: Optional[float],
+    cmp_tol: float,
+) -> tuple[str, list[dict]]:
+    """Compact Slack fire for one autocheck slot. Routed to SCOUT_QA_CHANNEL."""
+    status = result.get("status", "error")
+    if status == "ok":
+        today_rev = float(result.get("today_revenue") or 0)
+        proj      = float(result.get("projected_full_day") or 0)
+        med       = result.get("dow_median")
+        pct       = result.get("pct_of_expected")
+        share     = result.get("curve_share")
+        source    = result.get("curve_source") or "?"
+        wd        = result.get("weekday") or "?"
+
+        cmp_line = ""
+        if daemon_raw is not None and delta_abs is not None:
+            in_tol = delta_abs <= cmp_tol
+            cmp_line = (
+                f"\n• Apples vs daemon raw: helper=${today_rev:,.0f} "
+                f"daemon=${daemon_raw:,.0f} Δ=${delta_abs:,.0f} "
+                f"{'within' if in_tol else 'OUT OF'} ±${cmp_tol:,.0f} tolerance"
+            )
+            if not in_tol:
+                cmp_line += " ⚠️"
+
+        med_line = f" vs ${float(med):,.0f} {wd} median ({pct}%)" if med else ""
+        text = (
+            f"[projection-autocheck] :bar_chart: *Projection autocheck* `{slot}`\n"
+            f"• Today so far: ${today_rev:,.0f}\n"
+            f"• Projected EOD: ${proj:,.0f}{med_line}\n"
+            f"• Curve share: {share} ({source})"
+            f"{cmp_line}"
+        )
+    elif status in ("too_early", "insufficient_history", "unstable"):
+        formatted = result.get("formatted") or f"status={status}"
+        text = f"[projection-autocheck] `{slot}` {formatted}"
+    else:
+        err = result.get("error") or "unknown"
+        text = f"[projection-autocheck] :x: `{slot}` error: {err}"
+
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    return text, blocks
+
+
+def _format_projection_autocheck_eod(
+    date_str: str, entries: list[dict],
+) -> tuple[str, list[dict]]:
+    """17:30 CT EOD rollup — one summary message so muting the channel is not
+    the path of least resistance. Trust visibility = one read."""
+    if not entries:
+        text = (
+            f"[projection-autocheck] :bar_chart: *Projection autocheck EOD* {date_str}\n"
+            "• No fires recorded today (monitor disabled, paused, or restarted late)."
+        )
+        return text, [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+    ok      = [e for e in entries if e["status"] == "ok"]
+    errors  = [e for e in entries if e["status"] == "error"]
+    last_ok = ok[-1] if ok else None
+
+    lines = [f"[projection-autocheck] :bar_chart: *Projection autocheck EOD* {date_str}"]
+    lines.append(f"• Fires: {len(entries)} (ok={len(ok)}, errors={len(errors)})")
+    if last_ok:
+        proj = last_ok.get("projected_full_day")
+        med  = last_ok.get("dow_median")
+        pct  = last_ok.get("pct_of_expected")
+        proj_s = f"${float(proj):,.0f}" if proj else "—"
+        med_s  = f"${float(med):,.0f}" if med else "—"
+        pct_s  = f"{pct}%" if pct is not None else "—"
+        lines.append(f"• Last projection: {proj_s} vs {med_s} median ({pct_s})")
+
+    apples = [e for e in entries if e.get("delta_abs") is not None]
+    if apples:
+        deltas = [float(e["delta_abs"]) for e in apples]
+        lines.append(
+            f"• Apples-vs-daemon Δ: min=${min(deltas):,.0f} max=${max(deltas):,.0f} "
+            f"(n={len(apples)})"
+        )
+
+    text = "\n".join(lines)
+    return text, [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+
+def _projection_autocheck_daemon() -> None:
+    """Demand-feed port of scout_bot._projection_autocheck_monitor.
+
+    Hourly projection anomaly check within a configurable CT window.
+    Kill switch: PROJECTION_AUTOCHECK_ENABLED env var (default false — off).
+    Wired to job_runs telemetry.
+    """
+    import time as _time
+    import pytz
+    from datetime import datetime as _dt
+    from scout_agent import _get_ch_client
+    from scout_ch import project_today_revenue, _query_intraday_revenue_total
+    from scout_state import (
+        _load_projection_autocheck_slot,
+        _save_projection_autocheck_slot,
+        _load_eod_posted_date,
+        _save_eod_posted_date,
+        _load_projection_autocheck_fires,
+        _append_projection_autocheck_fire,
+        _evict_stale_projection_autocheck_fires,
+    )
+    from scout_core.job_runs import record_job_run
+    from slack_sdk.web import WebClient
+
+    while True:  # outer restart wrapper
+        try:
+            CT_TZ   = pytz.timezone("America/Chicago")
+            channel = os.getenv("SCOUT_QA_CHANNEL", "#sidd-qa")
+            tag     = "[projection-autocheck]"
+            web     = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+
+            # Seed in-memory slot from persisted state so a mid-hour restart
+            # does not re-fire the current slot.
+            last_slot: Optional[str] = _load_projection_autocheck_slot()
+            consecutive_errors    = 0
+            paused_for_date: Optional[str] = None
+            # Seed EOD-posted marker from disk so a restart after 17:30 CT
+            # does not re-post the same day's EOD summary.
+            eod_posted_for_date: Optional[str] = _load_eod_posted_date()
+
+            while True:  # inner poll loop
+                try:
+                    # Kill switch: default false — dormant until staging validated.
+                    if os.getenv("PROJECTION_AUTOCHECK_ENABLED", "false").strip().lower() != "true":
+                        _time.sleep(300)
+                        continue
+
+                    win_start  = int(os.getenv("PROJECTION_AUTOCHECK_WINDOW_START_CT", "10"))
+                    win_end    = int(os.getenv("PROJECTION_AUTOCHECK_WINDOW_END_CT", "17"))
+                    eod_hour   = int(os.getenv("PROJECTION_AUTOCHECK_EOD_HOUR_CT", "17"))
+                    eod_minute = int(os.getenv("PROJECTION_AUTOCHECK_EOD_MINUTE_CT", "30"))
+                    cmp_hour   = int(os.getenv("PROJECTION_AUTOCHECK_APPLES_HOUR_CT", "15"))
+                    cmp_tol    = float(os.getenv("PROJECTION_AUTOCHECK_APPLES_TOL_USD", "500"))
+                    max_errs   = int(os.getenv("PROJECTION_AUTOCHECK_MAX_ERRORS", "2"))
+
+                    now_ct    = _dt.now(CT_TZ)
+                    today_str = now_ct.date().isoformat()
+                    slot      = f"{today_str}T{now_ct.hour:02d}"
+
+                    # Reset kill-switch + per-day log on date rollover.
+                    if paused_for_date and paused_for_date != today_str:
+                        paused_for_date = None
+                        consecutive_errors = 0
+                    _evict_stale_projection_autocheck_fires(today_str)
+
+                    # EOD rollup — once per day, after eod_hour:eod_minute CT.
+                    if (
+                        eod_posted_for_date != today_str
+                        and (
+                            now_ct.hour > eod_hour
+                            or (now_ct.hour == eod_hour and now_ct.minute >= eod_minute)
+                        )
+                    ):
+                        try:
+                            entries = _load_projection_autocheck_fires(today_str)
+                            text, blocks = _format_projection_autocheck_eod(
+                                today_str, entries
+                            )
+                            web.chat_postMessage(channel=channel, text=text, blocks=blocks)
+                            eod_posted_for_date = today_str
+                            try:
+                                _save_eod_posted_date(today_str)
+                            except Exception as _e:
+                                log.warning(f"{tag} persist eod_posted_date failed: {_e}")
+                            log.info(f"{tag} posted EOD rollup for {today_str} ({len(entries)} fires).")
+                        except Exception as e:
+                            log.warning(f"{tag} EOD rollup post failed: {e}")
+                            eod_posted_for_date = today_str  # don't retry-spam
+                            try:
+                                _save_eod_posted_date(today_str)
+                            except Exception as _e:
+                                log.warning(f"{tag} persist eod_posted_date failed: {_e}")
+
+                    # Hourly fire gate.
+                    in_window = win_start <= now_ct.hour <= win_end
+                    if not in_window:
+                        _time.sleep(300)
+                        continue
+                    if paused_for_date == today_str:
+                        _time.sleep(300)
+                        continue
+                    if last_slot == slot:
+                        _time.sleep(300)
+                        continue
+                    # Top-of-hour only (first 10 min of the hour).
+                    if now_ct.minute >= 10:
+                        _time.sleep(300)
+                        continue
+
+                    # Fire.
+                    _t0 = _time.monotonic()
+                    try:
+                        ch = _get_ch_client()
+                        result = project_today_revenue(ch)
+                        status = result.get("status", "error")
+                    except Exception as e:
+                        log.warning(f"{tag} projection query failed: {e}")
+                        result = {"status": "error", "error": str(e)}
+                        status = "error"
+
+                    # Apples-to-apples comparison at the configured hour.
+                    daemon_raw = None
+                    delta_abs = None
+                    if status == "ok" and now_ct.hour == cmp_hour:
+                        try:
+                            daemon_dict = _query_intraday_revenue_total(_get_ch_client())
+                            if daemon_dict and daemon_dict.get("today_revenue") is not None:
+                                daemon_raw = float(daemon_dict["today_revenue"])
+                                helper_raw = float(result.get("today_revenue") or 0)
+                                delta_abs  = abs(daemon_raw - helper_raw)
+                        except Exception as e:
+                            log.warning(f"{tag} daemon-compare query failed: {e}")
+
+                    fallback, blocks = _format_projection_autocheck_fire(
+                        slot, result, daemon_raw, delta_abs, cmp_tol,
+                    )
+
+                    try:
+                        web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
+                        last_slot = slot
+                        _save_projection_autocheck_slot(slot)
+                        try:
+                            _append_projection_autocheck_fire(today_str, {
+                                "slot": slot,
+                                "status": status,
+                                "today_revenue":      result.get("today_revenue"),
+                                "projected_full_day": result.get("projected_full_day"),
+                                "dow_median":         result.get("dow_median"),
+                                "pct_of_expected":    result.get("pct_of_expected"),
+                                "daemon_raw":         daemon_raw,
+                                "delta_abs":          delta_abs,
+                            })
+                        except Exception as _e:
+                            log.warning(f"{tag} persist fires_log failed: {_e}")
+                        log.info(f"{tag} posted slot={slot} status={status} → {channel}.")
+                        duration_ms = int((_time.monotonic() - _t0) * 1000)
+                        record_job_run("projection_autocheck", status="success", duration_ms=duration_ms)
+                    except Exception as e:
+                        log.warning(f"{tag} slack post failed: {e}")
+                        status = "error"
+
+                    # Kill-switch accounting.
+                    if status == "error":
+                        duration_ms = int((_time.monotonic() - _t0) * 1000)
+                        record_job_run(
+                            "projection_autocheck",
+                            status="error",
+                            duration_ms=duration_ms,
+                            error=str(result.get("error", ""))[:400],
+                        )
+                        consecutive_errors += 1
+                        if (
+                            consecutive_errors >= max_errs
+                            and paused_for_date != today_str
+                        ):
+                            paused_for_date = today_str
+                            try:
+                                web.chat_postMessage(
+                                    channel=channel,
+                                    text=(
+                                        f"{tag} ≥{max_errs} consecutive errors — "
+                                        f"pausing for the rest of {today_str}. "
+                                        "Resumes at midnight CT."
+                                    ),
+                                )
+                            except Exception as _e:
+                                log.error(
+                                    f"{tag} kill-switch notification failed — "
+                                    f"daemon paused but Slack was not told: {_e}",
+                                    exc_info=True,
+                                )
+                            log.warning(
+                                f"{tag} kill-switch tripped ({consecutive_errors} errors) — "
+                                f"paused for {today_str}."
+                            )
+                    else:
+                        consecutive_errors = 0
+
+                except Exception as e:
+                    log.warning(f"{tag} unexpected error: {e}")
+                finally:
+                    _time.sleep(300)
+
+        except Exception as e:
+            log.error(f"[projection-autocheck] fatal crash — restarting in 30s: {e}", exc_info=True)
+            _time.sleep(30)
+
+
 def _start_http_server() -> None:
     port = int(os.getenv("DEMAND_FEED_PORT", "8080"))
     server = socketserver.TCPServer(("", port), _OffersHandler)
@@ -237,6 +532,15 @@ def main() -> None:
         target=_nightly_harvest_daemon, daemon=True, name="context-harvest"
     ).start()
     log.info("[demand-feed] nightly-harvest daemon started (kill switch: HARVESTER_AUTO_WRITE_ENABLED)")
+    threading.Thread(
+        target=_projection_autocheck_daemon,
+        daemon=True,
+        name="projection-autocheck",
+    ).start()
+    log.info(
+        "[demand-feed] projection-autocheck daemon started "
+        "(kill switch: PROJECTION_AUTOCHECK_ENABLED)"
+    )
     log.info("[demand-feed] starting")
 
     while True:
