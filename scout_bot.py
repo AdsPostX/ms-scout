@@ -30,17 +30,7 @@ from scout_notion import (
     _copy_coalescer_loop,
     _notion_watcher_loop,
 )
-from scout_slack_ui import (
-    _build_monitor_alert_blocks,
-)
-
-try:
-    from scout_ui_kit import Card, Severity, Surface, enforce, wrap_response, _KIT_ENABLED
-    _KIT_AVAILABLE = True
-except Exception as _e:
-    logging.getLogger("scout_bot").warning("scout_ui_kit import failed, disabling kit: %s", _e)
-    _KIT_AVAILABLE = False
-    _KIT_ENABLED = False
+from scout_ui_kit import Card, Severity, Surface, enforce, wrap_response, _KIT_ENABLED, _build_monitor_alert_blocks
 from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_state import (
     _DATA_DIR,
@@ -684,19 +674,11 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
             "Run `@Scout fill rate` to check publisher-level session health."
         )
 
-    if _KIT_AVAILABLE and _KIT_ENABLED:
-        headline = "Revenue alert — today is tracking soft"
-        body = "\n".join(items)
-        card = Card(severity=Severity.CRITICAL, headline=headline, body=body)
-        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-        return f"🔴 {headline}", blocks
-
-    return _build_monitor_alert_blocks(
-        ":red_circle:",
-        "Revenue alert — today is tracking soft",
-        items,
-        "",
-    )
+    headline = "Revenue alert — today is tracking soft"
+    body = "\n".join(items)
+    card = Card(severity=Severity.CRITICAL, headline=headline, body=body)
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    return f"🔴 {headline}", blocks
 
 
 def _digest_poster(web) -> None:
@@ -837,19 +819,11 @@ def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
             f"~{dtc:.0f}d to cap vs {dr}d remaining"
         )
 
-    if _KIT_AVAILABLE and _KIT_ENABLED:
-        headline = "Cap alert — advertisers approaching monthly budget"
-        body = "\n".join(f"• {item}" for item in items) if items else ""
-        card = Card(severity=Severity.WARN, headline=headline, body=body)
-        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-        return f"🟠 {headline}", blocks
-
-    return _build_monitor_alert_blocks(
-        ":warning:",
-        "Cap alert — advertisers approaching monthly budget",
-        items,
-        "cap alerts",
-    )
+    headline = "Cap alert — advertisers approaching monthly budget"
+    body = "\n".join(f"• {item}" for item in items) if items else ""
+    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    return f"🟠 {headline}", blocks
 
 
 def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
@@ -872,19 +846,11 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
             line += f"\n  {hyp}"
         items.append(line)
 
-    if _KIT_AVAILABLE and _KIT_ENABLED:
-        headline = "Revenue velocity — publishers tracking down"
-        body = "\n".join(f"• {item}" for item in items) if items else ""
-        card = Card(severity=Severity.WARN, headline=headline, body=body)
-        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-        return f"🟠 {headline}", blocks
-
-    return _build_monitor_alert_blocks(
-        ":chart_with_downwards_trend:",
-        "Revenue velocity — publishers tracking down",
-        items,
-        "velocity",
-    )
+    headline = "Revenue velocity — publishers tracking down"
+    body = "\n".join(f"• {item}" for item in items) if items else ""
+    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    return f"🟠 {headline}", blocks
 
 
 def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
@@ -896,19 +862,11 @@ def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
         imp_2d  = r.get("impressions_2d", 0)
         items.append(f"*{adv}*: {imp_7d:,} impressions in 7d · {imp_2d:,} in 2d")
 
-    if _KIT_AVAILABLE and _KIT_ENABLED:
-        headline = "Ghost campaigns — impressions without revenue"
-        body = "\n".join(f"• {item}" for item in items) if items else ""
-        card = Card(severity=Severity.WARN, headline=headline, body=body)
-        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-        return f"🟠 {headline}", blocks
-
-    return _build_monitor_alert_blocks(
-        ":ghost:",
-        "Ghost campaigns — impressions without revenue",
-        items,
-        "ghost campaigns",
-    )
+    headline = "Ghost campaigns — impressions without revenue"
+    body = "\n".join(f"• {item}" for item in items) if items else ""
+    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    return f"🟠 {headline}", blocks
 
 
 def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
@@ -924,19 +882,11 @@ def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
             f"{missed:,} missed of {sess:,} sessions/7d"
         )
 
-    if _KIT_AVAILABLE and _KIT_ENABLED:
-        headline = "Low fill rate — publishers with significant unfilled sessions"
-        body = "\n".join(f"• {item}" for item in items) if items else ""
-        card = Card(severity=Severity.WARN, headline=headline, body=body)
-        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-        return f"🟠 {headline}", blocks
-
-    return _build_monitor_alert_blocks(
-        ":droplet:",
-        "Low fill rate — publishers with significant unfilled sessions",
-        items,
-        "fill rate",
-    )
+    headline = "Low fill rate — publishers with significant unfilled sessions"
+    body = "\n".join(f"• {item}" for item in items) if items else ""
+    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    return f"🟠 {headline}", blocks
 
 
 def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
@@ -955,19 +905,11 @@ def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
             f"({delta:+.0f}%) - ${payout:.0f} payout"
         )
 
-    if _KIT_AVAILABLE and _KIT_ENABLED:
-        headline = "CVR anomalies — significant conversion rate drops since yesterday"
-        body = "\n".join(f"• {item}" for item in items) if items else ""
-        card = Card(severity=Severity.WARN, headline=headline, body=body)
-        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-        return f"🟠 {headline}", blocks
-
-    return _build_monitor_alert_blocks(
-        ":chart_with_downwards_trend:",
-        "CVR anomalies — significant conversion rate drops since yesterday",
-        items,
-        "CVR anomalies",
-    )
+    headline = "CVR anomalies — significant conversion rate drops since yesterday"
+    body = "\n".join(f"• {item}" for item in items) if items else ""
+    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    return f"🟠 {headline}", blocks
 
 
 def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
@@ -985,19 +927,11 @@ def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
             f"{pubs} publisher(s), {imp_7d:,} impressions, ${rev_7d:,.0f} revenue/7d"
         )
 
-    if _KIT_AVAILABLE and _KIT_ENABLED:
-        headline = "Expiring campaigns — active campaigns ending within the alert window"
-        body = "\n".join(f"• {item}" for item in items) if items else ""
-        card = Card(severity=Severity.WARN, headline=headline, body=body)
-        _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-        return f"🟠 {headline}", blocks
-
-    return _build_monitor_alert_blocks(
-        ":hourglass_flowing_sand:",
-        "Expiring campaigns — active campaigns ending within the alert window",
-        items,
-        "expiring campaigns",
-    )
+    headline = "Expiring campaigns — active campaigns ending within the alert window"
+    body = "\n".join(f"• {item}" for item in items) if items else ""
+    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    return f"🟠 {headline}", blocks
 
 
 def _check_campaign_health(adv_name: str, launched_at) -> dict | None:

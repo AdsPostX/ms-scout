@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scout_slack_ui import _text_to_blocks
+from scout_ui_kit import _text_to_blocks
 
 
 class TestPipeTableFallback(unittest.TestCase):

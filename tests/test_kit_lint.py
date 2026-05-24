@@ -16,7 +16,7 @@ _REPO = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
 
 _BUILDER_FILES = [
-    _REPO / "scout_slack_ui.py",
+    _REPO / "scout_ui_kit.py",
     _REPO / "scout_bot.py",
     _REPO / "scout_handlers.py",
 ]
@@ -51,11 +51,10 @@ class TestKitLint(unittest.TestCase):
         MUST be capped at BUDGETS[MONITOR_ALARM] so we never overflow Slack
         on a noisy day. Regression guard for the PR-2 budget wrapping."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
-        # Force re-import so _KIT_ENABLED picks up the env var
-        for mod in ("scout_ui_kit", "scout_slack_ui"):
+        # Force re-import so module-level constants pick up the env var
+        for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
-        from scout_ui_kit import BUDGETS, Surface
-        from scout_slack_ui import _build_monitor_alert_blocks
+        from scout_ui_kit import BUDGETS, Surface, _build_monitor_alert_blocks
 
         # 50 items would otherwise render 50+ blocks; we cap at 8 bullets per
         # section, but the surrounding header+context+section still need budget.
@@ -75,9 +74,9 @@ class TestKitLint(unittest.TestCase):
         single view. Regression guard for the 5-button Home that all shared
         action_id='home_try_query' and broke on iOS."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
-        for mod in ("scout_ui_kit", "scout_slack_ui"):
+        for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
-        from scout_slack_ui import _build_home_view
+        from scout_ui_kit import _build_home_view
 
         view = _build_home_view()
         seen: dict[str, int] = {}
@@ -99,25 +98,22 @@ class TestKitLint(unittest.TestCase):
         )
 
     def test_monitor_alert_passthrough_when_kit_disabled(self):
-        """Kill switch sanity: SCOUT_KIT_ENABLED=false must not crash and
-        must return blocks (no enforcement, legacy behavior)."""
-        os.environ["SCOUT_KIT_ENABLED"] = "false"
-        for mod in ("scout_ui_kit", "scout_slack_ui"):
+        """Sanity: _build_monitor_alert_blocks must not crash and must return blocks."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
-        from scout_slack_ui import _build_monitor_alert_blocks
+        from scout_ui_kit import _build_monitor_alert_blocks
 
         _fallback, blocks = _build_monitor_alert_blocks(
-            ":warning:", "Kill-switch test", ["a", "b"], ""
+            ":warning:", "Passthrough test", ["a", "b"], ""
         )
         self.assertGreater(len(blocks), 0)
-        # Restore default
-        os.environ["SCOUT_KIT_ENABLED"] = "true"
 
     def test_no_section_accessory_buttons(self):
         """Primary CTAs must be in actions blocks, never section.accessory (mobile-first rule 1).
         Renders all Card severity levels and asserts no section contains an accessory button."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
-        for mod in ("scout_ui_kit", "scout_slack_ui"):
+        for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
         from scout_ui_kit import Card, Severity, Surface, wrap_response
         for sev in Severity:
