@@ -2962,7 +2962,10 @@ def main():
     _start_daemon(_projection_autocheck_monitor,
                   name="projection-autocheck-monitor", args=(web_client,))
     _start_daemon(_digest_poster,         name="digest-poster",         args=(web_client,))
-    _start_daemon(_nightly_harvest,       name="context-harvest")
+    if os.getenv("SCOUT_INPROC_HARVESTER", "false").lower() != "false":
+        _start_daemon(_nightly_harvest, name="context-harvest")
+    else:
+        log.info("[scout] nightly-harvest moved to demand-feed (SCOUT_INPROC_HARVESTER=false)")
     _start_daemon(_notion_watcher_loop,   name="notion-watcher",      args=(web_client,))
     _start_daemon(_copy_coalescer_loop,   name="copy-coalescer")
     # PR 15c — live health heartbeat (CH ping every 30 min, NOT in HTTP /health)

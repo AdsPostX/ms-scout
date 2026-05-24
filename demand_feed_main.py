@@ -233,6 +233,10 @@ def main() -> None:
         name="revenue-tracker",
     ).start()
     log.info("[demand-feed] revenue-tracker daemon started (kill switch: REVENUE_TRACKER_ENABLED)")
+    threading.Thread(
+        target=_nightly_harvest_daemon, daemon=True, name="context-harvest"
+    ).start()
+    log.info("[demand-feed] nightly-harvest daemon started (kill switch: HARVESTER_AUTO_WRITE_ENABLED)")
     log.info("[demand-feed] starting")
 
     while True:
@@ -490,6 +494,93 @@ def _revenue_tracker_daemon() -> None:
         except Exception as e:
             log.error("[revenue-tracker] Fatal crash — restarting in 30s: %s", e, exc_info=True)
             _time.sleep(30)
+
+
+def _nightly_harvest_daemon() -> None:
+    """Demand-feed port of scout_bot._nightly_harvest.
+
+    Harvests Slack channel context once per day at midnight CT.
+    Kill switch: HARVESTER_AUTO_WRITE_ENABLED env var (default false — off).
+    Wired to job_runs telemetry.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    import time as _time
+
+    while True:
+        try:
+            # Kill switch — default false; set HARVESTER_AUTO_WRITE_ENABLED=true to activate
+            if os.getenv("HARVESTER_AUTO_WRITE_ENABLED", "false").strip().lower() != "true":
+                _time.sleep(300)
+                continue
+
+            now = _now_chicago()
+            tomorrow_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + _td(days=1)
+            sleep_secs = (tomorrow_midnight - now).total_seconds()
+
+            from context_harvester import harvest, is_stale
+            from scout_core.job_runs import record_job_run
+
+            if is_stale():
+                log.info("[harvest] context stale or missing — running immediate harvest")
+                t0 = _time.monotonic()
+                try:
+                    result = harvest()
+                    duration_ms = int((_time.monotonic() - t0) * 1000)
+                    record_job_run("nightly_harvest", status="success", duration_ms=duration_ms)
+                    _post_harvest_audit(result)
+                except Exception as exc:
+                    duration_ms = int((_time.monotonic() - t0) * 1000)
+                    record_job_run("nightly_harvest", status="error",
+                                   duration_ms=duration_ms, error=str(exc)[:400])
+                    raise
+            else:
+                log.info(f"[harvest] context is fresh — sleeping {sleep_secs / 3600:.1f}h until midnight CT")
+
+            _time.sleep(sleep_secs)
+
+            log.info("[harvest] midnight CT — running nightly harvest")
+            t0 = _time.monotonic()
+            try:
+                result = harvest()
+                duration_ms = int((_time.monotonic() - t0) * 1000)
+                record_job_run("nightly_harvest", status="success", duration_ms=duration_ms)
+                _post_harvest_audit(result)
+            except Exception as exc:
+                duration_ms = int((_time.monotonic() - t0) * 1000)
+                record_job_run("nightly_harvest", status="error",
+                               duration_ms=duration_ms, error=str(exc)[:400])
+                raise
+        except Exception as e:
+            log.error(f"[harvest] cycle failed: {e}", exc_info=True)
+            import time as _time2
+            _time2.sleep(3600)  # retry in 1 hour on failure
+
+
+def _post_harvest_audit(harvest_result: dict) -> None:
+    """Post a brief audit summary to #scout-qa if the harvester learned any entity facts."""
+    try:
+        audit = harvest_result.get("audit", []) if isinstance(harvest_result, dict) else []
+        if not audit:
+            return  # nothing to report
+
+        written = [e for e in audit if e.get("action") == "written"]
+        skipped = [e for e in audit if e.get("action") == "skipped"]
+
+        if not written and not skipped:
+            return
+
+        lines = [f":newspaper: *Scout learned overnight* ({len(written)} fact{'s' if len(written) != 1 else ''} added to entity knowledge)"]
+        for e in written:
+            icon = ":office:" if e.get("type") == "publisher" else ":chart_with_upwards_trend:"
+            lines.append(f"{icon} *{e['name']}* ({e['type']}) — {e.get('note', '')[:80]}")
+        for e in skipped:
+            lines.append(f":grey_exclamation: *{e['name']}* — skipped: {e.get('reason', 'manual entry exists')}")
+        lines.append("_To correct anything: `@Scout, actually [entity] does X` — I'll overwrite it._")
+
+        _alert_slack("\n".join(lines))
+        log.info(f"[harvest] audit posted — {len(written)} written, {len(skipped)} skipped")
+    except Exception as e:
+        log.warning(f"[harvest] audit post failed (non-fatal): {e}")
 
 
 if __name__ == "__main__":
