@@ -97,7 +97,7 @@ class TestKitLint(unittest.TestCase):
             f"Duplicate action_ids in Home view (mobile drops clicks): {dupes}",
         )
 
-    def test_monitor_alert_passthrough_when_kit_enabled(self):
+    def test_monitor_alert_blocks_basic_sanity(self):
         """Sanity: _build_monitor_alert_blocks must not crash and must return blocks."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
         for mod in ("scout_ui_kit",):
