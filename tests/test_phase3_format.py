@@ -240,9 +240,11 @@ try:
         _format_fill_alert,
     ) = _get_format_fns()
     _SCOUT_BOT_AVAILABLE = True
-except Exception as _exc:
+except ImportError as _exc:
     _SCOUT_BOT_AVAILABLE = False
     _SCOUT_BOT_IMPORT_ERR = str(_exc)
+except Exception:
+    raise
 
 
 # ---------------------------------------------------------------------------
@@ -337,9 +339,9 @@ class TestGoalPaceFraming(unittest.TestCase):
 
     def test_on_pace_shows_green_icon(self):
         """T5: When MTD revenue is at or above daily run-rate needed, 🟢 appears."""
-        # Target: $1M/month. Day 15 of a 31-day month: need ~$484K by now.
-        # We set MTD to $600K — comfortably ahead → should be 🟢.
-        rollup = _MockRollup(revenue_mtd_cents=600_000_00)  # $600K MTD
+        # Target: $1M/month. Use $1.1M MTD — above target regardless of day-of-month.
+        # ($600K was flaky: behind pace after day ~18 of a 31-day month.)
+        rollup = _MockRollup(revenue_mtd_cents=1_100_000_00)  # $1.1M MTD — always on pace
         thresholds = {"monthly_revenue_target": 1_000_000}  # $1M target
         text = self._run_scoreboard(rollup, thresholds)
         self.assertIn("🟢", text,

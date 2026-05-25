@@ -103,8 +103,10 @@ SELECT
                     AND toTimeZone(c.created_at, 'America/Chicago') <= now_ct,
                     toFloat64OrNull(c.revenue), 0)), 0) AS rev_mtd
 FROM adpx_conversionsdetails c
-PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY)
-WHERE c.created_at >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY
+PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(
+    toDate(least(month_start_ct, today_start_ct - INTERVAL 7 DAY))
+)
+WHERE c.created_at >= least(month_start_ct, today_start_ct - INTERVAL 7 DAY)
 """.strip()
 
     rows = ch.query(totals_sql).result_rows
