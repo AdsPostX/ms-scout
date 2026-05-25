@@ -439,6 +439,40 @@ def wrap_response(
     return fallback, blocks
 
 
+# ---------------------------------------------------------------------------
+# context_block() / divider_block() — lightweight block helpers
+# ---------------------------------------------------------------------------
+def context_block(
+    queried_at: str | None = None,
+    period: str | None = None,
+    latency_ms: int | None = None,
+) -> dict:
+    """Return a Slack context block with query metadata.
+
+    Typical usage::
+
+        card = Card(...)
+        card.context_elements = [context_block(queried_at="just now", period="7d")]
+        _, blocks = wrap_response(card, Surface.CHANNEL_ROOT)
+
+    All params are optional — omit any you don't have.
+    """
+    parts: list[str] = []
+    if queried_at:
+        parts.append(f"queried {queried_at}")
+    if period:
+        parts.append(f"{period} lookback")
+    if latency_ms is not None:
+        parts.append(f"{latency_ms}ms")
+    text = " · ".join(parts) if parts else "Scout"
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_{text}_"}]}
+
+
+def divider_block() -> dict:
+    """Return a Slack divider block."""
+    return {"type": "divider"}
+
+
 # =============================================================================
 # Block Kit renderers — migrated from scout_slack_ui.py (legacy file deleted)
 # All functions below are pure: data-in, blocks-out, no I/O.
