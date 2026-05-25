@@ -72,6 +72,25 @@ class Severity(Enum):
 
 
 # ---------------------------------------------------------------------------
+# ResponsePattern enum — canonical Slack response patterns
+# ---------------------------------------------------------------------------
+class ResponsePattern(str, Enum):
+    """Canonical Slack response patterns for Scout.
+
+    Pass as ``pattern=ResponsePattern.ALERT`` to ``wrap_response()`` to opt-in to
+    surface validation. Omitting ``pattern`` (existing callers) gets current behaviour.
+
+    Valid surface pairs are enforced at call time via ValueError.
+    """
+    ALERT   = "alert"    # monitor alarm  → Surface.MONITOR_ALARM, Severity.WARN/CRITICAL
+    ANSWER  = "answer"   # ask() reply    → Surface.CHANNEL_ROOT / THREAD / DM, Severity.INFO
+    STATUS  = "status"   # health check   → Surface.CHANNEL_ROOT / THREAD / DM, Severity.INFO/WARN
+    CONFIRM = "confirm"  # action ack     → Surface.EPHEMERAL, Severity.OK, 0 buttons
+    EMPTY   = "empty"    # no data        → same as ANSWER
+    ERROR   = "error"    # CH failure     → Surface.EPHEMERAL, Severity.ERROR
+
+
+# ---------------------------------------------------------------------------
 # Surface enum + budgets
 # ---------------------------------------------------------------------------
 class Surface(Enum):
@@ -90,6 +109,15 @@ BUDGETS: dict[Surface, int] = {
     Surface.MONITOR_ALARM: 6,
     Surface.HOME: 30,
     Surface.EPHEMERAL: 6,
+}
+
+_PATTERN_VALID_SURFACES: dict[ResponsePattern, set[Surface]] = {
+    ResponsePattern.ALERT:   {Surface.MONITOR_ALARM},
+    ResponsePattern.ANSWER:  {Surface.CHANNEL_ROOT, Surface.THREAD, Surface.DM},
+    ResponsePattern.STATUS:  {Surface.CHANNEL_ROOT, Surface.THREAD, Surface.DM},
+    ResponsePattern.CONFIRM: {Surface.EPHEMERAL},
+    ResponsePattern.EMPTY:   {Surface.CHANNEL_ROOT, Surface.THREAD, Surface.DM},
+    ResponsePattern.ERROR:   {Surface.EPHEMERAL},
 }
 
 
@@ -275,6 +303,7 @@ def wrap_response(
     feedback: Literal["reaction", "button", "none"] = "reaction",
     query_hash: Optional[str] = None,
     elapsed_seconds: Optional[int] = None,
+    pattern: "ResponsePattern | None" = None,
 ) -> tuple[str, list[dict]]:
     """Single entry-point for every ask() reply surface.
 
@@ -294,10 +323,20 @@ def wrap_response(
                           Required when feedback="button"; pass None to suppress buttons.
         elapsed_seconds:  If provided, appended as a context footer (ops surfaces only;
                           omit on DM to keep output clean).
+        pattern:          Optional ResponsePattern for surface validation. Raises ValueError
+                          if the surface is incompatible with the pattern. Existing callers
+                          that omit pattern= are unaffected.
 
     Returns:
         (fallback_text, blocks) — fallback is always non-empty (mobile push previews).
     """
+    if pattern is not None:
+        valid = _PATTERN_VALID_SURFACES.get(pattern, set())
+        if surface not in valid:
+            raise ValueError(
+                f"ResponsePattern.{pattern.value} requires surface in "
+                f"{[s.value for s in valid]}, got Surface.{surface.value}"
+            )
     suggestions = suggestions or []
     max_btn = MAX_ACTIONS.get(surface, 2)
 
