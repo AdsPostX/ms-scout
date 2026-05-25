@@ -956,6 +956,15 @@ def _post_harvest_audit(harvest_result: dict) -> None:
         log.warning(f"[harvest] audit post failed (non-fatal): {e}")
 
 
+# ── Per-monitor prod-fire dedup ────────────────────────────────────────────────
+# Maps monitor_name → last prod-fire date (YYYY-MM-DD CT).  Belt-and-suspenders
+# against Render ephemeral disk wipes that reset pulse_state.json and would
+# cause a monitor to re-fire the same day after a deploy.  Lives in memory so
+# it resets on each process restart, but that's acceptable: deploy wipes are rare
+# and this complements (not replaces) the persistent state file.
+_PROD_FIRED: dict[str, str] = {}
+
+
 def _run_shadow_monitor(
     *,
     monitor_name: str,
@@ -1050,6 +1059,15 @@ def _run_shadow_monitor(
                             last_shadow_slot = shadow_slot
                         continue
 
+                    # Belt-and-suspenders dedup: skip if this monitor already fired
+                    # today in this process run (catches post-deploy re-fires where
+                    # pulse_state.json was wiped but _PROD_FIRED still remembers).
+                    if not is_shadow_tick and _PROD_FIRED.get(monitor_name) == today_str:
+                        log.info(f"{tag} dedup: already fired for {today_str} — suppressing.")
+                        from scout_core.job_runs import record_job_run
+                        record_job_run(monitor_name, status="success", duration_ms=duration_ms)
+                        continue
+
                     from slack_sdk.web import WebClient as _WC
                     web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
                     web.chat_postMessage(channel=target_channel, text=fallback, blocks=blocks)
@@ -1061,6 +1079,7 @@ def _run_shadow_monitor(
                         last_shadow_slot = shadow_slot
                         log.info(f"{tag} shadow-posted {shadow_slot} ({len(results)} items) → {target_channel}.")
                     else:
+                        _PROD_FIRED[monitor_name] = today_str
                         save_state_fn(today_str)
                         log.info(f"{tag} posted alert for {today_str} ({len(results)} items).")
 
