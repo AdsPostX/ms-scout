@@ -1685,6 +1685,28 @@ def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
         log.exception("_handle_home_alert_drill: views_open failed")
 
 
+def _post_maintenance_summary(web: WebClient, channel: str, attempts: list) -> None:
+    """Post a maintenance-off summary. Reports who tried and how many times."""
+    if not attempts:
+        web.chat_postMessage(channel=channel,
+            text=":white_check_mark: Maintenance cleared. No messages were blocked.")
+        return
+    users: dict[str, int] = {}
+    for a in attempts:
+        uid = a.get("user_id", "?")
+        users[uid] = users.get(uid, 0) + 1
+    breakdown = ", ".join(f"<@{u}> ×{c}" for u, c in users.items())
+    web.chat_postMessage(channel=channel,
+        text=f":white_check_mark: Maintenance off. {len(attempts)} message(s) blocked: {breakdown}")
+    sidd_qa = os.getenv("SIDD_QA_CHANNEL_ID", "")
+    if sidd_qa and sidd_qa != channel:
+        try:
+            web.chat_postMessage(channel=sidd_qa,
+                text=f":wrench: Maintenance ended. {len(attempts)} missed message(s): {breakdown}")
+        except Exception as _e:
+            log.warning(f"[maintenance] sidd-qa post failed: {_e}")
+
+
 def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
     """
     Handle Scout slash commands. All responses are ephemeral — only the caller sees them.
@@ -1916,6 +1938,38 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 text="Scout — quick reference", blocks=help_blocks,
             )
 
+        elif command == "/scout-maintenance":
+            from scout_state import get_maintenance, set_maintenance, clear_maintenance
+            _admin_id = os.getenv("SCOUT_ADMIN_USER_ID", "")
+            if _admin_id and user_id != _admin_id:
+                web.chat_postEphemeral(channel=channel, user=user_id,
+                                       text="Only admins can toggle maintenance mode.")
+                return
+            arg = payload.get("text", "").strip().lower()
+            if arg.startswith("on"):
+                hours = 4.0
+                try:
+                    hours = float(arg.replace("on", "").replace("h", "").strip()) if arg != "on" else 4.0
+                except Exception:
+                    pass
+                m = set_maintenance(user_id, hours)
+                web.chat_postMessage(channel=channel,
+                    text=f":wrench: Maintenance on for {hours}h (auto-off {m['auto_off_at']} UTC).")
+            elif arg == "off":
+                attempts = clear_maintenance()
+                _post_maintenance_summary(web, channel, attempts)
+            elif arg == "status":
+                m = get_maintenance()
+                if m:
+                    web.chat_postMessage(channel=channel,
+                        text=f":wrench: Maintenance active since {m['set_at']}. Auto-off {m['auto_off_at']}. {len(m.get('attempts', []))} attempt(s) so far.")
+                else:
+                    web.chat_postMessage(channel=channel,
+                        text=":white_check_mark: Maintenance is off.")
+            else:
+                web.chat_postEphemeral(channel=channel, user=user_id,
+                    text="Usage: `/scout-maintenance on [Nh]` · `/scout-maintenance off` · `/scout-maintenance status`")
+
         else:
             web.chat_postEphemeral(
                 channel=channel, user=user_id,
@@ -2115,6 +2169,19 @@ def _handle_event_impl(req: SocketModeRequest):
     log.info(f"Query from {event.get('user')}: {query!r}")
     user_id_event = event.get("user", "")
     user_id = user_id_event  # alias used by ask() and usage logging below
+
+    # ── Maintenance gate — block non-admins when Scout is in the shop ──────────
+    from scout_state import get_maintenance, log_maintenance_attempt
+    _admin_id = os.getenv("SCOUT_ADMIN_USER_ID", "")
+    _maint = get_maintenance()
+    if _maint and (not _admin_id or user_id != _admin_id):
+        log_maintenance_attempt(user_id, query[:80])
+        web.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="🔧 Scout is in the shop (yes, again). Back in ~15 min.",
+        )
+        return
 
     # ── Correction capture — if this thread has a pending correction, store it ─
     learnings_state = _load_learnings()

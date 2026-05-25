@@ -1799,6 +1799,17 @@ def _build_home_view(queue_items: "list[dict] | None" = None,
 
     blocks: list = []
 
+    # ── Maintenance banner — shown at top of Home when Scout is in the shop ────
+    try:
+        from scout_state import get_maintenance as _get_maintenance
+        if _get_maintenance():
+            blocks.insert(0, {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": ":wrench: *Scout is down for updates.* Back soon."},
+            })
+    except Exception:
+        pass  # never crash the home view over maintenance state I/O
+
     if rollup is not None or alerts is not None:
         blocks.extend(_build_home_scoreboard_blocks(rollup, alerts))
 
