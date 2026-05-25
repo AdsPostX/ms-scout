@@ -242,7 +242,7 @@ POST_TX_PLACEMENTS: tuple[str, ...] = (
 # Ghost campaigns
 # ===========================================================================
 
-def ghost_campaigns(ch, recency_hours: int = 48) -> list[dict]:
+def ghost_campaigns(ch, recency_hours: int = 48, as_of_date: str | None = None) -> list[dict]:
     """
     Canonical ghost campaign detection — single source of truth for the
     agent tool (get_ghost_campaigns) and the ghost monitor daemon.
@@ -330,6 +330,9 @@ HAVING impressions_7d > 5000 AND clicks_7d > 200
 ORDER BY impressions_7d DESC
 LIMIT 25
 """
+    if as_of_date:
+        _ref = f"toDate('{as_of_date}')"
+        sql = sql.replace("today()", _ref)
     rows = ch.query(sql, parameters={"recency_hours": recency_hours}).result_rows
     return [
         {

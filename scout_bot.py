@@ -243,14 +243,14 @@ def _route_channel(purpose: str, force: bool = False) -> str:
 
 # ── Pulse signal helpers (one per signal, each owns its own ch connection) ────
 
-def _pulse_signal_cap(ch) -> list:
+def _pulse_signal_cap(ch, as_of_date: str | None = None) -> list:
     import json as _json
     from datetime import date as _date
     import calendar as _cal
+    _ref_date = f"toDate('{as_of_date}')" if as_of_date else "today()"
     results = []
     try:
-        cap_rows = ch.query(
-            """
+        _sql = """
             SELECT
                 c.id          AS campaign_id,
                 c.adv_name,
@@ -266,8 +266,10 @@ def _pulse_signal_cap(ch) -> list:
               AND c.capping_config != 'null'
             GROUP BY c.id, c.adv_name, c.capping_config
             """
-        ).result_rows
-        today_d = _date.today()
+        if as_of_date:
+            _sql = _sql.replace("today()", _ref_date)
+        cap_rows = ch.query(_sql).result_rows
+        today_d = _date.fromisoformat(as_of_date) if as_of_date else _date.today()
         days_in_month = _cal.monthrange(today_d.year, today_d.month)[1]
         days_remaining = days_in_month - today_d.day + 1
         for camp_id, adv_name, cap_cfg, revenue_mtd in cap_rows:
@@ -299,11 +301,11 @@ def _pulse_signal_cap(ch) -> list:
     return results
 
 
-def _pulse_signal_velocity(ch) -> list:
+def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
+    _ref_date = f"toDate('{as_of_date}')" if as_of_date else "today()"
     results: list = []
     try:
-        vel_rows = ch.query(
-            """
+        _vel_sql = """
             SELECT
                 user_id,
                 sum(toFloat64OrNull(revenue))                                           AS revenue_30d,
@@ -316,7 +318,9 @@ def _pulse_signal_velocity(ch) -> list:
             ORDER BY revenue_30d DESC
             LIMIT 200
             """
-        ).result_rows
+        if as_of_date:
+            _vel_sql = _vel_sql.replace("today()", _ref_date)
+        vel_rows = ch.query(_vel_sql).result_rows
 
         uid_list = [str(r[0]) for r in vel_rows if r[0]]
         org_map: dict = {}
@@ -353,8 +357,7 @@ def _pulse_signal_velocity(ch) -> list:
         if vel_pub_ids:
             try:
                 pub_id_csv = ",".join(str(p) for p in vel_pub_ids)
-                attr_rows = ch.query(
-                    f"""
+                _attr_sql = f"""
                     SELECT
                         cv.user_id,
                         c.adv_name,
@@ -371,7 +374,9 @@ def _pulse_signal_velocity(ch) -> list:
                     GROUP BY cv.user_id, c.adv_name
                     ORDER BY cv.user_id, abs(delta_ann) DESC
                     """
-                ).result_rows
+                if as_of_date:
+                    _attr_sql = _attr_sql.replace("today()", _ref_date)
+                attr_rows = ch.query(_attr_sql).result_rows
                 attr_map: dict = {}
                 for uid, adv_name, rev_30d_a, rev_7d_a, delta_a in attr_rows:
                     key = int(uid) if uid else None
@@ -425,8 +430,7 @@ def _pulse_signal_velocity(ch) -> list:
             gaps = []
             if top_adv:
                 try:
-                    hyp_rows = _ch.query(
-                        """
+                    _hyp_sql = """
                         SELECT
                             u.organization,
                             sum(toFloat64OrNull(cv.revenue))                                    AS rev_30d,
@@ -442,7 +446,11 @@ def _pulse_signal_velocity(ch) -> list:
                         HAVING rev_30d > 500
                         ORDER BY rev_30d DESC
                         LIMIT 5
-                        """,
+                        """
+                    if as_of_date:
+                        _hyp_sql = _hyp_sql.replace("today()", _ref_date)
+                    hyp_rows = _ch.query(
+                        _hyp_sql,
                         parameters={"adv": f"%{top_adv['adv_name']}%", "pub_id": pub_id},
                     ).result_rows
                     also_down = [r[0] for r in hyp_rows
@@ -465,7 +473,7 @@ def _pulse_signal_velocity(ch) -> list:
 
             existing = existing_by_pub.get(pub_id, set())
             try:
-                gap_rows = _ch.query(f"""
+                _gap_sql = f"""
                     WITH imp_agg AS (
                         SELECT campaign_id, count() AS imp_30d
                         FROM adpx_impressions_details
@@ -495,7 +503,10 @@ def _pulse_signal_velocity(ch) -> list:
                     HAVING pub_count >= 2 AND sum(ca.rev_30d) > 0
                     ORDER BY sum(ca.rev_30d) DESC
                     LIMIT 20
-                """).result_rows
+                """
+                if as_of_date:
+                    _gap_sql = _gap_sql.replace("today()", _ref_date)
+                gap_rows = _ch.query(_gap_sql).result_rows
                 gaps = [
                     (adv, rpm) for adv, _cnt, _rev, rpm in gap_rows
                     if adv not in existing and rpm and rpm > 0
@@ -526,11 +537,11 @@ def _pulse_signal_velocity(ch) -> list:
     return results
 
 
-def _pulse_signal_ghost(ch) -> list:
+def _pulse_signal_ghost(ch, as_of_date: str | None = None) -> list:
     results = []
     try:
         from scout_agent import _query_ghost_campaigns
-        ghost_detail_rows = _query_ghost_campaigns(ch)
+        ghost_detail_rows = _query_ghost_campaigns(ch, as_of_date=as_of_date)
         by_adv: dict = {}
         for r in ghost_detail_rows:
             adv = r["adv_name"]
@@ -545,13 +556,13 @@ def _pulse_signal_ghost(ch) -> list:
     return results
 
 
-def _pulse_signal_fill_rate(ch) -> list:
+def _pulse_signal_fill_rate(ch, as_of_date: str | None = None) -> list:
+    _ref_date = f"toDate('{as_of_date}')" if as_of_date else "today()"
     results = []
     try:
         from scout_agent import _POST_TX_PLACEMENTS, _load_entity_overrides as _load_eo
         placements_sql = ", ".join(_POST_TX_PLACEMENTS)
-        fill_rows = ch.query(
-            f"""
+        _fill_sql = f"""
             WITH sessions_agg AS (
                 SELECT
                     toInt64(user_id) AS publisher_id,
@@ -586,7 +597,9 @@ def _pulse_signal_fill_rate(ch) -> list:
             ORDER BY missed_sessions DESC
             LIMIT 5
             """
-        ).result_rows
+        if as_of_date:
+            _fill_sql = _fill_sql.replace("today()", _ref_date)
+        fill_rows = ch.query(_fill_sql).result_rows
         _pub_overrides = _load_eo().get("publishers", {})
         for pub_id, pub_name, sessions_7d, with_imps, fill_pct, missed in fill_rows:
             name = pub_name or f"Pub #{pub_id}"
