@@ -550,6 +550,9 @@ def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
 
 
 def _pulse_signal_ghost(ch, as_of_date: str | None = None) -> list:
+    # Validate early — ghost delegates downstream so validate here before passing on.
+    if as_of_date:
+        as_of_date = _resolve_ref_date(as_of_date)[0].isoformat()
     results = []
     try:
         from scout_agent import _query_ghost_campaigns
