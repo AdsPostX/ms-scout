@@ -125,3 +125,39 @@ Starting any Scout session:
 2. Read `tools/offer-scraper/CLAUDE.md` Engineering Principles + Known Debt
 3. Read `scout_agent.py` SYSTEM_PROMPT + TOOLS + TOOL_MAP if planning anything new
 4. Run `python3 smoke_test.py` to confirm baseline — "it worked last time" is not a baseline
+
+## Scout Response Patterns
+
+Scout uses ScoutKit (`scout_ui_kit.py`) for all Slack output. Every response maps to one of six patterns. Match pattern → surface → severity before writing new handlers.
+
+| Pattern | Surface | Severity | Max blocks | Buttons | When |
+|---|---|---|---|---|---|
+| `ALERT` | `MONITOR_ALARM` | WARN / CRITICAL | per budget | ≤3 | monitor alarm fires |
+| `ANSWER` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO | per budget | ≤3 | ask() reply |
+| `STATUS` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO / WARN | per budget | ≤3 | `@Scout status` |
+| `CONFIRM` | `EPHEMERAL` | OK (positive) | per budget | 0 | action acknowledged |
+| `EMPTY` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO | per budget | 0 | no data found |
+| `ERROR` | `EPHEMERAL` | ERROR | per budget | 0 | ClickHouse failure |
+
+**Actionability rule:** every ALERT and ANSWER must give the reader one next action. No number without context.
+
+### Code example (ANSWER pattern)
+
+```python
+from scout_ui_kit import Card, Severity, Surface, ResponsePattern, wrap_response
+
+card = Card(severity=Severity.INFO, headline="Revenue MTD", body="$847K / $1M · 71%")
+_, blocks = wrap_response(card, Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER)
+web.chat_postMessage(channel=channel, text="Revenue MTD", blocks=blocks)
+```
+
+### Pattern enforcement
+
+Passing `pattern=` raises `ValueError` at call time if the surface is wrong:
+
+```python
+# This raises ValueError — ALERT requires MONITOR_ALARM
+wrap_response(card, Surface.CHANNEL_ROOT, pattern=ResponsePattern.ALERT)
+```
+
+Existing callers that don't pass `pattern=` are unaffected.
