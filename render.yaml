@@ -58,6 +58,8 @@ services:
         sync: false
       - key: SCOUT_ADMIN_USER_ID
         sync: false
+      - key: SIDD_QA_CHANNEL_ID
+        sync: false
       # Cross-service offer feed — set to ms-demand-feed internal URL once confirmed stable.
       # Leave unset (or "") to use disk fallback (current production behavior).
       - key: DEMAND_FEED_URL

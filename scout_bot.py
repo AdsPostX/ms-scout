@@ -2066,6 +2066,28 @@ def _thread_watchdog(web: WebClient) -> None:
         _time.sleep(60)
 
 
+def _on_startup(web: WebClient) -> None:
+    """Post 'Scout is back' to sidd-qa on every boot.
+    If recovering from an active maintenance window, reports who was blocked."""
+    from scout_state import get_maintenance, clear_maintenance
+    m = get_maintenance()
+    attempts = clear_maintenance() if m else []
+    sidd_qa = os.getenv("SIDD_QA_CHANNEL_ID", "")
+    if not sidd_qa:
+        return
+    msg = ":white_check_mark: Scout is back online."
+    if attempts:
+        users: dict[str, int] = {}
+        for a in attempts:
+            users[a["user_id"]] = users.get(a["user_id"], 0) + 1
+        breakdown = ", ".join(f"<@{u}> ×{c}" for u, c in users.items())
+        msg += f" {len(attempts)} missed message(s) during maintenance: {breakdown}"
+    try:
+        web.chat_postMessage(channel=sidd_qa, text=msg)
+    except Exception as e:
+        log.warning(f"[startup] sidd-qa post failed: {e}")
+
+
 def main():
     global _BOT_USER_ID
     _check_singleton()
@@ -2122,6 +2144,7 @@ def main():
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
+    _on_startup(web_client)
 
     import signal as _signal
 
