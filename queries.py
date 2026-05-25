@@ -559,18 +559,20 @@ def publisher_serving_campaign_impressions(
 
 
 def publisher_campaign_rpms(
-    ch, pub_pid: str, campaign_ids: list[str], days: int = 14
+    ch, pub_user_id: str, campaign_ids: list[str], days: int = 14
 ) -> dict[str, float]:
     """
     RPM (revenue per 1,000 impressions) per campaign on this publisher.
     Only campaigns in `campaign_ids` that are actively serving are included.
-    Revenue attributed to this publisher via adpx_conversionsdetails.pid — no session join.
 
-    pub_pid: numeric publisher ID as string.
+    pub_user_id: numeric publisher ID as string (the traffic/attribution publisher).
 
-    adpx_conversionsdetails carries `pid` (String) natively, so we filter directly
-    instead of using session_id IN (subquery), which materialises potentially thousands
-    of session IDs and can be slow for active publishers.
+    IMPORTANT — two different ID columns, two different tables:
+    - adpx_impressions_details uses `pid` (offer-owner publisher). Correct for impression counts.
+    - adpx_conversionsdetails uses `user_id` (traffic publisher). MUST use user_id here —
+      filtering on `pid` in conversionsdetails returns offer-owner attribution, which for
+      publishers where pid ≠ user_id gives the wrong partner's revenue (e.g. pid=338 returns
+      $74K gross but 0 sessions; correct attribution is user_id=953).
 
     Returns: dict mapping campaign_id_str -> rpm (float, 0.0 if no revenue)
     """
@@ -590,12 +592,12 @@ def publisher_campaign_rpms(
             GROUP BY campaign_id
         ) imp
         LEFT JOIN (
-            -- adpx_conversionsdetails.pid is the publisher ID (String) — filter directly,
-            -- no session join needed (eliminates the IN-subquery anti-pattern).
+            -- Filter on user_id (traffic attribution), NOT pid (offer-owner).
+            -- See docstring above for the pid vs user_id attribution distinction.
             SELECT cv.campaign_id,
                    sum(toFloat64OrNull(cv.revenue)) AS total_revenue
             FROM default.adpx_conversionsdetails cv
-            PREWHERE cv.pid = {pub_pid: String}
+            PREWHERE cv.user_id = {pub_user_id: String}
             WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - {extended_days: UInt32})
               AND cv.created_at >= today() - {extended_days: UInt32}
               AND cv.campaign_id IN {cids: Array(String)}
@@ -603,7 +605,8 @@ def publisher_campaign_rpms(
         ) cv ON toInt64(imp.campaign_id) = toInt64(cv.campaign_id)
         """,
         parameters={
-            "pub_pid":       pub_pid,
+            "pub_pid":       pub_user_id,   # impressions table: pid column (offer-owner, correct here)
+            "pub_user_id":   pub_user_id,   # conversions table: user_id column (traffic attribution)
             "cids":          campaign_ids,
             "days":          days,
             "extended_days": days * 2,
