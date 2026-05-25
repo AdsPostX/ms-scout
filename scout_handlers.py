@@ -1512,15 +1512,15 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
 
                 _stop_heartbeat()
                 response_text = (response.text or "")[:3000]
-                content_blocks = _text_to_blocks(response_text)[:45]
-                footer_block = {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {_elapsed_str}_"}]}
+                card = Card(severity=Severity.INFO, headline="", body=response_text)
+                _, blocks = wrap_response(card=card, surface=Surface.MODAL, feedback="none")
                 web.views_update(
                     view_id=v_id,
                     view={
                         "type": "modal",
                         "title": {"type": "plain_text", "text": "Scout", "emoji": False},
                         "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                        "blocks": [*content_blocks, footer_block],
+                        "blocks": blocks,
                     },
                 )
                 log.info("home_try_query modal: ran %r for %s in %ss", query[:50], user_id, _elapsed)
