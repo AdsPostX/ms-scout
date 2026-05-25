@@ -85,9 +85,9 @@ class ResponsePattern(str, Enum):
     ALERT   = "alert"    # monitor alarm  → Surface.MONITOR_ALARM, Severity.WARN/CRITICAL
     ANSWER  = "answer"   # ask() reply    → Surface.CHANNEL_ROOT / THREAD / DM, Severity.INFO
     STATUS  = "status"   # health check   → Surface.CHANNEL_ROOT / THREAD / DM, Severity.INFO/WARN
-    CONFIRM = "confirm"  # action ack     → Surface.EPHEMERAL, Severity.OK, 0 buttons
+    CONFIRM = "confirm"  # action ack     → Surface.EPHEMERAL, Severity.POSITIVE, 0 buttons
     EMPTY   = "empty"    # no data        → same as ANSWER
-    ERROR   = "error"    # CH failure     → Surface.EPHEMERAL, Severity.ERROR
+    ERROR   = "error"    # CH failure     → Surface.EPHEMERAL, Severity.CRITICAL
 
 
 # ---------------------------------------------------------------------------
@@ -338,11 +338,11 @@ def wrap_response(
             raise TypeError(
                 f"pattern must be a ResponsePattern enum value, got {type(pattern).__name__!r}"
             )
-        valid = _PATTERN_VALID_SURFACES.get(pattern, set())
+        valid = _PATTERN_VALID_SURFACES[pattern]
         if surface not in valid:
             raise ValueError(
                 f"ResponsePattern.{pattern.value} requires surface in "
-                f"{[s.value for s in valid]}, got Surface.{surface.value}"
+                f"{sorted(s.value for s in valid)}, got Surface.{surface.value}"
             )
     suggestions = suggestions or []
     max_btn = MAX_ACTIONS.get(surface, 2)
