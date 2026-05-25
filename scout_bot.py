@@ -30,7 +30,7 @@ from scout_notion import (
     _copy_coalescer_loop,
     _notion_watcher_loop,
 )
-from scout_ui_kit import Card, Severity, Surface, enforce, wrap_response, _KIT_ENABLED, _build_monitor_alert_blocks
+from scout_ui_kit import Card, Severity, Surface, enforce, wrap_response, context_block, _KIT_ENABLED, _build_monitor_alert_blocks
 from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_state import (
     _DATA_DIR,
@@ -836,7 +836,12 @@ def _digest_poster(web) -> None:
 
 
 def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
-    """Return (fallback, blocks) Block Kit alert for advertisers nearing monthly cap."""
+    """Return (fallback, blocks) Block Kit alert for advertisers nearing monthly cap.
+
+    Each item shows: pct of cap, MTD revenue / cap, dollar headroom at risk,
+    and days-to-cap vs days-remaining — so the reader knows urgency at a glance.
+    Action footer prompts the only two levers: contact advertiser or lower bid floor.
+    """
     items = []
     for r in rows[:8]:
         adv     = r.get("adv_name", "Unknown")
@@ -845,21 +850,35 @@ def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
         cap     = r.get("monthly_cap", 0)
         dtc     = r.get("days_to_cap", 0)
         dr      = r.get("days_remaining", 0)
+        at_risk = max(cap - rev_mtd, 0)
+        pace_note = (
+            f"caps in ~{dtc:.0f}d, {dr}d left — *~${at_risk:,.0f} at risk*"
+            if dtc < dr
+            else f"~{dtc:.0f}d to cap, {dr}d remaining"
+        )
         items.append(
             f"*{adv}*: *{cap_pct:.0f}%* of cap · "
             f"${rev_mtd:,.0f} / ${cap:,.0f} · "
-            f"~{dtc:.0f}d to cap vs {dr}d remaining"
+            f"{pace_note}"
         )
 
     headline = "Cap alert — advertisers approaching monthly budget"
     body = "\n".join(f"• {item}" for item in items) if items else ""
-    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    action_footer = "→ Contact advertiser or lower bid floor before cap hits"
+    full_body = f"{body}\n\n{action_footer}" if body else action_footer
+    card = Card(severity=Severity.WARN, headline=headline, body=full_body)
     _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
     return f"🟠 {headline}", blocks
 
 
 def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
-    """Return (fallback, blocks) Block Kit alert for publishers with declining revenue velocity."""
+    """Return (fallback, blocks) Block Kit alert for publishers with declining revenue velocity.
+
+    Frames the drop in monthly-run-rate terms (what the publisher is on pace to miss)
+    alongside the raw weekly comparison so the magnitude is immediately actionable.
+    Hypothesis is shown when available to distinguish publisher-side issues from
+    advertiser-side cap events.
+    """
     downs = [v for v in rows if v.get("direction") == "down"]
     if not downs:
         return ("", [])
@@ -869,9 +888,13 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
         rev_30d   = v.get("revenue_30d", 0)
         rev_7d_a  = v.get("revenue_7d_ann", 0)
         pct       = v.get("pct_delta", 0)
+        rev_7d_wk = rev_7d_a / (30 / 7) if rev_7d_a else 0   # un-annualise to weekly
+        rev_30d_wk = rev_30d / (30 / 7) if rev_30d else 0
+        miss_mo   = rev_30d - rev_7d_a   # projected monthly shortfall vs last 30d pace
         line = (
-            f"*{name}*: 7d annualized *${rev_7d_a:,.0f}* vs 30d *${rev_30d:,.0f}* "
-            f"({pct:+.0f}%)"
+            f"*{name}* on pace to miss *${miss_mo:,.0f}*/mo · "
+            f"was ${rev_30d_wk:,.0f}/wk, now ${rev_7d_wk:,.0f}/wk · "
+            f"{pct:+.0f}%"
         )
         hyp = v.get("hypothesis", "")
         if hyp:
@@ -880,43 +903,65 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
 
     headline = "Revenue velocity — publishers tracking down"
     body = "\n".join(f"• {item}" for item in items) if items else ""
-    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    action_footer = "→ Check publisher fill rate and CPM floor"
+    full_body = f"{body}\n\n{action_footer}" if body else action_footer
+    card = Card(severity=Severity.WARN, headline=headline, body=full_body)
     _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
     return f"🟠 {headline}", blocks
 
 
 def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
-    """Return (fallback, blocks) Block Kit alert for campaigns with impressions but no revenue."""
+    """Return (fallback, blocks) Block Kit alert for campaigns with impressions but no revenue.
+
+    Shows traffic volume in recency-first order (48h impressions first) so the reader
+    sees how much inventory is burning right now, not just the 7d aggregate.
+    Action footer targets the two most common root causes: pixel breakage and dead creative.
+    """
     items = []
     for r in rows[:8]:
-        adv     = r.get("adv_name", "Unknown")
-        imp_7d  = r.get("impressions_7d", 0)
-        imp_2d  = r.get("impressions_2d", 0)
-        items.append(f"*{adv}*: {imp_7d:,} impressions in 7d · {imp_2d:,} in 2d")
+        adv    = r.get("adv_name", "Unknown")
+        imp_7d = r.get("impressions_7d", 0)
+        imp_2d = r.get("impressions_2d", 0)
+        # Express recency burn rate to convey urgency
+        items.append(
+            f"*{adv}*: {imp_2d:,} imps in 48h · {imp_7d:,} in 7d · $0 revenue — "
+            f"*{imp_7d:,} impressions wasted*"
+        )
 
     headline = "Ghost campaigns — impressions without revenue"
     body = "\n".join(f"• {item}" for item in items) if items else ""
-    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    action_footer = "→ Check tracking pixel / confirm creative is live"
+    full_body = f"{body}\n\n{action_footer}" if body else action_footer
+    card = Card(severity=Severity.WARN, headline=headline, body=full_body)
     _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
     return f"🟠 {headline}", blocks
 
 
 def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
-    """Return (fallback, blocks) Block Kit alert for publishers with low fill rate."""
+    """Return (fallback, blocks) Block Kit alert for publishers with low fill rate.
+
+    Anchors the fill rate against the 15% threshold so the gap is visible,
+    and shows session count to convey opportunity size alongside the rate.
+    Action footer names the two levers: floor price and supply source health.
+    """
     items = []
+    _FILL_THRESHOLD_PCT = 15  # mirrors the WHERE clause threshold in _pulse_signal_fill_rate
     for r in rows[:5]:
-        name    = r.get("publisher_name", "Unknown")
-        fill    = r.get("fill_rate_pct", 0)
-        missed  = r.get("missed_sessions", 0)
-        sess    = r.get("sessions_7d", 0)
+        name   = r.get("publisher_name", "Unknown")
+        fill   = r.get("fill_rate_pct", 0)
+        missed = r.get("missed_sessions", 0)
+        sess   = r.get("sessions_7d", 0)
+        gap    = max(_FILL_THRESHOLD_PCT - fill, 0)
         items.append(
-            f"*{name}*: *{fill:.0f}%* fill · "
-            f"{missed:,} missed of {sess:,} sessions/7d"
+            f"*{name}*: *{fill:.0f}%* fill rate (7d), {sess:,} sessions · "
+            f"threshold {_FILL_THRESHOLD_PCT}% — *{gap:.0f}pp below, {missed:,} missed*"
         )
 
     headline = "Low fill rate — publishers with significant unfilled sessions"
     body = "\n".join(f"• {item}" for item in items) if items else ""
-    card = Card(severity=Severity.WARN, headline=headline, body=body)
+    action_footer = "→ Review floor price or supply source health"
+    full_body = f"{body}\n\n{action_footer}" if body else action_footer
+    card = Card(severity=Severity.WARN, headline=headline, body=full_body)
     _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
     return f"🟠 {headline}", blocks
 
