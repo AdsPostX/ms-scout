@@ -122,15 +122,18 @@ class _LoggingCHClient:
         return getattr(self._client, name)
 
 
-def _query_ghost_campaigns(ch) -> list:
+def _query_ghost_campaigns(ch, as_of_date: str | None = None) -> list:
     """
     Canonical ghost campaign detection — delegates to queries.ghost_campaigns().
     SQL and thresholds live in queries.py. Any change belongs there.
     This wrapper exists so scout_bot.py can continue to import from scout_agent.
+
+    as_of_date: optional ISO date string (e.g. '2026-01-15') for backtest replay.
+    When provided, today() in the underlying SQL is substituted with toDate(as_of_date).
     """
     from scout_agent import SCOUT_THRESHOLDS  # lazy — avoids circular import
     recency_hours = int(SCOUT_THRESHOLDS.get("signals", {}).get("ghost_recency_hours", 48))
-    return _q.ghost_campaigns(ch, recency_hours=recency_hours)
+    return _q.ghost_campaigns(ch, recency_hours=recency_hours, as_of_date=as_of_date)
 
 
 def _query_revenue_baseline(ch) -> dict | None:

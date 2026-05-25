@@ -1029,7 +1029,7 @@ def test_ghost_recency_propagation():
         import queries as _queries
         calls = []
         original = _queries.ghost_campaigns
-        def _spy(ch, recency_hours=48):
+        def _spy(ch, recency_hours=48, as_of_date=None):
             calls.append(recency_hours)
             return []
         _queries.ghost_campaigns = _spy

@@ -2651,8 +2651,7 @@ def force_run_monitor(monitor: str = "", _caller_user_id: str = "") -> dict:
                 "message": ":lock: Force-run is admin-only (set SCOUT_THRESHOLD_ADMINS)."}
 
     web = _FORCE_MONITOR_CTX.get("web")
-    ch_factory = _FORCE_MONITOR_CTX.get("ch_factory")
-    if web is None or ch_factory is None:
+    if web is None:
         return {"ok": False, "error": "not_initialized",
                 "message": "Force-monitor context not injected yet — Scout still warming up."}
 
@@ -2668,9 +2667,9 @@ def force_run_monitor(monitor: str = "", _caller_user_id: str = "") -> dict:
         if fn is None:
             return {"ok": False, "error": "not_registered",
                     "message": f"Monitor '{name}' not registered (scout_bot startup may have skipped it)."}
-        fn(web, ch_factory(), "")
+        fn(web, os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa"), "")
         return {"ok": True, "monitor": name, "by_user_id": _caller_user_id,
-                "message": f"Force-ran {name} monitor — results posted to #scout-qa."}
+                "message": f"Force-ran {name} monitor — results posted to {os.getenv('SCOUT_SHADOW_CHANNEL', '#scout-qa')}."}
     except Exception as e:
         log.warning(f"force_run_monitor({name}) failed: {e}")
         return {"ok": False, "error": "execution_failed", "message": str(e)}
