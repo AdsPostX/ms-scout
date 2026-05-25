@@ -31,7 +31,7 @@ from scout_notion import (
     _fetch_notion_queue_items,
 )
 from scout_ui_kit import (
-    Card, Severity, Surface, wrap_response,
+    Card, Severity, Surface, wrap_response, context_block,
     _build_brief_blocks, _queue_confirm_blocks, _build_opportunity_cards,
     _build_suggestion_buttons, _build_help_blocks, _build_feedback_buttons,
     _build_home_view, _build_queue_card, _text_to_blocks, _is_help_query,
@@ -1213,6 +1213,11 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         feedback="reaction", query_hash=_placeholder_ts_sg,
         elapsed_seconds=_elapsed,
     )
+    _sg2_period = (
+        (response.payload or {}).get("extracted_context", {}).get("period")
+        if response.payload else None
+    )
+    _sg2_blocks = [*_sg2_blocks, context_block(queried_at="just now", period=_sg2_period)]
     web.chat_update(
         channel=channel, ts=_placeholder_ts_sg,
         text=_sg2_fallback, blocks=_sg2_blocks,
@@ -2662,6 +2667,11 @@ def _handle_event_impl(req: SocketModeRequest):
                 feedback="reaction", query_hash=msg_ts,
                 elapsed_seconds=_elapsed,
             )
+            _dm_period = (
+                (response.payload or {}).get("extracted_context", {}).get("period")
+                if response.payload else None
+            )
+            _dm6_blocks = [*_dm6_blocks, context_block(queried_at="just now", period=_dm_period)]
             _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=_dm6_fallback, blocks=_dm6_blocks,
@@ -2819,6 +2829,11 @@ def _handle_event_impl(req: SocketModeRequest):
             feedback="reaction", query_hash=_placeholder_ts,
             elapsed_seconds=_elapsed,
         )
+        _period = (
+            (response.payload or {}).get("extracted_context", {}).get("period")
+            if response.payload else None
+        )
+        _ch8_blocks = [*_ch8_blocks, context_block(queried_at="just now", period=_period)]
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
