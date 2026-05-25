@@ -989,3 +989,90 @@ CATEGORY × REVENUE (joins to conversions, fan-out happens AFTER aggregation):
   FROM agg
   JOIN default.from_airbyte_campaigns c ON toInt64(c.id) = toInt64(agg.campaign_id)
   GROUP BY category ORDER BY revenue DESC LIMIT 10
+
+━━ METRIC FORMULAS ━━
+
+All formulas below are authoritative. Use these when writing SQL via run_sql_query or
+explaining results to operators. Where a formula differs from the Notion Custom Reports
+doc, the formula here is correct.
+
+── Revenue & Earnings ──
+
+Gross Revenue     = sum(toFloat64OrZero(revenue))    FROM adpx_conversionsdetails
+                    Filter: user_id = partner_id (traffic attribution — NOT pid)
+
+Partner Revenue   = sum(toFloat64OrZero(payout))     FROM adpx_conversionsdetails
+                    Filter: user_id = partner_id
+
+Partner Cost      = sum(pub_cost_cents) / 100.0      FROM adpx_tracked_clicks
+                    Filter: user_id = partner_id
+                    Note: pub_cost_cents is UInt64 (cents) — divide by 100 for dollars
+
+Earnings          = Gross Revenue − Partner Revenue + Partner Cost
+                    CRITICAL: the formula includes +Partner Cost, NOT −Partner Cost.
+                    The Notion Custom Reports doc omits +Partner Cost — that doc is WRONG.
+                    Always use the three-table join (adpx_conversionsdetails × adpx_tracked_clicks).
+
+── RPM Variants (two different metrics, not interchangeable) ──
+
+RPM(Views)        = (Gross Revenue / Views) × 1000
+                    Denominator: adpx_sdk_sessions count (filter: user_id = partner_id)
+                    Use for: publisher-level monetization efficiency
+
+RPM(Offers)       = (Gross Revenue / Impressions) × 1000
+                    Denominator: adpx_impressions_details count (filter: pid = partner_id)
+                    Use for: ad slot fill / offer exposure efficiency
+
+Partner RPM(Views)  = (Partner Revenue / Views) × 1000
+Partner RPM(Offers) = (Partner Revenue / Impressions) × 1000
+
+eRPM(Views)       = (Earnings / Views) × 1000
+                    Requires Earnings (three-table join). Use for net monetization after costs.
+
+When a question mentions "RPM" without qualification, clarify which denominator is needed
+before writing SQL. The two numbers can differ by 2–10× depending on impressions-per-view.
+
+── Per-Click & Per-Conversion Rates ──
+
+CVR               = Conversions / Clicks × 100
+                    Denominator: adpx_tracked_clicks count (filter: user_id = partner_id)
+                    NOT conversions/sessions and NOT conversions/impressions.
+                    Note: get_exposure_rate_anomalies uses conversions/impressions intentionally
+                    (exposure rate anomaly detection) — that is a separate, non-canonical metric.
+
+RPC               = Gross Revenue / Clicks
+Partner RPC       = Partner Revenue / Clicks
+EPC               = Earnings / Clicks      (requires three-table Earnings join)
+
+RPT               = Gross Revenue / Conversions   (revenue per transaction)
+
+── CTR (two variants — context-dependent) ──
+
+CTR(Views)        = Clicks / Views × 100
+                    Use for: publisher-level reporting, measuring how many sessions clicked
+
+CTR(Activity)     = Clicks / Impressions × 100
+                    Use for: ad activity table context per TASK-1027
+                    Use when: the denominator is an impression count, not a session count
+
+When a question asks for CTR without specifying, default to CTR(Views) for publisher
+performance reports and CTR(Activity) for ad-unit / creative performance reports.
+
+── Ratio Metrics ──
+
+Impressions per View = Impressions / Views
+                       Informational — no threshold or alert. Shows average ad density.
+
+── Attribution Rule (applies to all formulas above) ──
+
+adpx_conversionsdetails has BOTH pid (offer-owner publisher) AND user_id (traffic publisher).
+ALWAYS filter on user_id for partner attribution. Filtering on pid returns offer-owner
+attribution — same conversion events, wrong publisher credit.
+
+Real trap: pid=338, user_id=953 → filter pid=338 returns $74,542 gross, 0 sessions, 0 clicks.
+                                    filter user_id=338 returns correct traffic-publisher data.
+
+adpx_sdk_sessions   → filter: user_id = partner_id
+adpx_tracked_clicks → filter: user_id = partner_id
+adpx_conversionsdetails → filter: user_id = partner_id (for revenue/payout/conversions)
+adpx_impressions_details → filter: pid = partner_id  (pid IS the correct key for impressions)
