@@ -1905,6 +1905,68 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": full_text}}],
             )
 
+        elif command in ("/scout-cap", "/scout-vel", "/scout-ghost", "/scout-fill"):
+            _signal_map = {
+                "/scout-cap":   "cap",
+                "/scout-vel":   "velocity",
+                "/scout-ghost": "ghost",
+                "/scout-fill":  "fill",
+            }
+            monitor_name = _signal_map[command]
+            fn = _FORCE_MONITOR_FNS.get(monitor_name)
+            if fn is None:
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id,
+                    text=f":x: `{monitor_name}` monitor not available — "
+                         f"runner not initialized. Try `@Scout force {monitor_name}` "
+                         f"after the demand-feed service starts.",
+                )
+            else:
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id,
+                    text=f":hourglass_flowing_sand: Running `{monitor_name}` monitor — "
+                         f"results will post in this channel shortly.",
+                )
+                def _run_signal(_fn=fn, _ch=channel):
+                    try:
+                        _fn(web, _ch, None)
+                    except Exception as _e:
+                        log.error(f"[{command}] force run failed: {_e}", exc_info=True)
+                        try:
+                            web.chat_postEphemeral(
+                                channel=_ch, user=user_id,
+                                text=f":x: `{monitor_name}` run failed: {_e}",
+                            )
+                        except Exception:
+                            pass
+                threading.Thread(target=_run_signal, daemon=True).start()
+
+        elif command == "/scout-revenue":
+            # Revenue query — same path as @Scout revenue, routed through NLP agent
+            web.chat_postEphemeral(
+                channel=channel, user=user_id,
+                text=":bar_chart: Fetching revenue status — ask `@Scout revenue` "
+                     "in this channel for the full response with context.",
+            )
+
+        elif command == "/scout-signal-status":
+            from alert_registry import current_state as _reg_state
+            _firing = _reg_state()
+            if not _firing:
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id,
+                    text=":white_check_mark: No signals firing right now.",
+                )
+            else:
+                _lines = []
+                for _s in _firing:
+                    _ts = _s.last_change.strftime("%m/%d %H:%M CT")
+                    _lines.append(f"• `{_s.alert_name}` — firing since {_ts}")
+                web.chat_postEphemeral(
+                    channel=channel, user=user_id,
+                    text=":rotating_light: *Signals currently firing:*\n" + "\n".join(_lines),
+                )
+
         elif command == "/scout-help":
             help_blocks = [
                 {"type": "header", "text": {"type": "plain_text",
@@ -1916,6 +1978,12 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text":
                     "*Slash commands — responses are private to you*\n"
+                    "• `/scout-cap` — force-run cap signal now\n"
+                    "• `/scout-vel` — force-run velocity signal now\n"
+                    "• `/scout-ghost` — force-run ghost (zero-conversion) signal now\n"
+                    "• `/scout-fill` — force-run fill-rate signal now\n"
+                    "• `/scout-signal-status` — which signals are currently firing\n"
+                    "• `/scout-revenue` — revenue status prompt\n"
                     "• `/scout-pub [publisher]` — revenue health, active offers, what to pitch\n"
                     "• `/scout-enter [advertiser]` — campaign entry card for the MS platform\n"
                     "• `/scout-queue` — what's pending in the pipeline\n"
@@ -1978,7 +2046,9 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
         else:
             web.chat_postEphemeral(
                 channel=channel, user=user_id,
-                text=f"Unknown command `{command}`. Try `/scout-help`, `/scout-pub`, `/scout-queue`, `/scout-enter`, or `/scout-status`.",
+                text=f"Unknown command `{command}`. Try `/scout-help` for the full list, "
+                     f"or one of: `/scout-cap`, `/scout-vel`, `/scout-ghost`, `/scout-fill`, "
+                     f"`/scout-signal-status`, `/scout-pub`, `/scout-queue`, `/scout-status`.",
             )
     except Exception as e:
         log.error(f"_handle_slash_command error ({command}): {e}")
