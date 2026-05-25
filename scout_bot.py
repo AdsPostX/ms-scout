@@ -295,6 +295,7 @@ def _pulse_signal_cap(ch) -> list:
         results.sort(key=lambda x: x["cap_pct"], reverse=True)
     except Exception as e:
         log.warning(f"Pulse cap signal failed: {e}")
+        raise
     return results
 
 
@@ -521,6 +522,7 @@ def _pulse_signal_velocity(ch) -> list:
 
     except Exception as e:
         log.warning(f"Pulse velocity signal failed: {e}")
+        raise
     return results
 
 
@@ -539,6 +541,7 @@ def _pulse_signal_ghost(ch) -> list:
             results.append({"adv_name": adv, **agg})
     except Exception as e:
         log.warning(f"Pulse ghost campaign signal failed: {e}")
+        raise
     return results
 
 
@@ -600,6 +603,7 @@ def _pulse_signal_fill_rate(ch) -> list:
             })
     except Exception as e:
         log.warning(f"Pulse fill rate signal failed: {e}")
+        raise
     return results
 
 
