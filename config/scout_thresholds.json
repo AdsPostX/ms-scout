@@ -1,5 +1,6 @@
 {
   "_doc": "Scout's tunable thresholds. Edit + redeploy on Render to change live values. The @Scout config tool reads from here at runtime so the team can audit what's currently active without reading source.",
+  "monthly_revenue_target": 1000000,
   "digest": {
     "min_rpm_floor": 5,
     "offers_per_network": 3,
