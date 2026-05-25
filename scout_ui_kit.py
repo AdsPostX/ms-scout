@@ -100,6 +100,7 @@ class Surface(Enum):
     MONITOR_ALARM = "monitor_alarm"
     HOME = "home"
     EPHEMERAL = "ephemeral"
+    MODAL = "modal"
 
 
 BUDGETS: dict[Surface, int] = {
@@ -109,6 +110,7 @@ BUDGETS: dict[Surface, int] = {
     Surface.MONITOR_ALARM: 6,
     Surface.HOME: 30,
     Surface.EPHEMERAL: 6,
+    Surface.MODAL: 45,
 }
 
 _PATTERN_VALID_SURFACES: dict[ResponsePattern, set[Surface]] = {
@@ -255,6 +257,7 @@ MAX_ACTIONS: dict[Surface, int] = {
     Surface.MONITOR_ALARM: 0,
     Surface.HOME: 2,
     Surface.EPHEMERAL: 1,
+    Surface.MODAL: 0,
 }
 
 
