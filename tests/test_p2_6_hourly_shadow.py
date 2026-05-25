@@ -4,11 +4,19 @@ T1: _run_shadow_monitor is callable from demand_feed_main
 T2: kill switch SCOUT_HOURLY_SHADOW_ENABLED=false → never calls signal_fn
 T3: all 6 monitor daemons are callable from demand_feed_main
 T4: module imports without error
+T5: CH exception from signal_fn → _run_shadow_monitor records status='error'
+T6: concurrent _update_pulse_state calls don't clobber each other's date keys
+T7: as_of_date parameter substitutes today() with toDate(as_of_date) in SQL
+T8: force_run_monitor passes Slack channel string (not CH client) to lambda
 """
 from __future__ import annotations
 
 import importlib
+import json
+import os
 import sys
+import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -164,6 +172,194 @@ class TestModuleImports(unittest.TestCase):
             import demand_feed_main  # noqa: F401
         except Exception as exc:
             self.fail(f"demand_feed_main import raised: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# T5: CH exception from signal_fn → _run_shadow_monitor records status='error'
+#     not status='success'.  Verifies the raise in each signal function's outer
+#     except block propagates up to the exception handler at line 1017 of
+#     demand_feed_main, which calls record_job_run(status='error').
+# ---------------------------------------------------------------------------
+
+class TestCHExceptionPropagatesFromSignalFns(unittest.TestCase):
+
+    def _make_ch_mock(self, side_effect=None, rows=None):
+        ch = MagicMock()
+        if side_effect:
+            ch.query.side_effect = side_effect
+        else:
+            result = MagicMock()
+            result.result_rows = rows or []
+            ch.query.return_value = result
+        return ch
+
+    def _assert_propagates(self, signal_fn_name: str, ch):
+        """Assert signal fn re-raises when ch.query raises RuntimeError."""
+        try:
+            import scout_bot as _sb
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"scout_bot not importable in test env: {exc}")
+        fn = getattr(_sb, signal_fn_name, None)
+        if fn is None:
+            self.skipTest(f"{signal_fn_name} not found on scout_bot")
+        with self.assertRaises(RuntimeError, msg=f"{signal_fn_name} must re-raise CH errors"):
+            fn(ch)
+
+    def test_cap_signal_reraises_ch_error(self):
+        self._assert_propagates("_pulse_signal_cap",
+                                self._make_ch_mock(side_effect=RuntimeError("CH down")))
+
+    def test_velocity_signal_reraises_ch_error(self):
+        self._assert_propagates("_pulse_signal_velocity",
+                                self._make_ch_mock(side_effect=RuntimeError("CH down")))
+
+    def test_fill_rate_signal_reraises_ch_error(self):
+        self._assert_propagates("_pulse_signal_fill_rate",
+                                self._make_ch_mock(side_effect=RuntimeError("CH down")))
+
+
+# ---------------------------------------------------------------------------
+# T6: concurrent _update_pulse_state calls don't clobber each other's keys.
+#     Fires 20 threads each writing a distinct key.  Asserts all 20 are
+#     present in the final state — proves the threading.Lock prevents
+#     lost-write races in the RMW cycle.
+# ---------------------------------------------------------------------------
+
+class TestConcurrentPulseStateUpdate(unittest.TestCase):
+
+    def test_no_clobber_under_concurrent_writes(self):
+        """20 threads writing distinct keys — all must survive."""
+        try:
+            import scout_state as _ss
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"scout_state not importable: {exc}")
+
+        N = 20
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_file = Path(tmpdir) / "pulse_state.json"
+            with patch.object(_ss, "_PULSE_STATE_FILE", tmp_file):
+                errors: list[Exception] = []
+
+                def _write(i: int) -> None:
+                    try:
+                        _ss._update_pulse_state(f"key_{i}", f"val_{i}")
+                    except Exception as exc:
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=_write, args=(i,)) for i in range(N)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+                self.assertEqual(errors, [], f"Threads raised: {errors}")
+                final = json.loads(tmp_file.read_text())
+                for i in range(N):
+                    self.assertIn(f"key_{i}", final,
+                                  f"key_{i} missing — concurrent write was clobbered")
+                    self.assertEqual(final[f"key_{i}"], f"val_{i}")
+
+
+# ---------------------------------------------------------------------------
+# T7: as_of_date replaces today() with toDate(as_of_date) in SQL.
+#     Calls _pulse_signal_cap with a fixed historical date and checks the SQL
+#     that reached the (mocked) ClickHouse client.
+# ---------------------------------------------------------------------------
+
+class TestAsOfDateSQLSubstitution(unittest.TestCase):
+
+    def _empty_ch(self):
+        ch = MagicMock()
+        result = MagicMock()
+        result.result_rows = []
+        ch.query.return_value = result
+        return ch
+
+    def _call_and_get_sql(self, signal_fn_name: str, as_of_date: str) -> str | None:
+        try:
+            import scout_bot as _sb
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"scout_bot not importable: {exc}")
+        fn = getattr(_sb, signal_fn_name, None)
+        if fn is None:
+            self.skipTest(f"{signal_fn_name} not found")
+        ch = self._empty_ch()
+        try:
+            fn(ch, as_of_date=as_of_date)
+        except Exception:
+            pass  # result rows are empty; some fns raise later — we only care about the SQL
+        if not ch.query.called:
+            return None
+        return ch.query.call_args[0][0]
+
+    def _assert_sql_has_date_not_today(self, sql: str | None, as_of_date: str) -> None:
+        if sql is None:
+            self.skipTest("ch.query was not called — function returned early")
+        self.assertIn(f"toDate('{as_of_date}')", sql,
+                      "Expected toDate substitution missing from SQL")
+        self.assertNotIn("today()", sql,
+                         "today() still present in SQL despite as_of_date being set")
+
+    def test_cap_sql_uses_as_of_date(self):
+        sql = self._call_and_get_sql("_pulse_signal_cap", "2026-01-15")
+        self._assert_sql_has_date_not_today(sql, "2026-01-15")
+
+    def test_velocity_sql_uses_as_of_date(self):
+        sql = self._call_and_get_sql("_pulse_signal_velocity", "2026-01-15")
+        self._assert_sql_has_date_not_today(sql, "2026-01-15")
+
+    def test_fill_rate_sql_uses_as_of_date(self):
+        sql = self._call_and_get_sql("_pulse_signal_fill_rate", "2026-01-15")
+        self._assert_sql_has_date_not_today(sql, "2026-01-15")
+
+
+# ---------------------------------------------------------------------------
+# T8: force_run_monitor passes a Slack channel string to the monitor lambda,
+#     not a ClickHouse client object.  The bug (pre-fix) was passing ch_factory()
+#     (a CH client) as the second arg; the lambda's second param is `ch` but
+#     the semantics is "channel string", and _one_shot_monitor expects str.
+# ---------------------------------------------------------------------------
+
+class TestForceRunMonitorPassesChannelString(unittest.TestCase):
+
+    def test_force_run_monitor_channel_arg_is_string(self):
+        """force_run_monitor must pass a channel string, not a CH client, to the lambda."""
+        try:
+            import scout_agent as _sa
+            import scout_handlers as _sh
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"scout_agent/scout_handlers not importable: {exc}")
+
+        captured: list = []
+
+        def _fake_fn(web, channel, thread_ts=""):
+            captured.append(channel)
+
+        original_fns = dict(_sh._FORCE_MONITOR_FNS)
+        _sh._FORCE_MONITOR_FNS["_test_ch_check"] = _fake_fn
+
+        original_ctx = dict(_sa._FORCE_MONITOR_CTX)
+        _sa._FORCE_MONITOR_CTX["web"] = MagicMock()
+        _sa._FORCE_MONITOR_CTX["ch_factory"] = lambda: MagicMock()
+
+        try:
+            with patch.dict(os.environ,
+                            {"SCOUT_SHADOW_CHANNEL": "#scout-qa-test",
+                             "SCOUT_THRESHOLD_ADMINS": "U_TEST_ADMIN"}):
+                result = _sa.force_run_monitor("_test_ch_check",
+                                               _caller_user_id="U_TEST_ADMIN")
+        finally:
+            _sh._FORCE_MONITOR_FNS.clear()
+            _sh._FORCE_MONITOR_FNS.update(original_fns)
+            _sa._FORCE_MONITOR_CTX.clear()
+            _sa._FORCE_MONITOR_CTX.update(original_ctx)
+
+        self.assertTrue(result.get("ok"), f"force_run_monitor returned error: {result}")
+        self.assertEqual(len(captured), 1, "lambda should have been called exactly once")
+        channel_arg = captured[0]
+        self.assertIsInstance(channel_arg, str,
+                              f"Expected str channel, got {type(channel_arg).__name__}")
+        self.assertEqual(channel_arg, "#scout-qa-test")
 
 
 if __name__ == "__main__":
