@@ -132,12 +132,12 @@ Scout uses ScoutKit (`scout_ui_kit.py`) for all Slack output. Every response map
 
 | Pattern | Surface | Severity | Max blocks | Buttons | When |
 |---|---|---|---|---|---|
-| `ALERT` | `MONITOR_ALARM` | WARN / CRITICAL | per budget | ≤3 | monitor alarm fires |
+| `ALERT` | `MONITOR_ALARM` | WARN / CRITICAL | per budget | 0 | monitor alarm fires |
 | `ANSWER` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO | per budget | ≤3 | ask() reply |
 | `STATUS` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO / WARN | per budget | ≤3 | `@Scout status` |
-| `CONFIRM` | `EPHEMERAL` | OK (positive) | per budget | 0 | action acknowledged |
+| `CONFIRM` | `EPHEMERAL` | POSITIVE | per budget | 0 | action acknowledged |
 | `EMPTY` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO | per budget | 0 | no data found |
-| `ERROR` | `EPHEMERAL` | ERROR | per budget | 0 | ClickHouse failure |
+| `ERROR` | `EPHEMERAL` | CRITICAL | per budget | 0 | ClickHouse failure |
 
 **Actionability rule:** every ALERT and ANSWER must give the reader one next action. No number without context.
 
@@ -147,7 +147,7 @@ Scout uses ScoutKit (`scout_ui_kit.py`) for all Slack output. Every response map
 from scout_ui_kit import Card, Severity, Surface, ResponsePattern, wrap_response
 
 card = Card(severity=Severity.INFO, headline="Revenue MTD", body="$847K / $1M · 71%")
-_, blocks = wrap_response(card, Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER)
+_, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER)
 web.chat_postMessage(channel=channel, text="Revenue MTD", blocks=blocks)
 ```
 
@@ -156,8 +156,8 @@ web.chat_postMessage(channel=channel, text="Revenue MTD", blocks=blocks)
 Passing `pattern=` raises `ValueError` at call time if the surface is wrong:
 
 ```python
-# This raises ValueError — ALERT requires MONITOR_ALARM
-wrap_response(card, Surface.CHANNEL_ROOT, pattern=ResponsePattern.ALERT)
+# This raises ValueError — ALERT requires MONITOR_ALARM, not CHANNEL_ROOT
+wrap_response(card=card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ALERT)
 ```
 
 Existing callers that don't pass `pattern=` are unaffected.

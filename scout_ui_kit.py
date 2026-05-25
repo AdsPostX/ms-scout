@@ -334,6 +334,10 @@ def wrap_response(
         (fallback_text, blocks) — fallback is always non-empty (mobile push previews).
     """
     if pattern is not None:
+        if not isinstance(pattern, ResponsePattern):
+            raise TypeError(
+                f"pattern must be a ResponsePattern enum value, got {type(pattern).__name__!r}"
+            )
         valid = _PATTERN_VALID_SURFACES.get(pattern, set())
         if surface not in valid:
             raise ValueError(
@@ -452,11 +456,11 @@ def context_block(
 ) -> dict:
     """Return a Slack context block with query metadata.
 
-    Typical usage::
+    Typical usage — append after wrap_response blocks::
 
-        card = Card(...)
-        card.context_elements = [context_block(queried_at="just now", period="7d")]
-        _, blocks = wrap_response(card, Surface.CHANNEL_ROOT)
+        _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, feedback="none")
+        meta = context_block(queried_at="just now", period="7d")
+        web.chat_postMessage(channel=channel, text="...", blocks=[*blocks, meta])
 
     All params are optional — omit any you don't have.
     """
