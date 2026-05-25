@@ -322,11 +322,17 @@ def _load_pulse_state() -> dict:
 
 
 def _save_pulse_state(state: dict):
-    try:
-        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(_PULSE_STATE_FILE, state)
-    except Exception as e:
-        log.warning(f"Could not persist pulse_state: {e}")
+    """Write the full pulse state dict atomically.
+
+    Acquires _PULSE_STATE_LOCK so direct callers don't race with
+    _update_pulse_state.  Prefer _update_pulse_state for single-key writes.
+    """
+    with _PULSE_STATE_LOCK:
+        try:
+            _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(_PULSE_STATE_FILE, state)
+        except Exception as e:
+            log.warning(f"Could not persist pulse_state: {e}")
 
 
 def _update_pulse_state(key: str, value) -> None:

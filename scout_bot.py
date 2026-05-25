@@ -247,7 +247,13 @@ def _pulse_signal_cap(ch, as_of_date: str | None = None) -> list:
     import json as _json
     from datetime import date as _date
     import calendar as _cal
-    _ref_date = f"toDate('{as_of_date}')" if as_of_date else "today()"
+    # Validate and resolve the reference date before any SQL is constructed.
+    if as_of_date:
+        today_d = _date.fromisoformat(as_of_date)  # raises ValueError for malformed input
+        _ref_date = f"toDate('{as_of_date}')"
+    else:
+        today_d = _date.today()
+        _ref_date = "today()"
     results = []
     try:
         _sql = """
@@ -269,7 +275,6 @@ def _pulse_signal_cap(ch, as_of_date: str | None = None) -> list:
         if as_of_date:
             _sql = _sql.replace("today()", _ref_date)
         cap_rows = ch.query(_sql).result_rows
-        today_d = _date.fromisoformat(as_of_date) if as_of_date else _date.today()
         days_in_month = _cal.monthrange(today_d.year, today_d.month)[1]
         days_remaining = days_in_month - today_d.day + 1
         for camp_id, adv_name, cap_cfg, revenue_mtd in cap_rows:

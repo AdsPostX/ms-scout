@@ -217,6 +217,10 @@ class TestCHExceptionPropagatesFromSignalFns(unittest.TestCase):
         self._assert_propagates("_pulse_signal_fill_rate",
                                 self._make_ch_mock(side_effect=RuntimeError("CH down")))
 
+    def test_ghost_signal_reraises_ch_error(self):
+        self._assert_propagates("_pulse_signal_ghost",
+                                self._make_ch_mock(side_effect=RuntimeError("CH down")))
+
 
 # ---------------------------------------------------------------------------
 # T6: concurrent _update_pulse_state calls don't clobber each other's keys.
@@ -310,6 +314,10 @@ class TestAsOfDateSQLSubstitution(unittest.TestCase):
 
     def test_fill_rate_sql_uses_as_of_date(self):
         sql = self._call_and_get_sql("_pulse_signal_fill_rate", "2026-01-15")
+        self._assert_sql_has_date_not_today(sql, "2026-01-15")
+
+    def test_ghost_sql_uses_as_of_date(self):
+        sql = self._call_and_get_sql("_pulse_signal_ghost", "2026-01-15")
         self._assert_sql_has_date_not_today(sql, "2026-01-15")
 
 

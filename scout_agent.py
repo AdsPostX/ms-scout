@@ -2651,8 +2651,7 @@ def force_run_monitor(monitor: str = "", _caller_user_id: str = "") -> dict:
                 "message": ":lock: Force-run is admin-only (set SCOUT_THRESHOLD_ADMINS)."}
 
     web = _FORCE_MONITOR_CTX.get("web")
-    ch_factory = _FORCE_MONITOR_CTX.get("ch_factory")
-    if web is None or ch_factory is None:
+    if web is None:
         return {"ok": False, "error": "not_initialized",
                 "message": "Force-monitor context not injected yet — Scout still warming up."}
 
