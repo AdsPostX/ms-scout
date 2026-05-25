@@ -1756,11 +1756,11 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
         # Omits the block entirely when the key is 0, None, or missing — fail-closed.
         _monthly_target = SCOUT_THRESHOLDS.get("monthly_revenue_target") or 0
         if _monthly_target > 0:
-            from datetime import timezone as _tz2
+            from datetime import datetime as _dt2, timezone as _tz2
             from zoneinfo import ZoneInfo as _ZI
             _mtd_cents = getattr(rollup, "revenue_mtd_cents", 0) or 0
             _target_cents = int(_monthly_target * 100)
-            _now_ct = datetime.now(_ZI("America/Chicago"))
+            _now_ct = _dt2.now(_ZI("America/Chicago"))
             _month_start = _now_ct.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             import calendar as _cal
             _days_in_month = _cal.monthrange(_now_ct.year, _now_ct.month)[1]
