@@ -1751,6 +1751,47 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
             }],
         })
 
+        # ── MTD goal + pace line ──────────────────────────────────────────────
+        # Reads monthly_revenue_target from scout_thresholds.json (top-level key).
+        # Omits the block entirely when the key is 0, None, or missing — fail-closed.
+        _monthly_target = SCOUT_THRESHOLDS.get("monthly_revenue_target") or 0
+        if _monthly_target > 0:
+            from datetime import datetime as _dt2, timezone as _tz2
+            from zoneinfo import ZoneInfo as _ZI
+            _mtd_cents = getattr(rollup, "revenue_mtd_cents", 0) or 0
+            _target_cents = int(_monthly_target * 100)
+            _now_ct = _dt2.now(_ZI("America/Chicago"))
+            _month_start = _now_ct.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            import calendar as _cal
+            _days_in_month = _cal.monthrange(_now_ct.year, _now_ct.month)[1]
+            _days_elapsed = max((_now_ct - _month_start).total_seconds() / 86400, 0.01)
+            _days_left = max(_days_in_month - _days_elapsed, 0)
+            _pct = round(100.0 * _mtd_cents / _target_cents) if _target_cents else 0
+            _running_per_day = _mtd_cents / _days_elapsed  # cents/day so far
+            _needed_per_day  = (_target_cents - _mtd_cents) / _days_left if _days_left > 0 else 0
+            _mtd_str    = _fmt_money_short(_mtd_cents)
+            _target_str = _fmt_money_short(_target_cents)
+            _need_str   = _fmt_money_short(int(_needed_per_day))
+            _run_str    = _fmt_money_short(int(_running_per_day))
+            _days_left_int = max(int(_days_left), 0)
+            # Pace indicator: 🔴 badly behind, 🟡 slightly behind, 🟢 on track
+            if _needed_per_day > 0 and _running_per_day < _needed_per_day * 0.8:
+                _pace_icon = "🔴"
+            elif _needed_per_day > 0 and _running_per_day < _needed_per_day:
+                _pace_icon = "🟡"
+            else:
+                _pace_icon = "🟢"
+            _pace_line = (
+                f"{_mtd_str} / {_target_str} MTD · {_pct}% · "
+                f"{_days_left_int} days left · "
+                f"need {_need_str}/day · "
+                f"running {_run_str}/day {_pace_icon}"
+            )
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": _pace_line}],
+            })
+
     firing = list(alerts or [])
     if not firing:
         health_text = "🟢 *All systems normal.*"

@@ -370,5 +370,118 @@ class TestForceRunMonitorPassesChannelString(unittest.TestCase):
         self.assertEqual(channel_arg, "#scout-qa-test")
 
 
+# ---------------------------------------------------------------------------
+# T9: mark_firing called after a successful Slack post
+# ---------------------------------------------------------------------------
+
+class TestMarkFiringCalledOnPost(unittest.TestCase):
+
+    def test_shadow_monitor_calls_mark_firing_on_post(self):
+        """_run_shadow_monitor calls alert_registry.mark_firing after a successful Slack post."""
+        import demand_feed_main as dm
+        import alert_registry
+
+        fired = []
+
+        # Stub signal_fn returning one anomaly row (non-empty → fires alert)
+        signal_mock = MagicMock(return_value=[{"network": "test-net", "cap_pct": 99.0}])
+        # format_fn must return a non-empty fallback string + block list
+        format_mock = MagicMock(return_value=("Alert: cap at 99%", [{"type": "section", "text": {"type": "mrkdwn", "text": "cap"}}]))
+        load_state_mock = MagicMock(return_value=None)
+        save_state_mock = MagicMock()
+
+        # Per-monitor SCOUT_THRESHOLDS entry — enables the monitor
+        fake_thresholds = {"signals": {"test_monitor_enabled": True, "test_monitor_check_hour_ct": 0}}
+
+        # WebClient mock — chat_postMessage must succeed
+        fake_web = MagicMock()
+        fake_web.chat_postMessage.return_value = {"ok": True}
+
+        # First sleep (300s) must pass silently so the inner loop body executes.
+        # Second sleep raises StopIteration to exit cleanly after one cycle.
+        sleep_calls = [0]
+
+        def _counting_sleep(secs):
+            sleep_calls[0] += 1
+            if sleep_calls[0] > 1:
+                raise StopIteration("one cycle done")
+
+        with patch.dict("os.environ", {"SCOUT_HOURLY_SHADOW_ENABLED": "true"}, clear=False), \
+             patch("scout_agent.SCOUT_THRESHOLDS", fake_thresholds), \
+             patch("demand_feed_main.alert_registry.mark_firing",
+                   side_effect=lambda name, ctx: fired.append((name, ctx))), \
+             patch("demand_feed_main.alert_registry.mark_cleared", MagicMock()), \
+             patch("scout_ch._get_ch_client", MagicMock(return_value=MagicMock())), \
+             patch("slack_sdk.web.WebClient", return_value=fake_web), \
+             patch("scout_core.job_runs.record_job_run", MagicMock()), \
+             patch("time.sleep", side_effect=_counting_sleep):
+            try:
+                dm._run_shadow_monitor(
+                    monitor_name="test-monitor",
+                    config_key="test",
+                    signal_fn=signal_mock,
+                    format_fn=format_mock,
+                    load_state_fn=load_state_mock,
+                    save_state_fn=save_state_mock,
+                )
+            except StopIteration:
+                pass
+
+        self.assertEqual(len(fired), 1, f"mark_firing should be called once, got: {fired}")
+        self.assertEqual(fired[0][0], "test-monitor")
+
+
+# ---------------------------------------------------------------------------
+# T10: mark_cleared called when signal_fn returns no anomalies
+# ---------------------------------------------------------------------------
+
+class TestMarkClearedCalledOnNoAnomaly(unittest.TestCase):
+
+    def test_shadow_monitor_calls_mark_cleared_on_no_anomaly(self):
+        """_run_shadow_monitor calls alert_registry.mark_cleared when results is empty."""
+        import demand_feed_main as dm
+
+        cleared = []
+
+        # signal_fn returns empty list → no anomalies
+        signal_mock = MagicMock(return_value=[])
+        format_mock = MagicMock(return_value=("", []))
+        load_state_mock = MagicMock(return_value=None)
+        save_state_mock = MagicMock()
+
+        fake_thresholds = {"signals": {"test_monitor_enabled": True, "test_monitor_check_hour_ct": 0}}
+
+        # Let the first sleep pass so the inner-loop body executes; raise on the second.
+        _cleared_sleep_calls = [0]
+
+        def _cleared_counting_sleep(secs):
+            _cleared_sleep_calls[0] += 1
+            if _cleared_sleep_calls[0] > 1:
+                raise StopIteration("one cycle done")
+
+        with patch.dict("os.environ", {"SCOUT_HOURLY_SHADOW_ENABLED": "true"}, clear=False), \
+             patch("scout_agent.SCOUT_THRESHOLDS", fake_thresholds), \
+             patch("demand_feed_main.alert_registry.mark_cleared",
+                   side_effect=lambda name: cleared.append(name)), \
+             patch("demand_feed_main.alert_registry.mark_firing", MagicMock()), \
+             patch("scout_ch._get_ch_client", MagicMock(return_value=MagicMock())), \
+             patch("scout_core.job_runs.record_job_run", MagicMock()), \
+             patch("time.sleep", side_effect=_cleared_counting_sleep):
+            try:
+                dm._run_shadow_monitor(
+                    monitor_name="test-monitor",
+                    config_key="test",
+                    signal_fn=signal_mock,
+                    format_fn=format_mock,
+                    load_state_fn=load_state_mock,
+                    save_state_fn=save_state_mock,
+                )
+            except StopIteration:
+                pass
+
+        self.assertEqual(len(cleared), 1, f"mark_cleared should be called once, got: {cleared}")
+        self.assertEqual(cleared[0], "test-monitor")
+
+
 if __name__ == "__main__":
     unittest.main()

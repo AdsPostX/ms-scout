@@ -53,6 +53,8 @@ from scout_core.contracts import set_geo_normalizer as _set_geo_normalizer
 from offer_scraper import normalize_geo as _normalize_geo
 _set_geo_normalizer(_normalize_geo)
 
+import alert_registry
+
 _SCRAPER_STATE = _DATA_DIR / "scraper_state.json"
 _OFFERS_FILE   = _DATA_DIR / "offers_latest.json"
 _QUEUE_FILE    = _DATA_DIR / "queue.json"
@@ -1049,6 +1051,7 @@ def _run_shadow_monitor(
                         if is_shadow_tick:
                             last_shadow_slot = shadow_slot
                         log.info(f"{tag} no anomalies — staying silent.")
+                        alert_registry.mark_cleared(monitor_name)
                         continue
 
                     fallback, blocks = format_fn(results)
@@ -1071,6 +1074,7 @@ def _run_shadow_monitor(
                     from slack_sdk.web import WebClient as _WC
                     web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
                     web.chat_postMessage(channel=target_channel, text=fallback, blocks=blocks)
+                    alert_registry.mark_firing(monitor_name, {"results_count": len(results), "channel": target_channel})
 
                     from scout_core.job_runs import record_job_run
                     record_job_run(monitor_name, status="success", duration_ms=duration_ms)
