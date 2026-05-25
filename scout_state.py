@@ -38,6 +38,13 @@ _LEARNED_BENCHMARKS_FILE = _DATA_DIR / "learned_benchmarks.json"
 _THRESHOLD_OVERRIDES_FILE = _DATA_DIR / "threshold_overrides.json"
 _THRESHOLD_CHANGELOG_FILE = _DATA_DIR / "threshold_changelog.jsonl"
 
+# ── Pulse-state concurrency lock ───────────────────────────────────────────────
+# Covers the read-modify-write race on pulse_state.json.  Within a single
+# process (Render deploys a single worker) this lock is sufficient; across
+# restart events the per-signal Slack dedup key in demand_feed_main.py acts
+# as a belt-and-suspenders guard.
+_PULSE_STATE_LOCK = threading.Lock()
+
 
 # ── Atomic write ───────────────────────────────────────────────────────────────
 
@@ -170,9 +177,7 @@ def _load_revenue_alert_state() -> str | None:
 
 def _save_revenue_alert_date(date_str: str) -> None:
     """Persist today's date as the last revenue alert date in pulse_state.json."""
-    state = _load_pulse_state()
-    state["last_revenue_alert_date"] = date_str
-    _save_pulse_state(state)
+    _update_pulse_state("last_revenue_alert_date", date_str)
 
 
 # ── Per-monitor alert state ───────────────────────────────────────────────────
@@ -186,9 +191,7 @@ def _load_cap_alert_state() -> str | None:
 
 
 def _save_cap_alert_date(date_str: str) -> None:
-    state = _load_pulse_state()
-    state["last_cap_alert_date"] = date_str
-    _save_pulse_state(state)
+    _update_pulse_state("last_cap_alert_date", date_str)
 
 
 def _load_velocity_down_alert_state() -> str | None:
@@ -196,9 +199,7 @@ def _load_velocity_down_alert_state() -> str | None:
 
 
 def _save_velocity_down_alert_date(date_str: str) -> None:
-    state = _load_pulse_state()
-    state["last_velocity_down_alert_date"] = date_str
-    _save_pulse_state(state)
+    _update_pulse_state("last_velocity_down_alert_date", date_str)
 
 
 def _load_ghost_alert_state() -> str | None:
@@ -206,9 +207,7 @@ def _load_ghost_alert_state() -> str | None:
 
 
 def _save_ghost_alert_date(date_str: str) -> None:
-    state = _load_pulse_state()
-    state["last_ghost_alert_date"] = date_str
-    _save_pulse_state(state)
+    _update_pulse_state("last_ghost_alert_date", date_str)
 
 
 def _load_fill_alert_state() -> str | None:
@@ -216,9 +215,7 @@ def _load_fill_alert_state() -> str | None:
 
 
 def _save_fill_alert_date(date_str: str) -> None:
-    state = _load_pulse_state()
-    state["last_fill_alert_date"] = date_str
-    _save_pulse_state(state)
+    _update_pulse_state("last_fill_alert_date", date_str)
 
 
 def _load_cvr_anomaly_alert_state() -> str | None:
@@ -226,9 +223,7 @@ def _load_cvr_anomaly_alert_state() -> str | None:
 
 
 def _save_cvr_anomaly_alert_date(date_str: str) -> None:
-    state = _load_pulse_state()
-    state["last_cvr_anomaly_alert_date"] = date_str
-    _save_pulse_state(state)
+    _update_pulse_state("last_cvr_anomaly_alert_date", date_str)
 
 
 def _load_expiration_alert_state() -> str | None:
@@ -236,9 +231,7 @@ def _load_expiration_alert_state() -> str | None:
 
 
 def _save_expiration_alert_date(date_str: str) -> None:
-    state = _load_pulse_state()
-    state["last_expiration_alert_date"] = date_str
-    _save_pulse_state(state)
+    _update_pulse_state("last_expiration_alert_date", date_str)
 
 
 # ── Projection autocheck slot ─────────────────────────────────────────────────
@@ -251,9 +244,7 @@ def _load_projection_autocheck_slot() -> str | None:
 
 
 def _save_projection_autocheck_slot(slot: str) -> None:
-    state = _load_pulse_state()
-    state["last_projection_autocheck_slot"] = slot
-    _save_pulse_state(state)
+    _update_pulse_state("last_projection_autocheck_slot", slot)
 
 
 # ── Projection autocheck EOD-posted marker ────────────────────────────────────
@@ -265,9 +256,7 @@ def _load_eod_posted_date() -> str | None:
 
 
 def _save_eod_posted_date(date_str: str) -> None:
-    state = _load_pulse_state()
-    state["last_projection_autocheck_eod_date"] = date_str
-    _save_pulse_state(state)
+    _update_pulse_state("last_projection_autocheck_eod_date", date_str)
 
 
 # ── Projection autocheck per-day fires log ────────────────────────────────────
@@ -282,24 +271,28 @@ def _load_projection_autocheck_fires(date_str: str) -> list[dict]:
 
 def _append_projection_autocheck_fire(date_str: str, entry: dict) -> None:
     """Append a single autocheck fire record under the given CT date."""
-    state = _load_pulse_state()
-    fires = state.setdefault("projection_autocheck_fires", {})
-    fires.setdefault(date_str, []).append(entry)
-    _save_pulse_state(state)
+    with _PULSE_STATE_LOCK:
+        state = _load_pulse_state()
+        fires = state.setdefault("projection_autocheck_fires", {})
+        fires.setdefault(date_str, []).append(entry)
+        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(_PULSE_STATE_FILE, state)
 
 
 def _evict_stale_projection_autocheck_fires(today_str: str) -> None:
     """Drop fire records for any CT date other than today_str."""
-    state = _load_pulse_state()
-    fires = state.get("projection_autocheck_fires")
-    if not fires:
-        return
-    stale = [d for d in fires if d != today_str]
-    if not stale:
-        return
-    for d in stale:
-        fires.pop(d, None)
-    _save_pulse_state(state)
+    with _PULSE_STATE_LOCK:
+        state = _load_pulse_state()
+        fires = state.get("projection_autocheck_fires")
+        if not fires:
+            return
+        stale = [d for d in fires if d != today_str]
+        if not stale:
+            return
+        for d in stale:
+            fires.pop(d, None)
+        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(_PULSE_STATE_FILE, state)
 
 
 # ── Digest poster state ───────────────────────────────────────────────────────
@@ -310,19 +303,21 @@ def _load_digest_post_state() -> str | None:
 
 
 def _save_digest_post_date(date_str: str) -> None:
-    state = _load_pulse_state()
-    state["last_digest_post_date"] = date_str
-    _save_pulse_state(state)
+    _update_pulse_state("last_digest_post_date", date_str)
 
 
 # ── Pulse state ────────────────────────────────────────────────────────────────
 
 def _load_pulse_state() -> dict:
-    try:
-        if _PULSE_STATE_FILE.exists():
-            return json.loads(_PULSE_STATE_FILE.read_text())
-    except Exception:
-        pass
+    """Load pulse_state.json.
+
+    Raises json.JSONDecodeError on corrupt data (fail-closed behaviour — callers
+    must not silently swallow this; a corrupt state file should be treated as an
+    error, not as 'monitor hasn't fired yet').  Returns {} when the file does
+    not exist yet (first-run).
+    """
+    if _PULSE_STATE_FILE.exists():
+        return json.loads(_PULSE_STATE_FILE.read_text())  # let JSONDecodeError propagate
     return {}
 
 
@@ -332,6 +327,21 @@ def _save_pulse_state(state: dict):
         _atomic_write(_PULSE_STATE_FILE, state)
     except Exception as e:
         log.warning(f"Could not persist pulse_state: {e}")
+
+
+def _update_pulse_state(key: str, value) -> None:
+    """Thread-safe single-key RMW on pulse_state.json.
+
+    Acquires _PULSE_STATE_LOCK so concurrent monitor threads cannot interleave
+    their load→mutate→save cycles and clobber each other's date keys.
+    Propagates json.JSONDecodeError on corrupt state (fail-closed — let the
+    monitor record status='error' rather than fire as if it never did before).
+    """
+    with _PULSE_STATE_LOCK:
+        state = _load_pulse_state()
+        state[key] = value
+        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(_PULSE_STATE_FILE, state)
 
 
 # ── Watchdog state ─────────────────────────────────────────────────────────────
