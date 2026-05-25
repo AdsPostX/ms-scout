@@ -19,6 +19,7 @@ import random
 import re
 import threading
 import time
+from datetime import datetime, timedelta
 
 log = logging.getLogger("scout_state")
 
@@ -37,6 +38,7 @@ _LEARNINGS_FILE          = _DATA_DIR / "learnings.json"
 _LEARNED_BENCHMARKS_FILE = _DATA_DIR / "learned_benchmarks.json"
 _THRESHOLD_OVERRIDES_FILE = _DATA_DIR / "threshold_overrides.json"
 _THRESHOLD_CHANGELOG_FILE = _DATA_DIR / "threshold_changelog.jsonl"
+_MAINTENANCE_FILE        = _DATA_DIR / "maintenance_state.json"
 
 # ── Pulse-state concurrency lock ───────────────────────────────────────────────
 # Covers the read-modify-write race on pulse_state.json.  Within a single
@@ -44,6 +46,77 @@ _THRESHOLD_CHANGELOG_FILE = _DATA_DIR / "threshold_changelog.jsonl"
 # restart events the per-signal Slack dedup key in demand_feed_main.py acts
 # as a belt-and-suspenders guard.
 _PULSE_STATE_LOCK = threading.Lock()
+
+# ── Maintenance-state concurrency lock ─────────────────────────────────────────
+# Socket Mode dispatches events on concurrent threads; every read-modify-write
+# cycle on maintenance_state.json must hold this lock.
+_MAINTENANCE_LOCK = threading.Lock()
+
+
+# ── Maintenance helpers ────────────────────────────────────────────────────────
+
+def get_maintenance() -> dict | None:
+    """Returns maintenance state or None if not active / expired. Thread-safe."""
+    with _MAINTENANCE_LOCK:
+        if not _MAINTENANCE_FILE.exists():
+            return None
+        try:
+            m = json.loads(_MAINTENANCE_FILE.read_text())
+        except Exception:
+            return None
+        if not m.get("active"):
+            return None
+        auto_off = m.get("auto_off_at")
+        if auto_off and datetime.fromisoformat(auto_off) < datetime.utcnow():
+            _MAINTENANCE_FILE.unlink(missing_ok=True)
+            return None
+        return m
+
+
+def set_maintenance(set_by: str, hours: float = 4.0) -> dict:
+    """Activates maintenance mode for `hours` hours. Returns the state dict. Thread-safe."""
+    with _MAINTENANCE_LOCK:
+        now = datetime.utcnow()
+        m = {
+            "active": True,
+            "set_at": now.isoformat(),
+            "set_by": set_by,
+            "auto_off_at": (now + timedelta(hours=hours)).isoformat(),
+            "attempts": [],
+        }
+        _MAINTENANCE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(_MAINTENANCE_FILE, m)
+        return m
+
+
+def clear_maintenance() -> list:
+    """Clears maintenance state. Returns attempts list for reporting. Thread-safe."""
+    with _MAINTENANCE_LOCK:
+        try:
+            m = json.loads(_MAINTENANCE_FILE.read_text()) if _MAINTENANCE_FILE.exists() else {}
+        except Exception:
+            m = {}
+        _MAINTENANCE_FILE.unlink(missing_ok=True)
+        return m.get("attempts", [])
+
+
+def log_maintenance_attempt(user_id: str, query_preview: str) -> None:
+    """Appends a blocked-attempt record to the active maintenance state. Thread-safe."""
+    with _MAINTENANCE_LOCK:
+        if not _MAINTENANCE_FILE.exists():
+            return
+        try:
+            m = json.loads(_MAINTENANCE_FILE.read_text())
+        except Exception:
+            return
+        if not m.get("active"):
+            return
+        m.setdefault("attempts", []).append({
+            "ts": datetime.utcnow().isoformat(),
+            "user_id": user_id,
+            "query": query_preview[:100],
+        })
+        _atomic_write(_MAINTENANCE_FILE, m)
 
 
 # ── Atomic write ───────────────────────────────────────────────────────────────
