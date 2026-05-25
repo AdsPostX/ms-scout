@@ -243,17 +243,24 @@ def _route_channel(purpose: str, force: bool = False) -> str:
 
 # ── Pulse signal helpers (one per signal, each owns its own ch connection) ────
 
+def _resolve_ref_date(as_of_date: str | None):
+    """Validate as_of_date and return (date_obj, sql_token).
+
+    Raises ValueError for malformed dates so callers fail fast before any SQL
+    is constructed — consistent across all four pulse signal functions.
+    """
+    from datetime import date as _date
+    if as_of_date:
+        d = _date.fromisoformat(as_of_date)   # raises ValueError on bad input
+        return d, f"toDate('{d.isoformat()}')"
+    return _date.today(), "today()"
+
+
 def _pulse_signal_cap(ch, as_of_date: str | None = None) -> list:
     import json as _json
     from datetime import date as _date
     import calendar as _cal
-    # Validate and resolve the reference date before any SQL is constructed.
-    if as_of_date:
-        today_d = _date.fromisoformat(as_of_date)  # raises ValueError for malformed input
-        _ref_date = f"toDate('{as_of_date}')"
-    else:
-        today_d = _date.today()
-        _ref_date = "today()"
+    today_d, _ref_date = _resolve_ref_date(as_of_date)
     results = []
     try:
         _sql = """
@@ -307,7 +314,7 @@ def _pulse_signal_cap(ch, as_of_date: str | None = None) -> list:
 
 
 def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
-    _ref_date = f"toDate('{as_of_date}')" if as_of_date else "today()"
+    _, _ref_date = _resolve_ref_date(as_of_date)
     results: list = []
     try:
         _vel_sql = """
@@ -562,7 +569,7 @@ def _pulse_signal_ghost(ch, as_of_date: str | None = None) -> list:
 
 
 def _pulse_signal_fill_rate(ch, as_of_date: str | None = None) -> list:
-    _ref_date = f"toDate('{as_of_date}')" if as_of_date else "today()"
+    _, _ref_date = _resolve_ref_date(as_of_date)
     results = []
     try:
         from scout_agent import _POST_TX_PLACEMENTS, _load_entity_overrides as _load_eo
