@@ -2869,7 +2869,8 @@ def get_advertiser_revenue_projection(
                 count(DISTINCT i.session_id)   AS sessions_30d,
                 coalesce(sum(toFloat64OrNull(cd.revenue)), 0) AS revenue_30d,
                 coalesce(sum(toFloat64OrNull(cd.payout)),  0) AS payout_30d,
-                count(cd.id)                   AS conversions_30d
+                count(cd.id)                   AS conversions_30d,
+                coalesce(any(clicks_agg.clicks_30d), 0) AS clicks_30d
             FROM adpx_impressions_details i
             JOIN from_airbyte_campaigns c
                 ON i.campaign_id = cast(c.id AS UInt64)
@@ -2879,6 +2880,15 @@ def get_advertiser_revenue_projection(
                 ON i.session_id = cd.session_id
                 AND cd.campaign_id = i.campaign_id
                 AND toYYYYMM(cd.created_at) >= toYYYYMM(today() - 44)
+            LEFT JOIN (
+                SELECT cast(tc.user_id AS String) AS pub_id, count() AS clicks_30d
+                FROM adpx_tracked_clicks tc
+                INNER JOIN from_airbyte_campaigns c2 ON tc.campaign_id = cast(c2.id AS UInt64)
+                WHERE c2.adv_name ILIKE %(adv)s
+                  AND c2.deleted_at IS NULL
+                  AND tc.created_at >= today() - 30
+                GROUP BY tc.user_id
+            ) clicks_agg ON clicks_agg.pub_id = cast(i.pid AS String)
             WHERE c.adv_name ILIKE %(adv)s
               AND c.deleted_at IS NULL
               AND i.created_at >= today() - 30
@@ -2954,6 +2964,7 @@ def get_advertiser_revenue_projection(
     total_impressions_30d = sum(r[2] for r in baseline_rows)
     total_sessions_30d    = sum(r[3] for r in baseline_rows)
     total_conversions_30d = sum(r[6] for r in baseline_rows)
+    total_clicks_30d      = sum(r[7] for r in baseline_rows)
 
     uncapped_projected_revenue = round((total_revenue_30d / 30) * days_in_month, 2)
     uncapped_projected_payout  = round((total_payout_30d  / 30) * days_in_month, 2)
@@ -2964,7 +2975,7 @@ def get_advertiser_revenue_projection(
 
     by_publisher = []
     for row in baseline_rows[:10]:
-        pub_pid, pub_name, impr, sess, rev, pay, convs = row
+        pub_pid, pub_name, impr, sess, rev, pay, convs, clicks = row
         by_publisher.append({
             "publisher":          pub_name or f"Partner {pub_pid}",
             "impressions_30d":    impr,
@@ -2994,7 +3005,7 @@ def get_advertiser_revenue_projection(
         # Performance metrics (used for payout impact math)
         "avg_daily_revenue":         round(total_revenue_30d / 30, 2),
         "avg_rpm":                   round(total_revenue_30d / max(total_impressions_30d, 1) * 1000, 4),
-        "avg_cvr":                   round(total_conversions_30d / max(total_sessions_30d, 1) * 100, 4),
+        "avg_cvr":                   round(total_conversions_30d / max(total_clicks_30d, 1) * 100, 4),
         # Breakdown + warnings
         "by_publisher":              by_publisher,
         "cap_warnings":              cap_warnings,
@@ -3112,7 +3123,7 @@ def get_publisher_health(
             rev = ad["revenue"]
             rpm = round(rev / impr * 1000, 2) if impr else 0.0
             ctr = round(cl["clicks"] / impr * 100, 2) if impr else 0.0
-            cvr = round(ad["conversions"] / sess * 100, 2) if sess else 0.0
+            cvr = round(ad["conversions"] / cl["clicks"] * 100, 2) if cl["clicks"] else 0.0
 
             anomaly = None
             if publisher_avg_rpm > 0 and rpm > 0 and rpm > publisher_avg_rpm * 5:
@@ -3147,7 +3158,7 @@ def get_publisher_health(
 
         overall_rpm = round(total_revenue / total_impressions * 1000, 2) if total_impressions else 0.0
         overall_ctr = round(total_clicks / total_impressions * 100, 2) if total_impressions else 0.0
-        overall_cvr = round(total_conversions / total_sessions * 100, 2) if total_sessions else 0.0
+        overall_cvr = round(total_conversions / total_clicks * 100, 2) if total_clicks else 0.0
 
         # Top placement note
         top_placement_note = ""
@@ -3645,67 +3656,56 @@ _POST_TX_PLACEMENTS = (
 
 def get_low_fill_publishers() -> str:
     """
-    Return publishers on post-transaction placements with fill rate < 15% over last 30 days.
+    Return publishers with fill rate < 15% over last 7 days (canonical: 7d window, 2,500 min sessions).
     Fill rate = % of sessions that received at least one offer impression.
     Low fill on a checkout/receipt page = burned traffic with no monetization attempt.
+
+    Uses fill_rate_publishers() canonical query (7-day window, minimum 2,500 sessions/7d).
+    Previously used low_fill_publishers() (30-day window, 10,000 minimum sessions) — deprecated.
     """
     ch = _get_ch_client()
     try:
-        # SQL and thresholds live in queries.low_fill_publishers() — any change belongs there.
-        # POST_TX_PLACEMENTS canonical list is also in queries.py.
-        data = _q.low_fill_publishers(ch, list(_q.POST_TX_PLACEMENTS))
+        # Canonical fill rate query: 7d window, 2500 min sessions, <15% threshold, entity overrides.
+        # Any threshold change belongs in config/scout_thresholds.json (fill_rate_min_sessions_7d).
+        data = _q.fill_rate_publishers(ch, limit=15)
     except Exception as e:
         return f"Fill rate query failed: {e}"
 
     if not data:
         return (
             "*Publisher Fill Rate Report*\n\n"
-            ":white_check_mark: All post-transaction publishers are filling at ≥15% — "
+            ":white_check_mark: All publishers are filling at ≥15% over the last 7 days — "
             "no low-fill anomalies detected."
         )
 
-    # Unpack into tuples for the formatting code below (preserves existing formatting logic)
-    rows = [
-        (d["publisher_id"], d["publisher_name"], d["placement"], d["sessions_30d"],
-         d["sessions_with_imps"], d["fill_rate_pct"], d["missed_sessions"], d["revenue_30d"])
-        for d in data
-    ]
-
-    total_missed = sum(int(r[6]) for r in rows)
-    # Rough RPM from revenue / sessions_with_imps across all low-fill pubs
-    total_imps = sum(int(r[4]) for r in rows)
-    total_rev  = sum(float(r[7]) for r in rows)
-    avg_rpm    = (total_rev / total_imps * 1000) if total_imps > 0 else 0
-    est_at_risk = total_missed / 30 * avg_rpm / 1000  # daily revenue at risk
+    total_missed = sum(int(d["missed_sessions"]) for d in data)
 
     lines = [
         f"*Publisher Fill Rate Report — Low Fill on Post-Transaction Pages*\n",
-        f"{len(rows)} publisher{'s' if len(rows) != 1 else ''} below 15% fill · "
-        f"{total_missed / 1_000_000:.1f}M missed sessions/30d",
+        f"{len(data)} publisher{'s' if len(data) != 1 else ''} below 15% fill · "
+        f"{total_missed / 1_000_000:.1f}M missed sessions/7d\n",
     ]
-    if avg_rpm > 0:
-        lines.append(
-            f"Est. revenue at risk: *${est_at_risk:,.0f}/day* "
-            f"(based on ${avg_rpm:.2f} RPM on served sessions)\n"
-        )
-    else:
-        lines.append("")
 
-    for pub_id, pub_name, placement, sessions, with_imps, fill_pct, missed, rev in rows:
+    for d in data:
+        pub_id   = d["publisher_id"]
+        pub_name = d["publisher_name"]
+        sessions = d["sessions_7d"]
+        fill_pct = d["fill_rate_pct"]
+        missed   = d["missed_sessions"]
+
         sessions_str = f"{int(sessions) / 1_000_000:.1f}M" if sessions >= 1_000_000 else f"{int(sessions) / 1000:.0f}K"
         missed_str   = f"{int(missed) / 1_000_000:.1f}M" if missed >= 1_000_000 else f"{int(missed) / 1000:.0f}K"
-        rev_str      = f"${float(rev) / 1000:.1f}K" if float(rev) >= 1000 else f"${float(rev):.0f}"
 
         if fill_pct < 2:
-            hypothesis = "Near-zero fill — SDK likely not showing offers at all. Check SDK integration, geo/OS targeting config, or advertiser supply for this placement."
+            hypothesis = "Near-zero fill — SDK likely not showing offers at all. Check SDK integration, geo/OS targeting config, or advertiser supply."
         elif fill_pct < 10:
             hypothesis = "Very low fill — most sessions get no offer. Check advertiser targeting restrictions (geo/OS/device), cap exhaustion, or SDK render failure."
         else:
             hypothesis = "Below-normal fill — some sessions served, but majority missed. May be geo/device targeting mismatch or insufficient advertiser supply."
 
         lines.append(
-            f"• *{pub_name or f'Pub #{pub_id}'}* · `{placement}` · Pub #{pub_id}\n"
-            f"  {sessions_str} sessions · {fill_pct:.1f}% fill · {missed_str} sessions missed · {rev_str} revenue/30d\n"
+            f"• *{pub_name or f'Pub #{pub_id}'}* · Pub #{pub_id}\n"
+            f"  {sessions_str} sessions/7d · {fill_pct:.1f}% fill · {missed_str} sessions missed\n"
             f"  ↳ _{hypothesis}_"
         )
 
