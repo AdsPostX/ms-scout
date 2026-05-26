@@ -1073,8 +1073,8 @@ def _run_shadow_monitor(
 
                     from slack_sdk.web import WebClient as _WC
                     web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
-                    web.chat_postMessage(channel=target_channel, text=fallback, blocks=blocks)
                     alert_registry.mark_firing(monitor_name, {"results_count": len(results), "channel": target_channel})
+                    web.chat_postMessage(channel=target_channel, text=fallback, blocks=blocks)
 
                     from scout_core.job_runs import record_job_run
                     record_job_run(monitor_name, status="success", duration_ms=duration_ms)
