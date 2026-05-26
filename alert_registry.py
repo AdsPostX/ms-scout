@@ -31,6 +31,7 @@ _REDIS_KEY = "scout:alert_registry"
 # Lazy-init, cached after first call. None = use in-memory fallback.
 _redis_client = None
 _redis_init_done = False
+_redis_init_lock = threading.Lock()  # guards the lazy-init critical section
 
 # In-memory fallback (used when Upstash env vars are not set).
 _LOCK = threading.Lock()
@@ -50,20 +51,26 @@ def _get_redis():
     global _redis_client, _redis_init_done
     if _redis_init_done:
         return _redis_client
-    _redis_init_done = True
-    try:
-        url = os.environ.get("UPSTASH_REDIS_REST_URL")
-        token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-        if url and token:
-            from upstash_redis import Redis  # noqa: PLC0415
-            _redis_client = Redis(url=url, token=token)
-            log.info(
-                "alert_registry: Upstash Redis connected (%s)",
-                url.split("//")[-1].split(".")[0],
-            )
-    except Exception:
-        log.warning("alert_registry: Upstash Redis init failed — using in-memory fallback")
-        _redis_client = None
+    with _redis_init_lock:
+        # Re-check inside the lock — another thread may have initialised while
+        # we were waiting.
+        if _redis_init_done:
+            return _redis_client
+        try:
+            url = os.environ.get("UPSTASH_REDIS_REST_URL")
+            token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+            if url and token:
+                from upstash_redis import Redis  # noqa: PLC0415
+                _redis_client = Redis(url=url, token=token)
+                log.info(
+                    "alert_registry: Upstash Redis connected (%s)",
+                    url.split("//")[-1].split(".")[0],
+                )
+        except Exception:
+            log.warning("alert_registry: Upstash Redis init failed — using in-memory fallback")
+            _redis_client = None
+        finally:
+            _redis_init_done = True
     return _redis_client
 
 
