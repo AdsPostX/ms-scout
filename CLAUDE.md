@@ -161,3 +161,23 @@ wrap_response(card=card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.A
 ```
 
 Existing callers that don't pass `pattern=` are unaffected.
+
+## Scout Slash Commands
+
+Registered at api.slack.com/apps — each must be added to the Slack app manifest.
+
+| Command | What it does |
+|---|---|
+| `/scout-cap` | Force-run cap signal now; results post in the channel |
+| `/scout-vel` | Force-run velocity signal now |
+| `/scout-ghost` | Force-run ghost (zero-conversion) signal now |
+| `/scout-fill` | Force-run fill-rate signal now |
+| `/scout-signal-status` | List signals currently firing (reads alert_registry) |
+| `/scout-revenue` | Prompts user to ask `@Scout revenue` for full response |
+| `/scout-pub [publisher]` | Revenue health card for a publisher |
+| `/scout-enter [advertiser]` | Campaign entry card for the MS platform |
+| `/scout-queue` | Current demand queue with Notion links |
+| `/scout-status` | System health + benchmark freshness |
+| `/scout-help` | Full reference card (ephemeral) |
+
+All `/scout-cap/vel/ghost/fill` commands route to `_FORCE_MONITOR_FNS` — the same path as `@Scout force <signal>`. Requires the demand-feed service to be running with monitors initialized.
