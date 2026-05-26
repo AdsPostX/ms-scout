@@ -989,6 +989,13 @@ def publisher_placement_names(ch, pid: int) -> dict[str, str]:
 
 def low_fill_publishers(ch, placements: list[str]) -> list[dict]:
     """
+    DEPRECATED — use fill_rate_publishers() instead.
+
+    This function uses a 30-day window with a hardcoded 10,000 minimum-session
+    threshold, which does not match the signal path (7d / 2,500 sessions defined
+    in config/scout_thresholds.json). Retained for wide-window diagnostic queries
+    where the 30-day view is intentional (e.g., monthly trend analysis).
+
     Publishers on post-transaction placements with fill rate < 15% over last 30 days.
     Fill rate = % of sessions that received at least one offer impression.
     Threshold: 10,000+ sessions (excludes low-volume publishers from alert).
@@ -1195,7 +1202,7 @@ def cvr_anomaly(
 
     Returns list of dicts with keys:
         publisher_id (int), publisher_name (str), campaign_id (int), adv_name (str),
-        cvr_7d (float), cvr_yesterday (float), delta_pct (float),
+        exposure_cvr_7d (float), cvr_yesterday (float), delta_pct (float),
         impressions_7d (int), payout_per_conversion (float)
     Raises on ClickHouse error — callers must catch.
     """
@@ -1269,7 +1276,7 @@ def cvr_anomaly(
                     toInt64(i7.campaign_id)                               AS campaign_id,
                     coalesce(ca.adv_name, '')                             AS adv_name,
                     round(coalesce(c7.conversions_7d, 0) /
-                          nullIf(i7.impressions_7d, 0), 6)                AS cvr_7d,
+                          nullIf(i7.impressions_7d, 0), 6)                AS exposure_cvr_7d,
                     round(coalesce(cy.conversions_yesterday, 0) /
                           nullIf(iy.impressions_yesterday, 0), 6)         AS cvr_yesterday,
                     round((coalesce(cy.conversions_yesterday, 0) /
@@ -1295,7 +1302,7 @@ def cvr_anomaly(
             )
         SELECT *
         FROM final
-        WHERE cvr_7d > 0
+        WHERE exposure_cvr_7d > 0
           AND delta_pct <= -{drop_pct: Float64}
         ORDER BY delta_pct ASC
         """,
@@ -1311,7 +1318,7 @@ def cvr_anomaly(
             "publisher_name": r[1],
             "campaign_id": int(r[2]),
             "adv_name": r[3],
-            "cvr_7d": float(r[4] or 0),
+            "exposure_cvr_7d": float(r[4] or 0),
             "cvr_yesterday": float(r[5] or 0),
             "delta_pct": float(r[6] or 0),
             "impressions_7d": int(r[7] or 0),
@@ -1543,6 +1550,16 @@ def publisher_top_categories(ch, pub_id: int) -> list[str]:
 
 def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[dict]:
     """
+    DEPRECATED for velocity alerts — use velocity_alerts() instead.
+
+    This function uses a period-median algorithm (sequential N-day windows, median as
+    baseline), which does not match the signal path. velocity_alerts() uses the canonical
+    annualized comparison formula: ((rev_7d/7)*30 - rev_30d) / rev_30d * 100, with
+    threshold -25% as defined in config/scout_thresholds.json.
+
+    Retained for analytical trend visualisation where the period-median view is intentional
+    (e.g., smoothed long-run trend charts that are not alert-quality signals).
+
     Publisher revenue trends: actual revenue vs. historical median for the same period length.
 
     Algorithm: divide history into sequential `days`-length windows, take the median of 8
@@ -1791,3 +1808,429 @@ def benchmark_overall_cvr(ch) -> dict:
         import logging
         logging.getLogger(__name__).warning(f"benchmark_overall_cvr failed: {e}")
     return {}
+
+
+# ===========================================================================
+# Canonical query contracts (ghost pattern — one function, both signal + NL)
+# ===========================================================================
+
+def fill_rate_publishers(
+    ch,
+    as_of_date=None,
+    window_days: int = 7,
+    min_sessions: int = 2500,
+    threshold_pct: float = 15.0,
+    placements=None,
+    entity_overrides=None,
+    limit: int = 5,
+) -> list[dict]:
+    """Canonical fill-rate alert query. One function, both signal path and NL path.
+
+    Returns publishers where fill_rate < threshold_pct over the last window_days days.
+    Fill rate = (sessions_with_impressions / sessions) * 100.
+
+    Replaces:
+      - scout_bot._pulse_signal_fill_rate   — 7d / 2500, f-string placements, from_airbyte_users
+      - queries.low_fill_publishers         — 30d / 10000, kept for diagnostic wide-window queries
+
+    Canonical values (from config/scout_thresholds.json):
+      window_days=7, min_sessions=2500, threshold_pct=15.0
+
+    Args:
+        ch:               ClickHouse client.
+        as_of_date:       "YYYY-MM-DD" or None → uses today() in ClickHouse.
+        window_days:      Lookback window in days (default 7).
+        min_sessions:     Minimum session count to include a publisher (default 2500).
+        threshold_pct:    Fill rate below this % triggers the alert (default 15.0).
+        placements:       List of placement strings to filter sessions.
+                          If None, loads _POST_TX_PLACEMENTS from scout_agent at call time.
+        entity_overrides: Dict of {publisher_name: {flag: value}} overrides.
+                          If None, loads from scout_state._load_entity_overrides() at call time.
+                          Note: loaded inside function body — NOT a default arg — to avoid
+                          the mutable-default anti-pattern and to stay testable.
+        limit:            Maximum number of publishers to return (default 5).
+
+    Returns:
+        List of dicts with keys:
+          publisher_id (int), publisher_name (str), sessions_7d (int),
+          fill_rate_pct (float), missed_sessions (int)
+    """
+    if entity_overrides is None:
+        try:
+            from scout_state import _load_entity_overrides
+            entity_overrides = _load_entity_overrides().get("publishers", {})
+        except Exception:
+            entity_overrides = {}
+    if placements is None:
+        try:
+            from scout_agent import _POST_TX_PLACEMENTS
+            placements = list(_POST_TX_PLACEMENTS)
+        except Exception:
+            placements = []
+
+    date_expr = f"toDate('{as_of_date}')" if as_of_date else "today()"
+
+    try:
+        rows = ch.query(
+            f"""
+            SELECT
+                s.user_id                                                   AS publisher_id,
+                any(u.name)                                                 AS publisher_name,
+                count() AS sessions_{window_days}d,
+                coalesce(i.sessions_with_imps, 0)                          AS sessions_with_imps,
+                round(
+                    coalesce(i.sessions_with_imps, 0) * 100.0 / count(), 2
+                )                                                           AS fill_rate_pct,
+                count() - coalesce(i.sessions_with_imps, 0)                AS missed_sessions
+            FROM adpx_sdk_sessions s
+            LEFT JOIN mv_adpx_users u ON toInt64(u.pid) = toInt64(s.user_id)
+            LEFT JOIN (
+                SELECT user_id, count() AS sessions_with_imps
+                FROM adpx_impressions_details
+                WHERE toDate(created_at) > {date_expr} - {window_days}
+                  AND placement IN {{placements: Array(String)}}
+                GROUP BY user_id
+            ) i ON toInt64(i.user_id) = toInt64(s.user_id)
+            WHERE toDate(s.created_at) > {date_expr} - {window_days}
+              AND s.placement IN {{placements: Array(String)}}
+            GROUP BY s.user_id, i.sessions_with_imps
+            HAVING sessions_{window_days}d > {{min_sessions: UInt64}}
+               AND fill_rate_pct < {{threshold_pct: Float64}}
+            ORDER BY fill_rate_pct ASC
+            LIMIT {{limit: UInt64}}
+            """,
+            parameters={
+                "placements": placements,
+                "min_sessions": min_sessions,
+                "threshold_pct": threshold_pct,
+                "limit": limit,
+            },
+        ).result_rows
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"fill_rate_publishers failed: {e}")
+        return []
+
+    results = []
+    for row in rows:
+        pub_id, pub_name, sessions, _, fill_rate, missed = row
+        name = pub_name or str(pub_id)
+        # Entity override check: skip publishers explicitly excluded from fill-rate alerts.
+        override = entity_overrides.get(name, {})
+        if override.get("exclude_from_fill_rate"):
+            continue
+        results.append(
+            {
+                "publisher_id": int(pub_id),
+                "publisher_name": name,
+                f"sessions_{window_days}d": int(sessions),
+                "fill_rate_pct": float(fill_rate),
+                "missed_sessions": int(missed),
+            }
+        )
+
+    return results
+
+
+def velocity_alerts(
+    ch,
+    as_of_date=None,
+    down_threshold_pct: float = -25.0,
+    up_threshold_pct: float = 20.0,
+    min_rev_30d: float = 5000.0,
+    publisher_id=None,
+) -> list[dict]:
+    """Canonical velocity alert query. One function, both signal path and NL path.
+
+    Computes annualised velocity for each publisher and returns those whose pace has
+    moved beyond the configured thresholds (down OR up).
+
+    Formula:
+        pct_delta = ((rev_7d / 7) * 30 - rev_30d) / rev_30d * 100
+
+    Replaces:
+      - scout_bot._pulse_signal_velocity   — annualised, inline SQL, up+down, two-phase
+      - queries.publisher_revenue_trends   — period-median, kept for analytical trend charts
+
+    Canonical values (from config/scout_thresholds.json):
+        down_threshold_pct=-25.0, up_threshold_pct=20.0, min_rev_30d=5000.0
+
+    Args:
+        ch:                 ClickHouse client.
+        as_of_date:         "YYYY-MM-DD" or None → uses today() in ClickHouse.
+        down_threshold_pct: Fire when pct_delta <= this value (default -25.0, i.e. ≥25% drop).
+        up_threshold_pct:   Fire when pct_delta >= this value (default 20.0).
+        min_rev_30d:        Minimum 30-day revenue to include a publisher (default $5,000).
+        publisher_id:       Optional int — narrow to a single publisher.
+
+    Returns:
+        List of dicts (top 5 by abs(pct_delta), descending), each with keys:
+          publisher_id (int), publisher_name (str), rev_30d (float), rev_7d (float),
+          pct_delta (float), direction ("up"|"down"),
+          advertisers (list[dict]) — top advertisers from Phase 2 attribution enrichment.
+    """
+    date_expr = f"toDate('{as_of_date}')" if as_of_date else "today()"
+    pub_filter = f"AND toInt64(user_id) = {int(publisher_id)}" if publisher_id else ""
+
+    try:
+        rows = ch.query(
+            f"""
+            SELECT
+                toInt64(user_id)                                                AS publisher_id,
+                any(u.name)                                                     AS publisher_name,
+                coalesce(sum(toFloat64OrZero(revenue)), 0)                      AS revenue_30d,
+                coalesce(sumIf(
+                    toFloat64OrZero(revenue),
+                    toDate(created_at) > {date_expr} - 7
+                ), 0)                                                           AS revenue_7d
+            FROM adpx_conversionsdetails cv
+            LEFT JOIN mv_adpx_users u ON toInt64(u.pid) = toInt64(cv.user_id)
+            WHERE toDate(cv.created_at) > {date_expr} - 30
+              {pub_filter}
+            GROUP BY user_id
+            HAVING revenue_30d >= {{min_rev_30d: Float64}}
+            ORDER BY revenue_30d DESC
+            LIMIT 200
+            """,
+            parameters={"min_rev_30d": min_rev_30d},
+        ).result_rows
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"velocity_alerts phase-1 failed: {e}")
+        return []
+
+    candidates = []
+    for row in rows:
+        pub_id, pub_name, rev_30d, rev_7d = row
+        if rev_30d <= 0:
+            continue
+        rev_7d_ann = (float(rev_7d) / 7) * 30
+        pct_delta = (rev_7d_ann - float(rev_30d)) / float(rev_30d) * 100
+        if down_threshold_pct < pct_delta < up_threshold_pct:
+            continue  # within normal range — skip
+        direction = "up" if pct_delta > 0 else "down"
+        candidates.append(
+            {
+                "publisher_id": int(pub_id),
+                "publisher_name": pub_name or str(pub_id),
+                "rev_30d": round(float(rev_30d), 2),
+                "rev_7d": round(float(rev_7d), 2),
+                "pct_delta": round(pct_delta, 1),
+                "direction": direction,
+                "advertisers": [],
+            }
+        )
+
+    # Top 5 by absolute delta magnitude.
+    candidates.sort(key=lambda x: abs(x["pct_delta"]), reverse=True)
+    candidates = candidates[:5]
+    if not candidates:
+        return []
+
+    # Phase 2 — advertiser attribution enrichment for the top candidates.
+    # Filter to candidates with |pct_delta| >= 100 (meaningful enough to warrant attribution).
+    enrich_ids = [c["publisher_id"] for c in candidates if abs(c["pct_delta"]) >= 100]
+    if enrich_ids:
+        pub_id_csv = ", ".join(str(pid) for pid in enrich_ids)
+        try:
+            adv_rows = ch.query(
+                f"""
+                SELECT
+                    toInt64(cv.user_id)                                     AS publisher_id,
+                    c.adv_name,
+                    coalesce(sum(toFloat64OrZero(cv.revenue)), 0)           AS rev_30d,
+                    coalesce(sumIf(
+                        toFloat64OrZero(cv.revenue),
+                        toDate(cv.created_at) > {date_expr} - 7
+                    ), 0)                                                   AS rev_7d
+                FROM adpx_conversionsdetails cv
+                JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = toInt64(c.id)
+                WHERE toDate(cv.created_at) > {date_expr} - 30
+                  AND toInt64(cv.user_id) IN ({pub_id_csv})
+                  AND c.deleted_at IS NULL
+                GROUP BY cv.user_id, c.adv_name
+                HAVING rev_30d > 0
+                ORDER BY rev_30d DESC
+                """
+            ).result_rows
+            # Group by publisher.
+            adv_by_pub: dict = {}
+            for adv_row in adv_rows:
+                pid_adv, adv_name, r30, r7 = adv_row
+                adv_by_pub.setdefault(int(pid_adv), []).append(
+                    {"advertiser": adv_name, "rev_30d": round(float(r30), 2), "rev_7d": round(float(r7), 2)}
+                )
+            for c in candidates:
+                c["advertisers"] = adv_by_pub.get(c["publisher_id"], [])[:5]
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"velocity_alerts phase-2 advertiser enrichment failed: {e}")
+
+    return candidates
+
+
+def cap_alert_campaigns(
+    ch,
+    as_of_date=None,
+    cap_alert_pct: float = 85.0,
+    advertiser_id=None,
+) -> list[dict]:
+    """Canonical cap-alert query. One function, signal path (and future NL path).
+
+    Returns campaigns whose MTD revenue has reached cap_alert_pct% of their monthly budget.
+
+    Replaces:
+      - scout_bot._pulse_signal_cap — inline SQL + Python capping_config JSON parsing
+
+    Canonical value (from config/scout_thresholds.json):
+        cap_alert_pct=85.0
+
+    Args:
+        ch:             ClickHouse client.
+        as_of_date:     "YYYY-MM-DD" or None → uses today() in ClickHouse.
+        cap_alert_pct:  Alert threshold as a percentage (default 85.0).
+        advertiser_id:  Optional int — narrow to a single advertiser campaign ID.
+
+    Returns:
+        List of dicts, each with keys:
+          adv_name (str), campaign_id (int), monthly_cap (float), revenue_mtd (float),
+          cap_pct (float), days_remaining (int), days_to_cap (float|None)
+    """
+    import json as _json
+    import datetime as _dt
+
+    date_expr = f"toDate('{as_of_date}')" if as_of_date else "today()"
+    adv_filter = f"AND c.id = {int(advertiser_id)}" if advertiser_id else ""
+
+    try:
+        rows = ch.query(
+            f"""
+            SELECT
+                c.id                                                        AS campaign_id,
+                c.adv_name,
+                c.capping_config,
+                coalesce(sum(toFloat64OrZero(cv.revenue)), 0)               AS revenue_mtd
+            FROM from_airbyte_campaigns c
+            LEFT JOIN adpx_conversionsdetails cv
+                ON toInt64(cv.campaign_id) = toInt64(c.id)
+               AND toYYYYMM(toDate(cv.created_at)) = toYYYYMM({date_expr})
+            WHERE c.deleted_at IS NULL
+              AND c.capping_config IS NOT NULL
+              AND c.capping_config != ''
+              AND c.capping_config != '{{}}'
+              {adv_filter}
+            GROUP BY c.id, c.adv_name, c.capping_config
+            HAVING revenue_mtd > 0
+            ORDER BY revenue_mtd DESC
+            """
+        ).result_rows
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"cap_alert_campaigns failed: {e}")
+        return []
+
+    today = _dt.date.fromisoformat(as_of_date) if as_of_date else _dt.date.today()
+    days_in_month = (today.replace(day=28) + _dt.timedelta(days=4)).replace(day=1) - _dt.timedelta(days=1)
+    days_remaining = (days_in_month - today).days + 1
+
+    results = []
+    for row in rows:
+        campaign_id, adv_name, cap_cfg, revenue_mtd = row
+        try:
+            cfg = _json.loads(cap_cfg)
+            month_cfg = cfg.get("month") or cfg.get("monthly") or {}
+            mb = float(month_cfg.get("budget") or 0)
+        except Exception:
+            continue
+        if mb <= 0:
+            continue
+        cap_pct = revenue_mtd / mb
+        if cap_pct < cap_alert_pct / 100:
+            continue
+
+        daily_run_rate = revenue_mtd / max(today.day, 1)
+        days_to_cap = (mb - revenue_mtd) / daily_run_rate if daily_run_rate > 0 else None
+
+        results.append(
+            {
+                "adv_name": adv_name,
+                "campaign_id": int(campaign_id),
+                "monthly_cap": round(mb, 2),
+                "revenue_mtd": round(float(revenue_mtd), 2),
+                "cap_pct": round(cap_pct * 100, 1),
+                "days_remaining": int(days_remaining),
+                "days_to_cap": round(days_to_cap, 1) if days_to_cap is not None else None,
+            }
+        )
+
+    results.sort(key=lambda x: x["cap_pct"], reverse=True)
+    return results
+
+
+def earnings_breakdown(
+    ch,
+    start_date: str,
+    end_date: str,
+    publisher_id=None,
+) -> dict:
+    """Returns Earnings and its three components for a publisher (or fleet-wide) over a date range.
+
+    Earnings = Gross Revenue - Partner Revenue + Partner Cost
+    IMPORTANT: the formula uses +Partner Cost (not minus).
+    The Notion Custom Reports doc is WRONG — it omits the +Partner Cost term.
+
+    All three source tables are filtered by user_id for correct partner attribution.
+    See attribution rule: use user_id, never pid, for traffic-publisher attribution.
+
+    Args:
+        ch:           ClickHouse client.
+        start_date:   "YYYY-MM-DD" inclusive start date.
+        end_date:     "YYYY-MM-DD" inclusive end date.
+        publisher_id: Optional int. If None, returns fleet-wide (all publishers).
+
+    Returns:
+        Dict with keys:
+          gross_rev (float), partner_rev (float), partner_cost (float), earnings (float)
+        Returns all-zero dict on query failure (logged as warning).
+    """
+    pub_filter_cv = f"AND toInt64(user_id) = {int(publisher_id)}" if publisher_id else ""
+    pub_filter_tc = f"AND toInt64(user_id) = {int(publisher_id)}" if publisher_id else ""
+
+    try:
+        rev_rows = ch.query(
+            f"""
+            SELECT
+                coalesce(sum(toFloat64OrZero(revenue)), 0) AS gross_rev,
+                coalesce(sum(toFloat64OrZero(payout)), 0)  AS partner_rev
+            FROM adpx_conversionsdetails
+            WHERE toDate(created_at) BETWEEN '{{start_date}}' AND '{{end_date}}'
+              {pub_filter_cv}
+            """,
+            parameters={"start_date": start_date, "end_date": end_date},
+        ).result_rows
+
+        cost_rows = ch.query(
+            f"""
+            SELECT coalesce(sum(pub_cost_cents) / 100.0, 0) AS partner_cost
+            FROM adpx_tracked_clicks
+            WHERE toDate(created_at) BETWEEN '{{start_date}}' AND '{{end_date}}'
+              {pub_filter_tc}
+            """,
+            parameters={"start_date": start_date, "end_date": end_date},
+        ).result_rows
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"earnings_breakdown failed: {e}")
+        return {"gross_rev": 0.0, "partner_rev": 0.0, "partner_cost": 0.0, "earnings": 0.0}
+
+    gross_rev = float(rev_rows[0][0]) if rev_rows else 0.0
+    partner_rev = float(rev_rows[0][1]) if rev_rows else 0.0
+    partner_cost = float(cost_rows[0][0]) if cost_rows else 0.0
+    earnings = gross_rev - partner_rev + partner_cost  # +partner_cost — NOT minus
+
+    return {
+        "gross_rev": round(gross_rev, 4),
+        "partner_rev": round(partner_rev, 4),
+        "partner_cost": round(partner_cost, 4),
+        "earnings": round(earnings, 4),
+    }

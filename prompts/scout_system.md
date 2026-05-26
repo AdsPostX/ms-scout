@@ -1076,3 +1076,30 @@ adpx_sdk_sessions   → filter: user_id = partner_id
 adpx_tracked_clicks → filter: user_id = partner_id
 adpx_conversionsdetails → filter: user_id = partner_id (for revenue/payout/conversions)
 adpx_impressions_details → filter: pid = partner_id  (pid IS the correct key for impressions)
+
+━━ SIGNAL MONITOR DEFINITIONS ━━
+
+These match the live monitor thresholds in config/scout_thresholds.json and the canonical
+query functions in queries.py. Use these when answering questions about when Scout fires.
+
+Fill Rate Signal
+  Window     : 7 days
+  Min sessions: 2,500 sessions/7d (fill_rate_min_sessions_7d in config)
+  Threshold  : fill_rate_pct < 15%
+  Scope      : publisher-level; entity overrides suppress specific publishers
+  Formula    : fill_rate_pct = sessions_with_impressions / sessions_7d * 100
+
+Velocity Signal
+  Formula    : pct_delta = ((rev_7d / 7) * 30 - rev_30d) / rev_30d * 100
+               (annualized 7-day pace vs actual 30-day revenue)
+  Down fires : pct_delta < -25%  (velocity_down_threshold_pct in config)
+  Up fires   : pct_delta > +20%  (velocity_up_threshold_pct in config)
+  Min revenue: $5,000 over 30 days (min_rev_30d) — excludes noise publishers
+
+Cap Signal
+  Threshold  : MTD_revenue / monthly_cap >= 85%  (cap_alert_pct in config)
+  Scope      : campaign-level
+
+Ghost Signal
+  Threshold  : zero conversions in last 48 hours (ghost_recency_hours in config)
+  Scope      : active campaigns only
