@@ -189,11 +189,11 @@ def _load_signal_cfg() -> dict:
         return {}
 
 _SIGNAL_CFG                  = _load_signal_cfg()
-_FILL_RATE_MIN_SESSIONS_7D   = int(_SIGNAL_CFG.get("fill_rate_min_sessions_7d", 5000))
+_FILL_RATE_MIN_SESSIONS_7D   = int(_SIGNAL_CFG.get("fill_rate_min_sessions_7d", 2500))
 _GHOST_RECENCY_HOURS         = int(_SIGNAL_CFG.get("ghost_recency_hours", 48))
-_VELOCITY_DOWN_THRESHOLD_PCT = float(_SIGNAL_CFG.get("velocity_down_threshold_pct", -40))
+_VELOCITY_DOWN_THRESHOLD_PCT = float(_SIGNAL_CFG.get("velocity_down_threshold_pct", -25))
 _VELOCITY_UP_THRESHOLD_PCT   = float(_SIGNAL_CFG.get("velocity_up_threshold_pct", 20))
-_CAP_ALERT_PCT               = float(_SIGNAL_CFG.get("cap_alert_pct", 90))
+_CAP_ALERT_PCT               = float(_SIGNAL_CFG.get("cap_alert_pct", 85))
 
 # PR 16b: Single source of truth for "which daemons must be alive."
 # Daemons register themselves here at startup via _start_daemon() instead of

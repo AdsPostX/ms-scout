@@ -123,11 +123,11 @@ _SCOUT_THRESHOLDS_FALLBACK: dict = {
         "max_per_payout_type": 2,
     },
     "signals": {
-        "fill_rate_min_sessions_7d": 5000,
+        "fill_rate_min_sessions_7d": 2500,
         "ghost_recency_hours": 48,
-        "velocity_down_threshold_pct": -40,
+        "velocity_down_threshold_pct": -25,
         "velocity_up_threshold_pct": 20,
-        "cap_alert_pct": 90,
+        "cap_alert_pct": 85,
     },
     "health": {
         "offer_staleness_hours": 30,
