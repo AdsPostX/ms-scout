@@ -1875,7 +1875,7 @@ def fill_rate_publishers(
             f"""
             SELECT
                 s.user_id                                                   AS publisher_id,
-                any(u.name)                                                 AS publisher_name,
+                any(u.organization)                                         AS publisher_name,
                 count() AS sessions_{window_days}d,
                 coalesce(i.sessions_with_imps, 0)                          AS sessions_with_imps,
                 round(
@@ -1883,7 +1883,8 @@ def fill_rate_publishers(
                 )                                                           AS fill_rate_pct,
                 count() - coalesce(i.sessions_with_imps, 0)                AS missed_sessions
             FROM adpx_sdk_sessions s
-            LEFT JOIN mv_adpx_users u ON toInt64(u.pid) = toInt64(s.user_id)
+            -- mv_adpx_users columns: id (UInt64), organization — NOT pid/name
+            LEFT JOIN mv_adpx_users u ON u.id = toUInt64(s.user_id)
             LEFT JOIN (
                 SELECT user_id, count() AS sessions_with_imps
                 FROM adpx_impressions_details
@@ -1977,14 +1978,15 @@ def velocity_alerts(
             f"""
             SELECT
                 toInt64(user_id)                                                AS publisher_id,
-                any(u.name)                                                     AS publisher_name,
+                any(u.organization)                                             AS publisher_name,
                 coalesce(sum(toFloat64OrZero(revenue)), 0)                      AS revenue_30d,
                 coalesce(sumIf(
                     toFloat64OrZero(revenue),
                     toDate(created_at) > {date_expr} - 7
                 ), 0)                                                           AS revenue_7d
             FROM adpx_conversionsdetails cv
-            LEFT JOIN mv_adpx_users u ON toInt64(u.pid) = toInt64(cv.user_id)
+            -- mv_adpx_users columns: id (UInt64), organization — NOT pid/name
+            LEFT JOIN mv_adpx_users u ON u.id = toUInt64(cv.user_id)
             WHERE toDate(cv.created_at) > {date_expr} - 30
               {pub_filter}
             GROUP BY user_id
@@ -2203,7 +2205,7 @@ def earnings_breakdown(
                 coalesce(sum(toFloat64OrZero(revenue)), 0) AS gross_rev,
                 coalesce(sum(toFloat64OrZero(payout)), 0)  AS partner_rev
             FROM adpx_conversionsdetails
-            WHERE toDate(created_at) BETWEEN '{{start_date}}' AND '{{end_date}}'
+            WHERE toDate(created_at) BETWEEN {{start_date: String}} AND {{end_date: String}}
               {pub_filter_cv}
             """,
             parameters={"start_date": start_date, "end_date": end_date},
@@ -2213,7 +2215,7 @@ def earnings_breakdown(
             f"""
             SELECT coalesce(sum(pub_cost_cents) / 100.0, 0) AS partner_cost
             FROM adpx_tracked_clicks
-            WHERE toDate(created_at) BETWEEN '{{start_date}}' AND '{{end_date}}'
+            WHERE toDate(created_at) BETWEEN {{start_date: String}} AND {{end_date: String}}
               {pub_filter_tc}
             """,
             parameters={"start_date": start_date, "end_date": end_date},

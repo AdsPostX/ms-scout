@@ -1525,21 +1525,21 @@ TOOLS = [
     {
         "name": "get_publisher_revenue_trends",
         "description": (
-            "Publisher revenue trends: compare each publisher's actual revenue over the last N days "
-            "against their historical median for the same period length (8 prior periods). "
-            "Uses period-median algorithm so the comparison is apples-to-apples (period vs period, "
-            "not daily average). "
+            "Publisher velocity: identifies publishers trending significantly up or down in revenue. "
+            "Uses canonical annualized comparison: ((rev_7d / 7) × 30 − rev_30d) / rev_30d × 100. "
+            "Fires for publishers with pct_delta < −25% (velocity down) or > +20% (velocity up), "
+            "minimum $5K revenue over the past 30 days. "
             "Use when the team asks: 'which publishers are trending up/down', 'revenue trends', "
-            "'publisher revenue vs baseline', 'which publishers improved this week', "
-            "'who dropped revenue vs historical', 'publisher performance trends'. "
-            "Returns publisher name, actual revenue, expected revenue, delta %, and trend direction."
+            "'publisher velocity', 'who dropped revenue', 'which publishers improved this week', "
+            "'publisher performance trends'. "
+            "Returns publisher_name, rev_7d, rev_30d, pct_delta, direction ('up' or 'down')."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "days": {
                     "type": "integer",
-                    "description": "Period length in days. Default: 7.",
+                    "description": "Ignored — always uses 7d/30d canonical window.",
                 },
             },
             "required": [],
@@ -2428,7 +2428,7 @@ def get_pulse_summary() -> dict:
         if not summary:
             return {
                 "has_pulse": False,
-                "message": "No scheduled Pulse has fired yet today. The morning briefing runs at 8am CT.",
+                "message": "No shadow monitor run has completed yet today.",
             }
         return {
             "has_pulse": True,
@@ -2869,7 +2869,7 @@ def get_advertiser_revenue_projection(
                 count(DISTINCT i.session_id)   AS sessions_30d,
                 coalesce(sum(toFloat64OrNull(cd.revenue)), 0) AS revenue_30d,
                 coalesce(sum(toFloat64OrNull(cd.payout)),  0) AS payout_30d,
-                count(cd.id)                   AS conversions_30d,
+                count(DISTINCT cd.id)           AS conversions_30d,
                 coalesce(any(clicks_agg.clicks_30d), 0) AS clicks_30d
             FROM adpx_impressions_details i
             JOIN from_airbyte_campaigns c
@@ -3681,7 +3681,7 @@ def get_low_fill_publishers() -> str:
     total_missed = sum(int(d["missed_sessions"]) for d in data)
 
     lines = [
-        f"*Publisher Fill Rate Report — Low Fill on Post-Transaction Pages*\n",
+        "*Publisher Fill Rate Report — Low Fill on Post-Transaction Pages*\n",
         f"{len(data)} publisher{'s' if len(data) != 1 else ''} below 15% fill · "
         f"{total_missed / 1_000_000:.1f}M missed sessions/7d\n",
     ]

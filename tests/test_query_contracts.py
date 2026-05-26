@@ -486,10 +486,10 @@ class TestCVRClicksDenominator(unittest.TestCase):
                         result["avg_cvr"], 1.0,
                         f"avg_cvr={result['avg_cvr']} looks sessions-based (expected ~5.0 clicks-based)"
                     )
+            except (ImportError, AttributeError) as e:
+                self.skipTest(f"scout_agent not importable or signature changed: {e}")
             except Exception:
-                # If the function signature or mock doesn't align exactly, skip gracefully
-                # The key correctness check is in the imports + code review, not runtime mock
-                pass
+                raise  # unexpected failures must surface, not be swallowed
 
 
 # ---------------------------------------------------------------------------
@@ -562,8 +562,10 @@ class TestNLVelocityHandler(unittest.TestCase):
                     )
                     self.assertIn(trend["direction"], ("up", "down"),
                                   "direction must be 'up' or 'down'")
+            except (ImportError, AttributeError) as e:
+                self.skipTest(f"scout_agent not importable or signature changed: {e}")
             except Exception:
-                pass  # Import-level issues in test env are acceptable; logic is verified above
+                raise  # unexpected failures must surface, not be swallowed
 
 
 if __name__ == "__main__":
