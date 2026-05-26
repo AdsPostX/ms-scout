@@ -190,11 +190,13 @@ class TestFeedbackHelpers(unittest.TestCase):
         self.assertEqual(row["user"], "U3")
         self.assertIn("ts", row)
 
-    def test_maybe_append_ps_is_passthrough(self):
-        """_maybe_append_ps returns text unchanged — PS is now in feedback buttons."""
-        from scout_handlers import _maybe_append_ps
-        self.assertEqual(_maybe_append_ps("U1", "answer"), "answer")
-        self.assertEqual(_maybe_append_ps("U1", "answer"), "answer")
+    def test_maybe_append_ps_removed(self):
+        """_maybe_append_ps was removed — PS is rendered via ScoutKit feedback buttons."""
+        import scout_handlers
+        self.assertFalse(
+            hasattr(scout_handlers, "_maybe_append_ps"),
+            "_maybe_append_ps should not exist — removed in favour of ScoutKit feedback",
+        )
 
 
 if __name__ == "__main__":
