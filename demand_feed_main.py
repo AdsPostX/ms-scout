@@ -1097,7 +1097,7 @@ def _run_shadow_monitor(
 
 def _cap_monitor_daemon() -> None:
     from scout_state import _load_cap_alert_state, _save_cap_alert_date
-    from scout_agent import _pulse_signal_cap
+    from scout_bot import _pulse_signal_cap
     from scout_bot import _format_cap_alert
     _run_shadow_monitor(
         monitor_name="cap-monitor", config_key="cap",
@@ -1108,7 +1108,7 @@ def _cap_monitor_daemon() -> None:
 
 def _velocity_down_monitor_daemon() -> None:
     from scout_state import _load_velocity_down_alert_state, _save_velocity_down_alert_date
-    from scout_agent import _pulse_signal_velocity
+    from scout_bot import _pulse_signal_velocity
     from scout_bot import _format_velocity_down_alert
     def _signal_down_only(ch):
         rows = _pulse_signal_velocity(ch)
@@ -1122,7 +1122,7 @@ def _velocity_down_monitor_daemon() -> None:
 
 def _ghost_monitor_daemon() -> None:
     from scout_state import _load_ghost_alert_state, _save_ghost_alert_date
-    from scout_agent import _pulse_signal_ghost
+    from scout_bot import _pulse_signal_ghost
     from scout_bot import _format_ghost_alert
     _run_shadow_monitor(
         monitor_name="ghost-monitor", config_key="ghost",
@@ -1133,7 +1133,7 @@ def _ghost_monitor_daemon() -> None:
 
 def _fill_monitor_daemon() -> None:
     from scout_state import _load_fill_alert_state, _save_fill_alert_date
-    from scout_agent import _pulse_signal_fill_rate
+    from scout_bot import _pulse_signal_fill_rate
     from scout_bot import _format_fill_alert
     _run_shadow_monitor(
         monitor_name="fill-monitor", config_key="fill",

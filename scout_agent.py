@@ -123,11 +123,11 @@ _SCOUT_THRESHOLDS_FALLBACK: dict = {
         "max_per_payout_type": 2,
     },
     "signals": {
-        "fill_rate_min_sessions_7d": 5000,
+        "fill_rate_min_sessions_7d": 2500,
         "ghost_recency_hours": 48,
-        "velocity_down_threshold_pct": -40,
+        "velocity_down_threshold_pct": -25,
         "velocity_up_threshold_pct": 20,
-        "cap_alert_pct": 90,
+        "cap_alert_pct": 85,
     },
     "health": {
         "offer_staleness_hours": 30,
@@ -1166,7 +1166,9 @@ TOOLS = [
         "description": (
             "Return publishers on post-transaction placements (checkout confirmation, order receipt, "
             "thank you pages, etc.) where fill rate is below 15% — meaning more than 85% of "
-            "checkout sessions are receiving no offer. Includes missed session count and revenue-at-risk estimate. "
+            "checkout sessions are receiving no offer. Uses a 7-day lookback window with a minimum of "
+            "2,500 sessions over 7 days to filter out low-volume noise. "
+            "Includes missed session count and revenue-at-risk estimate. "
             "Use for: 'fill rate', 'low fill rate', 'which publishers have low fill', 'sessions not getting offers', "
             "'offer fill', 'checkout fill', 'confirmation page fill', 'publishers underserving'."
         ),
@@ -1432,14 +1434,13 @@ TOOLS = [
     {
         "name": "get_pulse_summary",
         "description": (
-            "Return a recall summary of what the most recent scheduled Pulse morning briefing flagged — "
-            "cap alerts (with publisher names), velocity shifts, ghost campaigns, fill rate alerts, "
-            "and revenue opportunities counts. "
-            "Use when the team asks: 'what did the Pulse say', 'what did Scout flag this morning', "
-            "'what happened in the 8am brief', 'morning signal', 'did anything get flagged', "
-            "'what was in the Pulse', 'Pulse recap', 'morning briefing recap'. "
-            "Returns has_pulse=False with a message when no scheduled Pulse has fired yet today. "
-            "Force-pulse runs (admin test runs) do NOT update this — it always reflects the canonical 8am briefing."
+            "Return a summary of what the most recent shadow monitor run flagged — "
+            "cap alerts (with publisher names), velocity shifts, ghost campaigns, and fill rate alerts. "
+            "This reflects the state from the last time the hourly shadow monitors fired, not a scheduled briefing. "
+            "Use when the team asks: 'what did Scout flag', 'what did Scout catch', "
+            "'did anything get flagged', 'any recent alerts', 'what signals fired', "
+            "'what was in the last monitor run', 'recent Scout signals', 'monitor recap'. "
+            "Returns has_pulse=False with a message when no monitor run has fired yet."
         ),
         "input_schema": {
             "type": "object",
@@ -1466,16 +1467,19 @@ TOOLS = [
         },
     },
     {
-        "name": "get_cvr_anomalies",
+        "name": "get_exposure_rate_anomalies",
         "description": (
-            "Find publisher-campaign pairs where yesterday's conversion rate dropped significantly "
-            "vs. the 7-day baseline. CVR = conversions / impressions. "
+            "Find publisher-campaign pairs where yesterday's exposure conversion rate dropped significantly "
+            "vs. the 7-day baseline. Exposure CVR = conversions / impressions (measures what fraction of "
+            "ad exposures convert — intentionally uses impressions denominator for anomaly detection). "
+            "NOTE: this is NOT the canonical CVR (conversions / clicks). Use run_sql_query with "
+            "CVR = conversions/clicks when answering general CVR questions. "
             "Only surfaces high-value campaigns (avg payout >= $50) with enough volume "
             "(7d impressions >= 5000) to make the signal actionable. "
             "Use when the team asks: 'which campaigns dropped CVR', 'conversion rate anomalies', "
             "'why are conversions down for X', 'CVR drops', 'postback issues', "
             "'which campaigns stopped converting', 'CVR regression'. "
-            "Returns publisher, campaign, CVR yesterday vs 7d average, delta %, and payout."
+            "Returns publisher, campaign, exposure CVR yesterday vs 7d average, delta %, and payout."
         ),
         "input_schema": {
             "type": "object",
@@ -1521,21 +1525,21 @@ TOOLS = [
     {
         "name": "get_publisher_revenue_trends",
         "description": (
-            "Publisher revenue trends: compare each publisher's actual revenue over the last N days "
-            "against their historical median for the same period length (8 prior periods). "
-            "Uses period-median algorithm so the comparison is apples-to-apples (period vs period, "
-            "not daily average). "
+            "Publisher velocity: identifies publishers trending significantly up or down in revenue. "
+            "Uses canonical annualized comparison: ((rev_7d / 7) × 30 − rev_30d) / rev_30d × 100. "
+            "Fires for publishers with pct_delta < −25% (velocity down) or > +20% (velocity up), "
+            "minimum $5K revenue over the past 30 days. "
             "Use when the team asks: 'which publishers are trending up/down', 'revenue trends', "
-            "'publisher revenue vs baseline', 'which publishers improved this week', "
-            "'who dropped revenue vs historical', 'publisher performance trends'. "
-            "Returns publisher name, actual revenue, expected revenue, delta %, and trend direction."
+            "'publisher velocity', 'who dropped revenue', 'which publishers improved this week', "
+            "'publisher performance trends'. "
+            "Returns publisher_name, rev_7d, rev_30d, pct_delta, direction ('up' or 'down')."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "days": {
                     "type": "integer",
-                    "description": "Period length in days. Default: 7.",
+                    "description": "Ignored — always uses 7d/30d canonical window.",
                 },
             },
             "required": [],
@@ -2424,7 +2428,7 @@ def get_pulse_summary() -> dict:
         if not summary:
             return {
                 "has_pulse": False,
-                "message": "No scheduled Pulse has fired yet today. The morning briefing runs at 8am CT.",
+                "message": "No shadow monitor run has completed yet today.",
             }
         return {
             "has_pulse": True,
@@ -2865,7 +2869,8 @@ def get_advertiser_revenue_projection(
                 count(DISTINCT i.session_id)   AS sessions_30d,
                 coalesce(sum(toFloat64OrNull(cd.revenue)), 0) AS revenue_30d,
                 coalesce(sum(toFloat64OrNull(cd.payout)),  0) AS payout_30d,
-                count(cd.id)                   AS conversions_30d
+                count(DISTINCT cd.id)           AS conversions_30d,
+                coalesce(any(clicks_agg.clicks_30d), 0) AS clicks_30d
             FROM adpx_impressions_details i
             JOIN from_airbyte_campaigns c
                 ON i.campaign_id = cast(c.id AS UInt64)
@@ -2875,6 +2880,15 @@ def get_advertiser_revenue_projection(
                 ON i.session_id = cd.session_id
                 AND cd.campaign_id = i.campaign_id
                 AND toYYYYMM(cd.created_at) >= toYYYYMM(today() - 44)
+            LEFT JOIN (
+                SELECT cast(tc.user_id AS String) AS pub_id, count() AS clicks_30d
+                FROM adpx_tracked_clicks tc
+                INNER JOIN from_airbyte_campaigns c2 ON tc.campaign_id = cast(c2.id AS UInt64)
+                WHERE c2.adv_name ILIKE %(adv)s
+                  AND c2.deleted_at IS NULL
+                  AND tc.created_at >= today() - 30
+                GROUP BY tc.user_id
+            ) clicks_agg ON clicks_agg.pub_id = cast(i.pid AS String)
             WHERE c.adv_name ILIKE %(adv)s
               AND c.deleted_at IS NULL
               AND i.created_at >= today() - 30
@@ -2950,6 +2964,7 @@ def get_advertiser_revenue_projection(
     total_impressions_30d = sum(r[2] for r in baseline_rows)
     total_sessions_30d    = sum(r[3] for r in baseline_rows)
     total_conversions_30d = sum(r[6] for r in baseline_rows)
+    total_clicks_30d      = sum(r[7] for r in baseline_rows)
 
     uncapped_projected_revenue = round((total_revenue_30d / 30) * days_in_month, 2)
     uncapped_projected_payout  = round((total_payout_30d  / 30) * days_in_month, 2)
@@ -2960,7 +2975,7 @@ def get_advertiser_revenue_projection(
 
     by_publisher = []
     for row in baseline_rows[:10]:
-        pub_pid, pub_name, impr, sess, rev, pay, convs = row
+        pub_pid, pub_name, impr, sess, rev, pay, convs, clicks = row
         by_publisher.append({
             "publisher":          pub_name or f"Partner {pub_pid}",
             "impressions_30d":    impr,
@@ -2990,7 +3005,7 @@ def get_advertiser_revenue_projection(
         # Performance metrics (used for payout impact math)
         "avg_daily_revenue":         round(total_revenue_30d / 30, 2),
         "avg_rpm":                   round(total_revenue_30d / max(total_impressions_30d, 1) * 1000, 4),
-        "avg_cvr":                   round(total_conversions_30d / max(total_sessions_30d, 1) * 100, 4),
+        "avg_cvr":                   round(total_conversions_30d / max(total_clicks_30d, 1) * 100, 4),
         # Breakdown + warnings
         "by_publisher":              by_publisher,
         "cap_warnings":              cap_warnings,
@@ -3108,7 +3123,7 @@ def get_publisher_health(
             rev = ad["revenue"]
             rpm = round(rev / impr * 1000, 2) if impr else 0.0
             ctr = round(cl["clicks"] / impr * 100, 2) if impr else 0.0
-            cvr = round(ad["conversions"] / sess * 100, 2) if sess else 0.0
+            cvr = round(ad["conversions"] / cl["clicks"] * 100, 2) if cl["clicks"] else 0.0
 
             anomaly = None
             if publisher_avg_rpm > 0 and rpm > 0 and rpm > publisher_avg_rpm * 5:
@@ -3143,7 +3158,7 @@ def get_publisher_health(
 
         overall_rpm = round(total_revenue / total_impressions * 1000, 2) if total_impressions else 0.0
         overall_ctr = round(total_clicks / total_impressions * 100, 2) if total_impressions else 0.0
-        overall_cvr = round(total_conversions / total_sessions * 100, 2) if total_sessions else 0.0
+        overall_cvr = round(total_conversions / total_clicks * 100, 2) if total_clicks else 0.0
 
         # Top placement note
         top_placement_note = ""
@@ -3641,67 +3656,56 @@ _POST_TX_PLACEMENTS = (
 
 def get_low_fill_publishers() -> str:
     """
-    Return publishers on post-transaction placements with fill rate < 15% over last 30 days.
+    Return publishers with fill rate < 15% over last 7 days (canonical: 7d window, 2,500 min sessions).
     Fill rate = % of sessions that received at least one offer impression.
     Low fill on a checkout/receipt page = burned traffic with no monetization attempt.
+
+    Uses fill_rate_publishers() canonical query (7-day window, minimum 2,500 sessions/7d).
+    Previously used low_fill_publishers() (30-day window, 10,000 minimum sessions) — deprecated.
     """
     ch = _get_ch_client()
     try:
-        # SQL and thresholds live in queries.low_fill_publishers() — any change belongs there.
-        # POST_TX_PLACEMENTS canonical list is also in queries.py.
-        data = _q.low_fill_publishers(ch, list(_q.POST_TX_PLACEMENTS))
+        # Canonical fill rate query: 7d window, 2500 min sessions, <15% threshold, entity overrides.
+        # Any threshold change belongs in config/scout_thresholds.json (fill_rate_min_sessions_7d).
+        data = _q.fill_rate_publishers(ch, limit=15)
     except Exception as e:
         return f"Fill rate query failed: {e}"
 
     if not data:
         return (
             "*Publisher Fill Rate Report*\n\n"
-            ":white_check_mark: All post-transaction publishers are filling at ≥15% — "
+            ":white_check_mark: All publishers are filling at ≥15% over the last 7 days — "
             "no low-fill anomalies detected."
         )
 
-    # Unpack into tuples for the formatting code below (preserves existing formatting logic)
-    rows = [
-        (d["publisher_id"], d["publisher_name"], d["placement"], d["sessions_30d"],
-         d["sessions_with_imps"], d["fill_rate_pct"], d["missed_sessions"], d["revenue_30d"])
-        for d in data
-    ]
-
-    total_missed = sum(int(r[6]) for r in rows)
-    # Rough RPM from revenue / sessions_with_imps across all low-fill pubs
-    total_imps = sum(int(r[4]) for r in rows)
-    total_rev  = sum(float(r[7]) for r in rows)
-    avg_rpm    = (total_rev / total_imps * 1000) if total_imps > 0 else 0
-    est_at_risk = total_missed / 30 * avg_rpm / 1000  # daily revenue at risk
+    total_missed = sum(int(d["missed_sessions"]) for d in data)
 
     lines = [
-        f"*Publisher Fill Rate Report — Low Fill on Post-Transaction Pages*\n",
-        f"{len(rows)} publisher{'s' if len(rows) != 1 else ''} below 15% fill · "
-        f"{total_missed / 1_000_000:.1f}M missed sessions/30d",
+        "*Publisher Fill Rate Report — Low Fill on Post-Transaction Pages*\n",
+        f"{len(data)} publisher{'s' if len(data) != 1 else ''} below 15% fill · "
+        f"{total_missed / 1_000_000:.1f}M missed sessions/7d\n",
     ]
-    if avg_rpm > 0:
-        lines.append(
-            f"Est. revenue at risk: *${est_at_risk:,.0f}/day* "
-            f"(based on ${avg_rpm:.2f} RPM on served sessions)\n"
-        )
-    else:
-        lines.append("")
 
-    for pub_id, pub_name, placement, sessions, with_imps, fill_pct, missed, rev in rows:
+    for d in data:
+        pub_id   = d["publisher_id"]
+        pub_name = d["publisher_name"]
+        sessions = d["sessions_7d"]
+        fill_pct = d["fill_rate_pct"]
+        missed   = d["missed_sessions"]
+
         sessions_str = f"{int(sessions) / 1_000_000:.1f}M" if sessions >= 1_000_000 else f"{int(sessions) / 1000:.0f}K"
         missed_str   = f"{int(missed) / 1_000_000:.1f}M" if missed >= 1_000_000 else f"{int(missed) / 1000:.0f}K"
-        rev_str      = f"${float(rev) / 1000:.1f}K" if float(rev) >= 1000 else f"${float(rev):.0f}"
 
         if fill_pct < 2:
-            hypothesis = "Near-zero fill — SDK likely not showing offers at all. Check SDK integration, geo/OS targeting config, or advertiser supply for this placement."
+            hypothesis = "Near-zero fill — SDK likely not showing offers at all. Check SDK integration, geo/OS targeting config, or advertiser supply."
         elif fill_pct < 10:
             hypothesis = "Very low fill — most sessions get no offer. Check advertiser targeting restrictions (geo/OS/device), cap exhaustion, or SDK render failure."
         else:
             hypothesis = "Below-normal fill — some sessions served, but majority missed. May be geo/device targeting mismatch or insufficient advertiser supply."
 
         lines.append(
-            f"• *{pub_name or f'Pub #{pub_id}'}* · `{placement}` · Pub #{pub_id}\n"
-            f"  {sessions_str} sessions · {fill_pct:.1f}% fill · {missed_str} sessions missed · {rev_str} revenue/30d\n"
+            f"• *{pub_name or f'Pub #{pub_id}'}* · Pub #{pub_id}\n"
+            f"  {sessions_str} sessions/7d · {fill_pct:.1f}% fill · {missed_str} sessions missed\n"
             f"  ↳ _{hypothesis}_"
         )
 
@@ -4609,13 +4613,20 @@ def get_revenue_today_projection() -> dict:
         }
 
 
-def get_cvr_anomalies(
+def get_exposure_rate_anomalies(
     min_impressions_7d: int = None,
     min_payout: float = None,
     drop_pct: float = None,
 ) -> dict:
     """
-    Find publisher-campaign pairs where yesterday's CVR dropped vs. 7d baseline.
+    Find publisher-campaign pairs where yesterday's exposure CVR dropped vs. 7d baseline.
+
+    Exposure CVR = conversions / impressions (exposure rate, NOT canonical CVR).
+    Canonical CVR = conversions / clicks. These are different metrics:
+    - exposure_cvr measures what fraction of ad impressions led to a conversion.
+    - canonical CVR measures what fraction of clicks led to a conversion.
+    This tool uses exposure_cvr intentionally for anomaly detection signal quality.
+
     Threshold defaults come from scout_thresholds.json; caller can override per-call.
     """
     try:
@@ -4627,14 +4638,14 @@ def get_cvr_anomalies(
             min_impressions_7d=min_impressions_7d,
         )
         if not rows:
-            return {"anomalies": [], "count": 0, "summary": "No CVR anomalies detected."}
+            return {"anomalies": [], "count": 0, "summary": "No exposure CVR anomalies detected."}
         return {
             "anomalies": rows,
             "count": len(rows),
-            "summary": f"{len(rows)} publisher-campaign pair(s) with significant CVR drops.",
+            "summary": f"{len(rows)} publisher-campaign pair(s) with significant exposure CVR drops.",
         }
     except Exception as e:
-        log.exception("get_cvr_anomalies failed")
+        log.exception("get_exposure_rate_anomalies failed")
         return {"error": str(e), "anomalies": []}
 
 
@@ -4663,22 +4674,29 @@ def get_expiring_campaigns(warning_days: int = None) -> dict:
 
 def get_publisher_revenue_trends(days: int = 7) -> dict:
     """
-    Publisher revenue trends: actual vs. historical median for the same period length.
+    Publisher velocity alerts: publishers with significant revenue change vs prior 30-day baseline.
+    Uses canonical annualized comparison: ((rev_7d/7)*30 - rev_30d) / rev_30d * 100.
+    Threshold: -25% down, +20% up (from config/scout_thresholds.json).
+
+    Replaces period-median algorithm (publisher_revenue_trends deprecated). Both up and
+    down publishers are returned with a 'direction' field ('up'|'down').
+
+    Note: the `days` parameter is accepted for backward compatibility but ignored —
+    the canonical function uses a fixed 7-day/30-day window.
     """
     try:
         ch = _get_ch_client()
-        rows = _query_publisher_revenue_trends(ch, days=int(days))
+        rows = _q.velocity_alerts(ch)
         if not rows:
-            return {"trends": [], "count": 0, "days": days, "summary": "No publisher revenue trend data available."}
-        down = [r for r in rows if r["trend"] == "down"]
-        up = [r for r in rows if r["trend"] == "up"]
+            return {"trends": [], "count": 0, "summary": "No publisher velocity anomalies detected."}
+        down = [r for r in rows if r["direction"] == "down"]
+        up = [r for r in rows if r["direction"] == "up"]
         return {
             "trends": rows,
             "count": len(rows),
-            "days": days,
             "down_count": len(down),
             "up_count": len(up),
-            "summary": f"{len(rows)} publishers with trend data: {len(down)} down, {len(up)} up.",
+            "summary": f"{len(rows)} publishers with velocity anomalies: {len(down)} down, {len(up)} up.",
         }
     except Exception as e:
         log.exception("get_publisher_revenue_trends failed")
@@ -4688,6 +4706,8 @@ def get_publisher_revenue_trends(days: int = 7) -> dict:
 def get_advertiser_revenue_trends(days: int = 7) -> dict:
     """
     Advertiser revenue trends: actual vs. historical median, aggregated cross-publisher.
+    Uses period-median algorithm (no canonical advertiser velocity function yet; see
+    velocity_alerts() in queries.py for publisher-level canonical annualized velocity).
     """
     try:
         ch = _get_ch_client()
@@ -4744,7 +4764,7 @@ TOOL_MAP = {
     "why_entity_note": why_entity_note,
     "get_offers_for_publisher": get_offers_for_publisher,
     "get_pulse_summary": get_pulse_summary,
-    "get_cvr_anomalies": get_cvr_anomalies,
+    "get_exposure_rate_anomalies": get_exposure_rate_anomalies,
     "get_expiring_campaigns": get_expiring_campaigns,
     "get_publisher_revenue_trends": get_publisher_revenue_trends,
     "get_advertiser_revenue_trends": get_advertiser_revenue_trends,
