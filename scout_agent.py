@@ -4674,22 +4674,29 @@ def get_expiring_campaigns(warning_days: int = None) -> dict:
 
 def get_publisher_revenue_trends(days: int = 7) -> dict:
     """
-    Publisher revenue trends: actual vs. historical median for the same period length.
+    Publisher velocity alerts: publishers with significant revenue change vs prior 30-day baseline.
+    Uses canonical annualized comparison: ((rev_7d/7)*30 - rev_30d) / rev_30d * 100.
+    Threshold: -25% down, +20% up (from config/scout_thresholds.json).
+
+    Replaces period-median algorithm (publisher_revenue_trends deprecated). Both up and
+    down publishers are returned with a 'direction' field ('up'|'down').
+
+    Note: the `days` parameter is accepted for backward compatibility but ignored —
+    the canonical function uses a fixed 7-day/30-day window.
     """
     try:
         ch = _get_ch_client()
-        rows = _query_publisher_revenue_trends(ch, days=int(days))
+        rows = _q.velocity_alerts(ch)
         if not rows:
-            return {"trends": [], "count": 0, "days": days, "summary": "No publisher revenue trend data available."}
-        down = [r for r in rows if r["trend"] == "down"]
-        up = [r for r in rows if r["trend"] == "up"]
+            return {"trends": [], "count": 0, "summary": "No publisher velocity anomalies detected."}
+        down = [r for r in rows if r["direction"] == "down"]
+        up = [r for r in rows if r["direction"] == "up"]
         return {
             "trends": rows,
             "count": len(rows),
-            "days": days,
             "down_count": len(down),
             "up_count": len(up),
-            "summary": f"{len(rows)} publishers with trend data: {len(down)} down, {len(up)} up.",
+            "summary": f"{len(rows)} publishers with velocity anomalies: {len(down)} down, {len(up)} up.",
         }
     except Exception as e:
         log.exception("get_publisher_revenue_trends failed")
@@ -4699,6 +4706,8 @@ def get_publisher_revenue_trends(days: int = 7) -> dict:
 def get_advertiser_revenue_trends(days: int = 7) -> dict:
     """
     Advertiser revenue trends: actual vs. historical median, aggregated cross-publisher.
+    Uses period-median algorithm (no canonical advertiser velocity function yet; see
+    velocity_alerts() in queries.py for publisher-level canonical annualized velocity).
     """
     try:
         ch = _get_ch_client()
