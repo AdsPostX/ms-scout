@@ -194,7 +194,13 @@ class TestCHExceptionPropagatesFromSignalFns(unittest.TestCase):
         return ch
 
     def _assert_propagates(self, signal_fn_name: str, ch):
-        """Assert signal fn re-raises when ch.query raises RuntimeError."""
+        """Assert signal fn re-raises when ch.query raises RuntimeError.
+
+        Used only for _pulse_signal_ghost which retains inline SQL + re-raise.
+        Cap/velocity/fill now delegate to canonical queries.* functions that
+        catch CH errors internally and return [] — use _assert_returns_empty
+        for those.
+        """
         try:
             import scout_bot as _sb
         except ImportError as exc:  # pragma: no cover
@@ -205,17 +211,41 @@ class TestCHExceptionPropagatesFromSignalFns(unittest.TestCase):
         with self.assertRaises(RuntimeError, msg=f"{signal_fn_name} must re-raise CH errors"):
             fn(ch)
 
-    def test_cap_signal_reraises_ch_error(self):
-        self._assert_propagates("_pulse_signal_cap",
-                                self._make_ch_mock(side_effect=RuntimeError("CH down")))
+    def _assert_returns_empty(self, signal_fn_name: str, ch):
+        """Assert canonical-delegating signal fn returns [] on CH error (does not raise).
 
-    def test_velocity_signal_reraises_ch_error(self):
-        self._assert_propagates("_pulse_signal_velocity",
-                                self._make_ch_mock(side_effect=RuntimeError("CH down")))
+        Cap, velocity, and fill-rate signal functions now delegate to queries.*
+        canonical functions which catch exceptions internally and return [] so
+        that a CH failure is recorded as 'no anomaly' rather than crashing the
+        shadow monitor loop.  T4/T9/T14 in test_query_contracts.py cover the
+        canonical layer; this asserts the delegation wrapper preserves that
+        behaviour at the signal layer.
+        """
+        try:
+            import scout_bot as _sb
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"scout_bot not importable in test env: {exc}")
+        fn = getattr(_sb, signal_fn_name, None)
+        if fn is None:
+            self.skipTest(f"{signal_fn_name} not found on scout_bot")
+        # Should not raise — canonical functions swallow CH errors and return []
+        result = fn(ch)
+        self.assertEqual(result, [], f"{signal_fn_name} must return [] on CH error (not raise)")
 
-    def test_fill_rate_signal_reraises_ch_error(self):
-        self._assert_propagates("_pulse_signal_fill_rate",
-                                self._make_ch_mock(side_effect=RuntimeError("CH down")))
+    def test_cap_signal_returns_empty_on_ch_error(self):
+        """Cap delegates to canonical queries.cap_alert_campaigns which returns [] on error."""
+        self._assert_returns_empty("_pulse_signal_cap",
+                                   self._make_ch_mock(side_effect=RuntimeError("CH down")))
+
+    def test_velocity_signal_returns_empty_on_ch_error(self):
+        """Velocity delegates to canonical queries.velocity_alerts which returns [] on error."""
+        self._assert_returns_empty("_pulse_signal_velocity",
+                                   self._make_ch_mock(side_effect=RuntimeError("CH down")))
+
+    def test_fill_rate_signal_returns_empty_on_ch_error(self):
+        """Fill rate delegates to canonical queries.fill_rate_publishers which returns [] on error."""
+        self._assert_returns_empty("_pulse_signal_fill_rate",
+                                   self._make_ch_mock(side_effect=RuntimeError("CH down")))
 
     def test_ghost_signal_reraises_ch_error(self):
         self._assert_propagates("_pulse_signal_ghost",

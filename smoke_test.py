@@ -2290,7 +2290,7 @@ def test_cvr_anomaly_and_expiration_agent_tools_in_tool_map():
     """
     import scout_agent
     required = [
-        "get_cvr_anomalies",
+        "get_exposure_rate_anomalies",  # renamed from get_cvr_anomalies in commit 0a
         "get_expiring_campaigns",
         "get_publisher_revenue_trends",
         "get_advertiser_revenue_trends",
