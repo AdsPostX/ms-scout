@@ -463,35 +463,40 @@ class TestCVRClicksDenominator(unittest.TestCase):
             self.skipTest("scout_agent not importable in this environment")
             return
 
+        # Guard only the symbol lookup — skip if the function doesn't exist yet.
+        # Invocation and assertions are unguarded so AttributeErrors from the
+        # implementation propagate as test failures rather than silent skips.
+        _get_health = getattr(_sa, "get_publisher_health", None)
+        if _get_health is None:
+            self.skipTest("get_publisher_health not found on scout_agent")
+            return
+
         # Stub the ClickHouse client so get_publisher_health runs without real CH
         mock_ch = MagicMock()
 
-        # Simulate the internal CH query for publisher=1001 returning aggregates
-        # We patch _get_ch_client to return our mock
-        with patch.object(_sa, "_get_ch_client", return_value=mock_ch, create=True):
-            # 30-day aggregate row: (total_sessions, total_clicks, total_conversions, ...)
-            # sessions=10000, clicks=1000, conversions=50
-            # CVR with clicks: 50/1000*100 = 5.0
-            # CVR with sessions: 50/10000*100 = 0.5
-            mock_agg_row = _make_ch_result([
-                (10000, 1000, 50, 5000.0, 400.0, 30)  # sessions, clicks, conversions, rev, payout, days
-            ])
-            mock_ch.query.return_value = mock_agg_row
+        # 30-day aggregate row: (total_sessions, total_clicks, total_conversions, ...)
+        # sessions=10000, clicks=1000, conversions=50
+        # CVR with clicks: 50/1000*100 = 5.0
+        # CVR with sessions: 50/10000*100 = 0.5
+        mock_agg_row = _make_ch_result([
+            (10000, 1000, 50, 5000.0, 400.0, 30)  # sessions, clicks, conversions, rev, payout, days
+        ])
+        mock_ch.query.return_value = mock_agg_row
 
-            try:
-                result = _sa.get_publisher_health(publisher_id="1001")
-                self.assertIsInstance(result, dict, "get_publisher_health must return a dict")
-                self.assertIn("avg_cvr", result,
-                              "get_publisher_health result must contain 'avg_cvr'")
-                # Should be ~5.0 (clicks-based), not ~0.5 (sessions-based)
-                self.assertGreater(
-                    result["avg_cvr"], 1.0,
-                    f"avg_cvr={result['avg_cvr']} looks sessions-based (expected ~5.0 clicks-based)"
-                )
-            except (ImportError, AttributeError) as e:
-                self.skipTest(f"scout_agent not importable or signature changed: {e}")
-            except Exception:
-                raise  # unexpected failures must surface, not be swallowed
+        with patch.object(_sa, "_get_ch_client", return_value=mock_ch, create=True):
+            result = _get_health(publisher_id="1001")
+            self.assertIsInstance(result, dict, "get_publisher_health must return a dict")
+            # CVR lives under result["overall"]["cvr_pct"]
+            self.assertIn("overall", result,
+                          "get_publisher_health must return a result with 'overall' key")
+            overall = result["overall"]
+            self.assertIn("cvr_pct", overall,
+                          "overall must contain 'cvr_pct'")
+            # Should be ~5.0 (clicks-based: 50/1000*100), not ~0.5 (sessions-based: 50/10000*100)
+            self.assertGreater(
+                overall["cvr_pct"], 1.0,
+                f"cvr_pct={overall['cvr_pct']} looks sessions-based (expected ~5.0 clicks-based)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +551,12 @@ class TestNLVelocityHandler(unittest.TestCase):
             self.skipTest("scout_agent not importable")
             return
 
+        # Guard only the symbol lookup — skip if the function doesn't exist yet.
+        _get_trends = getattr(_sa, "get_publisher_revenue_trends", None)
+        if _get_trends is None:
+            self.skipTest("get_publisher_revenue_trends not found on scout_agent")
+            return
+
         mock_ch = MagicMock()
         # velocity_alerts returns a down publisher — pct_delta=-78.6%, direction="down"
         velocity_row = _make_ch_result([
@@ -554,24 +565,19 @@ class TestNLVelocityHandler(unittest.TestCase):
         mock_ch.query.return_value = velocity_row
 
         with patch.object(_sa, "_get_ch_client", return_value=mock_ch, create=True):
-            try:
-                result = _sa.get_publisher_revenue_trends()
-                self.assertIsInstance(result, dict,
-                                      "get_publisher_revenue_trends must return a dict")
-                self.assertIn("trends", result, "result must contain 'trends' key")
-                self.assertTrue(result["trends"],
-                                "trends list must not be empty given mock velocity data")
-                trend = result["trends"][0]
-                self.assertIn(
-                    "direction", trend,
-                    "get_publisher_revenue_trends must surface 'direction' field from velocity_alerts()",
-                )
-                self.assertIn(trend["direction"], ("up", "down"),
-                              "direction must be 'up' or 'down'")
-            except (ImportError, AttributeError) as e:
-                self.skipTest(f"scout_agent not importable or signature changed: {e}")
-            except Exception:
-                raise  # unexpected failures must surface, not be swallowed
+            result = _get_trends()
+            self.assertIsInstance(result, dict,
+                                  "get_publisher_revenue_trends must return a dict")
+            self.assertIn("trends", result, "result must contain 'trends' key")
+            self.assertTrue(result["trends"],
+                            "trends list must not be empty given mock velocity data")
+            trend = result["trends"][0]
+            self.assertIn(
+                "direction", trend,
+                "get_publisher_revenue_trends must surface 'direction' field from velocity_alerts()",
+            )
+            self.assertIn(trend["direction"], ("up", "down"),
+                          "direction must be 'up' or 'down'")
 
 
 if __name__ == "__main__":

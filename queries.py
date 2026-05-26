@@ -1202,7 +1202,7 @@ def cvr_anomaly(
 
     Returns list of dicts with keys:
         publisher_id (int), publisher_name (str), campaign_id (int), adv_name (str),
-        exposure_cvr_7d (float), cvr_yesterday (float), delta_pct (float),
+        exposure_cvr_7d (float), exposure_cvr_yesterday (float), delta_pct (float),
         impressions_7d (int), payout_per_conversion (float)
     Raises on ClickHouse error — callers must catch.
     """
@@ -1278,7 +1278,7 @@ def cvr_anomaly(
                     round(coalesce(c7.conversions_7d, 0) /
                           nullIf(i7.impressions_7d, 0), 6)                AS exposure_cvr_7d,
                     round(coalesce(cy.conversions_yesterday, 0) /
-                          nullIf(iy.impressions_yesterday, 0), 6)         AS cvr_yesterday,
+                          nullIf(iy.impressions_yesterday, 0), 6)         AS exposure_cvr_yesterday,
                     round((coalesce(cy.conversions_yesterday, 0) /
                           nullIf(iy.impressions_yesterday, 0) -
                           coalesce(c7.conversions_7d, 0) /
@@ -1319,7 +1319,7 @@ def cvr_anomaly(
             "campaign_id": int(r[2]),
             "adv_name": r[3],
             "exposure_cvr_7d": float(r[4] or 0),
-            "cvr_yesterday": float(r[5] or 0),
+            "exposure_cvr_yesterday": float(r[5] or 0),
             "delta_pct": float(r[6] or 0),
             "impressions_7d": int(r[7] or 0),
             "payout_per_conversion": float(r[8] or 0),
@@ -1886,7 +1886,7 @@ def fill_rate_publishers(
             -- mv_adpx_users columns: id (UInt64), organization — NOT pid/name
             LEFT JOIN mv_adpx_users u ON u.id = toUInt64(s.user_id)
             LEFT JOIN (
-                SELECT toInt64(pid) AS user_id, count() AS sessions_with_imps
+                SELECT toInt64(pid) AS user_id, count(DISTINCT session_id) AS sessions_with_imps
                 FROM adpx_impressions_details
                 WHERE toDate(created_at) > {date_expr} - {window_days}
                   AND placement IN {{placements: Array(String)}}
