@@ -257,156 +257,45 @@ def _resolve_ref_date(as_of_date: str | None):
 
 
 def _pulse_signal_cap(ch, as_of_date: str | None = None) -> list:
-    import json as _json
-    from datetime import date as _date
-    import calendar as _cal
-    today_d, _ref_date = _resolve_ref_date(as_of_date)
-    results = []
-    try:
-        _sql = """
-            SELECT
-                c.id          AS campaign_id,
-                c.adv_name,
-                c.capping_config,
-                coalesce(sum(toFloat64OrNull(cv.revenue)), 0) AS revenue_this_month
-            FROM from_airbyte_campaigns c
-            LEFT JOIN adpx_conversionsdetails cv
-                ON toInt64(cv.campaign_id) = c.id
-                AND toYYYYMM(cv.created_at) = toYYYYMM(today())
-            WHERE c.deleted_at IS NULL
-              AND c.capping_config IS NOT NULL
-              AND c.capping_config != ''
-              AND c.capping_config != 'null'
-            GROUP BY c.id, c.adv_name, c.capping_config
-            """
-        if as_of_date:
-            _sql = _sql.replace("today()", _ref_date)
-        cap_rows = ch.query(_sql).result_rows
-        days_in_month = _cal.monthrange(today_d.year, today_d.month)[1]
-        days_remaining = days_in_month - today_d.day + 1
-        for camp_id, adv_name, cap_cfg, revenue_mtd in cap_rows:
-            try:
-                cfg = _json.loads(cap_cfg) if isinstance(cap_cfg, str) else (cap_cfg or {})
-                mb  = float((cfg.get("month") or {}).get("budget") or 0)
-            except Exception:
-                mb = 0.0
-            if mb <= 0:
-                continue
-            cap_pct = revenue_mtd / mb
-            if cap_pct < _CAP_ALERT_PCT / 100:
-                continue
-            daily_run_rate = revenue_mtd / max(today_d.day, 1)
-            days_to_cap    = (mb - revenue_mtd) / daily_run_rate if daily_run_rate > 0 else 999
-            results.append({
-                "adv_name":       adv_name,
-                "campaign_id":    int(camp_id) if camp_id else None,
-                "monthly_cap":    mb,
-                "revenue_mtd":    round(revenue_mtd, 2),
-                "cap_pct":        round(cap_pct * 100, 1),
-                "days_remaining": days_remaining,
-                "days_to_cap":    round(days_to_cap, 1),
-            })
-        results.sort(key=lambda x: x["cap_pct"], reverse=True)
-    except Exception as e:
-        log.warning(f"Pulse cap signal failed: {e}")
-        raise
-    return results
+    import queries as _q
+    return _q.cap_alert_campaigns(
+        ch,
+        as_of_date=as_of_date,
+        cap_alert_pct=_CAP_ALERT_PCT,
+    )
 
 
 def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
-    _, _ref_date = _resolve_ref_date(as_of_date)
+    _, _ref_date = _resolve_ref_date(as_of_date)  # _ref_date used by _hyp_and_gap closure
     results: list = []
     try:
-        _vel_sql = """
-            SELECT
-                user_id,
-                sum(toFloat64OrNull(revenue))                                           AS revenue_30d,
-                sumIf(toFloat64OrNull(revenue), created_at >= today() - 7)              AS revenue_7d
-            FROM adpx_conversionsdetails
-            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-            WHERE created_at >= today() - 30
-            GROUP BY user_id
-            HAVING revenue_30d > 5000
-            ORDER BY revenue_30d DESC
-            LIMIT 200
-            """
-        if as_of_date:
-            _vel_sql = _vel_sql.replace("today()", _ref_date)
-        vel_rows = ch.query(_vel_sql).result_rows
-
-        uid_list = [str(r[0]) for r in vel_rows if r[0]]
-        org_map: dict = {}
-        if uid_list:
-            try:
-                id_csv = ",".join(uid_list[:200])
-                name_rows = ch.query(
-                    f"SELECT id, organization FROM from_airbyte_users WHERE id IN ({id_csv}) LIMIT 200"
-                ).result_rows
-                org_map = {str(r[0]): r[1] for r in name_rows}
-            except Exception:
-                log.debug("suppressed: publisher name enrichment query failed", exc_info=True)
-
-        for user_id, rev_30d, rev_7d in vel_rows:
-            rev_7d_ann = (rev_7d / 7) * 30 if rev_7d else 0
-            if rev_30d <= 0:
-                continue
-            pct_delta = (rev_7d_ann - rev_30d) / rev_30d * 100
-            if pct_delta > _VELOCITY_DOWN_THRESHOLD_PCT and pct_delta < _VELOCITY_UP_THRESHOLD_PCT:
-                continue
+        import queries as _q
+        base = _q.velocity_alerts(
+            ch,
+            as_of_date=as_of_date,
+            down_threshold_pct=_VELOCITY_DOWN_THRESHOLD_PCT,
+            up_threshold_pct=_VELOCITY_UP_THRESHOLD_PCT,
+            min_rev_30d=5000.0,
+        )
+        for b in base:
+            rev_7d_ann = round((b["rev_7d"] / 7) * 30, 2)
+            processed_advs = []
+            for a in b.get("advertisers", []):
+                adv_rev_7d_ann = (a["rev_7d"] / 7) * 30
+                processed_advs.append({
+                    "adv_name":  a["advertiser"],
+                    "delta_ann": round(adv_rev_7d_ann - a["rev_30d"], 0),
+                    "rev_7d":    a["rev_7d"],
+                })
             results.append({
-                "publisher_name":  org_map.get(str(user_id), f"Partner {user_id}"),
-                "publisher_id":    int(user_id) if user_id else None,
-                "revenue_30d":     round(rev_30d, 2),
-                "revenue_7d_ann":  round(rev_7d_ann, 2),
-                "pct_delta":       round(pct_delta, 1),
-                "direction":       "up" if pct_delta > 0 else "down",
-                "top_advertisers": [],
+                "publisher_name":  b["publisher_name"],
+                "publisher_id":    b["publisher_id"],
+                "revenue_30d":     b["rev_30d"],
+                "revenue_7d_ann":  rev_7d_ann,
+                "pct_delta":       b["pct_delta"],
+                "direction":       b["direction"],
+                "top_advertisers": processed_advs,
             })
-        results.sort(key=lambda x: abs(x["pct_delta"]), reverse=True)
-        results = results[:5]
-
-        vel_pub_ids = [v["publisher_id"] for v in results if v["publisher_id"]]
-        if vel_pub_ids:
-            try:
-                pub_id_csv = ",".join(str(p) for p in vel_pub_ids)
-                _attr_sql = f"""
-                    SELECT
-                        cv.user_id,
-                        c.adv_name,
-                        sum(toFloat64OrNull(cv.revenue))                                       AS rev_30d,
-                        sumIf(toFloat64OrNull(cv.revenue), cv.created_at >= today() - 7)       AS rev_7d,
-                        (sumIf(toFloat64OrNull(cv.revenue), cv.created_at >= today() - 7)
-                            / 7 * 30) - sum(toFloat64OrNull(cv.revenue))                      AS delta_ann
-                    FROM adpx_conversionsdetails cv
-                    JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
-                    PREWHERE cv.user_id IN ({pub_id_csv})
-                        AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
-                    WHERE cv.created_at >= today() - 30
-                      AND c.deleted_at IS NULL
-                    GROUP BY cv.user_id, c.adv_name
-                    ORDER BY cv.user_id, abs(delta_ann) DESC
-                    """
-                if as_of_date:
-                    _attr_sql = _attr_sql.replace("today()", _ref_date)
-                attr_rows = ch.query(_attr_sql).result_rows
-                attr_map: dict = {}
-                for uid, adv_name, rev_30d_a, rev_7d_a, delta_a in attr_rows:
-                    key = int(uid) if uid else None
-                    if key not in attr_map:
-                        attr_map[key] = []
-                    delta_rounded = round(delta_a or 0, 0)
-                    if abs(delta_rounded) < 100:
-                        continue
-                    if len(attr_map[key]) < 2:
-                        attr_map[key].append({
-                            "adv_name": adv_name,
-                            "delta_ann": delta_rounded,
-                            "rev_7d":    round(rev_7d_a or 0, 0),
-                        })
-                for v in results:
-                    v["top_advertisers"] = attr_map.get(v["publisher_id"], [])
-            except Exception as e:
-                log.warning(f"Pulse advertiser attribution failed: {e}")
 
         # ── Batch: fetch existing advertisers for all down publishers in one query ──
         for v in results:
@@ -572,67 +461,12 @@ def _pulse_signal_ghost(ch, as_of_date: str | None = None) -> list:
 
 
 def _pulse_signal_fill_rate(ch, as_of_date: str | None = None) -> list:
-    _, _ref_date = _resolve_ref_date(as_of_date)
-    results = []
-    try:
-        from scout_agent import _POST_TX_PLACEMENTS, _load_entity_overrides as _load_eo
-        placements_sql = ", ".join(_POST_TX_PLACEMENTS)
-        _fill_sql = f"""
-            WITH sessions_agg AS (
-                SELECT
-                    toInt64(user_id) AS publisher_id,
-                    count()          AS sessions_7d
-                FROM adpx_sdk_sessions
-                PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-                WHERE created_at >= today() - 7
-                  AND placement IN ({placements_sql})
-                GROUP BY user_id
-                HAVING sessions_7d > {_FILL_RATE_MIN_SESSIONS_7D}
-            ),
-            imps_agg AS (
-                SELECT
-                    toInt64(pid) AS publisher_id,
-                    count(DISTINCT session_id) AS sessions_with_imps
-                FROM adpx_impressions_details
-                PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-                WHERE created_at >= today() - 7
-                GROUP BY pid
-            )
-            SELECT
-                s.publisher_id,
-                u.organization AS publisher_name,
-                s.sessions_7d,
-                coalesce(i.sessions_with_imps, 0) AS sessions_with_imps,
-                round(100.0 * coalesce(i.sessions_with_imps, 0) / s.sessions_7d, 2) AS fill_rate_pct,
-                s.sessions_7d - coalesce(i.sessions_with_imps, 0) AS missed_sessions
-            FROM sessions_agg s
-            LEFT JOIN imps_agg i ON i.publisher_id = s.publisher_id
-            LEFT JOIN from_airbyte_users u ON s.publisher_id = u.id
-            WHERE coalesce(i.sessions_with_imps, 0) * 100.0 / s.sessions_7d < 15
-            ORDER BY missed_sessions DESC
-            LIMIT 5
-            """
-        if as_of_date:
-            _fill_sql = _fill_sql.replace("today()", _ref_date)
-        fill_rows = ch.query(_fill_sql).result_rows
-        _pub_overrides = _load_eo().get("publishers", {})
-        for pub_id, pub_name, sessions_7d, with_imps, fill_pct, missed in fill_rows:
-            name = pub_name or f"Pub #{pub_id}"
-            _override = _pub_overrides.get(name, {})
-            if _override.get("exclude_from_fill_rate"):
-                log.info(f"[pulse] fill rate: skipping {name!r} — {_override.get('note', '')[:60]}...")
-                continue
-            results.append({
-                "publisher_id":   int(pub_id),
-                "publisher_name": name,
-                "sessions_7d":    int(sessions_7d),
-                "fill_rate_pct":  round(float(fill_pct), 1),
-                "missed_sessions": int(missed),
-            })
-    except Exception as e:
-        log.warning(f"Pulse fill rate signal failed: {e}")
-        raise
-    return results
+    import queries as _q
+    return _q.fill_rate_publishers(
+        ch,
+        as_of_date=as_of_date,
+        min_sessions=_FILL_RATE_MIN_SESSIONS_7D,
+    )
 
 
 def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None) -> tuple[str, list[dict]]:
