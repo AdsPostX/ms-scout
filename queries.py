@@ -1886,11 +1886,11 @@ def fill_rate_publishers(
             -- mv_adpx_users columns: id (UInt64), organization — NOT pid/name
             LEFT JOIN mv_adpx_users u ON u.id = toUInt64(s.user_id)
             LEFT JOIN (
-                SELECT user_id, count() AS sessions_with_imps
+                SELECT toInt64(pid) AS user_id, count() AS sessions_with_imps
                 FROM adpx_impressions_details
                 WHERE toDate(created_at) > {date_expr} - {window_days}
                   AND placement IN {{placements: Array(String)}}
-                GROUP BY user_id
+                GROUP BY pid
             ) i ON toInt64(i.user_id) = toInt64(s.user_id)
             WHERE toDate(s.created_at) > {date_expr} - {window_days}
               AND s.placement IN {{placements: Array(String)}}

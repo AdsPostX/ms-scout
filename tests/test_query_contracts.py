@@ -480,12 +480,14 @@ class TestCVRClicksDenominator(unittest.TestCase):
 
             try:
                 result = _sa.get_publisher_health(publisher_id="1001")
-                if isinstance(result, dict) and "avg_cvr" in result:
-                    # Should be ~5.0 (clicks-based), not ~0.5 (sessions-based)
-                    self.assertGreater(
-                        result["avg_cvr"], 1.0,
-                        f"avg_cvr={result['avg_cvr']} looks sessions-based (expected ~5.0 clicks-based)"
-                    )
+                self.assertIsInstance(result, dict, "get_publisher_health must return a dict")
+                self.assertIn("avg_cvr", result,
+                              "get_publisher_health result must contain 'avg_cvr'")
+                # Should be ~5.0 (clicks-based), not ~0.5 (sessions-based)
+                self.assertGreater(
+                    result["avg_cvr"], 1.0,
+                    f"avg_cvr={result['avg_cvr']} looks sessions-based (expected ~5.0 clicks-based)"
+                )
             except (ImportError, AttributeError) as e:
                 self.skipTest(f"scout_agent not importable or signature changed: {e}")
             except Exception:
@@ -554,14 +556,18 @@ class TestNLVelocityHandler(unittest.TestCase):
         with patch.object(_sa, "_get_ch_client", return_value=mock_ch, create=True):
             try:
                 result = _sa.get_publisher_revenue_trends()
-                if isinstance(result, dict) and "trends" in result and result["trends"]:
-                    trend = result["trends"][0]
-                    self.assertIn(
-                        "direction", trend,
-                        "get_publisher_revenue_trends must surface 'direction' field from velocity_alerts()",
-                    )
-                    self.assertIn(trend["direction"], ("up", "down"),
-                                  "direction must be 'up' or 'down'")
+                self.assertIsInstance(result, dict,
+                                      "get_publisher_revenue_trends must return a dict")
+                self.assertIn("trends", result, "result must contain 'trends' key")
+                self.assertTrue(result["trends"],
+                                "trends list must not be empty given mock velocity data")
+                trend = result["trends"][0]
+                self.assertIn(
+                    "direction", trend,
+                    "get_publisher_revenue_trends must surface 'direction' field from velocity_alerts()",
+                )
+                self.assertIn(trend["direction"], ("up", "down"),
+                              "direction must be 'up' or 'down'")
             except (ImportError, AttributeError) as e:
                 self.skipTest(f"scout_agent not importable or signature changed: {e}")
             except Exception:

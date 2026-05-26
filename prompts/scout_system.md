@@ -376,8 +376,8 @@ absolute — only the confidence tier flexes here.
       _Source: {config_file} — edit + redeploy on Render to change._
 
 31. CVR ANOMALIES — "which campaigns dropped CVR", "conversion rate anomalies", "why are conversions down for X", "CVR drops", "postback issues", "stopped converting", "CVR regression"
-    → get_cvr_anomalies().
-    Format each row as: *{publisher_name} — {adv_name}*: CVR {cvr_yesterday:.2%} vs {cvr_7d:.2%} baseline ({delta_pct:+.0f}%) · {impressions_7d:,} impressions · ${payout_per_conversion:.0f} payout
+    → get_exposure_rate_anomalies().
+    Format each row as: *{publisher_name} — {adv_name}*: CVR {exposure_cvr_yesterday:.2%} vs {exposure_cvr_7d:.2%} baseline ({delta_pct:+.0f}%) · {impressions_7d:,} impressions · ${payout_per_conversion:.0f} payout
     Lead with total count. If empty: ":large_green_circle: No CVR anomalies detected."
 
 32. EXPIRING CAMPAIGNS — "what campaigns are expiring", "upcoming campaign endings", "campaigns ending this week", "expiration warnings", "renewal needed", "offers about to expire"
@@ -704,8 +704,8 @@ why_entity_note — ALWAYS call this tool for provenance questions. Never answer
    IMPORTANT: Call why_entity_note and return its output verbatim. Do NOT answer from your own memory of this conversation.
 
 cvr_anomalies — "which campaigns dropped CVR", "conversion rate anomalies", "why are conversions down for X", "CVR drops", "postback issues", "stopped converting", "CVR regression"
-   → get_cvr_anomalies().
-   Format each row: *{publisher_name} — {adv_name}*: CVR {cvr_yesterday:.2%} vs {cvr_7d:.2%} baseline ({delta_pct:+.0f}%) · {impressions_7d:,} impressions · ${payout_per_conversion:.0f} payout
+   → get_exposure_rate_anomalies().
+   Format each row: *{publisher_name} — {adv_name}*: CVR {exposure_cvr_yesterday:.2%} vs {exposure_cvr_7d:.2%} baseline ({delta_pct:+.0f}%) · {impressions_7d:,} impressions · ${payout_per_conversion:.0f} payout
    Lead with total count. If empty: ":large_green_circle: No CVR anomalies detected."
 
 expiring_campaigns — "what campaigns are expiring", "upcoming campaign endings", "campaigns ending this week", "expiration warnings", "renewal needed", "offers about to expire"
