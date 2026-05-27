@@ -19,7 +19,7 @@ import random
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 log = logging.getLogger("scout_state")
 
@@ -56,7 +56,7 @@ _MAINTENANCE_LOCK = threading.Lock()
 # ── Maintenance helpers ────────────────────────────────────────────────────────
 
 def get_maintenance() -> dict | None:
-    """Returns maintenance state or None if not active / expired. Thread-safe."""
+    """Returns maintenance state or None if not active. Thread-safe."""
     with _MAINTENANCE_LOCK:
         if not _MAINTENANCE_FILE.exists():
             return None
@@ -66,22 +66,17 @@ def get_maintenance() -> dict | None:
             return None
         if not m.get("active"):
             return None
-        auto_off = m.get("auto_off_at")
-        if auto_off and datetime.fromisoformat(auto_off) < datetime.utcnow():
-            _MAINTENANCE_FILE.unlink(missing_ok=True)
-            return None
         return m
 
 
-def set_maintenance(set_by: str, hours: float = 4.0) -> dict:
-    """Activates maintenance mode for `hours` hours. Returns the state dict. Thread-safe."""
+def set_maintenance(set_by: str) -> dict:
+    """Activates maintenance mode. Stays on until clear_maintenance() is called. Thread-safe."""
     with _MAINTENANCE_LOCK:
         now = datetime.utcnow()
         m = {
             "active": True,
             "set_at": now.isoformat(),
             "set_by": set_by,
-            "auto_off_at": (now + timedelta(hours=hours)).isoformat(),
             "attempts": [],
         }
         _MAINTENANCE_FILE.parent.mkdir(parents=True, exist_ok=True)
