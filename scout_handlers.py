@@ -2019,15 +2019,10 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                                        text="Only admins can toggle maintenance mode.")
                 return
             arg = payload.get("text", "").strip().lower()
-            if arg.startswith("on"):
-                hours = 4.0
-                try:
-                    hours = float(arg.replace("on", "").replace("h", "").strip()) if arg != "on" else 4.0
-                except Exception:
-                    pass
-                m = set_maintenance(user_id, hours)
+            if arg == "on" or arg == "":
+                m = set_maintenance(user_id)
                 web.chat_postMessage(channel=channel,
-                    text=f":wrench: Maintenance on for {hours}h (auto-off {m['auto_off_at']} UTC).")
+                    text=f":wrench: Maintenance on. Scout will block non-admin messages until you run `/scout-maintenance off`.")
             elif arg == "off":
                 attempts = clear_maintenance()
                 _post_maintenance_summary(web, channel, attempts)
@@ -2035,13 +2030,13 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 m = get_maintenance()
                 if m:
                     web.chat_postMessage(channel=channel,
-                        text=f":wrench: Maintenance active since {m['set_at']}. Auto-off {m['auto_off_at']}. {len(m.get('attempts', []))} attempt(s) so far.")
+                        text=f":wrench: Maintenance active since {m['set_at']} UTC. {len(m.get('attempts', []))} attempt(s) so far.")
                 else:
                     web.chat_postMessage(channel=channel,
                         text=":white_check_mark: Maintenance is off.")
             else:
                 web.chat_postEphemeral(channel=channel, user=user_id,
-                    text="Usage: `/scout-maintenance on [Nh]` · `/scout-maintenance off` · `/scout-maintenance status`")
+                    text="Usage: `/scout-maintenance on` · `/scout-maintenance off` · `/scout-maintenance status`")
 
         else:
             web.chat_postEphemeral(
