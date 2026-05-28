@@ -51,21 +51,36 @@ def _init() -> None:
         log.warning("[telemetry] init failed: %s — tracing disabled", exc)
 
 
-def capture(path: str, fn, metadata: dict | None = None):
+def capture(path: str, fn, metadata: dict | None = None, distinct_id: str | None = None):
     """
     Wrap a callable with a named Latitude span.
 
     Falls back to a plain call if telemetry is off or errors.
     Always returns the callable's return value.
+
+    distinct_id: optional user identifier forwarded to Latitude for per-user filtering.
     """
     if _telemetry is None:
         return fn()
+    _span_entered = False
     try:
-        with _telemetry.span(path, metadata=metadata or {}):
-            return fn()
+        _span = _telemetry.span(path, distinct_id=distinct_id, metadata=metadata or {})
+        _span.__enter__()
+        _span_entered = True
+        result = fn()
+        _span.__exit__(None, None, None)
+        return result
     except Exception as exc:
-        log.warning("[telemetry] capture(%s) error: %s — running untraced", path, exc)
-        return fn()
+        if not _span_entered:
+            # Span init failed — fall back silently; fn() not yet called
+            log.warning("[telemetry] capture(%s) span-init error: %s — running untraced", path, exc)
+            return fn()
+        # fn() itself raised — close span and re-raise (never double-execute)
+        try:
+            _span.__exit__(type(exc), exc, exc.__traceback__)
+        except Exception:
+            pass
+        raise
 
 
 _init()

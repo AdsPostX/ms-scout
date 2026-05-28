@@ -5,6 +5,7 @@ python-dotenv~=1.2
 clickhouse-connect~=0.15
 anthropic~=0.97
 latitude-telemetry~=1.0
+latitude-sdk~=5.0
 slack-sdk~=3.41
 pytz~=2026.1
 upstash-redis~=1.1

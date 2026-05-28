@@ -142,6 +142,7 @@ def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
                 "scout/agent",
                 lambda: ask(query, **kwargs),
                 {"user_id": kwargs.get("user_id", "")},
+                distinct_id=kwargs.get("user_id", "") or None,
             )
         except Exception as e:  # surface agent-side errors; let SystemExit/KeyboardInterrupt through
             result_box["err"] = e
@@ -2318,6 +2319,7 @@ def _handle_event_impl(req: SocketModeRequest):
                     messages=[{"role": "user", "content": _body}],
                 ),
                 {"user_id": user_id},
+                distinct_id=user_id or None,
             )
             import json as _json
             _raw_text = _parse_resp.content[0].text.strip()
