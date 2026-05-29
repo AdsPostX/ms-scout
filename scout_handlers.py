@@ -2255,7 +2255,7 @@ def _handle_event_impl(req: SocketModeRequest):
         web.chat_postMessage(
             channel=channel,
             thread_ts=thread_ts,
-            text="🔧 Scout is in the shop (yes, again). Back in ~15 min.",
+            text="🔧 Scout is offline for maintenance.",
         )
         return
 
