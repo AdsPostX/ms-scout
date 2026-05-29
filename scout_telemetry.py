@@ -18,6 +18,14 @@ Named spans in use:
 If LATITUDE_API_KEY is not set, capture() is a no-op pass-through.
 All exceptions from the telemetry layer are swallowed — Scout never
 fails because Latitude is down.
+
+Note on OTLP delivery: latitude-telemetry 1.0.0 (the current PyPI release)
+exports to gateway.latitude.so/api/v2/otlp/v1/traces which has been
+decommissioned — spans are structured and captured correctly but silently
+dropped at export. The fix (ingest.latitude.so endpoint + new API) is in the
+package's unreleased v3.0.0a8. Upgrade latitude-telemetry when a new PyPI
+release is available. The _init_prompt() managed-prompt feature is unaffected
+(it uses latitude-sdk REST API directly, which works fine with the current key).
 """
 
 from __future__ import annotations
@@ -28,6 +36,10 @@ import os
 log = logging.getLogger(__name__)
 
 _telemetry = None
+
+# Current PyPI release (1.0.0) exports to a decommissioned endpoint.
+# Spans are captured but not delivered until latitude-telemetry is updated.
+_OTLP_ENDPOINT_LIVE = False  # flip to True once a working PyPI release is installed
 
 
 def _init() -> None:
@@ -44,7 +56,15 @@ def _init() -> None:
             TelemetryOptions(instrumentors=[Instrumentors.Anthropic]),
         )
         _telemetry.instrument()
-        log.info("[telemetry] Latitude initialized (project=%s)", project)
+        if _OTLP_ENDPOINT_LIVE:
+            log.info("[telemetry] Latitude initialized (project=%s)", project)
+        else:
+            log.warning(
+                "[telemetry] Latitude initialized (project=%s) — OTLP export inactive: "
+                "latitude-telemetry 1.0.0 uses a decommissioned endpoint. "
+                "Spans are captured but not delivered. Upgrade the package when available.",
+                project,
+            )
     except ImportError:
         log.warning("[telemetry] latitude-telemetry not installed — tracing disabled")
     except Exception as exc:
