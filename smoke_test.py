@@ -2624,18 +2624,31 @@ def test_force_run_monitor_graceful_without_ctx():
 
 @test("threshold_control_tools_registered_in_TOOLS_and_TOOL_MAP")
 def test_threshold_tools_registered():
-    """All 4 new tools must be present in both the TOOLS list and TOOL_MAP."""
+    """Threshold-control tools registered in TOOLS or _INTERNAL_TOOLS and TOOL_MAP.
+
+    force_run_monitor was moved to _INTERNAL_TOOLS (B2 cull) — it's admin-only and
+    dangerous to expose to LLM selection. The other three remain in TOOLS.
+    """
     import scout_agent
 
-    expected = ["list_thresholds", "get_threshold_history", "set_threshold", "force_run_monitor"]
-    tool_names = {t.get("name") for t in scout_agent.TOOLS}
-    missing_tools = [n for n in expected if n not in tool_names]
-    missing_map = [n for n in expected if n not in scout_agent.TOOL_MAP]
-    if missing_tools:
-        return False, f"Missing from TOOLS list: {missing_tools}"
+    llm_tools   = ["list_thresholds", "get_threshold_history", "set_threshold"]
+    admin_tools = ["force_run_monitor"]
+    all_expected = llm_tools + admin_tools
+
+    tool_names     = {t.get("name") for t in scout_agent.TOOLS}
+    internal_names = set(scout_agent._INTERNAL_TOOLS.keys())
+
+    missing_llm    = [n for n in llm_tools   if n not in tool_names]
+    missing_admin  = [n for n in admin_tools if n not in internal_names]
+    missing_map    = [n for n in all_expected if n not in scout_agent.TOOL_MAP]
+
+    if missing_llm:
+        return False, f"Missing from TOOLS list: {missing_llm}"
+    if missing_admin:
+        return False, f"Missing from _INTERNAL_TOOLS: {missing_admin}"
     if missing_map:
         return False, f"Missing from TOOL_MAP: {missing_map}"
-    return True, f"All {len(expected)} threshold-control tools registered ✓"
+    return True, f"All {len(all_expected)} threshold-control tools registered ✓"
 
 
 @test("get_scout_config_exposes_overridden_keys_and_last_override_at")

@@ -995,22 +995,6 @@ TOOLS = [
         },
     },
     {
-        "name": "mark_offer_launched",
-        "description": (
-            "Mark an approved offer as live. Updates queue state and triggers a notification "
-            "to the person who approved it + AdOps. Thread-only — no channel noise. "
-            "Use when: 'TurboTax is live', 'confirm X is live', 'mark X as launched', "
-            "'X went live', 'X is running'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "advertiser": {"type": "string", "description": "Advertiser name (partial match OK)"},
-            },
-            "required": ["advertiser"],
-        },
-    },
-    {
         "name": "get_advertiser_revenue_projection",
         "description": (
             "Project gross revenue for a specific advertiser across ALL MS publisher partners for a target month. "
@@ -1151,20 +1135,6 @@ TOOLS = [
         },
     },
     {
-        "name": "get_low_fill_publishers",
-        "description": (
-            "Return publishers on post-transaction placements (checkout confirmation, order receipt, "
-            "thank you pages, etc.) where fill rate is below 15% — meaning more than 85% of "
-            "checkout sessions are receiving no offer. Includes missed session count and revenue-at-risk estimate. "
-            "Use for: 'fill rate', 'low fill rate', 'which publishers have low fill', 'sessions not getting offers', "
-            "'offer fill', 'checkout fill', 'confirmation page fill', 'publishers underserving'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-        },
-    },
-    {
         "name": "get_top_revenue_opportunities",
         "description": (
             "Return top cross-publisher revenue gap opportunities: high-performing advertisers "
@@ -1254,130 +1224,6 @@ TOOLS = [
         },
     },
     {
-        "name": "get_usage_report",
-        "description": (
-            "Return Scout usage statistics: queries per period, top users, most-used tools, avg response time. "
-            "Admin-only — requires SCOUT_ADMIN_USER_ID env var match. "
-            "Use for: 'scout usage', 'usage report', 'who uses scout', 'usage stats', "
-            "'how often is scout used', 'who asks the most questions'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "requesting_user_id": {
-                    "type": "string",
-                    "description": "Slack user ID of the person asking — for admin authorization check.",
-                }
-            },
-        },
-    },
-    {
-        "name": "export_usage_log",
-        "description": (
-            "Dump raw (query → tools fired) pairs from usage_log so an admin can audit "
-            "whether Scout's tool routing matched user intent. Admin-only. "
-            "Use for: 'export usage', 'dump usage log', 'show usage entries', 'audit tool routing', "
-            "'what tools fired for recent queries'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "days":  {"type": "integer", "description": "Lookback window in days (default 30, clamped to 1..365).", "minimum": 1, "maximum": 365},
-                "limit": {"type": "integer", "description": "Max entries to return (default 200, newest last; clamped to 1..500).", "minimum": 1, "maximum": 500},
-                "requesting_user_id": {"type": "string", "description": "Slack user ID for admin gate."}
-            },
-        },
-    },
-    {
-        "name": "record_entity_note",
-        "description": (
-            "Record publisher or advertiser knowledge in Scout's persistent learning store. "
-            "Use when a team member explains a publisher's integration quirk, SDK limitation, or signal distortion, "
-            "OR an advertiser's budget cap pattern, seasonality, attribution issue, or payout reliability. "
-            "Publisher notes: set exclude_from_fill_rate=True when high session count with low fill is expected behavior "
-            "(e.g., pre-purchase SDK calls, non-standard integration). "
-            "Advertiser notes: budget caps, seasonal patterns, attribution quirks, campaign status context. "
-            "Use for: '[entity] has a known limitation', 'note that [entity] does X', "
-            "'log this about [entity]', 'exclude [publisher] from fill rate', "
-            "'[advertiser] caps every [month]', '[advertiser] has attribution issues', "
-            "'remember that [entity]...', 'scout, [entity] does X because...'"
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "entity_name": {
-                    "type": "string",
-                    "description": "Publisher or advertiser name (e.g., 'Button', 'TurboTax').",
-                },
-                "entity_type": {
-                    "type": "string",
-                    "enum": ["publisher", "advertiser"],
-                    "description": "'publisher' for SDK/platform integrators, 'advertiser' for campaign/budget owners.",
-                },
-                "note": {
-                    "type": "string",
-                    "description": "The knowledge to record — what the team knows about this entity.",
-                },
-                "exclude_from_fill_rate": {
-                    "type": "boolean",
-                    "description": "Publishers only: True to suppress from Pulse fill rate signals (pre-purchase or non-standard integrations).",
-                },
-            },
-            "required": ["entity_name", "entity_type", "note"],
-        },
-    },
-    {
-        "name": "forget_entity_note",
-        "description": (
-            "Drop a previously-recorded publisher or advertiser fact. "
-            "Use when a team member tells Scout to forget, retract, or remove a learned note. "
-            "Triggers: 'forget that about [entity]', 'scout, that was wrong about [entity]', "
-            "'remove the note about [entity]', 'scratch that for [entity]', "
-            "'unlearn [entity]', 'never mind about [entity]'. "
-            "Idempotent — friendly message if no note exists."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "entity_name": {
-                    "type": "string",
-                    "description": "Publisher or advertiser name whose note should be dropped.",
-                },
-                "entity_type": {
-                    "type": "string",
-                    "enum": ["publisher", "advertiser"],
-                    "description": "'publisher' or 'advertiser'.",
-                },
-            },
-            "required": ["entity_name", "entity_type"],
-        },
-    },
-    {
-        "name": "why_entity_note",
-        "description": (
-            "Explain where a stored publisher/advertiser fact came from — returns the note, "
-            "who taught Scout (Slack user_id), when, and the Slack permalink if available. "
-            "Use when a team member challenges or audits Scout's beliefs about an entity. "
-            "Triggers: 'why do you think [X] about [entity]', 'where did you learn that about [entity]', "
-            "'who told you [entity] [does X]', 'source for [entity]', 'scout, justify [entity]'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "entity_name": {
-                    "type": "string",
-                    "description": "Publisher or advertiser name to audit.",
-                },
-                "entity_type": {
-                    "type": "string",
-                    "enum": ["publisher", "advertiser"],
-                    "description": "Optional. Omit to search both sections.",
-                },
-            },
-            "required": ["entity_name"],
-        },
-    },
-    {
         "name": "get_offers_for_publisher",
         "description": (
             f"Return top affiliate offers (from {', '.join(SUPPORTED_NETWORKS)} inventory) that are "
@@ -1399,23 +1245,6 @@ TOOLS = [
                 }
             },
             "required": ["publisher_name"],
-        },
-    },
-    {
-        "name": "run_self_qa",
-        "description": (
-            "Run Scout's full self-QA suite — 15 representative questions covering every major intent "
-            "(system status, ghost campaigns, offer search, revenue analysis, publisher health, "
-            "campaign status, revenue projection, supply gaps, perkswall, pipeline health, "
-            "multi-part question protocol, and data boundary tests). "
-            "Each question is evaluated for pass/fail by checking expected content signals. "
-            "Use when the user says: 'QA yourself', 'self test', 'run QA', 'test yourself', "
-            "'run the QA suite', 'scout QA', 'run self-qa', 'check yourself'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
         },
     },
     {
@@ -1616,7 +1445,218 @@ TOOLS = [
             "required": ["section", "key", "value", "reason"],
         },
     },
-    {
+]
+
+
+# ── Internal tools — accessible via TOOL_MAP but NOT exposed to the LLM ──────
+# These tools serve slash-command handlers, admin DM flows, and direct callers.
+# Move tools here instead of deleting them so non-LLM callers still resolve.
+# To re-expose a tool to the LLM, move its entry back to TOOLS above.
+_INTERNAL_TOOLS: dict[str, dict] = {
+    "get_demand_queue_status": {
+        # Culled B2: redundant with get_queue_status for LLM routing; imported but never
+        # actually called in scout_handlers.py — the slash-command reads get_queue_status.
+        "name": "get_demand_queue_status",
+        "description": (
+            "Read the MS Demand Queue — cross-references ClickHouse to detect if any queued offer "
+            "is already live (impressions > 0 since approval date). "
+            "Use for impression-based queries: 'is X live?', 'how many impressions since X was approved?'. "
+            "For general queue visibility use get_queue_status() instead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    "mark_offer_launched": {
+        # Culled B2: write operation — should be triggered by an explicit admin slash command,
+        # not auto-selected by the LLM based on conversational intent. No non-LLM callers found.
+        "name": "mark_offer_launched",
+        "description": (
+            "Mark an approved offer as live. Updates queue state and triggers a notification "
+            "to the person who approved it + AdOps. Thread-only — no channel noise. "
+            "Use when: 'TurboTax is live', 'confirm X is live', 'mark X as launched', "
+            "'X went live', 'X is running'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "advertiser": {"type": "string", "description": "Advertiser name (partial match OK)"},
+            },
+            "required": ["advertiser"],
+        },
+    },
+    "get_usage_report": {
+        # Culled B2: admin-only internal metric; no non-LLM callers; not a user-facing analytics query.
+        # Direct callers can still use TOOL_MAP["get_usage_report"](requesting_user_id=...).
+        "name": "get_usage_report",
+        "description": (
+            "Return Scout usage statistics: queries per period, top users, most-used tools, avg response time. "
+            "Admin-only — requires SCOUT_ADMIN_USER_ID env var match. "
+            "Use for: 'scout usage', 'usage report', 'who uses scout', 'usage stats', "
+            "'how often is scout used', 'who asks the most questions'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "requesting_user_id": {
+                    "type": "string",
+                    "description": "Slack user ID of the person asking — for admin authorization check.",
+                }
+            },
+        },
+    },
+    "export_usage_log": {
+        # Culled B2: admin debug tool; no non-LLM callers beyond TOOL_MAP; not a user-facing query.
+        "name": "export_usage_log",
+        "description": (
+            "Dump raw (query → tools fired) pairs from usage_log so an admin can audit "
+            "whether Scout's tool routing matched user intent. Admin-only. "
+            "Use for: 'export usage', 'dump usage log', 'show usage entries', 'audit tool routing', "
+            "'what tools fired for recent queries'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days":  {"type": "integer", "description": "Lookback window in days (default 30, clamped to 1..365).", "minimum": 1, "maximum": 365},
+                "limit": {"type": "integer", "description": "Max entries to return (default 200, newest last; clamped to 1..500).", "minimum": 1, "maximum": 500},
+                "requesting_user_id": {"type": "string", "description": "Slack user ID for admin gate."}
+            },
+        },
+    },
+    "record_entity_note": {
+        # Culled B2: write/learning operation; direct callers in scout_handlers.py (lines ~2208, 2236)
+        # import and call this function by name — TOOL_MAP and the function are unchanged.
+        "name": "record_entity_note",
+        "description": (
+            "Record publisher or advertiser knowledge in Scout's persistent learning store. "
+            "Use when a team member explains a publisher's integration quirk, SDK limitation, or signal distortion, "
+            "OR an advertiser's budget cap pattern, seasonality, attribution issue, or payout reliability. "
+            "Publisher notes: set exclude_from_fill_rate=True when high session count with low fill is expected behavior "
+            "(e.g., pre-purchase SDK calls, non-standard integration). "
+            "Advertiser notes: budget caps, seasonal patterns, attribution quirks, campaign status context. "
+            "Use for: '[entity] has a known limitation', 'note that [entity] does X', "
+            "'log this about [entity]', 'exclude [publisher] from fill rate', "
+            "'[advertiser] caps every [month]', '[advertiser] has attribution issues', "
+            "'remember that [entity]...', 'scout, [entity] does X because...'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_name": {
+                    "type": "string",
+                    "description": "Publisher or advertiser name (e.g., 'Button', 'TurboTax').",
+                },
+                "entity_type": {
+                    "type": "string",
+                    "enum": ["publisher", "advertiser"],
+                    "description": "'publisher' for SDK/platform integrators, 'advertiser' for campaign/budget owners.",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "The knowledge to record — what the team knows about this entity.",
+                },
+                "exclude_from_fill_rate": {
+                    "type": "boolean",
+                    "description": "Publishers only: True to suppress from Pulse fill rate signals (pre-purchase or non-standard integrations).",
+                },
+            },
+            "required": ["entity_name", "entity_type", "note"],
+        },
+    },
+    "forget_entity_note": {
+        # Culled B2: write/mutation operation; direct callers in scout_handlers.py (lines ~2292-2297)
+        # import and call this function by name — TOOL_MAP and the function are unchanged.
+        "name": "forget_entity_note",
+        "description": (
+            "Drop a previously-recorded publisher or advertiser fact. "
+            "Use when a team member tells Scout to forget, retract, or remove a learned note. "
+            "Triggers: 'forget that about [entity]', 'scout, that was wrong about [entity]', "
+            "'remove the note about [entity]', 'scratch that for [entity]', "
+            "'unlearn [entity]', 'never mind about [entity]'. "
+            "Idempotent — friendly message if no note exists."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_name": {
+                    "type": "string",
+                    "description": "Publisher or advertiser name whose note should be dropped.",
+                },
+                "entity_type": {
+                    "type": "string",
+                    "enum": ["publisher", "advertiser"],
+                    "description": "'publisher' or 'advertiser'.",
+                },
+            },
+            "required": ["entity_name", "entity_type"],
+        },
+    },
+    "why_entity_note": {
+        # Culled B2: audit/introspection tool; direct caller in scout_handlers.py (line ~2266-2267).
+        # TOOL_MAP and the function are unchanged.
+        "name": "why_entity_note",
+        "description": (
+            "Explain where a stored publisher/advertiser fact came from — returns the note, "
+            "who taught Scout (Slack user_id), when, and the Slack permalink if available. "
+            "Use when a team member challenges or audits Scout's beliefs about an entity. "
+            "Triggers: 'why do you think [X] about [entity]', 'where did you learn that about [entity]', "
+            "'who told you [entity] [does X]', 'source for [entity]', 'scout, justify [entity]'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_name": {
+                    "type": "string",
+                    "description": "Publisher or advertiser name to audit.",
+                },
+                "entity_type": {
+                    "type": "string",
+                    "enum": ["publisher", "advertiser"],
+                    "description": "Optional. Omit to search both sections.",
+                },
+            },
+            "required": ["entity_name"],
+        },
+    },
+    "run_self_qa": {
+        # Culled B2: internal diagnostic; no non-LLM callers found; not a user-facing query.
+        # Registered in TOOL_MAP via the post-definition assignment at the end of the file.
+        "name": "run_self_qa",
+        "description": (
+            "Run Scout's full self-QA suite — 15 representative questions covering every major intent "
+            "(system status, ghost campaigns, offer search, revenue analysis, publisher health, "
+            "campaign status, revenue projection, supply gaps, perkswall, pipeline health, "
+            "multi-part question protocol, and data boundary tests). "
+            "Each question is evaluated for pass/fail by checking expected content signals. "
+            "Use when the user says: 'QA yourself', 'self test', 'run QA', 'test yourself', "
+            "'run the QA suite', 'scout QA', 'run self-qa', 'check yourself'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    "get_low_fill_publishers": {
+        # Culled B2: overlaps with get_publisher_health which already covers fill rate analysis;
+        # no non-LLM callers found. Surfacing both caused LLM routing confusion.
+        "name": "get_low_fill_publishers",
+        "description": (
+            "Return publishers on post-transaction placements (checkout confirmation, order receipt, "
+            "thank you pages, etc.) where fill rate is below 15% — meaning more than 85% of "
+            "checkout sessions are receiving no offer. Includes missed session count and revenue-at-risk estimate. "
+            "Use for: 'fill rate', 'low fill rate', 'which publishers have low fill', 'sessions not getting offers', "
+            "'offer fill', 'checkout fill', 'confirmation page fill', 'publishers underserving'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    "force_run_monitor": {
+        # Culled B2: admin-only trigger; dangerous to expose to LLM selection; no non-LLM callers found.
+        # Admin access is via TOOL_MAP["force_run_monitor"](...) with _caller_user_id check.
         "name": "force_run_monitor",
         "description": (
             "Admin-only — requires SCOUT_THRESHOLD_ADMINS env match. "
@@ -1635,7 +1675,7 @@ TOOLS = [
             "required": ["monitor"],
         },
     },
-]
+}
 
 
 def _load_offers() -> list:
