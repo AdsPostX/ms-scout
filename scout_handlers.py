@@ -137,7 +137,13 @@ def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
 
     def _worker():
         try:
-            result_box["resp"] = ask(query, **kwargs)
+            from scout_telemetry import capture as _lat_capture
+            result_box["resp"] = _lat_capture(
+                "scout/agent",
+                lambda: ask(query, **kwargs),
+                {"user_id": kwargs.get("user_id", "")},
+                distinct_id=kwargs.get("user_id", "") or None,
+            )
         except Exception as e:  # surface agent-side errors; let SystemExit/KeyboardInterrupt through
             result_box["err"] = e
         finally:
@@ -2249,7 +2255,7 @@ def _handle_event_impl(req: SocketModeRequest):
         web.chat_postMessage(
             channel=channel,
             thread_ts=thread_ts,
-            text="🔧 Scout is in the shop (yes, again). Back in ~15 min.",
+            text="🔧 Scout is offline for maintenance.",
         )
         return
 
@@ -2299,15 +2305,21 @@ def _handle_event_impl(req: SocketModeRequest):
             from scout_agent import record_entity_note
             import anthropic as _ant, os as _os
             _ant_client = _ant.Anthropic(api_key=_os.getenv("ANTHROPIC_API_KEY", ""))
-            _parse_resp = _ant_client.messages.create(
-                model="claude-haiku-4-5",
-                max_tokens=256,
-                system=(
-                    'Extract entity_name, entity_type ("publisher" or "advertiser"), '
-                    'and a concise note from the user message. '
-                    'Return JSON only: {"entity_name": "...", "entity_type": "...", "note": "..."}'
+            from scout_telemetry import capture as _lat_capture
+            _parse_resp = _lat_capture(
+                "scout/entity-parse",
+                lambda: _ant_client.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=256,
+                    system=(
+                        'Extract entity_name, entity_type ("publisher" or "advertiser"), '
+                        'and a concise note from the user message. '
+                        'Return JSON only: {"entity_name": "...", "entity_type": "...", "note": "..."}'
+                    ),
+                    messages=[{"role": "user", "content": _body}],
                 ),
-                messages=[{"role": "user", "content": _body}],
+                {"user_id": user_id},
+                distinct_id=user_id or None,
             )
             import json as _json
             _raw_text = _parse_resp.content[0].text.strip()

@@ -732,7 +732,99 @@ def _scout_score(offer: dict, benchmarks: dict) -> float:
 
 
 _PROMPT_PATH = pathlib.Path(__file__).parent / "prompts" / "scout_system.md"
-SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
+
+# Compute git hash of the local prompt file at startup (zero-cost debug aid).
+# If git is not on PATH (e.g. production Docker image), silently defaults to "".
+try:
+    import subprocess as _subprocess
+    _PROMPT_SHA = _subprocess.run(
+        ["git", "hash-object", str(_PROMPT_PATH)],
+        capture_output=True, text=True, cwd=str(pathlib.Path(__file__).parent),
+        timeout=3,
+    ).stdout.strip()
+except (FileNotFoundError, OSError, Exception):
+    _PROMPT_SHA = ""
+
+
+def _init_prompt() -> str:
+    """
+    Fetch the Scout system prompt from Latitude's managed prompt store if
+    LATITUDE_PROMPT_PATH is set and latitude-sdk is installed.
+
+    LATITUDE_PROMPT_PATH should be the Latitude prompt path, e.g. "scout/system".
+
+    Falls back to the local prompts/scout_system.md file in all error cases:
+    - ImportError (latitude-sdk not installed)
+    - LATITUDE_PROMPT_PATH not set
+    - Network error or timeout
+    - Empty response from Latitude
+    - Any unexpected exception
+
+    Anthropic prompt-caching note: cache_control: ephemeral is keyed on prompt
+    TEXT content, not source. After fetching from Latitude we compare the
+    returned text against the local file (modulo trailing whitespace). A
+    mismatch means Latitude normalised the content — every ask() will be a
+    cache miss — and we log a SHA warning so the problem is visible.
+    """
+    _local_text = _PROMPT_PATH.read_text(encoding="utf-8")
+    _prompt_path = os.environ.get("LATITUDE_PROMPT_PATH", "")
+    if not _prompt_path:
+        log.debug("[agent] LATITUDE_PROMPT_PATH not set — using local prompt file")
+        return _local_text
+
+    try:
+        from latitude_sdk import Latitude, LatitudeOptions, GetPromptOptions  # type: ignore[import]
+        _api_key = os.environ.get("LATITUDE_API_KEY", "")
+        _project_id = os.environ.get("LATITUDE_PROJECT_ID", "")
+        if not _api_key or not _project_id:
+            log.debug("[agent] LATITUDE_API_KEY or LATITUDE_PROJECT_ID missing — using local prompt")
+            return _local_text
+
+        import asyncio as _asyncio
+
+        async def _fetch() -> str:
+            _lat = Latitude(_api_key, LatitudeOptions(project_id=int(_project_id)))
+            _result = await _lat.prompts.get(
+                _prompt_path,
+                GetPromptOptions(project_id=int(_project_id)),
+            )
+            return str(_result.content or "")
+
+        _fetched = _asyncio.run(_fetch())
+        if not _fetched.strip():
+            log.warning(
+                "[agent] Latitude returned empty prompt (path=%s) — using local", _prompt_path
+            )
+            return _local_text
+
+        # Whitespace normalisation guard: if Latitude changed the content the
+        # Anthropic prompt cache will miss on every ask() call.
+        import hashlib as _hashlib
+        _fetched_sha = _hashlib.sha256(_fetched.encode()).hexdigest()[:12]
+        _file_sha = _hashlib.sha256(_local_text.encode()).hexdigest()[:12]
+        if _fetched.strip() != _local_text.strip():
+            log.warning(
+                "[agent] Latitude prompt content differs from local file — "
+                "Anthropic cache will miss on every ask(). "
+                "fetched_sha=%s local_sha=%s git_sha=%s",
+                _fetched_sha, _file_sha, _PROMPT_SHA,
+            )
+        else:
+            log.info(
+                "[agent] prompt loaded from Latitude (path=%s git_sha=%s)",
+                _prompt_path, _PROMPT_SHA,
+            )
+        return _fetched
+
+    except ImportError:
+        log.warning("[agent] latitude-sdk not installed — using local prompt file")
+        return _local_text
+    except Exception as exc:
+        log.warning("[agent] Latitude prompt fetch failed: %s — using local file", exc)
+        return _local_text
+
+
+SYSTEM_PROMPT = _init_prompt()
 
 
 def get_supply_demand_gaps(
