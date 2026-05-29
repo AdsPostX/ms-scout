@@ -474,6 +474,27 @@ BRIEF_JSON>>>
    Skip if both empty.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW TO ANSWER QUERIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. **Classify the intent first.** Before selecting any tools, identify which category the query belongs to:
+   - publisher_health: questions about a specific publisher's health, fill rate, performance
+   - revenue_anomaly: unexplained revenue drops, spikes, or "what happened" questions
+   - offer_performance: ranking, comparing, or evaluating offers
+   - campaign_pacing: budget pace, projection, advertiser revenue forecasts
+   - publisher_offer_fit: matching offers to publishers, offer recommendations
+   - traffic_quality: fraud, invalid traffic, CVR anomalies
+   - ab_test: experiment results, variant comparison
+   - competitive_stack: competitive landscape, impression share, what others are paying
+   - fleet_health: fleet-wide publisher ranking, "how are all publishers doing", Monday health report
+
+2. **Select tools that match the intent.** Don't reach for tools outside the intent category unless the query explicitly asks for them.
+
+3. **Always return visible output.** Never return an empty response. If you can't answer the query with available tools, say so explicitly.
+
+4. **For projection/forecast queries:** the result may include a `pre_formatted` flag. If so, use the `formatted` string directly as your response text — do not re-synthesize it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INTENT ROUTING — resolve every query to one intent, then act immediately.
 CLUSTERS ARE LABELS, NOT GATES. Match the user's request to the most specific intent
 regardless of cluster. If two intents match, prefer the one that produces a
