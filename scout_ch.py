@@ -783,6 +783,25 @@ def _query_publisher_revenue_trends(ch, days: int = 7) -> list[dict]:
     )
 
 
+def _query_publisher_fleet_health(
+    ch,
+    days: int = 7,
+    top_n: int = 20,
+    alert_threshold_pct: float = -15.0,
+) -> dict:
+    """Thin wrapper — reads min_periods from config and delegates to
+    queries.get_publisher_fleet_health_data()."""
+    from scout_agent import SCOUT_THRESHOLDS
+    t = SCOUT_THRESHOLDS.get("signals", {})
+    return _q.get_publisher_fleet_health_data(
+        ch,
+        days=days,
+        min_periods=int(t.get("revenue_trend_min_periods", 4)),
+        top_n=top_n,
+        alert_threshold_pct=alert_threshold_pct,
+    )
+
+
 def _query_advertiser_revenue_trends(ch, days: int = 7) -> list[dict]:
     """Thin wrapper — reads min_periods from config and delegates to queries.advertiser_revenue_trends()."""
     from scout_agent import SCOUT_THRESHOLDS
