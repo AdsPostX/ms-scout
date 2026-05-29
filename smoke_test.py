@@ -3124,6 +3124,59 @@ def test_advertiser_projection_pre_formatted():
         return False, str(e)
 
 
+@test("publisher_fleet_health_pre_formatted")
+def test_publisher_fleet_health_pre_formatted():
+    """
+    B3 regression guard: get_publisher_fleet_health must return pre_formatted:True
+    so the pre_formatted short-circuit in ask() fires and renders in Slack.
+    Verifies both the at-risk path and the all-healthy path.
+    """
+    try:
+        from unittest.mock import patch
+
+        class _FakeResult:
+            def __init__(self, rows):
+                self.result_rows = rows
+
+        # Rows shape from publisher_revenue_trends query:
+        # (publisher_id, publisher_name, revenue_actual, revenue_expected, delta_pct, sessions_actual)
+        # Two publishers: one at-risk (-25%), one healthy (+12%)
+        _fake_rows = [
+            (101, "BobPublisher",  7500.0, 10000.0, -25.0, 3000),
+            (202, "AlicePublisher", 22000.0, 19600.0, 12.2, 8500),
+        ]
+
+        class _FakeCH:
+            def query(self, sql, parameters=None):
+                return _FakeResult(_fake_rows)
+
+        with patch("scout_agent._get_ch_client", return_value=_FakeCH()):
+            from scout_agent import get_publisher_fleet_health
+            result = get_publisher_fleet_health(days=7, top_n=20, alert_threshold_pct=-15.0)
+
+        if not isinstance(result, dict):
+            return False, f"expected dict, got {type(result).__name__}"
+        if not result.get("pre_formatted"):
+            return False, (
+                "pre_formatted not True — Slack rendering will be silent. "
+                f"Keys returned: {sorted(result.keys())}"
+            )
+        formatted = result.get("formatted", "")
+        if not formatted or not formatted.strip():
+            return False, "formatted string is empty — would render blank in Slack"
+        if "Fleet Health" not in formatted:
+            return False, f"missing 'Fleet Health' header: {formatted[:120]}"
+        has_at_risk = "at risk" in formatted.lower() or "At Risk" in formatted
+        has_all_ok = "All publishers" in formatted
+        if not has_at_risk and not has_all_ok:
+            return False, f"missing 'at risk' or 'All publishers' phrase: {formatted[:120]}"
+        first_line = formatted.split("\n")[0]
+        return True, f"pre_formatted=True ✓  {first_line[:70]}"
+    except Exception as e:
+        import traceback
+        return False, f"{e}\n{traceback.format_exc()}"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
