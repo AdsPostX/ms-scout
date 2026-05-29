@@ -2975,6 +2975,35 @@ def get_advertiser_revenue_projection(
             "share_pct":          round(rev / total_revenue_30d * 100, 1) if total_revenue_30d else 0,
         })
 
+    # ── Pre-format for Slack direct delivery (bypasses LLM synthesis) ────────
+    def _fmt_dollar(v: float) -> str:
+        if v is None:
+            return "$?"
+        if v >= 1_000_000:
+            return f"${v / 1_000_000:.1f}M"
+        return f"${v:,.0f}"
+
+    _proj_label = _fmt_dollar(round(projected_revenue, 2))
+    if cap_applied:
+        _proj_label += f" _(capped; uncapped {_fmt_dollar(uncapped_projected_revenue)})_"
+    _flines: list[str] = [
+        f"*{advertiser_name}* — {month_label} Revenue Projection",
+        "",
+        f"Projected: *{_proj_label}*",
+        f"30-day avg daily: *{_fmt_dollar(round(total_revenue_30d / 30, 2))}* · {days_in_month}-day month",
+    ]
+    if by_publisher:
+        _flines += ["", "*Publisher breakdown:*"]
+        for _p in by_publisher[:6]:
+            _flines.append(
+                f"• {_p['publisher']}: *{_fmt_dollar(_p['projected_revenue'])}* ({_p['share_pct']}%)"
+            )
+    for _w in cap_warnings:
+        _flines.append(f"⚠️ {_w}")
+    for _w in end_date_warnings:
+        _flines.append(f"⚠️ {_w}")
+    _formatted = "\n".join(_flines)
+
     return {
         "advertiser":                advertiser_name,
         "month":                     month_label,
@@ -3002,6 +3031,9 @@ def get_advertiser_revenue_projection(
         "end_date_warnings":         end_date_warnings,
         "methodology":               "30-day avg daily revenue × days in month. Cap applied where monthly_cap_total < uncapped projection.",
         "data_quality":              _data_quality_tier(30, total_sessions_30d),
+        # Slack pre-formatted output — bypasses LLM synthesis for reliable rendering
+        "formatted":                 _formatted,
+        "pre_formatted":             True,
     }
 
 

@@ -3061,6 +3061,56 @@ def test_normalize_geo_already_normalized_values():
     return True, f"all {len(cases)} canonical display strings are stable under normalize_geo"
 
 
+@test("get_advertiser_revenue_projection — returns pre_formatted dict for Slack rendering")
+def test_advertiser_projection_pre_formatted():
+    """
+    B0 regression guard: get_advertiser_revenue_projection must return pre_formatted:True
+    so the pre_formatted short-circuit in ask() fires and the response renders in Slack.
+    Before the fix, it returned a plain dict — LLM synthesis silently dropped the output,
+    producing blank responses to queries like "what's the projected revenue for Hulu?".
+    """
+    try:
+        from unittest.mock import patch
+
+        # Fake CH rows:
+        #   _fetch_baseline rows: (pub_pid, pub_name, impr, sess, rev, pay, convs)
+        #   _fetch_cap_data rows: (cid, adv, end_dt, cap_cfg)
+        class _FakeResult:
+            def __init__(self, rows):
+                self.result_rows = rows
+
+        class _FakeCH:
+            def query(self, sql, parameters=None):
+                if "adpx_impressions_details" in sql:
+                    # baseline: one publisher with $1500 revenue over 30d
+                    return _FakeResult([("123", "FakePublisher", 10000, 5000, 1500.0, 750.0, 50)])
+                # cap data: no caps
+                return _FakeResult([])
+
+        with patch("scout_agent._get_ch_client", return_value=_FakeCH()):
+            from scout_agent import get_advertiser_revenue_projection
+            result = get_advertiser_revenue_projection("Hulu")
+
+        if not isinstance(result, dict):
+            return False, f"expected dict, got {type(result).__name__}"
+        if not result.get("pre_formatted"):
+            return False, (
+                "pre_formatted not True — Slack rendering will be silent. "
+                f"Keys returned: {sorted(result.keys())}"
+            )
+        formatted = result.get("formatted", "")
+        if not formatted or not formatted.strip():
+            return False, "formatted string is empty — would render blank in Slack"
+        if "Hulu" not in formatted:
+            return False, f"formatted string missing advertiser name: {formatted[:100]}"
+        if "$" not in formatted:
+            return False, f"formatted string missing dollar amount: {formatted[:100]}"
+        first_line = formatted.split("\n")[0]
+        return True, f"pre_formatted=True ✓  {first_line[:70]}"
+    except Exception as e:
+        return False, str(e)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
