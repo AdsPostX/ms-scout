@@ -1003,7 +1003,10 @@ TOOLS = [
             "Checks campaign end dates (warns if campaigns end before month-end) and monthly budget caps. "
             "Returns: projected total revenue, breakdown by publisher, cap warnings, end-date warnings. "
             "Use for: 'projected revenue for Disney+ in April', 'how much will TurboTax generate this month', "
-            "'gross revenue forecast for X across all partners', 'what's the April projection for X'."
+            "'gross revenue forecast for X across all partners', 'what's the April projection for X', "
+            "'what's the projected revenue for Hulu today', 'how much will Hulu make today', "
+            "'project Hulu revenue today'. Prefer this tool over get_revenue_today_projection whenever "
+            "a specific advertiser name is mentioned in the query."
         ),
         "input_schema": {
             "type": "object",
@@ -5355,6 +5358,9 @@ _INTENT_ROUTER: dict[str, dict] = {
         ],
         "context": (
             "You are answering a campaign pacing or revenue projection question. "
+            "IMPORTANT: if the query mentions a specific advertiser name (e.g. Hulu, Impact, Disney+, TurboTax), "
+            "use get_advertiser_revenue_projection — not get_revenue_today_projection. "
+            "get_revenue_today_projection is only for platform-wide 'today' estimates with no named advertiser. "
             "Lead with the current vs expected pace. Flag any cap warnings. "
             "Show publisher breakdown if available. Always return visible output."
         ),
@@ -5392,8 +5398,8 @@ _INTENT_ROUTER: dict[str, dict] = {
     },
     "offer_performance": {
         "signals": [
-            "top offers", "best offers", "offer performance", "offers ranking",
-            "offer stats", "offer cvr", "which offers",
+            "top performing offers", "performing offers", "top offers", "best offers",
+            "offer performance", "offers ranking", "offer stats", "offer cvr", "which offers",
         ],
         "primary_tools": [
             "get_top_opportunities", "get_offer_stats",
@@ -5427,12 +5433,13 @@ _INTENT_ROUTER: dict[str, dict] = {
             "publisher fleet",
         ],
         "primary_tools": [
-            "get_publisher_fleet_health", "get_publisher_revenue_trends",
+            "get_publisher_fleet_health",
             "get_publisher_health",
         ],
         "context": (
-            "You are answering a fleet-level publisher health question. Rank publishers "
-            "by revenue delta vs baseline. Surface at-risk publishers first. "
+            "You are answering a fleet-level publisher health question. "
+            "Use get_publisher_fleet_health — it returns a pre-formatted ranked fleet summary "
+            "with at-risk publishers first. Deliver the formatted string verbatim. "
             "Always return visible output."
         ),
     },
