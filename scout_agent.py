@@ -1193,7 +1193,9 @@ TOOLS = [
             "Use for: 'project today's revenue', 'estimate today's revenue', 'EOD revenue', "
             "'what will today land at', 'how much will we make today', 'forecast today', "
             "'after it ends', 'how much do you estimate our revenue for today'. "
-            "Do NOT use for 'revenue so far today' — that's get_revenue_today."
+            "Do NOT use for 'revenue so far today' — that's get_revenue_today. "
+            "Do NOT use if the query mentions a specific advertiser name (Hulu, Impact, "
+            "Disney+, TurboTax, etc.) — use get_advertiser_revenue_projection instead."
         ),
         "input_schema": {
             "type": "object",
@@ -4800,7 +4802,6 @@ def get_publisher_fleet_health(
         lines = [f"*Publisher Fleet Health — last {days} day{'s' if days != 1 else ''}*", ""]
 
         if result.get("insufficient_history"):
-            from scout_agent import SCOUT_THRESHOLDS
             min_p = SCOUT_THRESHOLDS.get("signals", {}).get("revenue_trend_min_periods", 4)
             lines.append(
                 f"_⚠️ Not enough history for reliable baseline (need {min_p}+ periods)_"
@@ -5365,6 +5366,26 @@ _INTENT_ROUTER: dict[str, dict] = {
             "Show publisher breakdown if available. Always return visible output."
         ),
     },
+    # fleet_health must come BEFORE publisher_health in dict order so that
+    # fleet queries ("how are all publishers", "all publishers this week") are not
+    # captured early by publisher_health's broad "how is" / "how are" signals.
+    "fleet_health": {
+        "signals": [
+            "all publishers", "fleet health", "fleet", "publisher overview",
+            "monday report", "publishers doing", "how are publishers",
+            "publisher fleet",
+        ],
+        "primary_tools": [
+            "get_publisher_fleet_health",
+            "get_publisher_health",
+        ],
+        "context": (
+            "You are answering a fleet-level publisher health question. "
+            "Use get_publisher_fleet_health — it returns a pre-formatted ranked fleet summary "
+            "with at-risk publishers first. Deliver the formatted string verbatim. "
+            "Always return visible output."
+        ),
+    },
     "publisher_health": {
         "signals": [
             "publisher health", "publisher performance", "publisher snapshot",
@@ -5423,23 +5444,6 @@ _INTENT_ROUTER: dict[str, dict] = {
         "context": (
             "You are answering a publisher-offer fit question. Show the top-fit offers "
             "for the publisher. Include CVR benchmark, payout, and why each offer fits. "
-            "Always return visible output."
-        ),
-    },
-    "fleet_health": {
-        "signals": [
-            "all publishers", "fleet health", "fleet", "publisher overview",
-            "monday report", "publishers doing", "how are publishers",
-            "publisher fleet",
-        ],
-        "primary_tools": [
-            "get_publisher_fleet_health",
-            "get_publisher_health",
-        ],
-        "context": (
-            "You are answering a fleet-level publisher health question. "
-            "Use get_publisher_fleet_health — it returns a pre-formatted ranked fleet summary "
-            "with at-risk publishers first. Deliver the formatted string verbatim. "
             "Always return visible output."
         ),
     },
