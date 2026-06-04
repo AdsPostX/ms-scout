@@ -1660,6 +1660,25 @@ TOOLS = [
         },
     },
     {
+        "name": "get_publisher_fleet_health",
+        "description": (
+            "Fleet-level publisher health snapshot. Returns publishers ranked by revenue delta "
+            "vs 8-period median baseline. Use for: 'how are all publishers doing?', 'which publishers "
+            "are underperforming?', 'Monday health report', 'fleet health', 'publisher overview'. "
+            "Optional: days (default 7, max 90), top_n (default 20, max 50), "
+            "alert_threshold_pct (default -15, must be negative)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "default": 7, "minimum": 1, "maximum": 90},
+                "top_n": {"type": "integer", "default": 20, "minimum": 1, "maximum": 50},
+                "alert_threshold_pct": {"type": "number", "default": -15.0, "maximum": 0},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "list_thresholds",
         "description": (
             "Return all active Scout monitor thresholds plus override metadata. "
@@ -4795,6 +4814,86 @@ def get_publisher_revenue_trends(days: int = 7) -> dict:
         return {"error": str(e), "trends": []}
 
 
+def get_publisher_fleet_health(
+    days: int = 7,
+    top_n: int = 20,
+    alert_threshold_pct: float = -15.0,
+) -> dict:
+    """
+    Fleet-level publisher health snapshot: publishers ranked by revenue delta vs
+    8-period median baseline, separated into at-risk and healthy buckets.
+    Returns pre_formatted Slack text for direct rendering.
+    """
+    try:
+        # Clamp inputs to declared bounds
+        days = max(1, min(90, int(days)))
+        top_n = max(1, min(50, int(top_n)))
+        alert_threshold_pct = max(-100.0, min(0.0, float(alert_threshold_pct)))
+
+        ch = _get_ch_client()
+        result = _query_publisher_fleet_health(
+            ch,
+            days=days,
+            top_n=top_n,
+            alert_threshold_pct=alert_threshold_pct,
+        )
+
+        lines = [f"*Publisher Fleet Health — last {days} day{'s' if days != 1 else ''}*", ""]
+
+        if result.get("insufficient_history"):
+            min_p = SCOUT_THRESHOLDS.get("signals", {}).get("revenue_trend_min_periods", 4)
+            lines.append(
+                f"_⚠️ Not enough history for reliable baseline (need {min_p}+ periods)_"
+            )
+        else:
+            at_risk = result.get("at_risk", [])
+            healthy = result.get("healthy_top5", [])
+
+            # ── At-risk block ────────────────────────────────────────────────
+            if at_risk:
+                lines.append(f"⚠️ *At Risk* ({len(at_risk)} publishers)")
+                for pub in at_risk:
+                    arrow = "↓" if pub["delta_pct"] < 0 else "↑"
+                    lines.append(
+                        f"• {pub['publisher_name']}: {pub['delta_pct']:+.1f}% {arrow}"
+                        f"  (${pub['revenue_actual']:,.0f} actual vs"
+                        f" ${pub['revenue_expected']:,.0f} expected)"
+                    )
+            else:
+                lines.append("✅ All publishers within normal range")
+
+            lines.append("")
+
+            # ── Healthy top-5 block ──────────────────────────────────────────
+            if healthy:
+                lines.append("✅ *Healthy — Top 5*")
+                for pub in healthy:
+                    arrow = "↑" if pub["delta_pct"] > 0 else ("↓" if pub["delta_pct"] < 0 else "→")
+                    lines.append(
+                        f"• {pub['publisher_name']}: {pub['delta_pct']:+.1f}% {arrow}"
+                        f"  (${pub['revenue_actual']:,.0f} actual vs"
+                        f" ${pub['revenue_expected']:,.0f} expected)"
+                    )
+
+        # ── Footer ──────────────────────────────────────────────────────────
+        total = result.get("total_publishers", 0)
+        at_risk_count = result.get("at_risk_count", 0)
+        as_of_raw = result.get("as_of", "")
+        as_of = as_of_raw[:10] if as_of_raw else "unknown"
+        lines.append(
+            f"_{total} publishers tracked · {at_risk_count} at risk · as of {as_of}_"
+        )
+
+        return {"formatted": "\n".join(lines), "pre_formatted": True}
+
+    except Exception:
+        log.exception("get_publisher_fleet_health failed")
+        return {
+            "formatted": "⚠️ Fleet health unavailable — query failed. Try again or check ClickHouse.",
+            "pre_formatted": True,
+        }
+
+
 def get_advertiser_revenue_trends(days: int = 7) -> dict:
     """
     Advertiser revenue trends: actual vs. historical median, aggregated cross-publisher.
@@ -4860,6 +4959,7 @@ TOOL_MAP = {
     "get_expiring_campaigns": get_expiring_campaigns,
     "get_publisher_revenue_trends": get_publisher_revenue_trends,
     "get_advertiser_revenue_trends": get_advertiser_revenue_trends,
+    "get_publisher_fleet_health": get_publisher_fleet_health,
     "get_scout_config": None,   # registered below after function definition
     "run_self_qa": None,  # registered below after function definition
 }
