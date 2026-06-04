@@ -13,6 +13,7 @@ import logging
 import os
 import pathlib
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -1785,6 +1786,187 @@ _INTERNAL_TOOLS: dict[str, dict] = {
 
 # Remove internal tools from the LLM-visible TOOLS list
 TOOLS = [t for t in TOOLS if t["name"] not in _INTERNAL_TOOLS]
+
+# ── Thread-level intent memory ────────────────────────────────────────────────
+# Follow-up messages in the same Slack thread inherit the classified intent
+# without re-classifying, keeping conversation context stable.
+_THREAD_INTENTS: dict[str, str] = {}
+_THREAD_INTENTS_LOCK = threading.Lock()
+
+# ── Intent router ─────────────────────────────────────────────────────────────
+# 9 intent buckets. Order matters: fleet_health MUST come before publisher_health
+# so fleet queries don't get captured by the broader "how are/is" signals first.
+_INTENT_ROUTER: dict[str, dict] = {
+    "campaign_pacing": {
+        "signals": [
+            "campaign pacing", "projected revenue", "how much will",
+            "advertiser revenue", "budget pace", "projection", "on track",
+            "pace", "budget status",
+        ],
+        "primary_tools": [
+            "get_advertiser_revenue_projection", "get_revenue_today_projection",
+            "get_campaign_status", "get_ghost_campaigns",
+        ],
+        "context": (
+            "You are answering a campaign pacing or revenue projection question. "
+            "IMPORTANT: if the query mentions a specific advertiser name (e.g. Hulu, Impact, "
+            "Disney+, TurboTax), use get_advertiser_revenue_projection — not "
+            "get_revenue_today_projection. get_revenue_today_projection is only for "
+            "platform-wide 'today' estimates with no named advertiser. "
+            "Lead with the current vs expected pace. Flag any cap warnings. "
+            "Show publisher breakdown if available. Always return visible output."
+        ),
+    },
+    "fleet_health": {
+        "signals": [
+            "all publishers", "fleet health", "fleet", "publisher overview",
+            "monday report", "publishers doing", "how are publishers", "publisher fleet",
+        ],
+        "primary_tools": [
+            "get_publisher_fleet_health", "get_publisher_health",
+        ],
+        "context": (
+            "You are answering a fleet-level publisher health question. "
+            "Use get_publisher_fleet_health — it returns a pre-formatted ranked fleet summary "
+            "with at-risk publishers first. Deliver the formatted string verbatim. "
+            "Always return visible output."
+        ),
+    },
+    "publisher_health": {
+        "signals": [
+            "publisher health", "publisher performance", "publisher snapshot",
+            "fill rate", "impressions down", "low fill", "how is", "how are", "showing up",
+        ],
+        "primary_tools": [
+            "get_publisher_health", "get_publisher_revenue_trends", "get_publisher_fleet_health",
+        ],
+        "context": (
+            "You are answering a publisher health question. Lead with the publisher name, "
+            "current revenue vs expected, and fill rate. Surface anomalies first. "
+            "Always return visible output."
+        ),
+    },
+    "revenue_anomaly": {
+        "signals": [
+            "revenue down", "revenue drop", "anomaly", "spike", "unusual",
+            "what happened", "why is revenue", "revenue alert", "revenue dip",
+        ],
+        "primary_tools": [
+            "get_revenue_today", "get_exposure_rate_anomalies",
+            "get_advertiser_revenue_trends", "get_publisher_revenue_trends",
+        ],
+        "context": (
+            "You are diagnosing a revenue anomaly. Start with what changed and when. "
+            "Surface the largest contributors to the delta. Suggest a root cause hypothesis. "
+            "Always return visible output."
+        ),
+    },
+    "offer_performance": {
+        "signals": [
+            "top performing offers", "performing offers", "top offers", "best offers",
+            "offer performance", "offers ranking", "offer stats", "offer cvr", "which offers",
+        ],
+        "primary_tools": [
+            "get_top_opportunities", "get_offer_stats",
+            "get_category_performance", "get_running_offers",
+        ],
+        "context": (
+            "You are answering an offer performance question. Rank offers by revenue "
+            "contribution or CVR. Include offer name, payout, and network. "
+            "Always return visible output."
+        ),
+    },
+    "publisher_offer_fit": {
+        "signals": [
+            "fit", "right offers", "offers for publisher", "publisher offers",
+            "offer match", "which offers for", "offers for",
+        ],
+        "primary_tools": [
+            "get_offers_for_publisher", "get_publisher_competitive_landscape",
+            "get_fallback_candidates",
+        ],
+        "context": (
+            "You are answering a publisher-offer fit question. Show the top-fit offers "
+            "for the publisher. Include CVR benchmark, payout, and why each offer fits. "
+            "Always return visible output."
+        ),
+    },
+    "traffic_quality": {
+        "signals": [
+            "traffic quality", "fraud", "invalid traffic", "ivt",
+            "low quality", "bad traffic", "suspicious",
+        ],
+        "primary_tools": [
+            "get_publisher_health", "get_exposure_rate_anomalies", "get_supply_demand_gaps",
+        ],
+        "context": (
+            "You are investigating traffic quality. Surface CVR anomalies and fill rate "
+            "outliers. Flag any publishers with unusual patterns. Always return visible output."
+        ),
+    },
+    "ab_test": {
+        "signals": [
+            "a/b test", "ab test", "experiment", "test result", "variant",
+            "control vs test", "which version",
+        ],
+        "primary_tools": [
+            "get_perkswall_engagement", "get_offer_stats", "get_publisher_health",
+        ],
+        "context": (
+            "You are answering an A/B test question. Compare the variants directly. "
+            "Lead with which version is winning and by how much. Always return visible output."
+        ),
+    },
+    "competitive_stack": {
+        "signals": [
+            "competitive", "competition", "other offers", "impression share",
+            "competing offers", "what else is running", "what are others paying",
+        ],
+        "primary_tools": [
+            "get_publisher_competitive_landscape", "get_supply_demand_gaps",
+            "get_top_opportunities",
+        ],
+        "context": (
+            "You are answering a competitive landscape question. Show what's competing for "
+            "impressions at this publisher or in this category. Include payout comparison. "
+            "Always return visible output."
+        ),
+    },
+}
+
+
+def _classify_intent(
+    query: str,
+    thread_ts: str | None = None,
+) -> tuple[str | None, dict | None]:
+    """
+    Classify a query into an intent bucket for tool narrowing.
+
+    Returns (intent_name, intent_dict) or (None, None) if no match.
+    Thread memory: follow-up messages in the same Slack thread inherit the
+    classified intent without re-classifying, keeping conversation context stable.
+    Signals are sorted longest-first so specific phrases beat short generic ones.
+    """
+    q = query.lower()
+
+    # Thread memory — follow-ups inherit parent intent
+    if thread_ts:
+        with _THREAD_INTENTS_LOCK:
+            if thread_ts in _THREAD_INTENTS:
+                name = _THREAD_INTENTS[thread_ts]
+                return name, _INTENT_ROUTER.get(name)
+
+    # Signal matching — longest signals first
+    for intent_name, intent_dict in _INTENT_ROUTER.items():
+        signals = sorted(intent_dict["signals"], key=len, reverse=True)
+        for signal in signals:
+            if signal in q:
+                if thread_ts:
+                    with _THREAD_INTENTS_LOCK:
+                        _THREAD_INTENTS[thread_ts] = intent_name
+                return intent_name, intent_dict
+
+    return None, None
 
 
 def _load_offers() -> list:
@@ -5559,6 +5741,19 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
 
     MAX_ROUNDS = 12  # hard cap — prevents runaway loops on complex / ambiguous queries
     _round = 0
+
+    # Intent classification — narrow tool surface and prepend focused context.
+    # Runs once per ask() call, outside the retry loop.
+    _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=permalink)
+    _ask_tools = TOOLS
+    _ask_system = SYSTEM_PROMPT
+    if _intent_dict:
+        _primary = set(_intent_dict["primary_tools"])
+        _narrowed = [t for t in TOOLS if t["name"] in _primary]
+        if _narrowed:  # fall back to full TOOLS if no bucket tools found in public list
+            _ask_tools = _narrowed
+        _ask_system = _intent_dict["context"] + "\n\n" + SYSTEM_PROMPT
+
     while _round < MAX_ROUNDS:
         _round += 1
         for attempt in range(4):
@@ -5566,8 +5761,8 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
                 response = client.messages.create(
                     model=_select_model(user_message),
                     max_tokens=4096,
-                    system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                    tools=TOOLS,
+                    system=[{"type": "text", "text": _ask_system, "cache_control": {"type": "ephemeral"}}],
+                    tools=_ask_tools,
                     messages=messages,
                 )
                 break
