@@ -1763,6 +1763,29 @@ TOOLS = [
     },
 ]
 
+# Tools the LLM should NOT auto-select — callable via TOOL_MAP by direct handlers only.
+# Keeps the LLM-visible surface lean and prevents routing confusion on
+# admin/write/redundant tools.
+_INTERNAL_TOOLS: dict[str, dict] = {
+    t["name"]: t
+    for t in TOOLS
+    if t["name"] in {
+        "get_demand_queue_status",
+        "mark_offer_launched",
+        "get_usage_report",
+        "export_usage_log",
+        "record_entity_note",
+        "forget_entity_note",
+        "why_entity_note",
+        "run_self_qa",
+        "get_low_fill_publishers",
+        "force_run_monitor",
+    }
+}
+
+# Remove internal tools from the LLM-visible TOOLS list
+TOOLS = [t for t in TOOLS if t["name"] not in _INTERNAL_TOOLS]
+
 
 def _load_offers() -> list:
     """Load offers from DEMAND_FEED_URL when set; fall back to disk snapshot.
