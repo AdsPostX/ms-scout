@@ -1137,7 +1137,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     try:
         _t0 = time.monotonic()
         response = ask(query, history=history, user_id=user_id,
-                       user_tz=_get_user_tz(web, user_id))
+                       user_tz=_get_user_tz(web, user_id), thread_ts=thread_ts or "")
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
     except Exception as e:
@@ -2718,7 +2718,7 @@ def _handle_event_impl(req: SocketModeRequest):
             _permalink = _permalink_for(web, channel, msg_ts)
             response = _ask_with_timeout(
                 query, history=history, user_id=user_id, permalink=_permalink,
-                user_tz=_get_user_tz(web, user_id),
+                user_tz=_get_user_tz(web, user_id), thread_ts=thread_ts or "",
             )
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
@@ -2836,7 +2836,8 @@ def _handle_event_impl(req: SocketModeRequest):
     try:
         _t0 = time.monotonic()
         _permalink = _permalink_for(web, channel, msg_ts)
-        response = _ask_with_timeout(query, history=history, user_id=user_id, permalink=_permalink)
+        response = _ask_with_timeout(query, history=history, user_id=user_id, permalink=_permalink,
+                                     thread_ts=thread_ts or "")
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting

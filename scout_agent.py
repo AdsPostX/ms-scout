@@ -1878,7 +1878,7 @@ _INTENT_ROUTER: dict[str, dict] = {
     },
     "publisher_offer_fit": {
         "signals": [
-            "fit", "right offers", "offers for publisher", "publisher offers",
+            "offer fit", "right offers", "offers for publisher", "publisher offers",
             "offer match", "which offers for", "offers for",
         ],
         "primary_tools": [
@@ -1949,22 +1949,23 @@ def _classify_intent(
     """
     q = query.lower()
 
-    # Thread memory — follow-ups inherit parent intent
+    # Signal matching — longest signals first so specific phrases beat short ones
+    for intent_name, intent_dict in _INTENT_ROUTER.items():
+        signals = sorted(intent_dict["signals"], key=len, reverse=True)
+        for signal in signals:
+            if signal in q:
+                # Update thread memory whenever a signal matches
+                if thread_ts:
+                    with _THREAD_INTENTS_LOCK:
+                        _THREAD_INTENTS[thread_ts] = intent_name
+                return intent_name, intent_dict
+
+    # No signal matched — fall back to thread memory for ambiguous follow-ups
     if thread_ts:
         with _THREAD_INTENTS_LOCK:
             if thread_ts in _THREAD_INTENTS:
                 name = _THREAD_INTENTS[thread_ts]
                 return name, _INTENT_ROUTER.get(name)
-
-    # Signal matching — longest signals first
-    for intent_name, intent_dict in _INTENT_ROUTER.items():
-        signals = sorted(intent_dict["signals"], key=len, reverse=True)
-        for signal in signals:
-            if signal in q:
-                if thread_ts:
-                    with _THREAD_INTENTS_LOCK:
-                        _THREAD_INTENTS[thread_ts] = intent_name
-                return intent_name, intent_dict
 
     return None, None
 
@@ -5695,7 +5696,7 @@ def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]
 
 
 def ask(user_message: str, history: list | None = None, user_id: str = "",
-        permalink: str = "", user_tz: str = "") -> AskResult:
+        permalink: str = "", user_tz: str = "", thread_ts: str = "") -> AskResult:
     """
     Send a message to Scout and get a response.
     history: optional list of prior {"role": "user"/"assistant", "content": str} messages
@@ -5780,7 +5781,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
 
     # Intent classification — narrow tool surface and prepend focused context.
     # Runs once per ask() call, outside the retry loop.
-    _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=permalink)
+    _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
     _ask_tools = TOOLS
     _ask_system = SYSTEM_PROMPT
     if _intent_dict:
