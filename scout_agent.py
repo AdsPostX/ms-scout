@@ -3301,7 +3301,7 @@ def get_advertiser_revenue_projection(
             "share_pct":          round(rev / total_revenue_30d * 100, 1) if total_revenue_30d else 0,
         })
 
-    return {
+    result = {
         "advertiser":                advertiser_name,
         "month":                     month_label,
         "days_in_month":             days_in_month,
@@ -3329,6 +3329,42 @@ def get_advertiser_revenue_projection(
         "methodology":               "30-day avg daily revenue × days in month. Cap applied where monthly_cap_total < uncapped projection.",
         "data_quality":              _data_quality_tier(30, total_sessions_30d),
     }
+
+    # Build pre-formatted Slack output — prevents silent LLM synthesis failures
+    _lines = []
+    if result.get("cap_applied"):
+        _monthly_cap = result.get("monthly_cap_total", 0)
+        _avg_daily = result.get("avg_daily_revenue", 0)
+        _uncapped = result.get("uncapped_projected_revenue", 0)
+        _delta = (_uncapped or 0) - (_monthly_cap or 0)
+        _adv = result.get("advertiser", advertiser_name)
+        _lines.append(
+            f":red_circle: *Budget cap is the story.* {_adv} capped at "
+            f"*${_monthly_cap:,.0f}*/mo — run rate *${_avg_daily:,.0f}/day* "
+            f"(~${_uncapped:,.0f} uncapped). "
+            f":zap: Lift cap or spin uncapped campaign to unlock ~${_delta:,.0f}."
+        )
+    else:
+        _proj = result.get("projected_revenue", 0)
+        _avg = result.get("avg_daily_revenue", 0)
+        _adv = result.get("advertiser", advertiser_name)
+        _m = result.get("month", month_label)
+        _lines.append(
+            f"{_adv} projects *${_proj:,.0f}* for {_m} at *${_avg:,.0f}/day*."
+        )
+    # Publisher breakdown top 5
+    _breakdown = result.get("by_publisher", [])
+    if _breakdown:
+        _lines.append("")
+        for _pub in _breakdown[:5]:
+            _pname = _pub.get("publisher", "Unknown")
+            _prev = _pub.get("revenue_30d", 0)
+            _pshare = _pub.get("share_pct", 0)
+            _lines.append(f"• {_pname}: ${_prev:,.0f} ({_pshare:.0f}%)")
+    result["formatted"] = "\n".join(_lines)
+    result["pre_formatted"] = True
+
+    return result
 
 
 def get_publisher_health(
