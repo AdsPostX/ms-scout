@@ -5072,8 +5072,9 @@ def get_publisher_fleet_health(
         top_n = max(1, min(50, int(top_n)))
         alert_threshold_pct = max(-100.0, min(0.0, float(alert_threshold_pct)))
 
+        from queries import get_publisher_fleet_health_data
         ch = _get_ch_client()
-        result = _query_publisher_fleet_health(
+        result = get_publisher_fleet_health_data(
             ch,
             days=days,
             top_n=top_n,
