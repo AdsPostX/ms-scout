@@ -5129,10 +5129,11 @@ def get_publisher_fleet_health(
 
         return {"formatted": "\n".join(lines), "pre_formatted": True}
 
-    except Exception:
+    except Exception as _fleet_exc:
         log.exception("get_publisher_fleet_health failed")
+        _err_msg = str(_fleet_exc)[:300]
         return {
-            "formatted": "⚠️ Fleet health unavailable — query failed. Try again or check ClickHouse.",
+            "formatted": f"⚠️ Fleet health query failed: `{_err_msg}`",
             "pre_formatted": True,
         }
 
