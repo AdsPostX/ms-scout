@@ -1671,94 +1671,224 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
     ]
 
 
+def publisher_fleet_health_stats(
+    ch,
+    days: int = 7,
+    min_windows: int = 3,
+    min_revenue: float = 500.0,
+) -> list[dict]:
+    """
+    Statistical fleet health baseline: rolling 4-week same-period average + σ-score.
+
+    Algorithm:
+    - current_window: revenue in the most recent `days`-day window
+    - prior_windows: 4 non-overlapping `days`-day windows immediately before current
+    - baseline: mean + stddev of those 4 prior windows per publisher
+    - sigma_score: (actual - mean) / stddev — how many std deviations from normal
+    - dollar_gap: mean - actual (positive = shortfall, negative = surplus)
+
+    Gates:
+    - min_windows: require at least this many of 4 prior windows populated (default 3)
+    - min_revenue: materiality floor — only publishers with mean >= this enter analysis
+
+    Excludes is_test publishers and publishers whose name ends with ' Super'.
+    Joins from_airbyte_partner_categories for tier data (empty string if no entry).
+
+    Returns list sorted by dollar_gap DESC (largest shortfall first).
+    Each row: publisher_id, publisher_name, tier, revenue_actual, revenue_expected,
+              delta_pct, sigma_score, dollar_gap
+    """
+    lookback = days * 5  # covers 4 prior windows + buffer
+
+    rows = ch.query(
+        """
+        WITH
+        -- ── Current window ──────────────────────────────────────────────────────
+        current_window AS (
+            SELECT
+                user_id                                                AS publisher_id,
+                round(sum(toFloat64OrZero(revenue)), 2)               AS revenue_actual
+            FROM adpx_conversionsdetails
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL {days: Int32} DAY)
+            WHERE created_at >= today() - INTERVAL {days: Int32} DAY
+            GROUP BY publisher_id
+        ),
+        -- ── Prior 4 same-length windows ─────────────────────────────────────────
+        -- window_idx 0 = most recent prior period, 3 = oldest of the 4
+        -- Formula: intDiv((days_ago - days) / days)
+        --   7 days ago → intDiv(0, 7)=0  14 days ago → intDiv(7, 7)=1  etc.
+        prior_windows AS (
+            SELECT
+                user_id                                                AS publisher_id,
+                intDiv(
+                    dateDiff('day', toDate(created_at, 'America/Chicago'), today())
+                    - {days: Int32},
+                    {days: Int32}
+                )                                                      AS window_idx,
+                round(sum(toFloat64OrZero(revenue)), 2)               AS window_revenue
+            FROM adpx_conversionsdetails
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL {lookback: Int32} DAY)
+            WHERE created_at >= today() - INTERVAL {lookback: Int32} DAY
+              AND created_at < today() - INTERVAL {days: Int32} DAY
+            GROUP BY publisher_id, window_idx
+            HAVING window_idx BETWEEN 0 AND 3
+        ),
+        -- ── Per-publisher baseline stats ─────────────────────────────────────────
+        baseline AS (
+            SELECT
+                publisher_id,
+                round(avg(window_revenue), 2)                         AS revenue_mean,
+                round(stddevSamp(window_revenue), 2)                  AS revenue_stddev,
+                count()                                               AS window_count
+            FROM prior_windows
+            GROUP BY publisher_id
+            HAVING window_count >= {min_windows: Int32}
+        ),
+        -- ── Publisher registry (non-test, non-super-admin) ───────────────────────
+        publishers AS (
+            SELECT id AS publisher_id, organization AS publisher_name
+            FROM mv_adpx_users
+            WHERE NOT is_test
+              AND NOT endsWith(organization, ' Super')
+        ),
+        -- ── Tier data ────────────────────────────────────────────────────────────
+        tiers AS (
+            SELECT user_id AS publisher_id, toString(tier) AS tier
+            FROM from_airbyte_partner_categories
+        )
+        SELECT
+            b.publisher_id,
+            p.publisher_name,
+            coalesce(t.tier, '')                                       AS tier,
+            coalesce(cw.revenue_actual, 0)                            AS revenue_actual,
+            b.revenue_mean                                             AS revenue_expected,
+            round(
+                (coalesce(cw.revenue_actual, 0) - b.revenue_mean)
+                / nullIf(b.revenue_mean, 0) * 100,
+                1
+            )                                                          AS delta_pct,
+            -- σ-score: NULL when stddev=0 (perfectly consistent publisher that just dropped)
+            -- callers map NULL → -99.0 to treat as a definite anomaly
+            round(
+                (coalesce(cw.revenue_actual, 0) - b.revenue_mean)
+                / nullIf(b.revenue_stddev, 0),
+                2
+            )                                                          AS sigma_score
+        FROM baseline b
+        INNER JOIN publishers p ON p.publisher_id = b.publisher_id
+        LEFT JOIN current_window cw ON cw.publisher_id = b.publisher_id
+        LEFT JOIN tiers t ON t.publisher_id = b.publisher_id
+        WHERE b.revenue_mean >= {min_revenue: Float64}
+        ORDER BY (b.revenue_mean - coalesce(cw.revenue_actual, 0)) DESC
+        """,
+        parameters={
+            "days": int(days),
+            "lookback": int(lookback),
+            "min_windows": int(min_windows),
+            "min_revenue": float(min_revenue),
+        },
+    ).result_rows
+
+    return [
+        {
+            "publisher_id": int(r[0]),
+            "publisher_name": str(r[1]),
+            "tier": str(r[2]),
+            "revenue_actual": float(r[3] or 0),
+            "revenue_expected": float(r[4] or 0),
+            "delta_pct": float(r[5] or 0),
+            # NULL sigma (zero-stddev publisher with a drop) → -99 = treat as significant
+            "sigma_score": float(r[6]) if r[6] is not None else -99.0,
+            "dollar_gap": float(r[4] or 0) - float(r[3] or 0),
+        }
+        for r in rows
+    ]
+
+
 def get_publisher_fleet_health_data(
     ch,
     days: int = 7,
-    min_periods: int = 4,
-    top_n: int = 20,
-    alert_threshold_pct: float = -15.0,
+    min_windows: int = 3,
+    min_revenue: float = 500.0,
+    act_now_sigma: float = -2.0,
+    act_now_gap: float = 500.0,
+    watch_sigma: float = -1.5,
+    watch_gap: float = 200.0,
 ) -> dict:
-    """Ranked fleet health summary using the same 8-period median baseline as
-    publisher_revenue_trends.  At-risk publishers (delta_pct < alert_threshold_pct)
-    are returned first (worst first); healthy publishers (top 5 by positive delta)
-    follow.
+    """
+    Classify publishers into Act Now / Watch / Healthy using σ-based statistical gates.
 
-    Input bounds are enforced by the caller; this function trusts them.
+    Gates (both conditions must be met):
+    - act_now:  sigma_score <= act_now_sigma (-2.0) AND dollar_gap >= act_now_gap ($500)
+    - watch:    sigma_score <= watch_sigma  (-1.5) AND dollar_gap >= watch_gap  ($200)
+    - healthy:  delta_pct >= 0 (on or above baseline)
+
+    Platform-wide alarm fires when act_now count > 5 — indicates a platform event
+    rather than individual publisher issues.
 
     Returns:
-        {
-            "as_of": ISO timestamp (str),
-            "window_days": int,
-            "total_publishers": int,
-            "at_risk_count": int,
-            "insufficient_history": bool,
-            "at_risk": [   # sorted delta_pct ascending (worst first)
-                {
-                    "publisher_id": str,
-                    "publisher_name": str,
-                    "revenue_actual": float,
-                    "revenue_expected": float,
-                    "delta_pct": float,
-                    "trend": "up"|"down"|"flat",
-                    "sessions_actual": int,
-                    "alert": bool,
-                }
-            ],
-            "healthy_top5": [   # sorted delta_pct descending (best first), max 5
-                { ...same fields... }
-            ],
-        }
-    When fewer than min_periods historical windows exist for every publisher the
-    at_risk / healthy_top5 lists will be empty and insufficient_history is True.
+    {
+        "as_of": str,          "window_days": int,
+        "total_publishers": int,  "total_gap": float,
+        "act_now": [...],      "watch": [...],   "healthy_top5": [...],
+        "platform_alarm": bool,   "insufficient_history": bool,
+    }
+    Each publisher entry: publisher_id, publisher_name, tier, revenue_actual,
+    revenue_expected, delta_pct, sigma_score, dollar_gap
     """
     from datetime import timezone, datetime
 
-    rows = publisher_revenue_trends(ch, days=days, min_periods=min_periods)
+    stats = publisher_fleet_health_stats(
+        ch,
+        days=days,
+        min_windows=min_windows,
+        min_revenue=min_revenue,
+    )
 
     as_of = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    if not rows:
+    if not stats:
         return {
             "as_of": as_of,
             "window_days": days,
             "total_publishers": 0,
-            "at_risk_count": 0,
-            "insufficient_history": True,
-            "at_risk": [],
+            "total_gap": 0.0,
+            "act_now": [],
+            "watch": [],
             "healthy_top5": [],
+            "platform_alarm": False,
+            "insufficient_history": True,
         }
 
-    def _row_to_entry(r: dict, threshold: float) -> dict:
-        return {
-            "publisher_id": str(r["publisher_id"]),
-            "publisher_name": r["publisher_name"],
-            "revenue_actual": r["revenue_actual"],
-            "revenue_expected": r["revenue_expected"],
-            "delta_pct": r["delta_pct"],
-            "trend": r["trend"],
-            "sessions_actual": r["sessions_actual"],
-            "alert": r["delta_pct"] < threshold,
-        }
+    act_now, watch, healthy = [], [], []
+    for pub in stats:
+        gap = pub["dollar_gap"]
+        sigma = pub["sigma_score"]
+        if sigma <= act_now_sigma and gap >= act_now_gap:
+            act_now.append(pub)
+        elif sigma <= watch_sigma and gap >= watch_gap:
+            watch.append(pub)
+        elif pub["delta_pct"] >= 0:
+            healthy.append(pub)
 
-    all_entries = [_row_to_entry(r, alert_threshold_pct) for r in rows]
-
-    # Limit to top_n by absolute delta magnitude (worst at_risk + best healthy)
-    # rows already sorted delta_pct ASC from publisher_revenue_trends query
-    at_risk = [e for e in all_entries if e["delta_pct"] < alert_threshold_pct][:top_n]
-    healthy = sorted(
-        [e for e in all_entries if e["delta_pct"] >= alert_threshold_pct],
-        key=lambda e: e["delta_pct"],
+    healthy_top5 = sorted(
+        healthy,
+        key=lambda p: p["revenue_actual"] - p["revenue_expected"],
         reverse=True,
     )[:5]
+
+    total_gap = sum(p["dollar_gap"] for p in act_now + watch if p["dollar_gap"] > 0)
 
     return {
         "as_of": as_of,
         "window_days": days,
-        "total_publishers": len(all_entries),
-        "at_risk_count": len(at_risk),
+        "total_publishers": len(stats),
+        "total_gap": round(total_gap, 2),
+        "act_now": act_now,
+        "watch": watch,
+        "healthy_top5": healthy_top5,
+        "platform_alarm": len(act_now) > 5,
         "insufficient_history": False,
-        "at_risk": at_risk,
-        "healthy_top5": healthy,
     }
 
 
