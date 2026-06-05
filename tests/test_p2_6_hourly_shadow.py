@@ -407,9 +407,20 @@ class TestForceRunMonitorPassesChannelString(unittest.TestCase):
 class TestMarkFiringCalledOnPost(unittest.TestCase):
 
     def test_shadow_monitor_calls_mark_firing_on_post(self):
-        """_run_shadow_monitor calls alert_registry.mark_firing after a successful Slack post."""
+        """_run_shadow_monitor calls alert_registry.mark_firing on a production (non-shadow) post.
+
+        mark_firing must NOT be called on shadow-only ticks — only when the monitor
+        posts to the production channel.  The framework kill-switch requires
+        SCOUT_HOURLY_SHADOW_ENABLED=true; we freeze time at 09:05 CT with
+        check_hour_ct=9 so in_prod_window=True.  Since prod has not fired yet
+        (load_state returns None) and we ARE in the prod window, is_shadow_tick=False
+        and the production branch executes.
+        """
         import demand_feed_main as dm
         import alert_registry
+        import pytz
+        import datetime as _dt_module
+        from datetime import datetime as _real_dt
 
         fired = []
 
@@ -420,12 +431,25 @@ class TestMarkFiringCalledOnPost(unittest.TestCase):
         load_state_mock = MagicMock(return_value=None)
         save_state_mock = MagicMock()
 
-        # Per-monitor SCOUT_THRESHOLDS entry — enables the monitor
-        fake_thresholds = {"signals": {"test_monitor_enabled": True, "test_monitor_check_hour_ct": 0}}
+        # check_hour=9; time frozen to 09:05 CT so in_prod_window=True
+        # Shadow is enabled (required to pass the outer kill switch) but
+        # since we're in the prod window with prod not yet fired, is_shadow_tick=False.
+        fake_thresholds = {"signals": {"test_monitor_enabled": True, "test_monitor_check_hour_ct": 9}}
 
         # WebClient mock — chat_postMessage must succeed
         fake_web = MagicMock()
         fake_web.chat_postMessage.return_value = {"ok": True}
+
+        # Frozen CT time at 09:05 — satisfies (hour==9 and minute<10)
+        CT_TZ = pytz.timezone("America/Chicago")
+        frozen_ct = CT_TZ.localize(_real_dt(2024, 6, 1, 9, 5, 0))
+
+        class _FakeDt(_real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is not None:
+                    return frozen_ct.astimezone(tz)
+                return frozen_ct
 
         # First sleep (300s) must pass silently so the inner loop body executes.
         # Second sleep raises StopIteration to exit cleanly after one cycle.
@@ -444,6 +468,7 @@ class TestMarkFiringCalledOnPost(unittest.TestCase):
              patch("scout_ch._get_ch_client", MagicMock(return_value=MagicMock())), \
              patch("slack_sdk.web.WebClient", return_value=fake_web), \
              patch("scout_core.job_runs.record_job_run", MagicMock()), \
+             patch(_dt_module.__name__ + ".datetime", _FakeDt), \
              patch("time.sleep", side_effect=_counting_sleep):
             try:
                 dm._run_shadow_monitor(
@@ -457,7 +482,7 @@ class TestMarkFiringCalledOnPost(unittest.TestCase):
             except StopIteration:
                 pass
 
-        self.assertEqual(len(fired), 1, f"mark_firing should be called once, got: {fired}")
+        self.assertEqual(len(fired), 1, f"mark_firing should be called once on prod post, got: {fired}")
         self.assertEqual(fired[0][0], "test-monitor")
 
 
@@ -468,8 +493,17 @@ class TestMarkFiringCalledOnPost(unittest.TestCase):
 class TestMarkClearedCalledOnNoAnomaly(unittest.TestCase):
 
     def test_shadow_monitor_calls_mark_cleared_on_no_anomaly(self):
-        """_run_shadow_monitor calls alert_registry.mark_cleared when results is empty."""
+        """_run_shadow_monitor calls alert_registry.mark_cleared on a production tick with no anomalies.
+
+        mark_cleared must NOT be called on shadow-only ticks — only on production
+        ticks where the signal returns empty.  The framework kill-switch requires
+        SCOUT_HOURLY_SHADOW_ENABLED=true; time is frozen at 09:05 CT with
+        check_hour_ct=9 so in_prod_window=True and is_shadow_tick=False.
+        """
         import demand_feed_main as dm
+        import pytz
+        import datetime as _dt_module
+        from datetime import datetime as _real_dt
 
         cleared = []
 
@@ -479,7 +513,20 @@ class TestMarkClearedCalledOnNoAnomaly(unittest.TestCase):
         load_state_mock = MagicMock(return_value=None)
         save_state_mock = MagicMock()
 
-        fake_thresholds = {"signals": {"test_monitor_enabled": True, "test_monitor_check_hour_ct": 0}}
+        # check_hour=9; time frozen to 09:05 CT so in_prod_window=True
+        # Shadow enabled (required for kill switch) but prod window is active → is_shadow_tick=False
+        fake_thresholds = {"signals": {"test_monitor_enabled": True, "test_monitor_check_hour_ct": 9}}
+
+        # Frozen CT time at 09:05 — satisfies (hour==9 and minute<10)
+        CT_TZ = pytz.timezone("America/Chicago")
+        frozen_ct = CT_TZ.localize(_real_dt(2024, 6, 1, 9, 5, 0))
+
+        class _FakeDt(_real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is not None:
+                    return frozen_ct.astimezone(tz)
+                return frozen_ct
 
         # Let the first sleep pass so the inner-loop body executes; raise on the second.
         _cleared_sleep_calls = [0]
@@ -496,6 +543,7 @@ class TestMarkClearedCalledOnNoAnomaly(unittest.TestCase):
              patch("demand_feed_main.alert_registry.mark_firing", MagicMock()), \
              patch("scout_ch._get_ch_client", MagicMock(return_value=MagicMock())), \
              patch("scout_core.job_runs.record_job_run", MagicMock()), \
+             patch(_dt_module.__name__ + ".datetime", _FakeDt), \
              patch("time.sleep", side_effect=_cleared_counting_sleep):
             try:
                 dm._run_shadow_monitor(
@@ -511,6 +559,136 @@ class TestMarkClearedCalledOnNoAnomaly(unittest.TestCase):
 
         self.assertEqual(len(cleared), 1, f"mark_cleared should be called once, got: {cleared}")
         self.assertEqual(cleared[0], "test-monitor")
+
+
+# ---------------------------------------------------------------------------
+# TestHourlyDedup: unit tests for _run_hourly_with_web deduplication logic
+# ---------------------------------------------------------------------------
+
+class TestHourlyDedup(unittest.TestCase):
+    """Unit tests for _run_hourly_with_web deduplication logic in scout_core.monitors."""
+
+    # Frozen CT time at 10:05 — inside default business hours (9-17)
+    _FROZEN_DATE = "2026-06-05"
+    _FROZEN_HOUR = 10
+    _EXPECTED_SLOT = f"{_FROZEN_DATE}T{_FROZEN_HOUR:02d}"
+
+    def _run_one_cycle(
+        self,
+        signal_fn,
+        format_fn,
+        save_slot_fn,
+        load_slot_fn,
+        load_context_fn,
+        save_context_fn,
+    ):
+        """Run _run_hourly_with_web for exactly one inner-loop cycle."""
+        import datetime as _dt_module
+        from datetime import datetime as _real_dt
+        import pytz
+
+        CT_TZ = pytz.timezone("America/Chicago")
+        frozen_ct = CT_TZ.localize(_real_dt(2026, 6, 5, self._FROZEN_HOUR, 5, 0))
+
+        class _FakeDt(_real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is not None:
+                    return frozen_ct.astimezone(tz)
+                return frozen_ct
+
+        sleep_calls = [0]
+
+        def _counting_sleep(secs):
+            sleep_calls[0] += 1
+            if sleep_calls[0] > 1:
+                raise StopIteration("one cycle done")
+
+        fake_web_instance = MagicMock()
+        fake_web_instance.chat_postMessage.return_value = {"ok": True}
+        fake_web_cls = MagicMock(return_value=fake_web_instance)
+
+        fake_ar = MagicMock()
+        fake_ar.current_state.return_value = []
+
+        from scout_core import monitors as _mon
+
+        with patch(_dt_module.__name__ + ".datetime", _FakeDt), \
+             patch("time.sleep", side_effect=_counting_sleep), \
+             patch("scout_ch._get_ch_client", return_value=MagicMock()), \
+             patch("scout_core.job_runs.record_job_run", MagicMock()), \
+             patch("slack_sdk.web.WebClient", fake_web_cls), \
+             patch.dict("sys.modules", {"alert_registry": fake_ar}):
+            try:
+                _mon._run_hourly_with_web(
+                    signal_fn=signal_fn,
+                    format_fn=format_fn,
+                    load_slot_fn=load_slot_fn,
+                    save_slot_fn=save_slot_fn,
+                    load_context_fn=load_context_fn,
+                    save_context_fn=save_context_fn,
+                    severity_key="cap_pct",
+                    escalation_pct=5.0,
+                    alert_name="test-cap",
+                )
+            except StopIteration:
+                pass
+
+        return fake_ar, fake_web_instance
+
+    def test_same_advertisers_no_escalation_deduplicates(self):
+        """Same advertisers, cap_pct unchanged → no re-fire, slot NOT saved."""
+        # Prior context: adv A at 87%; current results: adv A at 87% (no change)
+        signal_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 87.0}])
+        format_fn = MagicMock(return_value=("Alert!", [{"type": "section"}]))
+        save_slot_fn = MagicMock()
+        # Return a different slot so the already-fired-this-hour check passes
+        load_slot_fn = MagicMock(return_value="2026-06-05T09")
+        load_context_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 87.0}])
+        save_context_fn = MagicMock()
+
+        _ar, _web = self._run_one_cycle(
+            signal_fn, format_fn, save_slot_fn, load_slot_fn, load_context_fn, save_context_fn
+        )
+
+        signal_fn.assert_called_once()
+        format_fn.assert_not_called()
+        save_slot_fn.assert_not_called()
+
+    def test_escalation_at_exact_threshold_fires(self):
+        """cap_pct increase == escalation_pct (5%) → fires (>= not >)."""
+        # Prior: adv A at 85%; current: adv A at 90% (exactly +5 — meets >= threshold)
+        signal_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 90.0}])
+        format_fn = MagicMock(return_value=("Alert: cap at 90%", [{"type": "section"}]))
+        save_slot_fn = MagicMock()
+        load_slot_fn = MagicMock(return_value="2026-06-05T09")
+        load_context_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 85.0}])
+        save_context_fn = MagicMock()
+
+        _ar, _web = self._run_one_cycle(
+            signal_fn, format_fn, save_slot_fn, load_slot_fn, load_context_fn, save_context_fn
+        )
+
+        format_fn.assert_called_once()
+
+    def test_new_advertiser_fires_regardless_of_prior(self):
+        """New advertiser in results that wasn't in prior context → fires."""
+        # Prior context: adv A at 85%; current: adv A at 85% + adv B at 90%
+        signal_fn = MagicMock(return_value=[
+            {"adv_name": "adv_a", "cap_pct": 85.0},
+            {"adv_name": "adv_b", "cap_pct": 90.0},
+        ])
+        format_fn = MagicMock(return_value=("Alert: new advertiser!", [{"type": "section"}]))
+        save_slot_fn = MagicMock()
+        load_slot_fn = MagicMock(return_value="2026-06-05T09")
+        load_context_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 85.0}])
+        save_context_fn = MagicMock()
+
+        _ar, _web = self._run_one_cycle(
+            signal_fn, format_fn, save_slot_fn, load_slot_fn, load_context_fn, save_context_fn
+        )
+
+        format_fn.assert_called_once()
 
 
 if __name__ == "__main__":
