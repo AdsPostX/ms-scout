@@ -1619,13 +1619,12 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
             HAVING period_count >= {min_periods: Int32}
         ),
         names AS (
-            -- Exclude test accounts and internal super-admin accounts.
-            -- is_test filters Org Test and similar; endsWith(' Super') filters
-            -- named super-admin accounts (Jon Super, Ali Super, Gordon Super, etc.)
+            -- Exclude test accounts (match existing codebase pattern for Nullable UInt8).
+            -- Super-admin filtering done in Python post-processing (avoids LowCardinality
+            -- compatibility issues with endsWith in some ClickHouse versions).
             SELECT id AS publisher_id, organization AS publisher_name
             FROM mv_adpx_users
-            WHERE NOT is_test
-              AND NOT endsWith(organization, ' Super')
+            WHERE (is_test = false OR is_test IS NULL)
         )
         SELECT
             b.publisher_id,
@@ -1668,6 +1667,9 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
             "sessions_actual": int(r[5] or 0),
         }
         for r in rows
+        # Python-side super-admin filter (e.g. "Jon Super", "Ali Super") — kept out of
+        # SQL to avoid LowCardinality(String) compatibility issues with endsWith.
+        if not str(r[1]).endswith(" Super")
     ]
 
 
