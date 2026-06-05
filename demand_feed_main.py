@@ -1050,8 +1050,9 @@ def _run_shadow_monitor(
                         record_job_run(monitor_name, status="success", duration_ms=duration_ms)
                         if is_shadow_tick:
                             last_shadow_slot = shadow_slot
+                        else:
+                            alert_registry.mark_cleared(monitor_name)
                         log.info(f"{tag} no anomalies — staying silent.")
-                        alert_registry.mark_cleared(monitor_name)
                         continue
 
                     fallback, blocks = format_fn(results)
@@ -1073,7 +1074,6 @@ def _run_shadow_monitor(
 
                     from slack_sdk.web import WebClient as _WC
                     web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
-                    alert_registry.mark_firing(monitor_name, {"results_count": len(results), "channel": target_channel})
                     web.chat_postMessage(channel=target_channel, text=fallback, blocks=blocks)
 
                     from scout_core.job_runs import record_job_run
@@ -1083,6 +1083,7 @@ def _run_shadow_monitor(
                         last_shadow_slot = shadow_slot
                         log.info(f"{tag} shadow-posted {shadow_slot} ({len(results)} items) → {target_channel}.")
                     else:
+                        alert_registry.mark_firing(monitor_name, {"results_count": len(results), "channel": target_channel})
                         _PROD_FIRED[monitor_name] = today_str
                         save_state_fn(today_str)
                         log.info(f"{tag} posted alert for {today_str} ({len(results)} items).")

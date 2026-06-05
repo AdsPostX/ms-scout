@@ -74,6 +74,42 @@ def _get_redis():
     return _redis_client
 
 
+def _persist_registry_state() -> None:
+    """Persist current registry state to pulse_state.json for deploy-survivability."""
+    try:
+        from scout_state import _load_pulse_state, _save_pulse_state
+        state = _load_pulse_state()
+        state["alert_registry"] = {
+            name: {
+                "status": s.status,
+                "context": s.context,
+                "last_change": s.last_change.isoformat(),
+            }
+            for name, s in _STATE.items()
+        }
+        _save_pulse_state(state)
+    except Exception:
+        log.exception("alert_registry: failed to persist state")
+
+
+def _load_registry_from_state() -> None:
+    """Restore registry state from pulse_state.json on startup after a deploy."""
+    try:
+        from scout_state import _load_pulse_state
+        stored = _load_pulse_state().get("alert_registry", {})
+        for name, data in stored.items():
+            _STATE[name] = AlertState(
+                alert_name=name,
+                status=data["status"],
+                context=data.get("context", {}),
+                last_change=datetime.fromisoformat(data["last_change"]),
+            )
+        if stored:
+            log.info("alert_registry: restored %d alerts from pulse_state", len(stored))
+    except Exception:
+        log.exception("alert_registry: failed to restore state from pulse_state")
+
+
 def mark_firing(alert_name: str, context: dict[str, Any] | None = None) -> None:
     """Record that `alert_name` is firing. Idempotent — repeated calls are harmless."""
     if not alert_name:
@@ -96,6 +132,7 @@ def mark_firing(alert_name: str, context: dict[str, Any] | None = None) -> None:
                     context=dict(context or {}),
                     last_change=now,
                 )
+            _persist_registry_state()
     except Exception:
         log.exception("alert_registry.mark_firing failed (alert=%s)", alert_name)
 
@@ -111,6 +148,7 @@ def mark_cleared(alert_name: str) -> None:
         else:
             with _LOCK:
                 _STATE.pop(alert_name, None)
+            _persist_registry_state()
     except Exception:
         log.exception("alert_registry.mark_cleared failed (alert=%s)", alert_name)
 
@@ -141,3 +179,8 @@ def current_state(window_days: int = 7) -> list[AlertState]:
         return []
     snapshot.sort(key=lambda s: s.last_change, reverse=True)
     return snapshot
+
+
+# Restore registry state from pulse_state.json on module load (deploy-survivability).
+# Only applies to the in-memory fallback path; Redis handles its own persistence.
+_load_registry_from_state()
