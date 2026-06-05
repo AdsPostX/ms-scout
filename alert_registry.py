@@ -75,7 +75,11 @@ def _get_redis():
 
 
 def _persist_registry_state() -> None:
-    """Persist current registry state to pulse_state.json for deploy-survivability."""
+    """Persist current registry state to pulse_state.json for deploy-survivability.
+
+    Must be called while holding _LOCK to prevent TOCTOU races on _STATE.
+    The Redis path (when configured) handles its own persistence and this is a no-op.
+    """
     try:
         from scout_state import _load_pulse_state, _save_pulse_state
         state = _load_pulse_state()
@@ -93,7 +97,10 @@ def _persist_registry_state() -> None:
 
 
 def _load_registry_from_state() -> None:
-    """Restore registry state from pulse_state.json on startup after a deploy."""
+    """Restore registry state from pulse_state.json on startup after a deploy.
+
+    Safe without _LOCK: called at module import time, before any monitor threads start.
+    """
     try:
         from scout_state import _load_pulse_state
         stored = _load_pulse_state().get("alert_registry", {})
@@ -132,7 +139,7 @@ def mark_firing(alert_name: str, context: dict[str, Any] | None = None) -> None:
                     context=dict(context or {}),
                     last_change=now,
                 )
-            _persist_registry_state()
+                _persist_registry_state()
     except Exception:
         log.exception("alert_registry.mark_firing failed (alert=%s)", alert_name)
 
@@ -148,7 +155,7 @@ def mark_cleared(alert_name: str) -> None:
         else:
             with _LOCK:
                 _STATE.pop(alert_name, None)
-            _persist_registry_state()
+                _persist_registry_state()
     except Exception:
         log.exception("alert_registry.mark_cleared failed (alert=%s)", alert_name)
 
