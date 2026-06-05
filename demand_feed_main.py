@@ -758,13 +758,19 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: Optional[str] = 
 def _revenue_tracker_daemon() -> None:
     """Demand-feed port of scout_bot._revenue_tracker.
 
-    Proactive intraday revenue alert at 3pm CT on weekdays.
+    Hourly mode (revenue_tracker_hourly_enabled=true, default):
+      Posts during business hours (9am–5pm CT) whenever revenue drops below
+      threshold. Smart deduplication: re-fires only when pct_of_expected drops
+      by >= revenue_tracker_refire_drop_pct since the last posted alert.
+      Uses YYYY-MM-DDTHH slot for per-hour idempotency.
+
+    Daily fallback (revenue_tracker_hourly_enabled=false):
+      Legacy once-daily behaviour at revenue_tracker_check_hour_ct (now 10am CT).
+
     Kill switch: REVENUE_TRACKER_ENABLED env var (default false — off).
     Wired to job_runs telemetry via scout_core.job_runs.record_job_run.
 
-    Runs every 5 minutes. Fires at most once per calendar day (state in
-    pulse_state.json via scout_state). Posts to REVENUE_ALERT_CHANNEL
-    (default: #revenue-operations channel id from REVENUE_OPS_CHANNEL env var).
+    Posts to REVENUE_OPS_CHANNEL (production) or #bot-qa (non-production).
 
     Outer restart wrapper: any unhandled crash logs the traceback and restarts
     after 30s so the thread stays alive indefinitely without a Render redeploy.
@@ -776,6 +782,7 @@ def _revenue_tracker_daemon() -> None:
     from scout_ch import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher, _get_ch_client
     from scout_state import _load_revenue_alert_state, _save_revenue_alert_date
     from scout_core.job_runs import record_job_run
+    from scout_agent import SCOUT_THRESHOLDS as _ST
 
     _HQ_CHANNEL = "C0AQEECF800"  # #bot-qa fallback (matches scout_bot._SCOUT_HQ_CHANNEL)
 
@@ -788,7 +795,17 @@ def _revenue_tracker_daemon() -> None:
     while True:  # outer restart wrapper — self-heals any unhandled crash
         try:
             CT_TZ      = pytz.timezone("America/Chicago")
-            check_hour = int(os.getenv("REVENUE_TRACKER_CHECK_HOUR_CT", "15"))
+            sig        = _ST.get("signals", {})
+            check_hour = int(sig.get("revenue_tracker_check_hour_ct",
+                             os.getenv("REVENUE_TRACKER_CHECK_HOUR_CT", "10")))
+            hourly_enabled     = sig.get("revenue_tracker_hourly_enabled", True)
+            hourly_start       = int(sig.get("revenue_tracker_hourly_start_ct", 9))
+            hourly_end         = int(sig.get("revenue_tracker_hourly_end_ct", 17))
+            refire_drop_pct    = float(sig.get("revenue_tracker_refire_drop_pct", 10))
+
+            # In-memory: last pct_of_expected we alerted on (for dedup comparison)
+            last_alerted_pct: float | None = None
+            last_rev_slot: str | None      = None
 
             while True:  # inner poll loop
                 _time.sleep(300)  # 5-min poll
@@ -803,13 +820,26 @@ def _revenue_tracker_daemon() -> None:
                     if now_ct.weekday() >= 5:
                         continue
 
-                    # Fire window: target hour ± 10 minutes
-                    if not (now_ct.hour == check_hour and now_ct.minute < 10):
-                        continue
-
                     today_str = now_ct.date().isoformat()
-                    if _load_revenue_alert_state() == today_str:
-                        continue  # already posted today
+
+                    if hourly_enabled:
+                        # Business-hours gate
+                        if not (hourly_start <= now_ct.hour < hourly_end):
+                            continue
+
+                        slot = f"{today_str}T{now_ct.hour:02d}"
+                        if last_rev_slot == slot:
+                            continue  # already handled this hour
+
+                    else:
+                        # Legacy: fire window — target hour ± 10 minutes
+                        if not (now_ct.hour == check_hour and now_ct.minute < 10):
+                            continue
+
+                        if _load_revenue_alert_state() == today_str:
+                            continue  # already posted today
+
+                        slot = today_str  # not used below in daily mode
 
                     channel = _get_channel()
                     web = WebClient(token=os.getenv("SLACK_BOT_TOKEN", ""))
@@ -822,7 +852,10 @@ def _revenue_tracker_daemon() -> None:
                         total = _query_intraday_revenue_total(ch)
                     except Exception as e:
                         log.warning("[revenue-tracker] Phase 1 query failed: %s", e)
-                        _save_revenue_alert_date(today_str)  # avoid hammering on CH error
+                        if not hourly_enabled:
+                            _save_revenue_alert_date(today_str)  # avoid hammering on CH error
+                        else:
+                            last_rev_slot = slot  # skip this hour on error
                         record_job_run(
                             "revenue_tracker",
                             status="error",
@@ -833,7 +866,17 @@ def _revenue_tracker_daemon() -> None:
 
                     if total is None:
                         # Revenue within normal range — mark checked, stay silent
-                        _save_revenue_alert_date(today_str)
+                        if not hourly_enabled:
+                            _save_revenue_alert_date(today_str)
+                        else:
+                            last_rev_slot = slot
+                            # If we had an active revenue alert, clear it
+                            if last_alerted_pct is not None:
+                                firing_names = {s.alert_name for s in alert_registry.current_state()}
+                                if "revenue_tracker" in firing_names:
+                                    alert_registry.mark_cleared("revenue_tracker")
+                                last_alerted_pct = None
+                                log.info("[revenue-tracker] Revenue on pace — alert cleared.")
                         log.info("[revenue-tracker] Revenue on pace — no alert needed.")
                         record_job_run(
                             "revenue_tracker",
@@ -841,6 +884,24 @@ def _revenue_tracker_daemon() -> None:
                             duration_ms=int((_time.monotonic() - _t0) * 1000),
                         )
                         continue
+
+                    # Revenue below threshold
+                    curr_pct = float(total.get("pct_of_expected", 0))
+
+                    if hourly_enabled and last_alerted_pct is not None:
+                        # Deduplicate: only re-fire if pct dropped by >= refire_drop_pct
+                        if curr_pct > last_alerted_pct - refire_drop_pct:
+                            log.info(
+                                "[revenue-tracker] dedup — pct=%.1f%% last_alerted=%.1f%% "
+                                "no significant drop (slot=%s).",
+                                curr_pct, last_alerted_pct, slot,
+                            )
+                            last_rev_slot = slot
+                            record_job_run(
+                                "revenue_tracker", status="success",
+                                duration_ms=int((_time.monotonic() - _t0) * 1000),
+                            )
+                            continue
 
                     # Phase 2: per-publisher decomposition
                     try:
@@ -851,11 +912,18 @@ def _revenue_tracker_daemon() -> None:
 
                     fallback, blocks = _format_revenue_alert(total, publishers)
                     web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
-                    _save_revenue_alert_date(today_str)
+
+                    if not hourly_enabled:
+                        _save_revenue_alert_date(today_str)
+                    else:
+                        last_rev_slot = slot
+                        last_alerted_pct = curr_pct
+                        alert_registry.mark_firing("revenue_tracker", {"slot": slot, "pct_of_expected": curr_pct})
+
                     duration_ms = int((_time.monotonic() - _t0) * 1000)
                     log.info(
                         "[revenue-tracker] Alert posted for %s (%.0f%% of expected).",
-                        today_str, total["pct_of_expected"],
+                        today_str, curr_pct,
                     )
                     record_job_run(
                         "revenue_tracker",
@@ -1096,15 +1164,176 @@ def _run_shadow_monitor(
             import time as _t2; _t2.sleep(30)
 
 
+def _run_hourly_with_web(
+    *,
+    signal_fn,
+    format_fn,
+    config_key: str,
+    load_slot_fn,
+    save_slot_fn,
+    load_context_fn,
+    save_context_fn,
+    severity_key: str,
+    escalation_pct: float,
+    alert_name: str,
+    hourly_start: int = 9,
+    hourly_end: int = 17,
+) -> None:
+    """Generic hourly daemon for cap/revenue monitors with smart deduplication.
+
+    Polls every 5 minutes. During business hours (hourly_start <= hour < hourly_end CT):
+      - Uses YYYY-MM-DDTHH slot for per-hour idempotency.
+      - Fires only when new advertisers appear or existing ones escalate by > escalation_pct.
+      - Posts a resolved message when the condition clears.
+      - Slot is NOT saved on dedup so next hour can re-check in case severity changes.
+
+    Outer restart wrapper: any unhandled crash logs the traceback and restarts
+    after 30s so the thread stays alive indefinitely without a Render redeploy.
+    """
+    import time as _time
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    from slack_sdk.web import WebClient as _WC
+    from scout_ch import _get_ch_client
+    from scout_core.job_runs import record_job_run
+
+    CT_TZ = ZoneInfo("America/Chicago")
+    tag = f"[{alert_name}]"
+
+    while True:  # outer restart wrapper — self-heals any unhandled crash
+        try:
+            while True:  # inner poll loop
+                _time.sleep(300)  # 5-minute poll interval
+                try:
+                    now_ct = _dt.now(CT_TZ)
+
+                    # Business-hours gate
+                    if not (hourly_start <= now_ct.hour < hourly_end):
+                        continue
+
+                    slot = f"{now_ct.date().isoformat()}T{now_ct.hour:02d}"
+                    if load_slot_fn() == slot:
+                        continue  # already fired this hour
+
+                    t0 = _time.monotonic()
+                    try:
+                        results = signal_fn(_get_ch_client())
+                    except Exception as e:
+                        log.warning(f"{tag} signal query failed: {e}")
+                        record_job_run(alert_name, status="error",
+                                       duration_ms=int((_time.monotonic() - t0) * 1000),
+                                       error=str(e)[:400])
+                        continue
+
+                    results = results or []
+                    duration_ms = int((_time.monotonic() - t0) * 1000)
+
+                    if not results:
+                        # Condition cleared — post resolved message if alert was active
+                        firing_names = {s.alert_name for s in alert_registry.current_state()}
+                        if alert_name in firing_names:
+                            web = _WC(token=os.getenv("SLACK_BOT_TOKEN", ""))
+                            channel = os.getenv("SCOUT_MONITOR_CHANNEL", "#scout-offers")
+                            if os.getenv("SCOUT_ENV", "development") != "production":
+                                channel = os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa")
+                            web.chat_postMessage(
+                                channel=channel,
+                                text=f"✅ {alert_name} resolved — no advertisers above threshold.",
+                            )
+                            alert_registry.mark_cleared(alert_name)
+                            save_slot_fn(slot)
+                            log.info(f"{tag} condition cleared — resolved message posted.")
+                        record_job_run(alert_name, status="success", duration_ms=duration_ms)
+                        continue
+
+                    # Load prior context for severity comparison
+                    prior = load_context_fn()
+                    prior_by_name = {
+                        str(r.get("adv_name", "")).strip().lower(): r
+                        for r in prior
+                    }
+                    current_names = {str(r.get("adv_name", "")).strip().lower() for r in results}
+                    prior_names = set(prior_by_name.keys())
+
+                    new_advertisers = current_names - prior_names
+                    escalated = set()
+                    for r in results:
+                        name = str(r.get("adv_name", "")).strip().lower()
+                        if name in prior_by_name:
+                            prior_val = float(prior_by_name[name].get(severity_key, 0))
+                            curr_val = float(r.get(severity_key, 0))
+                            if curr_val > prior_val + escalation_pct:
+                                escalated.add(name)
+
+                    if not new_advertisers and not escalated:
+                        # Same advertisers, severity unchanged or improved — deduplicate
+                        # Do NOT save slot so next hour can re-check
+                        log.info(f"{tag} dedup — same advertisers, no escalation (slot {slot}).")
+                        record_job_run(alert_name, status="success", duration_ms=duration_ms)
+                        continue
+
+                    # New or escalated — fire the alert
+                    fallback, blocks = format_fn(results)
+                    if not fallback:
+                        record_job_run(alert_name, status="success", duration_ms=duration_ms)
+                        continue
+
+                    web = _WC(token=os.getenv("SLACK_BOT_TOKEN", ""))
+                    channel = os.getenv("SCOUT_MONITOR_CHANNEL", "#scout-offers")
+                    if os.getenv("SCOUT_ENV", "development") != "production":
+                        channel = os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa")
+                    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
+
+                    alert_registry.mark_firing(alert_name, {"slot": slot, "count": len(results)})
+                    save_context_fn(results)
+                    save_slot_fn(slot)
+                    record_job_run(alert_name, status="success", duration_ms=duration_ms)
+                    log.info(
+                        f"{tag} posted alert slot={slot} new={len(new_advertisers)} "
+                        f"escalated={len(escalated)} total={len(results)}."
+                    )
+
+                except Exception as e:
+                    log.warning(f"{tag} unexpected error: {e}")
+
+        except Exception as e:
+            log.error(f"{tag} fatal crash — restarting in 30s: {e}", exc_info=True)
+            import time as _t2; _t2.sleep(30)
+
+
 def _cap_monitor_daemon() -> None:
-    from scout_state import _load_cap_alert_state, _save_cap_alert_date
-    from scout_bot import _pulse_signal_cap
-    from scout_bot import _format_cap_alert
-    _run_shadow_monitor(
-        monitor_name="cap-monitor", config_key="cap",
-        signal_fn=_pulse_signal_cap, format_fn=_format_cap_alert,
-        load_state_fn=_load_cap_alert_state, save_state_fn=_save_cap_alert_date,
+    from scout_state import (
+        _load_cap_alert_slot, _save_cap_alert_slot,
+        _load_cap_alert_context, _save_cap_alert_context,
     )
+    from scout_bot import _pulse_signal_cap, _format_cap_alert
+    from scout_agent import SCOUT_THRESHOLDS as _ST
+
+    sig = _ST.get("signals", {})
+    hourly_enabled = sig.get("cap_monitor_hourly_enabled", True)
+
+    if hourly_enabled:
+        _run_hourly_with_web(
+            signal_fn=_pulse_signal_cap,
+            format_fn=_format_cap_alert,
+            config_key="cap",
+            load_slot_fn=_load_cap_alert_slot,
+            save_slot_fn=_save_cap_alert_slot,
+            load_context_fn=_load_cap_alert_context,
+            save_context_fn=_save_cap_alert_context,
+            severity_key="cap_pct",
+            escalation_pct=float(sig.get("cap_monitor_severity_escalation_pct", 5)),
+            alert_name="cap_alert",
+            hourly_start=int(sig.get("cap_monitor_hourly_start_ct", 9)),
+            hourly_end=int(sig.get("cap_monitor_hourly_end_ct", 17)),
+        )
+    else:
+        from scout_state import _load_cap_alert_state, _save_cap_alert_date
+        _run_shadow_monitor(
+            monitor_name="cap-monitor", config_key="cap",
+            signal_fn=_pulse_signal_cap, format_fn=_format_cap_alert,
+            load_state_fn=_load_cap_alert_state, save_state_fn=_save_cap_alert_date,
+        )
 
 
 def _velocity_down_monitor_daemon() -> None:

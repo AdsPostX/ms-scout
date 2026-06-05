@@ -302,6 +302,46 @@ def _save_expiration_alert_date(date_str: str) -> None:
     _update_pulse_state("last_expiration_alert_date", date_str)
 
 
+# ── Cap alert hourly slot + context (Phase 2) ─────────────────────────────────
+# Slot key ("YYYY-MM-DDTHH") persisted so a mid-hour restart does not re-fire.
+# Context snapshot stores normalized advertiser rows for severity comparison so
+# we only re-alert when severity genuinely escalates (not on float drift).
+
+def _save_cap_alert_slot(slot: str) -> None:
+    """Persist 'YYYY-MM-DDTHH' as last cap alert slot (hourly mode)."""
+    state = _load_pulse_state()
+    state["last_cap_alert_slot"] = slot
+    _save_pulse_state(state)
+
+
+def _load_cap_alert_slot() -> str | None:
+    """Return the last cap alert slot string (YYYY-MM-DDTHH), or None."""
+    return _load_pulse_state().get("last_cap_alert_slot")
+
+
+def _save_cap_alert_context(advertisers: list[dict]) -> None:
+    """Store the advertiser snapshot from the last cap alert for severity comparison.
+    ALWAYS replaces the full list — never appends.
+    Advertisers normalized: adv_name.strip().lower(), cap_pct rounded to 1dp.
+    """
+    normalized = [
+        {
+            **adv,
+            "adv_name": str(adv.get("adv_name", "")).strip().lower(),
+            "cap_pct": round(float(adv.get("cap_pct", 0)), 1),
+        }
+        for adv in advertisers
+    ]
+    state = _load_pulse_state()
+    state["last_cap_alert_advertisers"] = normalized  # replace, not append
+    _save_pulse_state(state)
+
+
+def _load_cap_alert_context() -> list[dict]:
+    """Return the stored advertiser snapshot from the last cap alert."""
+    return _load_pulse_state().get("last_cap_alert_advertisers", [])
+
+
 # ── Projection autocheck slot ─────────────────────────────────────────────────
 # Hourly CT-anchored slot key ("YYYY-MM-DDTHH") for the projection autocheck
 # monitor — fires once per CT hour into #sidd-qa. Persisted so a mid-hour
