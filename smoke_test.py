@@ -269,14 +269,18 @@ def test_pulse_summary_shape():
         if "has_pulse" not in result:
             return False, "has_pulse key missing from get_pulse_summary() result"
         if result["has_pulse"]:
-            required = ["had_content", "cap_alerts_count", "ghost_campaigns_count", "opportunities_count"]
+            required = ["had_content", "fired_today", "currently_active"]
             missing = [k for k in required if k not in result]
             if missing:
                 return False, f"has_pulse=True but missing keys: {missing}"
+            expected_signal_keys = {"cap", "velocity_down", "ghost", "fill_rate", "cvr_anomaly", "expiration"}
+            actual_keys = set(result["fired_today"].keys())
+            if actual_keys != expected_signal_keys:
+                return False, f"fired_today keys mismatch: got {actual_keys}, expected {expected_signal_keys}"
+            fired = [k for k, v in result["fired_today"].items() if v]
             return True, (
-                f"has_pulse=True — cap_alerts={result.get('cap_alerts_count')}, "
-                f"ghosts={result.get('ghost_campaigns_count')}, "
-                f"opportunities={result.get('opportunities_count')}"
+                f"has_pulse=True — fired_today: {fired}, "
+                f"currently_active={len(result.get('currently_active', []))}"
             )
         else:
             if "message" not in result:

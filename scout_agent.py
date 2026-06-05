@@ -1527,13 +1527,11 @@ TOOLS = [
     {
         "name": "get_pulse_summary",
         "description": (
-            "Return a summary of what the most recent shadow monitor run flagged — "
-            "cap alerts (with publisher names), velocity shifts, ghost campaigns, and fill rate alerts. "
-            "This reflects the state from the last time the hourly shadow monitors fired, not a scheduled briefing. "
-            "Use when the team asks: 'what did Scout flag', 'what did Scout catch', "
-            "'did anything get flagged', 'any recent alerts', 'what signals fired', "
-            "'what was in the last monitor run', 'recent Scout signals', 'monitor recap'. "
-            "Returns has_pulse=False with a message when no monitor run has fired yet."
+            "Returns which monitoring signals have fired today (cap, velocity, ghost, fill, CVR anomaly, expiration). "
+            "Use for: 'what did Scout flag today', 'what alerted this morning', 'what signals fired', "
+            "'did anything fire', 'any alerts today', 'recent Scout signals', 'monitor recap'. "
+            "Returns fired_today dict with per-signal booleans and currently_active list. "
+            "Returns has_pulse=False with a message when no signals have fired yet today."
         ),
         "input_schema": {
             "type": "object",
@@ -2744,12 +2742,13 @@ def get_pulse_summary() -> dict:
       message (str): human-readable summary
     """
     try:
-        import datetime as _dt
+        # alert_registry imported locally — it initialises the registry on import and
+        # must not run at module load time (it has side-effects / may not be available
+        # in test environments that only import scout_agent without the daemon running).
         import alert_registry as _ar
-        from zoneinfo import ZoneInfo as _ZI
 
         state = _load_pulse_state_local()
-        today = _dt.datetime.now(_ZI("America/Chicago")).date().isoformat()
+        today = _dt_mod.datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
 
         # Cap: after Phase 2, key is last_cap_alert_slot (YYYY-MM-DDTHH prefix)
         # Before Phase 2, key is last_cap_alert_date (YYYY-MM-DD)
