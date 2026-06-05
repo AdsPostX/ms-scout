@@ -335,14 +335,6 @@ def _retry_with_hint(web: WebClient, channel: str, msg_ts: str,
         return False
 
 
-def _seed_feedback_reactions(web: WebClient, channel: str, ts: str) -> None:
-    """No-op. Seeded 👍/👎 reactions made Scout look like it was voting on itself,
-    eroding trust in the affordance. Call sites kept for diff-stability; the
-    affordance is now Block Kit buttons + a microcopy line under each response.
-    """
-    return
-
-
 def _permalink_for(web: WebClient, channel: str, msg_ts: str) -> str:
     """Best-effort Slack permalink for a user message. Empty string on failure.
 
@@ -2345,7 +2337,6 @@ def _handle_event_impl(req: SocketModeRequest):
                     channel=channel, thread_ts=thread_ts,
                     text=_result, unfurl_links=False,
                 )
-                _seed_feedback_reactions(web, channel, (_rpost.get("ts") or thread_ts or msg_ts))
                 log.info(f"[remember shortcut] {_ename!r} ({_etype}) logged by {user_id}")
                 return
         except Exception as _re:
@@ -2372,7 +2363,6 @@ def _handle_event_impl(req: SocketModeRequest):
                 channel=channel, thread_ts=thread_ts,
                 text=_wresult, unfurl_links=False,
             )
-            _seed_feedback_reactions(web, channel, (_wpost.get("ts") or thread_ts or msg_ts))
             log.info(f"[why shortcut] {_wentity!r} by {user_id}")
             return
         except Exception as _we:
@@ -2405,7 +2395,6 @@ def _handle_event_impl(req: SocketModeRequest):
                 channel=channel, thread_ts=thread_ts,
                 text=_fresult, unfurl_links=False,
             )
-            _seed_feedback_reactions(web, channel, (_fpost.get("ts") or thread_ts or msg_ts))
             log.info(f"[forget shortcut] {_fentity!r} by {user_id}")
             return
         except Exception as _fe:
@@ -2782,7 +2771,6 @@ def _handle_event_impl(req: SocketModeRequest):
                 blocks=blocks,
                 unfurl_links=False,
             )
-            _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         elif response.payload and response.payload.get("type") == "opportunities":
             header_text       = _sanitize_slack(response.text)
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
@@ -2799,7 +2787,6 @@ def _handle_event_impl(req: SocketModeRequest):
                 text=_dm5_fallback, blocks=_dm5_final,
                 unfurl_links=False,
             )
-            _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         else:
             response_text  = _sanitize_slack(response.text)[:3000]
             content_blocks = _text_to_blocks(response_text)
@@ -2821,7 +2808,6 @@ def _handle_event_impl(req: SocketModeRequest):
                 text=_dm6_fallback, blocks=_dm6_blocks,
                 unfurl_links=False,
             )
-            _seed_feedback_reactions(web, channel, _post.get("ts", ""))
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
 
@@ -2936,7 +2922,6 @@ def _handle_event_impl(req: SocketModeRequest):
             text=fallback_text,
             blocks=blocks,
         )
-        _seed_feedback_reactions(web, channel, placeholder["ts"])
         log.info(f"Posted Block Kit brief for {brief_data.get('advertiser')} in {channel}")
 
         # Async tracking URL check — fires when brief is first shown, before any queue action
@@ -2960,7 +2945,6 @@ def _handle_event_impl(req: SocketModeRequest):
             ts=_placeholder_ts,
             text=_ch7_fallback, blocks=_ch7_final,
         )
-        _seed_feedback_reactions(web, channel, _placeholder_ts)
         log.info(f"Posted opportunity cards ({len(response.payload.get('offers', []))} offers) in {channel}")
 
     else:
@@ -2984,6 +2968,5 @@ def _handle_event_impl(req: SocketModeRequest):
             ts=_placeholder_ts,
             text=_ch8_fallback, blocks=_ch8_blocks,
         )
-        _seed_feedback_reactions(web, channel, _placeholder_ts)
         log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
 

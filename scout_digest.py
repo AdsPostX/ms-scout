@@ -330,26 +330,23 @@ def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def record_approval(offer_id: str, advertiser: str, payout: str, actioned_by: str):
+def _record_action(action: str, offer_id: str, advertiser: str, payout: str, actioned_by: str):
     state = load_state()
-    state.setdefault("approved", {})[str(offer_id)] = {
+    state.setdefault(action, {})[str(offer_id)] = {
         "advertiser": advertiser,
         "payout_at_action": payout,
         "actioned_by": actioned_by,
         "actioned_at": datetime.utcnow().isoformat(),
     }
     save_state(state)
+
+
+def record_approval(offer_id: str, advertiser: str, payout: str, actioned_by: str):
+    _record_action("approved", offer_id, advertiser, payout, actioned_by)
 
 
 def record_rejection(offer_id: str, advertiser: str, payout: str, actioned_by: str):
-    state = load_state()
-    state.setdefault("rejected", {})[str(offer_id)] = {
-        "advertiser": advertiser,
-        "payout_at_action": payout,
-        "actioned_by": actioned_by,
-        "actioned_at": datetime.utcnow().isoformat(),
-    }
-    save_state(state)
+    _record_action("rejected", offer_id, advertiser, payout, actioned_by)
 
 
 # ── ClickHouse: active MS campaigns for deduplication ─────────────────────────

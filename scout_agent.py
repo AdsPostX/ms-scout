@@ -58,6 +58,18 @@ _set_geo_normalizer(_normalize_geo)
 log = logging.getLogger("scout_agent")
 
 
+def _fmt_rev(amount: float | None) -> str:
+    """Format a revenue float as a compact human-readable dollar string."""
+    if amount is None:
+        return "$?"
+    if amount >= 10_000:
+        return f"${round(amount / 100) * 100 / 1000:.0f}K"
+    if amount >= 1_000:
+        rounded = round(amount / 100) * 100
+        return f"${rounded:,.0f}"
+    return f"${amount:,.0f}"
+
+
 # ── Part 4 (plan v3): typed boundary contract for ask() ──────────────────────
 # Replaces the old Union[str, dict] return shape that left tools_called gated on
 # a defensive isinstance check in scout_handlers, producing empty usage_log rows
@@ -4792,16 +4804,6 @@ def get_revenue_today() -> dict:
     """
     import datetime as _dt_mod
 
-    def _fmt_rev(amount: float) -> str:
-        """Round revenue to human-readable form."""
-        if amount >= 10_000:
-            return f"${round(amount / 100) * 100 / 1000:.0f}K"
-        elif amount >= 1_000:
-            rounded = round(amount / 100) * 100
-            return f"${rounded:,.0f}"
-        else:
-            return f"${amount:,.0f}"
-
     def _signal(today_rev: float, avg_rev: float) -> str:
         if avg_rev <= 0:
             return "🟢"
@@ -4930,17 +4932,6 @@ def get_revenue_today_projection() -> dict:
         insufficient_history  → verbatim helper string
         unstable / error      → verbatim helper string
     """
-    def _fmt_rev(amount: float) -> str:
-        if amount is None:
-            return "$?"
-        if amount >= 10_000:
-            return f"${round(amount / 100) * 100 / 1000:.0f}K"
-        elif amount >= 1_000:
-            rounded = round(amount / 100) * 100
-            return f"${rounded:,.0f}"
-        else:
-            return f"${amount:,.0f}"
-
     try:
         ch = _get_ch_client()
         result = project_today_revenue(ch)
@@ -5701,12 +5692,24 @@ def _split_dotted_key(dotted: str) -> tuple[str, str]:
 
 
 def _format_dict_response(title: str, data: dict) -> str:
-    """Slack-friendly JSON dump for control-surface tool results."""
-    try:
-        body = json.dumps(data, indent=2, default=str, sort_keys=True)
-    except Exception:
-        body = repr(data)
-    return f"*{title}*\n```\n{body}\n```"
+    """Slack-friendly key-value dump for control-surface tool results.
+
+    Fenced code blocks are intentionally avoided: _escape_md_code() in
+    scout_ui_kit collapses them to their first content line (the opening '{'),
+    which would render the entire dict as a lone '{' in Slack.
+    """
+    def _fmt(v: object) -> str:
+        if isinstance(v, dict):
+            return " · ".join(f"{k}: {v2}" for k, v2 in v.items())
+        if isinstance(v, list):
+            joined = ", ".join(str(x) for x in v[:8])
+            return joined + ("…" if len(v) > 8 else "")
+        return str(v)
+
+    lines = [f"*{title}*"]
+    for key, val in (data or {}).items():
+        lines.append(f"• *{key}*: {_fmt(val)}")
+    return "\n".join(lines)
 
 
 def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]:
