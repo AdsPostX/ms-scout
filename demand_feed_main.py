@@ -780,7 +780,12 @@ def _revenue_tracker_daemon() -> None:
     from datetime import datetime as _dt
     from slack_sdk.web import WebClient
     from scout_ch import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher, _get_ch_client
-    from scout_state import _load_revenue_alert_state, _save_revenue_alert_date
+    from scout_state import (
+        _load_revenue_alert_state, _save_revenue_alert_date,
+        _load_revenue_alert_slot, _save_revenue_alert_slot,
+        _load_revenue_alert_context, _save_revenue_alert_context,
+        _clear_revenue_alert_context,
+    )
     from scout_core.job_runs import record_job_run
     from scout_agent import SCOUT_THRESHOLDS as _ST
 
@@ -803,10 +808,6 @@ def _revenue_tracker_daemon() -> None:
             hourly_end         = int(sig.get("revenue_tracker_hourly_end_ct", 17))
             refire_drop_pct    = float(sig.get("revenue_tracker_refire_drop_pct", 10))
 
-            # In-memory: last pct_of_expected we alerted on (for dedup comparison)
-            last_alerted_pct: float | None = None
-            last_rev_slot: str | None      = None
-
             while True:  # inner poll loop
                 _time.sleep(300)  # 5-min poll
                 try:
@@ -828,7 +829,7 @@ def _revenue_tracker_daemon() -> None:
                             continue
 
                         slot = f"{today_str}T{now_ct.hour:02d}"
-                        if last_rev_slot == slot:
+                        if _load_revenue_alert_slot() == slot:
                             continue  # already handled this hour
 
                     else:
@@ -855,7 +856,7 @@ def _revenue_tracker_daemon() -> None:
                         if not hourly_enabled:
                             _save_revenue_alert_date(today_str)  # avoid hammering on CH error
                         else:
-                            last_rev_slot = slot  # skip this hour on error
+                            _save_revenue_alert_slot(slot)  # skip this hour on error
                         record_job_run(
                             "revenue_tracker",
                             status="error",
@@ -869,13 +870,13 @@ def _revenue_tracker_daemon() -> None:
                         if not hourly_enabled:
                             _save_revenue_alert_date(today_str)
                         else:
-                            last_rev_slot = slot
+                            _save_revenue_alert_slot(slot)
                             # If we had an active revenue alert, clear it
-                            if last_alerted_pct is not None:
+                            if _load_revenue_alert_context() is not None:
                                 firing_names = {s.alert_name for s in alert_registry.current_state()}
                                 if "revenue_tracker" in firing_names:
                                     alert_registry.mark_cleared("revenue_tracker")
-                                last_alerted_pct = None
+                                _clear_revenue_alert_context()
                                 log.info("[revenue-tracker] Revenue on pace — alert cleared.")
                         log.info("[revenue-tracker] Revenue on pace — no alert needed.")
                         record_job_run(
@@ -888,15 +889,16 @@ def _revenue_tracker_daemon() -> None:
                     # Revenue below threshold
                     curr_pct = float(total.get("pct_of_expected", 0))
 
-                    if hourly_enabled and last_alerted_pct is not None:
+                    _last_alerted_pct = _load_revenue_alert_context()
+                    if hourly_enabled and _last_alerted_pct is not None:
                         # Deduplicate: only re-fire if pct dropped by >= refire_drop_pct
-                        if curr_pct > last_alerted_pct - refire_drop_pct:
+                        if curr_pct > _last_alerted_pct - refire_drop_pct:
                             log.info(
                                 "[revenue-tracker] dedup — pct=%.1f%% last_alerted=%.1f%% "
                                 "no significant drop (slot=%s).",
-                                curr_pct, last_alerted_pct, slot,
+                                curr_pct, _last_alerted_pct, slot,
                             )
-                            last_rev_slot = slot
+                            _save_revenue_alert_slot(slot)
                             record_job_run(
                                 "revenue_tracker", status="success",
                                 duration_ms=int((_time.monotonic() - _t0) * 1000),
@@ -916,8 +918,8 @@ def _revenue_tracker_daemon() -> None:
                     if not hourly_enabled:
                         _save_revenue_alert_date(today_str)
                     else:
-                        last_rev_slot = slot
-                        last_alerted_pct = curr_pct
+                        _save_revenue_alert_slot(slot)
+                        _save_revenue_alert_context(curr_pct)
                         alert_registry.mark_firing("revenue_tracker", {"slot": slot, "pct_of_expected": curr_pct})
 
                     duration_ms = int((_time.monotonic() - _t0) * 1000)
@@ -1164,141 +1166,7 @@ def _run_shadow_monitor(
             import time as _t2; _t2.sleep(30)
 
 
-def _run_hourly_with_web(
-    *,
-    signal_fn,
-    format_fn,
-    config_key: str,
-    load_slot_fn,
-    save_slot_fn,
-    load_context_fn,
-    save_context_fn,
-    severity_key: str,
-    escalation_pct: float,
-    alert_name: str,
-    hourly_start: int = 9,
-    hourly_end: int = 17,
-) -> None:
-    """Generic hourly daemon for cap/revenue monitors with smart deduplication.
-
-    Polls every 5 minutes. During business hours (hourly_start <= hour < hourly_end CT):
-      - Uses YYYY-MM-DDTHH slot for per-hour idempotency.
-      - Fires only when new advertisers appear or existing ones escalate by > escalation_pct.
-      - Posts a resolved message when the condition clears.
-      - Slot is NOT saved on dedup so next hour can re-check in case severity changes.
-
-    Outer restart wrapper: any unhandled crash logs the traceback and restarts
-    after 30s so the thread stays alive indefinitely without a Render redeploy.
-    """
-    import time as _time
-    from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
-    from slack_sdk.web import WebClient as _WC
-    from scout_ch import _get_ch_client
-    from scout_core.job_runs import record_job_run
-
-    CT_TZ = ZoneInfo("America/Chicago")
-    tag = f"[{alert_name}]"
-
-    while True:  # outer restart wrapper — self-heals any unhandled crash
-        try:
-            while True:  # inner poll loop
-                _time.sleep(300)  # 5-minute poll interval
-                try:
-                    now_ct = _dt.now(CT_TZ)
-
-                    # Business-hours gate
-                    if not (hourly_start <= now_ct.hour < hourly_end):
-                        continue
-
-                    slot = f"{now_ct.date().isoformat()}T{now_ct.hour:02d}"
-                    if load_slot_fn() == slot:
-                        continue  # already fired this hour
-
-                    t0 = _time.monotonic()
-                    try:
-                        results = signal_fn(_get_ch_client())
-                    except Exception as e:
-                        log.warning(f"{tag} signal query failed: {e}")
-                        record_job_run(alert_name, status="error",
-                                       duration_ms=int((_time.monotonic() - t0) * 1000),
-                                       error=str(e)[:400])
-                        continue
-
-                    results = results or []
-                    duration_ms = int((_time.monotonic() - t0) * 1000)
-
-                    if not results:
-                        # Condition cleared — post resolved message if alert was active
-                        firing_names = {s.alert_name for s in alert_registry.current_state()}
-                        if alert_name in firing_names:
-                            web = _WC(token=os.getenv("SLACK_BOT_TOKEN", ""))
-                            channel = os.getenv("SCOUT_MONITOR_CHANNEL", "#scout-offers")
-                            if os.getenv("SCOUT_ENV", "development") != "production":
-                                channel = os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa")
-                            web.chat_postMessage(
-                                channel=channel,
-                                text=f"✅ {alert_name} resolved — no advertisers above threshold.",
-                            )
-                            alert_registry.mark_cleared(alert_name)
-                            save_slot_fn(slot)
-                            log.info(f"{tag} condition cleared — resolved message posted.")
-                        record_job_run(alert_name, status="success", duration_ms=duration_ms)
-                        continue
-
-                    # Load prior context for severity comparison
-                    prior = load_context_fn()
-                    prior_by_name = {
-                        str(r.get("adv_name", "")).strip().lower(): r
-                        for r in prior
-                    }
-                    current_names = {str(r.get("adv_name", "")).strip().lower() for r in results}
-                    prior_names = set(prior_by_name.keys())
-
-                    new_advertisers = current_names - prior_names
-                    escalated = set()
-                    for r in results:
-                        name = str(r.get("adv_name", "")).strip().lower()
-                        if name in prior_by_name:
-                            prior_val = float(prior_by_name[name].get(severity_key, 0))
-                            curr_val = float(r.get(severity_key, 0))
-                            if curr_val > prior_val + escalation_pct:
-                                escalated.add(name)
-
-                    if not new_advertisers and not escalated:
-                        # Same advertisers, severity unchanged or improved — deduplicate
-                        # Do NOT save slot so next hour can re-check
-                        log.info(f"{tag} dedup — same advertisers, no escalation (slot {slot}).")
-                        record_job_run(alert_name, status="success", duration_ms=duration_ms)
-                        continue
-
-                    # New or escalated — fire the alert
-                    fallback, blocks = format_fn(results)
-                    if not fallback:
-                        record_job_run(alert_name, status="success", duration_ms=duration_ms)
-                        continue
-
-                    web = _WC(token=os.getenv("SLACK_BOT_TOKEN", ""))
-                    channel = os.getenv("SCOUT_MONITOR_CHANNEL", "#scout-offers")
-                    if os.getenv("SCOUT_ENV", "development") != "production":
-                        channel = os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa")
-                    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
-
-                    alert_registry.mark_firing(alert_name, {"slot": slot, "count": len(results)})
-                    save_context_fn(results)
-                    save_slot_fn(slot)
-                    record_job_run(alert_name, status="success", duration_ms=duration_ms)
-                    log.info(
-                        f"{tag} posted alert slot={slot} new={len(new_advertisers)} "
-                        f"escalated={len(escalated)} total={len(results)}."
-                    )
-
-                except Exception as e:
-                    log.warning(f"{tag} unexpected error: {e}")
-
-        except Exception as e:
-            log.error(f"{tag} fatal crash — restarting in 30s: {e}", exc_info=True)
-            import time as _t2; _t2.sleep(30)
+from scout_core.monitors import _run_hourly_with_web  # noqa: E402 — defined after top-level imports
 
 
 def _cap_monitor_daemon() -> None:
@@ -1316,7 +1184,6 @@ def _cap_monitor_daemon() -> None:
         _run_hourly_with_web(
             signal_fn=_pulse_signal_cap,
             format_fn=_format_cap_alert,
-            config_key="cap",
             load_slot_fn=_load_cap_alert_slot,
             save_slot_fn=_save_cap_alert_slot,
             load_context_fn=_load_cap_alert_context,

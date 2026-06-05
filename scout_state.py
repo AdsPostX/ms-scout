@@ -302,6 +302,42 @@ def _save_expiration_alert_date(date_str: str) -> None:
     _update_pulse_state("last_expiration_alert_date", date_str)
 
 
+# ── Revenue alert hourly slot + context (Phase 2) ────────────────────────────
+# Slot key ("YYYY-MM-DDTHH") and last-alerted pct persisted so crash/restart
+# restores dedup window — prevents re-firing the same alert after a Render deploy.
+
+def _save_revenue_alert_slot(slot: str) -> None:
+    """Persist 'YYYY-MM-DDTHH' as last revenue alert slot."""
+    state = _load_pulse_state()
+    state["last_revenue_alert_slot"] = slot
+    _save_pulse_state(state)
+
+
+def _load_revenue_alert_slot() -> str | None:
+    """Return the last revenue alert slot (YYYY-MM-DDTHH), or None."""
+    return _load_pulse_state().get("last_revenue_alert_slot")
+
+
+def _save_revenue_alert_context(pct: float) -> None:
+    """Persist the last-alerted revenue deviation pct for re-fire comparison."""
+    state = _load_pulse_state()
+    state["last_revenue_alert_pct"] = round(float(pct), 1)
+    _save_pulse_state(state)
+
+
+def _load_revenue_alert_context() -> float | None:
+    """Return the last-alerted revenue deviation pct, or None."""
+    raw = _load_pulse_state().get("last_revenue_alert_pct")
+    return float(raw) if raw is not None else None
+
+
+def _clear_revenue_alert_context() -> None:
+    """Remove the persisted revenue alert pct (revenue returned to normal)."""
+    state = _load_pulse_state()
+    state.pop("last_revenue_alert_pct", None)
+    _save_pulse_state(state)
+
+
 # ── Cap alert hourly slot + context (Phase 2) ─────────────────────────────────
 # Slot key ("YYYY-MM-DDTHH") persisted so a mid-hour restart does not re-fire.
 # Context snapshot stores normalized advertiser rows for severity comparison so
