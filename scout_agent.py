@@ -2733,23 +2733,58 @@ def _load_pulse_state_local() -> dict:
 
 def get_pulse_summary() -> dict:
     """
-    Return the last scheduled Pulse signal summary from pulse_state.json.
-    Covers: cap alerts, velocity shifts, ghost campaigns, fill rate, opportunities.
-    Returns has_pulse=False when no Pulse has fired yet (e.g., before 8am CT or fresh deploy).
-    Force-pulse runs intentionally do NOT update this state, so has_pulse always reflects
-    the canonical morning briefing, not an admin test run.
+    Return a summary of which monitoring signals have fired today.
+    Reads from per-signal state keys written by the individual monitor daemons.
+
+    Returns:
+      has_pulse (bool): True if any signal fired today
+      had_content (bool): same as has_pulse
+      fired_today (dict): per-signal boolean — which fired today
+      currently_active (list[str]): alert names currently firing in the registry
+      message (str): human-readable summary
     """
     try:
+        import datetime as _dt
+        import alert_registry as _ar
+        from zoneinfo import ZoneInfo as _ZI
+
         state = _load_pulse_state_local()
-        summary = state.get("last_signals_summary")
-        if not summary:
-            return {
-                "has_pulse": False,
-                "message": "No shadow monitor run has completed yet today.",
-            }
+        today = _dt.datetime.now(_ZI("America/Chicago")).date().isoformat()
+
+        # Cap: after Phase 2, key is last_cap_alert_slot (YYYY-MM-DDTHH prefix)
+        # Before Phase 2, key is last_cap_alert_date (YYYY-MM-DD)
+        _cap_slot = state.get("last_cap_alert_slot", "")
+        _cap_date = state.get("last_cap_alert_date", "")
+        cap_fired = (_cap_slot[:10] == today) if _cap_slot else (_cap_date == today)
+
+        fired_today = {
+            "cap": cap_fired,
+            "velocity_down": state.get("last_velocity_down_alert_date") == today,
+            "ghost": state.get("last_ghost_alert_date") == today,
+            "fill_rate": state.get("last_fill_alert_date") == today,
+            "cvr_anomaly": state.get("last_cvr_anomaly_alert_date") == today,
+            "expiration": state.get("last_expiration_alert_date") == today,
+        }
+
+        any_fired = any(fired_today.values())
+
+        try:
+            currently_active = [s.alert_name for s in _ar.current_state()]
+        except Exception:
+            currently_active = []
+
+        if any_fired:
+            fired_names = [k for k, v in fired_today.items() if v]
+            msg = "Today's signals fired: " + ", ".join(fired_names)
+        else:
+            msg = "No monitoring signals have fired today yet."
+
         return {
-            "has_pulse": True,
-            **summary,
+            "has_pulse": any_fired,
+            "had_content": any_fired,
+            "fired_today": fired_today,
+            "currently_active": currently_active,
+            "message": msg,
         }
     except Exception as e:
         log.warning(f"get_pulse_summary failed: {e}")
