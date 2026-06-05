@@ -3061,6 +3061,39 @@ def test_normalize_geo_already_normalized_values():
     return True, f"all {len(cases)} canonical display strings are stable under normalize_geo"
 
 
+@test("fleet health v2 — signature and return schema")
+def test_fleet_health_v2_schema():
+    """Verify get_publisher_fleet_health_data is the σ-based v2 (not the old % baseline).
+
+    Guards against re-introducing the shadowed v1 in queries.py.  Uses an empty
+    stats list so no ClickHouse connection is needed.
+    """
+    import inspect
+    from unittest.mock import patch
+    from queries import get_publisher_fleet_health_data
+
+    sig = inspect.signature(get_publisher_fleet_health_data)
+    params = set(sig.parameters)
+    v2_params = {"days", "min_windows", "min_revenue", "act_now_sigma", "act_now_gap", "watch_sigma", "watch_gap"}
+    v1_only_params = {"min_periods", "top_n", "alert_threshold_pct"}
+
+    if v1_only_params & params:
+        return False, f"v1 parameters still present: {v1_only_params & params}"
+    missing = v2_params - params
+    if missing:
+        return False, f"v2 parameters missing: {missing}"
+
+    with patch("queries.publisher_fleet_health_stats", return_value=[]):
+        result = get_publisher_fleet_health_data(ch=None)
+
+    required_keys = {"as_of", "window_days", "total_publishers", "total_gap", "act_now", "watch", "healthy_top5", "platform_alarm", "insufficient_history"}
+    missing_keys = required_keys - set(result)
+    if missing_keys:
+        return False, f"v2 return schema missing keys: {missing_keys}"
+
+    return True, "v2 σ-based implementation confirmed (9/9 schema keys present, v1 params absent)"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
