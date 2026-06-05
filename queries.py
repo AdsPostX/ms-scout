@@ -1619,20 +1619,28 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
             HAVING period_count >= {min_periods: Int32}
         ),
         names AS (
+            -- Exclude test accounts and internal super-admin accounts.
+            -- is_test filters Org Test and similar; endsWith(' Super') filters
+            -- named super-admin accounts (Jon Super, Ali Super, Gordon Super, etc.)
             SELECT id AS publisher_id, organization AS publisher_name
             FROM mv_adpx_users
+            WHERE NOT is_test
+              AND NOT endsWith(organization, ' Super')
         )
         SELECT
             b.publisher_id,
-            coalesce(n.publisher_name, toString(b.publisher_id))       AS publisher_name,
+            n.publisher_name,
             coalesce(a.revenue_actual, 0)                              AS revenue_actual,
             b.revenue_expected,
             round((coalesce(a.revenue_actual, 0) - b.revenue_expected) /
                   nullIf(b.revenue_expected, 0) * 100, 1)              AS delta_pct,
             coalesce(a.sessions_actual, 0)                             AS sessions_actual
         FROM baseline b
+        INNER JOIN names n ON n.publisher_id = b.publisher_id
         LEFT JOIN actual a ON a.publisher_id = b.publisher_id
-        LEFT JOIN names n ON n.publisher_id = b.publisher_id
+        -- Exclude publishers with negligible baseline (< $10 expected) — avoids
+        -- noise entries like "$0 actual vs $0 expected" that add no signal.
+        WHERE b.revenue_expected >= 10
         ORDER BY delta_pct ASC
         """,
         parameters={

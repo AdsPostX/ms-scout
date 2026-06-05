@@ -1666,14 +1666,14 @@ TOOLS = [
             "Fleet-level publisher health snapshot. Returns publishers ranked by revenue delta "
             "vs 8-period median baseline. Use for: 'how are all publishers doing?', 'which publishers "
             "are underperforming?', 'Monday health report', 'fleet health', 'publisher overview'. "
-            "Optional: days (default 7, max 90), top_n (default 20, max 50), "
+            "Optional: days (default 7, max 90), top_n (default 10, max 50), "
             "alert_threshold_pct (default -15, must be negative)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "days": {"type": "integer", "default": 7, "minimum": 1, "maximum": 90},
-                "top_n": {"type": "integer", "default": 20, "minimum": 1, "maximum": 50},
+                "top_n": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50},
                 "alert_threshold_pct": {"type": "number", "default": -15.0, "maximum": 0},
             },
             "required": [],
@@ -5058,7 +5058,7 @@ def get_publisher_revenue_trends(days: int = 7) -> dict:
 
 def get_publisher_fleet_health(
     days: int = 7,
-    top_n: int = 20,
+    top_n: int = 10,
     alert_threshold_pct: float = -15.0,
 ) -> dict:
     """
