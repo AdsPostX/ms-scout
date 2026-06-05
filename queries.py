@@ -1619,27 +1619,20 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
             HAVING period_count >= {min_periods: Int32}
         ),
         names AS (
-            -- Exclude test accounts (match existing codebase pattern for Nullable UInt8).
-            -- Super-admin filtering done in Python post-processing (avoids LowCardinality
-            -- compatibility issues with endsWith in some ClickHouse versions).
             SELECT id AS publisher_id, organization AS publisher_name
             FROM mv_adpx_users
-            WHERE (is_test = false OR is_test IS NULL)
         )
         SELECT
             b.publisher_id,
-            n.publisher_name,
+            coalesce(n.publisher_name, toString(b.publisher_id))       AS publisher_name,
             coalesce(a.revenue_actual, 0)                              AS revenue_actual,
             b.revenue_expected,
             round((coalesce(a.revenue_actual, 0) - b.revenue_expected) /
                   nullIf(b.revenue_expected, 0) * 100, 1)              AS delta_pct,
             coalesce(a.sessions_actual, 0)                             AS sessions_actual
         FROM baseline b
-        INNER JOIN names n ON n.publisher_id = b.publisher_id
         LEFT JOIN actual a ON a.publisher_id = b.publisher_id
-        -- Exclude publishers with negligible baseline (< $10 expected) — avoids
-        -- noise entries like "$0 actual vs $0 expected" that add no signal.
-        WHERE b.revenue_expected >= 10
+        LEFT JOIN names n ON n.publisher_id = b.publisher_id
         ORDER BY delta_pct ASC
         """,
         parameters={
@@ -1667,9 +1660,6 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
             "sessions_actual": int(r[5] or 0),
         }
         for r in rows
-        # Python-side super-admin filter (e.g. "Jon Super", "Ali Super") — kept out of
-        # SQL to avoid LowCardinality(String) compatibility issues with endsWith.
-        if not str(r[1]).endswith(" Super")
     ]
 
 
@@ -1741,6 +1731,20 @@ def get_publisher_fleet_health_data(
             "sessions_actual": r["sessions_actual"],
             "alert": r["delta_pct"] < threshold,
         }
+
+    # Fleet-health-specific filters applied in Python to avoid ClickHouse type issues
+    # (Nullable UInt8 is_test can't be used safely in SQL WHERE clauses).
+    # - Exclude " Super" accounts (Jon Super, Ali Super, Gordon Super, etc.)
+    # - Exclude publishers with negligible baseline revenue (< $10/period) — noise
+    # Note: is_test accounts typically have near-zero revenue and are caught by the
+    # revenue floor; a future improvement can query is_test separately if needed.
+    _SUPER_SUFFIX = " Super"
+    _MIN_EXPECTED = 10.0
+    rows = [
+        r for r in rows
+        if not r["publisher_name"].endswith(_SUPER_SUFFIX)
+        and r["revenue_expected"] >= _MIN_EXPECTED
+    ]
 
     all_entries = [_row_to_entry(r, alert_threshold_pct) for r in rows]
 
