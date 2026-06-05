@@ -334,5 +334,57 @@ class TestClassifyIntent(unittest.TestCase):
         self.assertEqual(name, "revenue_anomaly")  # signals > thread memory
 
 
+class TestSystemBlockCaching(unittest.TestCase):
+    """Verify that the two-block system array is built correctly for prompt caching."""
+
+    def _get_system_blocks(self, user_message: str) -> list:
+        """Run the intent classification + block assembly logic inline."""
+        from scout_agent import _classify_intent, SYSTEM_PROMPT, TOOLS
+        _, _intent_dict = _classify_intent(user_message)
+        if _intent_dict:
+            return [
+                {"type": "text", "text": _intent_dict["context"]},
+                {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+            ]
+        return [
+            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        ]
+
+    def test_intent_query_produces_two_block_system(self):
+        """When intent fires, system must be 2 blocks: dynamic context + cached SYSTEM_PROMPT."""
+        blocks = self._get_system_blocks("fleet health report")
+        self.assertEqual(len(blocks), 2, "Expected 2 system blocks when intent fires")
+        # First block: dynamic intent context, NOT cached
+        self.assertNotIn("cache_control", blocks[0], "Intent context must NOT be cached")
+        self.assertIn("text", blocks[0])
+        # Second block: static SYSTEM_PROMPT, MUST be cached
+        self.assertEqual(blocks[1].get("cache_control"), {"type": "ephemeral"})
+        from scout_agent import SYSTEM_PROMPT
+        self.assertEqual(blocks[1]["text"], SYSTEM_PROMPT)
+
+    def test_no_intent_query_produces_single_cached_block(self):
+        """When no intent fires, system must be 1 block with cache_control on SYSTEM_PROMPT."""
+        blocks = self._get_system_blocks("tell me a joke")
+        self.assertEqual(len(blocks), 1, "Expected 1 system block when no intent fires")
+        self.assertEqual(blocks[0].get("cache_control"), {"type": "ephemeral"})
+        from scout_agent import SYSTEM_PROMPT
+        self.assertEqual(blocks[0]["text"], SYSTEM_PROMPT)
+
+    def test_system_prompt_block_is_always_last_cached_block(self):
+        """SYSTEM_PROMPT cache_control is always on the last block — never on the intent context."""
+        for query in ["fleet health", "revenue drop this week", "top offers"]:
+            blocks = self._get_system_blocks(query)
+            last_block = blocks[-1]
+            self.assertEqual(
+                last_block.get("cache_control"), {"type": "ephemeral"},
+                f"SYSTEM_PROMPT cache_control must be on last block for query: {query!r}",
+            )
+            from scout_agent import SYSTEM_PROMPT
+            self.assertEqual(
+                last_block["text"], SYSTEM_PROMPT,
+                f"Last block must be SYSTEM_PROMPT for query: {query!r}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

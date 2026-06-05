@@ -5865,13 +5865,22 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     # Runs once per ask() call, outside the retry loop.
     _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
     _ask_tools = TOOLS
-    _ask_system = SYSTEM_PROMPT
     if _intent_dict:
         _primary = set(_intent_dict["primary_tools"])
         _narrowed = [t for t in TOOLS if t["name"] in _primary]
         if _narrowed:  # fall back to full TOOLS if no bucket tools found in public list
             _ask_tools = _narrowed
-        _ask_system = _intent_dict["context"] + "\n\n" + SYSTEM_PROMPT
+        # Two-block system array: intent context is small/dynamic (no cache),
+        # SYSTEM_PROMPT is large/static (always cached). Keeps one shared cache
+        # entry for SYSTEM_PROMPT regardless of which intent bucket fires.
+        _system_blocks = [
+            {"type": "text", "text": _intent_dict["context"]},
+            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        ]
+    else:
+        _system_blocks = [
+            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        ]
 
     while _round < MAX_ROUNDS:
         _round += 1
@@ -5880,7 +5889,8 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
                 response = client.messages.create(
                     model=_select_model(user_message),
                     max_tokens=4096,
-                    system=[{"type": "text", "text": _ask_system, "cache_control": {"type": "ephemeral"}}],
+                    cache_control={"type": "ephemeral"},  # automatic caching for growing message history
+                    system=_system_blocks,
                     tools=_ask_tools,
                     messages=messages,
                 )
