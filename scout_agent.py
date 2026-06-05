@@ -58,6 +58,18 @@ _set_geo_normalizer(_normalize_geo)
 log = logging.getLogger("scout_agent")
 
 
+def _fmt_rev(amount: float | None) -> str:
+    """Format a revenue float as a compact human-readable dollar string."""
+    if amount is None:
+        return "$?"
+    if amount >= 10_000:
+        return f"${round(amount / 100) * 100 / 1000:.0f}K"
+    if amount >= 1_000:
+        rounded = round(amount / 100) * 100
+        return f"${rounded:,.0f}"
+    return f"${amount:,.0f}"
+
+
 # ── Part 4 (plan v3): typed boundary contract for ask() ──────────────────────
 # Replaces the old Union[str, dict] return shape that left tools_called gated on
 # a defensive isinstance check in scout_handlers, producing empty usage_log rows
@@ -4792,16 +4804,6 @@ def get_revenue_today() -> dict:
     """
     import datetime as _dt_mod
 
-    def _fmt_rev(amount: float) -> str:
-        """Round revenue to human-readable form."""
-        if amount >= 10_000:
-            return f"${round(amount / 100) * 100 / 1000:.0f}K"
-        elif amount >= 1_000:
-            rounded = round(amount / 100) * 100
-            return f"${rounded:,.0f}"
-        else:
-            return f"${amount:,.0f}"
-
     def _signal(today_rev: float, avg_rev: float) -> str:
         if avg_rev <= 0:
             return "🟢"
@@ -4930,17 +4932,6 @@ def get_revenue_today_projection() -> dict:
         insufficient_history  → verbatim helper string
         unstable / error      → verbatim helper string
     """
-    def _fmt_rev(amount: float) -> str:
-        if amount is None:
-            return "$?"
-        if amount >= 10_000:
-            return f"${round(amount / 100) * 100 / 1000:.0f}K"
-        elif amount >= 1_000:
-            rounded = round(amount / 100) * 100
-            return f"${rounded:,.0f}"
-        else:
-            return f"${amount:,.0f}"
-
     try:
         ch = _get_ch_client()
         result = project_today_revenue(ch)
