@@ -269,6 +269,14 @@ _CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 _FENCED_BLOCK_RE = re.compile(r"```[a-z]*\n?(.*?)```", re.DOTALL)
 
 
+def _fit(s: str, max_len: int = 25) -> str:
+    """Truncate a button label to max_len, breaking on a word boundary."""
+    if len(s) <= max_len:
+        return s
+    cut = s[:max_len].rsplit(" ", 1)[0]
+    return cut if cut else s[:max_len]
+
+
 def _escape_md_code(text: str) -> str:
     """Convert fenced code blocks to inline code and escape underscores in spans.
 
@@ -390,12 +398,6 @@ def wrap_response(
     # 3. Suggestion buttons — capped at MAX_ACTIONS[surface]; omit block entirely if empty
     capped = [s for s in suggestions[:max_btn] if isinstance(s, str) and s.strip()]
     if capped:
-        def _fit(s: str, max_len: int = 25) -> str:
-            if len(s) <= max_len:
-                return s
-            cut = s[:max_len].rsplit(" ", 1)[0]
-            return cut if cut else s[:max_len]
-
         elements = [
             {
                 "type": "button",
@@ -1268,12 +1270,6 @@ def _text_to_blocks(text: str) -> list:
 # ---------------------------------------------------------------------------
 def _build_suggestion_buttons(suggestions: list) -> list:
     """Build a Slack actions block with 2-3 contextual follow-up suggestion buttons."""
-    def _fit(s: str, max_len: int = 25) -> str:
-        if len(s) <= max_len:
-            return s
-        cut = s[:max_len].rsplit(' ', 1)[0]
-        return cut if cut else s[:max_len]
-
     if not suggestions:
         return []
     buttons = [
