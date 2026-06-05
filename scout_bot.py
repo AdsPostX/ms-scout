@@ -669,6 +669,12 @@ def _digest_poster(web) -> None:
 # Alert only when there's something to act on — no "all signals nominal" digests.
 
 
+def _alert_blocks(headline: str, body: str, severity: Severity = Severity.WARN) -> tuple[str, list]:
+    card = Card(severity=severity, headline=headline, body=body)
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    return f"🟠 {headline}", blocks
+
+
 def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for advertisers nearing monthly cap.
 
@@ -700,9 +706,7 @@ def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
     body = "\n".join(f"• {item}" for item in items) if items else ""
     action_footer = "→ Contact advertiser or lower bid floor before cap hits"
     full_body = f"{body}\n\n{action_footer}" if body else action_footer
-    card = Card(severity=Severity.WARN, headline=headline, body=full_body)
-    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-    return f"🟠 {headline}", blocks
+    return _alert_blocks(headline, full_body)
 
 
 def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
@@ -739,9 +743,7 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
     body = "\n".join(f"• {item}" for item in items) if items else ""
     action_footer = "→ Check publisher fill rate and CPM floor"
     full_body = f"{body}\n\n{action_footer}" if body else action_footer
-    card = Card(severity=Severity.WARN, headline=headline, body=full_body)
-    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-    return f"🟠 {headline}", blocks
+    return _alert_blocks(headline, full_body)
 
 
 def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
@@ -766,9 +768,7 @@ def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
     body = "\n".join(f"• {item}" for item in items) if items else ""
     action_footer = "→ Check tracking pixel / confirm creative is live"
     full_body = f"{body}\n\n{action_footer}" if body else action_footer
-    card = Card(severity=Severity.WARN, headline=headline, body=full_body)
-    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-    return f"🟠 {headline}", blocks
+    return _alert_blocks(headline, full_body)
 
 
 def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
@@ -795,9 +795,7 @@ def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
     body = "\n".join(f"• {item}" for item in items) if items else ""
     action_footer = "→ Review floor price or supply source health"
     full_body = f"{body}\n\n{action_footer}" if body else action_footer
-    card = Card(severity=Severity.WARN, headline=headline, body=full_body)
-    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-    return f"🟠 {headline}", blocks
+    return _alert_blocks(headline, full_body)
 
 
 def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
@@ -818,9 +816,7 @@ def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
 
     headline = "CVR anomalies — significant conversion rate drops since yesterday"
     body = "\n".join(f"• {item}" for item in items) if items else ""
-    card = Card(severity=Severity.WARN, headline=headline, body=body)
-    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-    return f"🟠 {headline}", blocks
+    return _alert_blocks(headline, body)
 
 
 def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
@@ -840,9 +836,7 @@ def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
 
     headline = "Expiring campaigns — active campaigns ending within the alert window"
     body = "\n".join(f"• {item}" for item in items) if items else ""
-    card = Card(severity=Severity.WARN, headline=headline, body=body)
-    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
-    return f"🟠 {headline}", blocks
+    return _alert_blocks(headline, body)
 
 
 def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
