@@ -5692,12 +5692,24 @@ def _split_dotted_key(dotted: str) -> tuple[str, str]:
 
 
 def _format_dict_response(title: str, data: dict) -> str:
-    """Slack-friendly JSON dump for control-surface tool results."""
-    try:
-        body = json.dumps(data, indent=2, default=str, sort_keys=True)
-    except Exception:
-        body = repr(data)
-    return f"*{title}*\n```\n{body}\n```"
+    """Slack-friendly key-value dump for control-surface tool results.
+
+    Fenced code blocks are intentionally avoided: _escape_md_code() in
+    scout_ui_kit collapses them to their first content line (the opening '{'),
+    which would render the entire dict as a lone '{' in Slack.
+    """
+    def _fmt(v: object) -> str:
+        if isinstance(v, dict):
+            return " · ".join(f"{k}: {v2}" for k, v2 in v.items())
+        if isinstance(v, list):
+            joined = ", ".join(str(x) for x in v[:8])
+            return joined + ("…" if len(v) > 8 else "")
+        return str(v)
+
+    lines = [f"*{title}*"]
+    for key, val in (data or {}).items():
+        lines.append(f"• *{key}*: {_fmt(val)}")
+    return "\n".join(lines)
 
 
 def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]:
