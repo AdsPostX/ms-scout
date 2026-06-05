@@ -67,6 +67,10 @@ def _run_hourly_with_web(
                     try:
                         results = signal_fn(_get_ch_client())
                     except Exception as e:
+                        # Intentionally do NOT save slot on CH error — allows retry next hour.
+                        # Risk: up to 12 retries/hr during outage. Revenue tracker takes the
+                        # opposite approach and saves slot on error to prevent CH hammering;
+                        # the cap monitor prioritizes not missing a cap alert over CH load.
                         log.warning(f"{tag} signal query failed: {e}")
                         record_job_run(alert_name, status="error",
                                        duration_ms=int((_time.monotonic() - t0) * 1000),
@@ -88,8 +92,11 @@ def _run_hourly_with_web(
                                 channel=channel,
                                 text=f"✅ {alert_name} resolved — no advertisers above threshold.",
                             )
-                            alert_registry.mark_cleared(alert_name)
+                            # Save slot BEFORE mark_cleared: if mark_cleared throws,
+                            # the slot is already persisted so the resolved message
+                            # won't re-post on the next poll.
                             save_slot_fn(slot)
+                            alert_registry.mark_cleared(alert_name)
                             log.info(f"{tag} condition cleared — resolved message posted.")
                         record_job_run(alert_name, status="success", duration_ms=duration_ms)
                         continue

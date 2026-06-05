@@ -891,8 +891,10 @@ def _revenue_tracker_daemon() -> None:
 
                     _last_alerted_pct = _load_revenue_alert_context()
                     if hourly_enabled and _last_alerted_pct is not None:
-                        # Deduplicate: only re-fire if pct dropped by >= refire_drop_pct
-                        if curr_pct > _last_alerted_pct - refire_drop_pct:
+                        # Re-fire only if revenue has worsened by refire_drop_pct or more since last alert
+                        worsened_enough = curr_pct <= (_last_alerted_pct or 0.0) - refire_drop_pct
+                        if not worsened_enough:
+                            # deduplicate
                             log.info(
                                 "[revenue-tracker] dedup — pct=%.1f%% last_alerted=%.1f%% "
                                 "no significant drop (slot=%s).",
@@ -904,6 +906,7 @@ def _revenue_tracker_daemon() -> None:
                                 duration_ms=int((_time.monotonic() - _t0) * 1000),
                             )
                             continue
+                        # else: worsened_enough — fall through to fire
 
                     # Phase 2: per-publisher decomposition
                     try:

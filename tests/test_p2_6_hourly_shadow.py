@@ -561,5 +561,135 @@ class TestMarkClearedCalledOnNoAnomaly(unittest.TestCase):
         self.assertEqual(cleared[0], "test-monitor")
 
 
+# ---------------------------------------------------------------------------
+# TestHourlyDedup: unit tests for _run_hourly_with_web deduplication logic
+# ---------------------------------------------------------------------------
+
+class TestHourlyDedup(unittest.TestCase):
+    """Unit tests for _run_hourly_with_web deduplication logic in scout_core.monitors."""
+
+    # Frozen CT time at 10:05 — inside default business hours (9-17)
+    _FROZEN_DATE = "2026-06-05"
+    _FROZEN_HOUR = 10
+    _EXPECTED_SLOT = f"{_FROZEN_DATE}T{_FROZEN_HOUR:02d}"
+
+    def _run_one_cycle(
+        self,
+        signal_fn,
+        format_fn,
+        save_slot_fn,
+        load_slot_fn,
+        load_context_fn,
+        save_context_fn,
+    ):
+        """Run _run_hourly_with_web for exactly one inner-loop cycle."""
+        import datetime as _dt_module
+        from datetime import datetime as _real_dt
+        import pytz
+
+        CT_TZ = pytz.timezone("America/Chicago")
+        frozen_ct = CT_TZ.localize(_real_dt(2026, 6, 5, self._FROZEN_HOUR, 5, 0))
+
+        class _FakeDt(_real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is not None:
+                    return frozen_ct.astimezone(tz)
+                return frozen_ct
+
+        sleep_calls = [0]
+
+        def _counting_sleep(secs):
+            sleep_calls[0] += 1
+            if sleep_calls[0] > 1:
+                raise StopIteration("one cycle done")
+
+        fake_web_instance = MagicMock()
+        fake_web_instance.chat_postMessage.return_value = {"ok": True}
+        fake_web_cls = MagicMock(return_value=fake_web_instance)
+
+        fake_ar = MagicMock()
+        fake_ar.current_state.return_value = []
+
+        from scout_core import monitors as _mon
+
+        with patch(_dt_module.__name__ + ".datetime", _FakeDt), \
+             patch("time.sleep", side_effect=_counting_sleep), \
+             patch("scout_ch._get_ch_client", return_value=MagicMock()), \
+             patch("scout_core.job_runs.record_job_run", MagicMock()), \
+             patch("slack_sdk.web.WebClient", fake_web_cls), \
+             patch.dict("sys.modules", {"alert_registry": fake_ar}):
+            try:
+                _mon._run_hourly_with_web(
+                    signal_fn=signal_fn,
+                    format_fn=format_fn,
+                    load_slot_fn=load_slot_fn,
+                    save_slot_fn=save_slot_fn,
+                    load_context_fn=load_context_fn,
+                    save_context_fn=save_context_fn,
+                    severity_key="cap_pct",
+                    escalation_pct=5.0,
+                    alert_name="test-cap",
+                )
+            except StopIteration:
+                pass
+
+        return fake_ar, fake_web_instance
+
+    def test_same_advertisers_no_escalation_deduplicates(self):
+        """Same advertisers, cap_pct unchanged → no re-fire, slot NOT saved."""
+        # Prior context: adv A at 87%; current results: adv A at 87% (no change)
+        signal_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 87.0}])
+        format_fn = MagicMock(return_value=("Alert!", [{"type": "section"}]))
+        save_slot_fn = MagicMock()
+        # Return a different slot so the already-fired-this-hour check passes
+        load_slot_fn = MagicMock(return_value="2026-06-05T09")
+        load_context_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 87.0}])
+        save_context_fn = MagicMock()
+
+        _ar, _web = self._run_one_cycle(
+            signal_fn, format_fn, save_slot_fn, load_slot_fn, load_context_fn, save_context_fn
+        )
+
+        signal_fn.assert_called_once()
+        format_fn.assert_not_called()
+        save_slot_fn.assert_not_called()
+
+    def test_escalation_at_exact_threshold_fires(self):
+        """cap_pct increase == escalation_pct (5%) → fires (>= not >)."""
+        # Prior: adv A at 85%; current: adv A at 90% (exactly +5 — meets >= threshold)
+        signal_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 90.0}])
+        format_fn = MagicMock(return_value=("Alert: cap at 90%", [{"type": "section"}]))
+        save_slot_fn = MagicMock()
+        load_slot_fn = MagicMock(return_value="2026-06-05T09")
+        load_context_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 85.0}])
+        save_context_fn = MagicMock()
+
+        _ar, _web = self._run_one_cycle(
+            signal_fn, format_fn, save_slot_fn, load_slot_fn, load_context_fn, save_context_fn
+        )
+
+        format_fn.assert_called_once()
+
+    def test_new_advertiser_fires_regardless_of_prior(self):
+        """New advertiser in results that wasn't in prior context → fires."""
+        # Prior context: adv A at 85%; current: adv A at 85% + adv B at 90%
+        signal_fn = MagicMock(return_value=[
+            {"adv_name": "adv_a", "cap_pct": 85.0},
+            {"adv_name": "adv_b", "cap_pct": 90.0},
+        ])
+        format_fn = MagicMock(return_value=("Alert: new advertiser!", [{"type": "section"}]))
+        save_slot_fn = MagicMock()
+        load_slot_fn = MagicMock(return_value="2026-06-05T09")
+        load_context_fn = MagicMock(return_value=[{"adv_name": "adv_a", "cap_pct": 85.0}])
+        save_context_fn = MagicMock()
+
+        _ar, _web = self._run_one_cycle(
+            signal_fn, format_fn, save_slot_fn, load_slot_fn, load_context_fn, save_context_fn
+        )
+
+        format_fn.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

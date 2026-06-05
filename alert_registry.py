@@ -117,6 +117,9 @@ def _load_registry_from_state() -> None:
         log.exception("alert_registry: failed to restore state from pulse_state")
 
 
+# Lock ordering: _LOCK is always acquired before _PULSE_STATE_LOCK (inside
+# _persist_registry_state → _save_pulse_state). Never reverse this order.
+
 def mark_firing(alert_name: str, context: dict[str, Any] | None = None) -> None:
     """Record that `alert_name` is firing. Idempotent — repeated calls are harmless."""
     if not alert_name:
