@@ -1661,18 +1661,16 @@ TOOLS = [
     {
         "name": "get_publisher_fleet_health",
         "description": (
-            "Fleet-level publisher health snapshot. Returns publishers ranked by revenue delta "
-            "vs 8-period median baseline. Use for: 'how are all publishers doing?', 'which publishers "
-            "are underperforming?', 'Monday health report', 'fleet health', 'publisher overview'. "
-            "Optional: days (default 7, max 90), top_n (default 10, max 50), "
-            "alert_threshold_pct (default -15, must be negative)."
+            "Fleet-level publisher health using statistical (σ-based) baseline. "
+            "Classifies publishers into Act Now (>=2σ drop, >=$500 gap) and Watch (>=1.5σ, >=$200). "
+            "Use for: 'how are all publishers doing?', 'Monday health report', 'fleet health', "
+            "'which publishers need attention?', 'publisher overview'. "
+            "Optional: days (default 7, max 90)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "days": {"type": "integer", "default": 7, "minimum": 1, "maximum": 90},
-                "top_n": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50},
-                "alert_threshold_pct": {"type": "number", "default": -15.0, "maximum": 0},
             },
             "required": [],
         },
@@ -5090,84 +5088,132 @@ def get_publisher_revenue_trends(days: int = 7) -> dict:
         return {"error": str(e), "trends": []}
 
 
+def _format_fleet_health(result: dict, days: int) -> str:
+    """Render fleet health result as Slack mrkdwn. Called by get_publisher_fleet_health."""
+    lines = [f"*Publisher Fleet Health — last {days} day{'s' if days != 1 else ''}*"]
+
+    if result.get("insufficient_history"):
+        lines.append(
+            "_⚠️ Not enough history yet — need at least 3 weeks of data at $500+/week._"
+        )
+        return "\n".join(lines)
+
+    total_gap = result.get("total_gap", 0.0)
+    total = result.get("total_publishers", 0)
+    act_now = result.get("act_now", [])
+    watch = result.get("watch", [])
+    healthy = result.get("healthy_top5", [])
+    as_of = (result.get("as_of", "") or "")[:10]
+    affected = len(act_now) + len(watch)
+
+    # ── Headline ─────────────────────────────────────────────────────────
+    if result.get("platform_alarm"):
+        lines.append("")
+        lines.append(
+            f":rotating_light: *{len(act_now)} publishers in freefall simultaneously* — "
+            "likely a platform-wide tracking issue, not individual publisher problems. "
+            "Check ClickHouse connectivity and pixel/postback health first."
+        )
+    elif total_gap > 0:
+        pub_word = "publisher" if affected == 1 else "publishers"
+        lines.append(
+            f":red_circle: *${total_gap:,.0f} behind baseline* across {affected} {pub_word}"
+        )
+    else:
+        lines.append(":large_green_circle: All publishers tracking on or above baseline")
+
+    def _pub_line(pub: dict) -> str:
+        tier = f" [T{pub['tier']}]" if pub.get("tier") else ""
+        sigma = pub["sigma_score"]
+        sigma_str = f"{abs(sigma):.1f}σ" if sigma != -99.0 else "∞σ"
+        return (
+            f"• {pub['publisher_name']}{tier} · "
+            f"*${pub['dollar_gap']:,.0f} gap* · "
+            f"{pub['delta_pct']:+.1f}% · "
+            f"_{sigma_str} below normal_"
+        )
+
+    # ── Act Now ──────────────────────────────────────────────────────────
+    if act_now:
+        lines.append("")
+        label = "publisher" if len(act_now) == 1 else "publishers"
+        lines.append(f":rotating_light: *Act Now* ({len(act_now)} {label})")
+        for pub in act_now:
+            lines.append(_pub_line(pub))
+
+    # ── Watch ────────────────────────────────────────────────────────────
+    if watch:
+        lines.append("")
+        label = "publisher" if len(watch) == 1 else "publishers"
+        lines.append(f":eyes: *Watch* ({len(watch)} {label})")
+        for pub in watch:
+            lines.append(_pub_line(pub))
+
+    if not act_now and not watch:
+        lines.append("")
+        lines.append(":white_check_mark: No publishers need attention this week")
+
+    # ── Healthy compact line ──────────────────────────────────────────────
+    if healthy:
+        lines.append("")
+        gains = " · ".join(
+            f"{p['publisher_name']} +${p['revenue_actual'] - p['revenue_expected']:,.0f}"
+            for p in healthy[:3]
+        )
+        extra = f" · +{len(healthy) - 3} more" if len(healthy) > 3 else ""
+        lines.append(f":white_check_mark: *Healthy* — {gains}{extra}")
+
+    # ── Action line ───────────────────────────────────────────────────────
+    if act_now and total_gap > 0:
+        top = act_now[0]
+        tier_str = f" [T{top['tier']}]" if top.get("tier") else ""
+        pct_of_gap = top["dollar_gap"] / total_gap * 100 if total_gap > 0 else 0
+        lines.append(
+            f":zap: *{top['publisher_name']}{tier_str}* is the top priority — "
+            f"${top['dollar_gap']:,.0f} gap ({pct_of_gap:.0f}% of total shortfall)."
+        )
+    elif watch:
+        lines.append(
+            f":zap: *Action:* Investigate {watch[0]['publisher_name']} — "
+            f"${watch[0]['dollar_gap']:,.0f} gap."
+        )
+
+    # ── Footer ────────────────────────────────────────────────────────────
+    lines.append(f"_{total} publishers tracked · as of {as_of}_")
+    return "\n".join(lines)
+
+
 def get_publisher_fleet_health(
     days: int = 7,
-    top_n: int = 10,
-    alert_threshold_pct: float = -15.0,
 ) -> dict:
     """
-    Fleet-level publisher health snapshot: publishers ranked by revenue delta vs
-    8-period median baseline, separated into at-risk and healthy buckets.
+    Fleet-level publisher health using σ-based statistical baseline.
+
+    Rolling 4-week same-period average as baseline. Only surfaces publishers
+    with >= $500/week baseline AND >= 1.5σ below normal — separates real
+    signal from normal variance.
+
+    Classifies:
+    - Act Now: >= 2σ below normal AND >= $500 dollar gap
+    - Watch:   >= 1.5σ below normal AND >= $200 dollar gap
+    - Healthy: on or above baseline (top 3 gains shown)
+    - Platform alarm: > 5 Act Now publishers simultaneously
+
     Returns pre_formatted Slack text for direct rendering.
     """
     try:
-        # Clamp inputs to declared bounds
         days = max(1, min(90, int(days)))
-        top_n = max(1, min(50, int(top_n)))
-        alert_threshold_pct = max(-100.0, min(0.0, float(alert_threshold_pct)))
 
         from queries import get_publisher_fleet_health_data
         ch = _get_ch_client()
-        result = get_publisher_fleet_health_data(
-            ch,
-            days=days,
-            top_n=top_n,
-            alert_threshold_pct=alert_threshold_pct,
-        )
+        result = get_publisher_fleet_health_data(ch, days=days)
 
-        lines = [f"*Publisher Fleet Health — last {days} day{'s' if days != 1 else ''}*", ""]
+        return {"formatted": _format_fleet_health(result, days), "pre_formatted": True}
 
-        if result.get("insufficient_history"):
-            min_p = SCOUT_THRESHOLDS.get("signals", {}).get("revenue_trend_min_periods", 4)
-            lines.append(
-                f"_⚠️ Not enough history for reliable baseline (need {min_p}+ periods)_"
-            )
-        else:
-            at_risk = result.get("at_risk", [])
-            healthy = result.get("healthy_top5", [])
-
-            # ── At-risk block ────────────────────────────────────────────────
-            if at_risk:
-                lines.append(f"⚠️ *At Risk* ({len(at_risk)} publishers)")
-                for pub in at_risk:
-                    arrow = "↓" if pub["delta_pct"] < 0 else "↑"
-                    lines.append(
-                        f"• {pub['publisher_name']}: {pub['delta_pct']:+.1f}% {arrow}"
-                        f"  (${pub['revenue_actual']:,.0f} actual vs"
-                        f" ${pub['revenue_expected']:,.0f} expected)"
-                    )
-            else:
-                lines.append("✅ All publishers within normal range")
-
-            lines.append("")
-
-            # ── Healthy top-5 block ──────────────────────────────────────────
-            if healthy:
-                lines.append("✅ *Healthy — Top 5*")
-                for pub in healthy:
-                    arrow = "↑" if pub["delta_pct"] > 0 else ("↓" if pub["delta_pct"] < 0 else "→")
-                    lines.append(
-                        f"• {pub['publisher_name']}: {pub['delta_pct']:+.1f}% {arrow}"
-                        f"  (${pub['revenue_actual']:,.0f} actual vs"
-                        f" ${pub['revenue_expected']:,.0f} expected)"
-                    )
-
-        # ── Footer ──────────────────────────────────────────────────────────
-        total = result.get("total_publishers", 0)
-        at_risk_count = result.get("at_risk_count", 0)
-        as_of_raw = result.get("as_of", "")
-        as_of = as_of_raw[:10] if as_of_raw else "unknown"
-        lines.append(
-            f"_{total} publishers tracked · {at_risk_count} at risk · as of {as_of}_"
-        )
-
-        return {"formatted": "\n".join(lines), "pre_formatted": True}
-
-    except Exception as _fleet_exc:
+    except Exception:
         log.exception("get_publisher_fleet_health failed")
-        _err_msg = str(_fleet_exc)[:300]
         return {
-            "formatted": f"⚠️ Fleet health query failed: `{_err_msg}`",
+            "formatted": "⚠️ Fleet health unavailable — query failed. Try again or check ClickHouse.",
             "pre_formatted": True,
         }
 
