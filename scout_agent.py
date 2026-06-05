@@ -13,6 +13,7 @@ import logging
 import os
 import pathlib
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -1660,6 +1661,25 @@ TOOLS = [
         },
     },
     {
+        "name": "get_publisher_fleet_health",
+        "description": (
+            "Fleet-level publisher health snapshot. Returns publishers ranked by revenue delta "
+            "vs 8-period median baseline. Use for: 'how are all publishers doing?', 'which publishers "
+            "are underperforming?', 'Monday health report', 'fleet health', 'publisher overview'. "
+            "Optional: days (default 7, max 90), top_n (default 20, max 50), "
+            "alert_threshold_pct (default -15, must be negative)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "default": 7, "minimum": 1, "maximum": 90},
+                "top_n": {"type": "integer", "default": 20, "minimum": 1, "maximum": 50},
+                "alert_threshold_pct": {"type": "number", "default": -15.0, "maximum": 0},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "list_thresholds",
         "description": (
             "Return all active Scout monitor thresholds plus override metadata. "
@@ -1743,6 +1763,211 @@ TOOLS = [
         },
     },
 ]
+
+# Tools the LLM should NOT auto-select — callable via TOOL_MAP by direct handlers only.
+# Keeps the LLM-visible surface lean and prevents routing confusion on
+# admin/write/redundant tools.
+_INTERNAL_TOOLS: dict[str, dict] = {
+    t["name"]: t
+    for t in TOOLS
+    if t["name"] in {
+        "get_demand_queue_status",
+        "mark_offer_launched",
+        "get_usage_report",
+        "export_usage_log",
+        "record_entity_note",
+        "forget_entity_note",
+        "why_entity_note",
+        "run_self_qa",
+        "get_low_fill_publishers",
+        "force_run_monitor",
+    }
+}
+
+# Remove internal tools from the LLM-visible TOOLS list
+TOOLS = [t for t in TOOLS if t["name"] not in _INTERNAL_TOOLS]
+
+# ── Thread-level intent memory ────────────────────────────────────────────────
+# Follow-up messages in the same Slack thread inherit the classified intent
+# without re-classifying, keeping conversation context stable.
+_THREAD_INTENTS: dict[str, str] = {}
+_THREAD_INTENTS_LOCK = threading.Lock()
+
+# ── Intent router ─────────────────────────────────────────────────────────────
+# 9 intent buckets. Order matters: fleet_health MUST come before publisher_health
+# so fleet queries don't get captured by the broader "how are/is" signals first.
+_INTENT_ROUTER: dict[str, dict] = {
+    "campaign_pacing": {
+        "signals": [
+            "campaign pacing", "projected revenue", "how much will",
+            "advertiser revenue", "budget pace", "projection", "on track",
+            "pace", "budget status",
+        ],
+        "primary_tools": [
+            "get_advertiser_revenue_projection", "get_revenue_today_projection",
+            "get_campaign_status", "get_ghost_campaigns",
+        ],
+        "context": (
+            "You are answering a campaign pacing or revenue projection question. "
+            "IMPORTANT: if the query mentions a specific advertiser name (e.g. Hulu, Impact, "
+            "Disney+, TurboTax), use get_advertiser_revenue_projection — not "
+            "get_revenue_today_projection. get_revenue_today_projection is only for "
+            "platform-wide 'today' estimates with no named advertiser. "
+            "Lead with the current vs expected pace. Flag any cap warnings. "
+            "Show publisher breakdown if available. Always return visible output."
+        ),
+    },
+    "fleet_health": {
+        "signals": [
+            "all publishers", "fleet health", "fleet", "publisher overview",
+            "monday report", "publishers doing", "how are publishers", "publisher fleet",
+        ],
+        "primary_tools": [
+            "get_publisher_fleet_health", "get_publisher_health",
+        ],
+        "context": (
+            "You are answering a fleet-level publisher health question. "
+            "Use get_publisher_fleet_health — it returns a pre-formatted ranked fleet summary "
+            "with at-risk publishers first. Deliver the formatted string verbatim. "
+            "Always return visible output."
+        ),
+    },
+    "publisher_health": {
+        "signals": [
+            "publisher health", "publisher performance", "publisher snapshot",
+            "fill rate", "impressions down", "low fill", "how is", "how are", "showing up",
+        ],
+        "primary_tools": [
+            "get_publisher_health", "get_publisher_revenue_trends", "get_publisher_fleet_health",
+        ],
+        "context": (
+            "You are answering a publisher health question. Lead with the publisher name, "
+            "current revenue vs expected, and fill rate. Surface anomalies first. "
+            "Always return visible output."
+        ),
+    },
+    "revenue_anomaly": {
+        "signals": [
+            "revenue down", "revenue drop", "anomaly", "spike", "unusual",
+            "what happened", "why is revenue", "revenue alert", "revenue dip",
+        ],
+        "primary_tools": [
+            "get_revenue_today", "get_exposure_rate_anomalies",
+            "get_advertiser_revenue_trends", "get_publisher_revenue_trends",
+        ],
+        "context": (
+            "You are diagnosing a revenue anomaly. Start with what changed and when. "
+            "Surface the largest contributors to the delta. Suggest a root cause hypothesis. "
+            "Always return visible output."
+        ),
+    },
+    "offer_performance": {
+        "signals": [
+            "top performing offers", "performing offers", "top offers", "best offers",
+            "offer performance", "offers ranking", "offer stats", "offer cvr", "which offers",
+        ],
+        "primary_tools": [
+            "get_top_opportunities", "get_offer_stats",
+            "get_category_performance", "get_running_offers",
+        ],
+        "context": (
+            "You are answering an offer performance question. Rank offers by revenue "
+            "contribution or CVR. Include offer name, payout, and network. "
+            "Always return visible output."
+        ),
+    },
+    "publisher_offer_fit": {
+        "signals": [
+            "offer fit", "right offers", "offers for publisher", "publisher offers",
+            "offer match", "which offers for", "offers for",
+        ],
+        "primary_tools": [
+            "get_offers_for_publisher", "get_publisher_competitive_landscape",
+            "get_fallback_candidates",
+        ],
+        "context": (
+            "You are answering a publisher-offer fit question. Show the top-fit offers "
+            "for the publisher. Include CVR benchmark, payout, and why each offer fits. "
+            "Always return visible output."
+        ),
+    },
+    "traffic_quality": {
+        "signals": [
+            "traffic quality", "fraud", "invalid traffic", "ivt",
+            "low quality", "bad traffic", "suspicious",
+        ],
+        "primary_tools": [
+            "get_publisher_health", "get_exposure_rate_anomalies", "get_supply_demand_gaps",
+        ],
+        "context": (
+            "You are investigating traffic quality. Surface CVR anomalies and fill rate "
+            "outliers. Flag any publishers with unusual patterns. Always return visible output."
+        ),
+    },
+    "ab_test": {
+        "signals": [
+            "a/b test", "ab test", "experiment", "test result", "variant",
+            "control vs test", "which version",
+        ],
+        "primary_tools": [
+            "get_perkswall_engagement", "get_offer_stats", "get_publisher_health",
+        ],
+        "context": (
+            "You are answering an A/B test question. Compare the variants directly. "
+            "Lead with which version is winning and by how much. Always return visible output."
+        ),
+    },
+    "competitive_stack": {
+        "signals": [
+            "competitive", "competition", "other offers", "impression share",
+            "competing offers", "what else is running", "what are others paying",
+        ],
+        "primary_tools": [
+            "get_publisher_competitive_landscape", "get_supply_demand_gaps",
+            "get_top_opportunities",
+        ],
+        "context": (
+            "You are answering a competitive landscape question. Show what's competing for "
+            "impressions at this publisher or in this category. Include payout comparison. "
+            "Always return visible output."
+        ),
+    },
+}
+
+
+def _classify_intent(
+    query: str,
+    thread_ts: str | None = None,
+) -> tuple[str | None, dict | None]:
+    """
+    Classify a query into an intent bucket for tool narrowing.
+
+    Returns (intent_name, intent_dict) or (None, None) if no match.
+    Thread memory: follow-up messages in the same Slack thread inherit the
+    classified intent without re-classifying, keeping conversation context stable.
+    Signals are sorted longest-first so specific phrases beat short generic ones.
+    """
+    q = query.lower()
+
+    # Signal matching — longest signals first so specific phrases beat short ones
+    for intent_name, intent_dict in _INTENT_ROUTER.items():
+        signals = sorted(intent_dict["signals"], key=len, reverse=True)
+        for signal in signals:
+            if signal in q:
+                # Update thread memory whenever a signal matches
+                if thread_ts:
+                    with _THREAD_INTENTS_LOCK:
+                        _THREAD_INTENTS[thread_ts] = intent_name
+                return intent_name, intent_dict
+
+    # No signal matched — fall back to thread memory for ambiguous follow-ups
+    if thread_ts:
+        with _THREAD_INTENTS_LOCK:
+            if thread_ts in _THREAD_INTENTS:
+                name = _THREAD_INTENTS[thread_ts]
+                return name, _INTENT_ROUTER.get(name)
+
+    return None, None
 
 
 def _load_offers() -> list:
@@ -3077,7 +3302,7 @@ def get_advertiser_revenue_projection(
             "share_pct":          round(rev / total_revenue_30d * 100, 1) if total_revenue_30d else 0,
         })
 
-    return {
+    result = {
         "advertiser":                advertiser_name,
         "month":                     month_label,
         "days_in_month":             days_in_month,
@@ -3105,6 +3330,42 @@ def get_advertiser_revenue_projection(
         "methodology":               "30-day avg daily revenue × days in month. Cap applied where monthly_cap_total < uncapped projection.",
         "data_quality":              _data_quality_tier(30, total_sessions_30d),
     }
+
+    # Build pre-formatted Slack output — prevents silent LLM synthesis failures
+    _lines = []
+    if result.get("cap_applied"):
+        _monthly_cap = result.get("monthly_cap_total", 0)
+        _avg_daily = result.get("avg_daily_revenue", 0)
+        _uncapped = result.get("uncapped_projected_revenue", 0)
+        _delta = (_uncapped or 0) - (_monthly_cap or 0)
+        _adv = result.get("advertiser", advertiser_name)
+        _lines.append(
+            f":red_circle: *Budget cap is the story.* {_adv} capped at "
+            f"*${_monthly_cap:,.0f}*/mo — run rate *${_avg_daily:,.0f}/day* "
+            f"(~${_uncapped:,.0f} uncapped). "
+            f":zap: Lift cap or spin uncapped campaign to unlock ~${_delta:,.0f}."
+        )
+    else:
+        _proj = result.get("projected_revenue", 0)
+        _avg = result.get("avg_daily_revenue", 0)
+        _adv = result.get("advertiser", advertiser_name)
+        _m = result.get("month", month_label)
+        _lines.append(
+            f"{_adv} projects *${_proj:,.0f}* for {_m} at *${_avg:,.0f}/day*."
+        )
+    # Publisher breakdown top 5
+    _breakdown = result.get("by_publisher", [])
+    if _breakdown:
+        _lines.append("")
+        for _pub in _breakdown[:5]:
+            _pname = _pub.get("publisher", "Unknown")
+            _prev = _pub.get("revenue_30d", 0)
+            _pshare = _pub.get("share_pct", 0)
+            _lines.append(f"• {_pname}: ${_prev:,.0f} ({_pshare:.0f}%)")
+    result["formatted"] = "\n".join(_lines)
+    result["pre_formatted"] = True
+
+    return result
 
 
 def get_publisher_health(
@@ -4795,6 +5056,86 @@ def get_publisher_revenue_trends(days: int = 7) -> dict:
         return {"error": str(e), "trends": []}
 
 
+def get_publisher_fleet_health(
+    days: int = 7,
+    top_n: int = 20,
+    alert_threshold_pct: float = -15.0,
+) -> dict:
+    """
+    Fleet-level publisher health snapshot: publishers ranked by revenue delta vs
+    8-period median baseline, separated into at-risk and healthy buckets.
+    Returns pre_formatted Slack text for direct rendering.
+    """
+    try:
+        # Clamp inputs to declared bounds
+        days = max(1, min(90, int(days)))
+        top_n = max(1, min(50, int(top_n)))
+        alert_threshold_pct = max(-100.0, min(0.0, float(alert_threshold_pct)))
+
+        ch = _get_ch_client()
+        result = _query_publisher_fleet_health(
+            ch,
+            days=days,
+            top_n=top_n,
+            alert_threshold_pct=alert_threshold_pct,
+        )
+
+        lines = [f"*Publisher Fleet Health — last {days} day{'s' if days != 1 else ''}*", ""]
+
+        if result.get("insufficient_history"):
+            min_p = SCOUT_THRESHOLDS.get("signals", {}).get("revenue_trend_min_periods", 4)
+            lines.append(
+                f"_⚠️ Not enough history for reliable baseline (need {min_p}+ periods)_"
+            )
+        else:
+            at_risk = result.get("at_risk", [])
+            healthy = result.get("healthy_top5", [])
+
+            # ── At-risk block ────────────────────────────────────────────────
+            if at_risk:
+                lines.append(f"⚠️ *At Risk* ({len(at_risk)} publishers)")
+                for pub in at_risk:
+                    arrow = "↓" if pub["delta_pct"] < 0 else "↑"
+                    lines.append(
+                        f"• {pub['publisher_name']}: {pub['delta_pct']:+.1f}% {arrow}"
+                        f"  (${pub['revenue_actual']:,.0f} actual vs"
+                        f" ${pub['revenue_expected']:,.0f} expected)"
+                    )
+            else:
+                lines.append("✅ All publishers within normal range")
+
+            lines.append("")
+
+            # ── Healthy top-5 block ──────────────────────────────────────────
+            if healthy:
+                lines.append("✅ *Healthy — Top 5*")
+                for pub in healthy:
+                    arrow = "↑" if pub["delta_pct"] > 0 else ("↓" if pub["delta_pct"] < 0 else "→")
+                    lines.append(
+                        f"• {pub['publisher_name']}: {pub['delta_pct']:+.1f}% {arrow}"
+                        f"  (${pub['revenue_actual']:,.0f} actual vs"
+                        f" ${pub['revenue_expected']:,.0f} expected)"
+                    )
+
+        # ── Footer ──────────────────────────────────────────────────────────
+        total = result.get("total_publishers", 0)
+        at_risk_count = result.get("at_risk_count", 0)
+        as_of_raw = result.get("as_of", "")
+        as_of = as_of_raw[:10] if as_of_raw else "unknown"
+        lines.append(
+            f"_{total} publishers tracked · {at_risk_count} at risk · as of {as_of}_"
+        )
+
+        return {"formatted": "\n".join(lines), "pre_formatted": True}
+
+    except Exception:
+        log.exception("get_publisher_fleet_health failed")
+        return {
+            "formatted": "⚠️ Fleet health unavailable — query failed. Try again or check ClickHouse.",
+            "pre_formatted": True,
+        }
+
+
 def get_advertiser_revenue_trends(days: int = 7) -> dict:
     """
     Advertiser revenue trends: actual vs. historical median, aggregated cross-publisher.
@@ -4860,6 +5201,7 @@ TOOL_MAP = {
     "get_expiring_campaigns": get_expiring_campaigns,
     "get_publisher_revenue_trends": get_publisher_revenue_trends,
     "get_advertiser_revenue_trends": get_advertiser_revenue_trends,
+    "get_publisher_fleet_health": get_publisher_fleet_health,
     "get_scout_config": None,   # registered below after function definition
     "run_self_qa": None,  # registered below after function definition
 }
@@ -5354,7 +5696,7 @@ def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]
 
 
 def ask(user_message: str, history: list | None = None, user_id: str = "",
-        permalink: str = "", user_tz: str = "") -> AskResult:
+        permalink: str = "", user_tz: str = "", thread_ts: str = "") -> AskResult:
     """
     Send a message to Scout and get a response.
     history: optional list of prior {"role": "user"/"assistant", "content": str} messages
@@ -5436,6 +5778,19 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
 
     MAX_ROUNDS = 12  # hard cap — prevents runaway loops on complex / ambiguous queries
     _round = 0
+
+    # Intent classification — narrow tool surface and prepend focused context.
+    # Runs once per ask() call, outside the retry loop.
+    _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
+    _ask_tools = TOOLS
+    _ask_system = SYSTEM_PROMPT
+    if _intent_dict:
+        _primary = set(_intent_dict["primary_tools"])
+        _narrowed = [t for t in TOOLS if t["name"] in _primary]
+        if _narrowed:  # fall back to full TOOLS if no bucket tools found in public list
+            _ask_tools = _narrowed
+        _ask_system = _intent_dict["context"] + "\n\n" + SYSTEM_PROMPT
+
     while _round < MAX_ROUNDS:
         _round += 1
         for attempt in range(4):
@@ -5443,8 +5798,8 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
                 response = client.messages.create(
                     model=_select_model(user_message),
                     max_tokens=4096,
-                    system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                    tools=TOOLS,
+                    system=[{"type": "text", "text": _ask_system, "cache_control": {"type": "ephemeral"}}],
+                    tools=_ask_tools,
                     messages=messages,
                 )
                 break

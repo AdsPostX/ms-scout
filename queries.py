@@ -1663,6 +1663,97 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
     ]
 
 
+def get_publisher_fleet_health_data(
+    ch,
+    days: int = 7,
+    min_periods: int = 4,
+    top_n: int = 20,
+    alert_threshold_pct: float = -15.0,
+) -> dict:
+    """Ranked fleet health summary using the same 8-period median baseline as
+    publisher_revenue_trends.  At-risk publishers (delta_pct < alert_threshold_pct)
+    are returned first (worst first); healthy publishers (top 5 by positive delta)
+    follow.
+
+    Input bounds are enforced by the caller; this function trusts them.
+
+    Returns:
+        {
+            "as_of": ISO timestamp (str),
+            "window_days": int,
+            "total_publishers": int,
+            "at_risk_count": int,
+            "insufficient_history": bool,
+            "at_risk": [   # sorted delta_pct ascending (worst first)
+                {
+                    "publisher_id": str,
+                    "publisher_name": str,
+                    "revenue_actual": float,
+                    "revenue_expected": float,
+                    "delta_pct": float,
+                    "trend": "up"|"down"|"flat",
+                    "sessions_actual": int,
+                    "alert": bool,
+                }
+            ],
+            "healthy_top5": [   # sorted delta_pct descending (best first), max 5
+                { ...same fields... }
+            ],
+        }
+    When fewer than min_periods historical windows exist for every publisher the
+    at_risk / healthy_top5 lists will be empty and insufficient_history is True.
+    """
+    from datetime import timezone, datetime
+
+    rows = publisher_revenue_trends(ch, days=days, min_periods=min_periods)
+
+    as_of = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if not rows:
+        return {
+            "as_of": as_of,
+            "window_days": days,
+            "total_publishers": 0,
+            "at_risk_count": 0,
+            "insufficient_history": True,
+            "at_risk": [],
+            "healthy_top5": [],
+        }
+
+    def _row_to_entry(r: dict, threshold: float) -> dict:
+        return {
+            "publisher_id": str(r["publisher_id"]),
+            "publisher_name": r["publisher_name"],
+            "revenue_actual": r["revenue_actual"],
+            "revenue_expected": r["revenue_expected"],
+            "delta_pct": r["delta_pct"],
+            "trend": r["trend"],
+            "sessions_actual": r["sessions_actual"],
+            "alert": r["delta_pct"] < threshold,
+        }
+
+    all_entries = [_row_to_entry(r, alert_threshold_pct) for r in rows]
+
+    # Limit to top_n by absolute delta magnitude (worst at_risk + best healthy)
+    # rows already sorted delta_pct ASC from publisher_revenue_trends query
+    at_risk = [e for e in all_entries if e["delta_pct"] < alert_threshold_pct][:top_n]
+    healthy = sorted(
+        [e for e in all_entries if e["delta_pct"] >= alert_threshold_pct],
+        key=lambda e: e["delta_pct"],
+        reverse=True,
+    )[:5]
+
+    return {
+        "as_of": as_of,
+        "window_days": days,
+        "total_publishers": len(all_entries),
+        "at_risk_count": len(at_risk),
+        "insufficient_history": False,
+        "at_risk": at_risk,
+        "healthy_top5": healthy,
+    }
+
+
 def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[dict]:
     """
     Advertiser revenue trends: same period-median algorithm as publisher_revenue_trends

@@ -14,9 +14,11 @@ import scout_agent  # noqa: E402
 from scout_agent import (  # noqa: E402
     AmbiguousThresholdKey,
     AskResult,
+    _classify_intent,
     _coerce_threshold_value,
     _route_deterministic,
     _split_dotted_key,
+    _THREAD_INTENTS,
     set_threshold,
 )
 
@@ -278,6 +280,58 @@ class TestRawMessageRouting(unittest.TestCase):
             r = _route_deterministic(prefixed, user_id="U1")
         # Prefixed text is not equal to "alert thresholds" → falls through to LLM
         self.assertIsNone(r)
+
+
+class TestClassifyIntent(unittest.TestCase):
+    def tearDown(self):
+        _THREAD_INTENTS.clear()
+
+    def test_fleet_health_signals(self):
+        name, d = _classify_intent("fleet health report")
+        self.assertEqual(name, "fleet_health")
+        self.assertIn("get_publisher_fleet_health", d["primary_tools"])
+
+    def test_fleet_health_before_publisher_health(self):
+        # "how are publishers" has "how are" (publisher_health signal) but also
+        # "publishers" near fleet context — fleet bucket comes first
+        name, _ = _classify_intent("how are publishers doing this week")
+        self.assertEqual(name, "fleet_health")
+
+    def test_campaign_pacing(self):
+        name, _ = _classify_intent("how much will TurboTax make this month")
+        self.assertEqual(name, "campaign_pacing")
+
+    def test_revenue_anomaly(self):
+        name, _ = _classify_intent("revenue drop this week why")
+        self.assertEqual(name, "revenue_anomaly")
+
+    def test_offer_performance(self):
+        name, _ = _classify_intent("top performing offers right now")
+        self.assertEqual(name, "offer_performance")
+
+    def test_publisher_offer_fit_tightened(self):
+        # "profitable" should NOT match publisher_offer_fit after "fit" → "offer fit"
+        name, _ = _classify_intent("which offers are most profitable")
+        self.assertNotEqual(name, "publisher_offer_fit")
+
+    def test_no_match_returns_none(self):
+        name, d = _classify_intent("tell me a joke")
+        self.assertIsNone(name)
+        self.assertIsNone(d)
+
+    def test_thread_memory_fallback(self):
+        # Signal matches first, sets thread memory
+        name1, _ = _classify_intent("fleet health", thread_ts="T999")
+        self.assertEqual(name1, "fleet_health")
+        # Ambiguous follow-up with no signal → uses thread memory
+        name2, _ = _classify_intent("and this week?", thread_ts="T999")
+        self.assertEqual(name2, "fleet_health")
+
+    def test_thread_memory_overridden_by_strong_signal(self):
+        # Thread tagged as fleet_health, but explicit revenue signal should win
+        _classify_intent("fleet health", thread_ts="T888")
+        name, _ = _classify_intent("revenue drop this week", thread_ts="T888")
+        self.assertEqual(name, "revenue_anomaly")  # signals > thread memory
 
 
 if __name__ == "__main__":
