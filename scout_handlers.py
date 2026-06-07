@@ -2030,7 +2030,6 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
             )
 
         elif command == "/scout-health":
-            import subprocess
             _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
             def _count_lines(filename: str) -> int:
