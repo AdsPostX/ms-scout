@@ -357,16 +357,25 @@ def wrap_response(
 
     # 1. Headline + body from Card
     blocks: list[dict] = []
-    # Skip the header section when headline is empty so body-only cards don't
-    # render as "🔵 **" (empty bold) — callers pass headline="" for plain-text
-    # responses where the full answer goes into body.
-    if card.headline:
+    # Non-INFO severity: native header block (always bold in Slack, renders on mobile)
+    # followed by divider. The section-based headline is suppressed to avoid duplication.
+    # INFO: existing section layout unchanged.
+    _MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•")
+    if card.headline and card.severity is not Severity.INFO:
+        blocks.append({
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"{card.severity.emoji} {card.headline}", "emoji": True},
+        })
+        blocks.append({"type": "divider"})
+    elif card.headline:
         header_text = f"{card.severity.emoji} *{card.headline}*"
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
 
     if card.body:
-        body_text = _escape_md_code(card.body)
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body_text}})
+        if any(sig in card.body for sig in _MARKDOWN_SIGNALS):
+            blocks.extend(_text_to_blocks(card.body))
+        else:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _escape_md_code(card.body)}})
 
     if card.facts:
         fields = [
