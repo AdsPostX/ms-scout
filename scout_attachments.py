@@ -41,7 +41,7 @@ class AttachmentResult:
 # Slack delivers links as <url> or <url|label>. Unwrap before matching.
 _SLACK_LINK_WRAP_RE = re.compile(r'<(https?://[^|>]+)(?:\|[^>]*)?>')
 _SHEETS_URL_RE = re.compile(r'https?://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]+)')
-_GID_RE = re.compile(r'[?&]gid=(\d+)')
+_GID_RE = re.compile(r'[?&#]gid=(\d+)')  # Google uses #gid= fragment in normal URLs
 
 def detect_sheets_url(text: str) -> Optional[str]:
     """Return first Google Sheets URL in text, or None. Unwraps Slack's <url|label> first."""
