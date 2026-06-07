@@ -42,7 +42,6 @@ from scout_state import (
     _load_watchdog_state, _save_watchdog_state,
     _update_benchmark_from_actuals,
 )
-from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_handlers import (
     _set_bot_user_id, _set_thread_state, _set_force_monitor_fn,
     handle_event,

@@ -33,7 +33,7 @@ from scout_notion import (
     _fetch_notion_queue_items,
 )
 from scout_ui_kit import (
-    Card, Severity, Surface, wrap_response, context_block,
+    Card, Severity, Surface, ResponsePattern, wrap_response, context_block,
     _build_brief_blocks, _queue_confirm_blocks, _build_opportunity_cards,
     _build_help_blocks,
     _build_home_view, _build_queue_card, _is_help_query,
@@ -1737,6 +1737,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
     /scout-queue  — Show the current demand queue with Notion links
     /scout-enter  — MS Platform entry card for a queued offer
     /scout-status — System health: benchmark freshness, offer count, ClickHouse status
+    /scout-health — Codebase line-count bars + deferred test items
     /scout-help   — Ephemeral reference card (capabilities, commands, limits)
     """
     from scout_agent import get_demand_queue_status, get_scout_status, get_publisher_competitive_landscape
@@ -2004,6 +2005,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                     "• `/scout-enter [advertiser]` — campaign entry card for the MS platform\n"
                     "• `/scout-queue` — what's pending in the pipeline\n"
                     "• `/scout-status` — system health + data freshness\n"
+                    "• `/scout-health` — codebase line-count bars + deferred test items\n"
                     "• `/scout-help` — this card"}},
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text":
@@ -2025,6 +2027,76 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
             web.chat_postEphemeral(
                 channel=channel, user=user_id,
                 text="Scout — quick reference", blocks=help_blocks,
+            )
+
+        elif command == "/scout-health":
+            import subprocess
+            _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+            def _count_lines(filename: str) -> int:
+                path = os.path.join(_THIS_DIR, filename)
+                try:
+                    with open(path) as _f:
+                        return sum(1 for _ in _f)
+                except OSError:
+                    return 0
+
+            def _fill_bar(current: int, ceiling: int, width: int = 10) -> str:
+                ratio = min(current / ceiling, 1.0) if ceiling > 0 else 0.0
+                filled = round(ratio * width)
+                return "█" * filled + "░" * (width - filled)
+
+            def _ceiling(n: int) -> int:
+                # Round up to nearest 100, add 200 headroom
+                return (n // 100 + 1) * 100 + 200
+
+            modules = [
+                ("scout_agent.py",   _count_lines("scout_agent.py")),
+                ("queries.py",       _count_lines("queries.py")),
+                ("offer_scraper.py", _count_lines("offer_scraper.py")),
+            ]
+
+            bar_lines = []
+            for name, count in modules:
+                ceil = _ceiling(count)
+                bar  = _fill_bar(count, ceil)
+                # Fixed-width name column (17 chars)
+                bar_lines.append(f"`{name:<17}` {bar}  {count:,}/{ceil:,}")
+
+            # Parse deferred items from smoke_test.py
+            deferred: list[str] = []
+            smoke_path = os.path.join(_THIS_DIR, "smoke_test.py")
+            try:
+                with open(smoke_path) as _sf:
+                    for _line in _sf:
+                        if "DEFERRED:" in _line:
+                            _m = re.search(r'DEFERRED:\s*([^|"\\]+)', _line)
+                            if _m:
+                                deferred.append(_m.group(1).strip())
+            except OSError:
+                deferred.append("smoke_test.py not found")
+
+            deferred_text = (
+                "\n".join(f"• {d}" for d in deferred)
+                if deferred else "_None_"
+            )
+
+            body = (
+                "*Module line counts*\n"
+                + "\n".join(bar_lines)
+                + "\n\n*Deferred items (smoke_test.py)*\n"
+                + deferred_text
+            )
+            card = Card(severity=Severity.INFO, headline="Scout codebase health", body=body)
+            _, health_blocks = wrap_response(
+                card=card,
+                surface=Surface.EPHEMERAL,
+                pattern=ResponsePattern.CONFIRM,
+            )
+            web.chat_postEphemeral(
+                channel=channel, user=user_id,
+                text="Scout codebase health",
+                blocks=health_blocks,
             )
 
         elif command == "/scout-maintenance":
@@ -2059,7 +2131,8 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 channel=channel, user=user_id,
                 text=f"Unknown command `{command}`. Try `/scout-help` for the full list, "
                      f"or one of: `/scout-cap`, `/scout-vel`, `/scout-ghost`, `/scout-fill`, "
-                     f"`/scout-signal-status`, `/scout-pub`, `/scout-queue`, `/scout-status`.",
+                     f"`/scout-signal-status`, `/scout-pub`, `/scout-queue`, `/scout-status`, "
+                     f"`/scout-health`.",
             )
     except Exception as e:
         log.error(f"_handle_slash_command error ({command}): {e}")
