@@ -164,47 +164,6 @@ class Card:
     facts: list[tuple[str, str]] = field(default_factory=list)
     actions: list[tuple[str, str, str, str]] = field(default_factory=list)
 
-    def render(self, surface: Surface) -> list[dict]:
-        """Render to Block Kit blocks. Caller must pass through enforce() before send."""
-        blocks: list[dict] = []
-
-        # Header section: severity emoji + bold headline
-        header_text = f"{self.severity.emoji} *{self.headline}*"
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": header_text},
-        })
-
-        # Body section (optional)
-        if self.body:
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": _escape_md_code(self.body)},
-            })
-
-        # Facts as section.fields (max 10 fields — Slack limit)
-        if self.facts:
-            fields = []
-            for label, value in self.facts[:10]:
-                fields.append({"type": "mrkdwn", "text": f"*{label}*\n{_escape_md_code(str(value))}"})
-            blocks.append({"type": "section", "fields": fields})
-
-        # Actions row (optional)
-        if self.actions:
-            elements = []
-            for label, action_id, value, style in self.actions[:25]:  # Slack Block Kit limit: 25
-                btn: dict = {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": label},
-                    "action_id": action_id,
-                    "value": value,
-                }
-                if style in ("primary", "danger"):
-                    btn["style"] = style
-                elements.append(btn)
-            blocks.append({"type": "actions", "elements": elements})
-
-        return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +562,12 @@ def _build_alert_block(severity: str, title: str, body: str = "") -> list[dict]:
         "info": Severity.INFO,
     }
     kit_sev = _KIT_MAP.get(severity, Severity.INFO)
-    return Card(severity=kit_sev, headline=title, body=body).render(Surface.EPHEMERAL)
+    _fallback, blocks = wrap_response(
+        card=Card(severity=kit_sev, headline=title, body=body),
+        surface=Surface.EPHEMERAL,
+        feedback="none",
+    )
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -1489,48 +1453,6 @@ def _build_publisher_card(
     if flag_count >= 4:
         context_parts.append(f"_flagged {flag_count}d_")
     return _build_item_card(name, left, right, "  \n".join(context_parts))
-
-
-def _build_monitor_alert_blocks(
-    emoji: str,
-    title: str,
-    items: list[str],
-    cta_query: str = "",
-) -> "tuple[str, list[dict]]":
-    """Test fixture — not called by production code (live path: _alert_blocks → wrap_response).
-
-    Typography contract:
-    - Title: native header block (plain_text, emoji: true) + divider.
-    - Items: native rich_text_list (bullet), capped at 8. Renders with proper
-      left-margin on iOS — no horizontal scroll. Overflow shown in context block.
-    - CTA: context block using backtick so the command is copy-pasteable. Phrased
-      as an action ("for the full breakdown") rather than a passive footnote.
-    """
-    _ITEM_CAP = 8
-    fallback = f"{emoji} {title}"
-    header_text = f"{emoji} {title}"
-    if len(header_text) > _HEADER_PLAIN_TEXT_MAX:
-        header_text = header_text[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
-    blocks: list[dict] = [
-        {"type": "header", "text": {"type": "plain_text", "text": header_text, "emoji": True}},
-        {"type": "divider"},
-    ]
-    if items:
-        visible = items[:_ITEM_CAP]
-        overflow = len(items) - len(visible)
-        blocks.extend(_build_rich_text_list(visible))
-        if overflow > 0:
-            blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"_+ {overflow} more_"}],
-            })
-    if cta_query:
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"→ `@Scout {cta_query}` for the full breakdown"}],
-        })
-    blocks = enforce(blocks, Surface.MONITOR_ALARM)
-    return fallback, blocks
 
 
 # ---------------------------------------------------------------------------
