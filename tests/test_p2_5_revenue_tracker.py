@@ -185,13 +185,10 @@ class TestModuleImports(unittest.TestCase):
         self.assertIsNotNone(fn, "_revenue_tracker_daemon missing from demand_feed_main")
         self.assertTrue(callable(fn))
 
-    def test_format_revenue_alert_in_main_namespace(self):
-        """_format_revenue_alert helper must be accessible at module level."""
-        import demand_feed_main as dm
-        importlib.reload(dm)
-        fn = getattr(dm, "_format_revenue_alert", None)
-        self.assertIsNotNone(fn, "_format_revenue_alert missing from demand_feed_main")
-        self.assertTrue(callable(fn))
+    def test_format_revenue_alert_importable_from_scout_bot(self):
+        """_format_revenue_alert lives in scout_bot (not inlined in demand_feed_main)."""
+        from scout_bot import _format_revenue_alert
+        self.assertTrue(callable(_format_revenue_alert))
 
 
 if __name__ == "__main__":
