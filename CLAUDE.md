@@ -162,6 +162,26 @@ wrap_response(card=card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.A
 
 Existing callers that don't pass `pattern=` are unaffected.
 
+## Scout Attachment Ingestion (file + Google Sheets URL)
+
+Scout extracts content from @mention attachments and Google Sheets URLs and passes it as per-turn context to `ask_with_attachment()`. Read-only — no write-back to external systems.
+
+**Required Slack scope:** `files:read` — register at api.slack.com/apps → OAuth & Permissions → Bot Token Scopes. Reinstall the app after adding.
+
+**Supported sources:**
+- Google Sheets URLs in `@mention` text — fetched anonymously via `export?format=csv`. Sheet must be shared as **anyone with the link can view** (no service-account OAuth in v1). Auto-unwraps Slack's `<url|label>` formatting and handles `#gid=` fragments.
+- File attachments via `event.files[]` — PDF (pdftotext + pdfplumber fallback), CSV (pandas), images (Claude vision via base64 content block), text/JSON/markdown.
+
+**Limits:** 10MB per file/sheet, 30K char extracted text, 5MB raw image bytes before base64. Single source per @mention (file takes priority over URL if both present).
+
+**Security guards** (`scout_attachments.py`):
+- SSRF protection on Sheets fetch — host allowlist (`docs.google.com`, `accounts.google.com`), max 3 redirect hops, private/loopback/link-local IP blocked via `_resolves_to_private_ip`
+- pdftotext runs via `subprocess.run` with timeout, `tempfile.mkstemp`, no shell — never `shell=True`
+- `_NoRedirect` custom handler prevents urllib auto-following redirects we haven't validated
+- Slack `url_private` downloads gated on `files.slack.com` / `slack.com` prefix
+
+**Boundary:** `ask()` is NOT modified — `ask_with_attachment()` is a separate function that composes `_build_initial_messages` + `_run_tool_loop` with attachment-aware message construction. AC-9 ("no regression on text-only @mentions") is structurally guaranteed.
+
 ## Scout Slash Commands
 
 Registered at api.slack.com/apps — each must be added to the Slack app manifest.
