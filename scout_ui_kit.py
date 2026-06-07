@@ -149,7 +149,7 @@ class Card:
     severity:  Severity enum value
     headline:  Short title (≤150 chars, no mrkdwn needed — rendered bold)
     body:      Optional main body text (mrkdwn supported)
-    facts:     Optional list of (label, value) pairs rendered as section.fields
+    facts:     Optional list of (label, value) pairs rendered as rich_text (mobile-safe)
     actions:   Optional list of (label, action_id, value, style) button tuples
                action_id: Slack action_id for block_action routing
                style: "primary" | "danger" | "" (default/unstyled)
