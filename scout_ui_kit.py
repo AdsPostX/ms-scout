@@ -277,6 +277,14 @@ def _fit(s: str, max_len: int = 25) -> str:
     return cut if cut else s[:max_len]
 
 
+# Slack header block plain_text limit per Block Kit spec.
+_HEADER_PLAIN_TEXT_MAX = 150
+
+# Strings that signal markdown-formatted body content — route through _text_to_blocks()
+# instead of a plain mrkdwn section. Checked at the START of wrap_response() body routing.
+_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•")
+
+
 def _escape_md_code(text: str) -> str:
     """Convert fenced code blocks to inline code and escape underscores in spans.
 
@@ -357,14 +365,19 @@ def wrap_response(
 
     # 1. Headline + body from Card
     blocks: list[dict] = []
-    # Non-INFO severity: native header block (always bold in Slack, renders on mobile)
-    # followed by divider. The section-based headline is suppressed to avoid duplication.
+    # Non-INFO severity on non-MONITOR_ALARM surfaces: native header block (always bold
+    # in Slack, renders on mobile) followed by divider. The section-based headline is
+    # suppressed to avoid duplication.
+    # MONITOR_ALARM is excluded — its 6-block budget is tight and it has its own
+    # specialized render path via _build_monitor_alert_blocks().
     # INFO: existing section layout unchanged.
-    _MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•")
-    if card.headline and card.severity is not Severity.INFO:
+    if card.headline and card.severity is not Severity.INFO and surface is not Surface.MONITOR_ALARM:
+        raw_header = f"{card.severity.emoji} {card.headline}"
+        if len(raw_header) > _HEADER_PLAIN_TEXT_MAX:
+            raw_header = raw_header[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
         blocks.append({
             "type": "header",
-            "text": {"type": "plain_text", "text": f"{card.severity.emoji} {card.headline}", "emoji": True},
+            "text": {"type": "plain_text", "text": raw_header, "emoji": True},
         })
         blocks.append({"type": "divider"})
     elif card.headline:
