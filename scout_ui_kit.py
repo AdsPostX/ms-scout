@@ -1132,6 +1132,38 @@ def _text_to_blocks(text: str) -> list:
         in_fence = False
         fence_buf: list = []
 
+        def _flush_table(table_buf: list, rt_elems: list) -> list:
+            """Flush accumulated pipe-table rows into rt_elems. Returns empty list to reset table_buf."""
+            if not table_buf:
+                return []
+            col_count = len(table_buf[0].strip('|').split('|'))  # do NOT filter empty — sparse cols count
+            if col_count <= 3:
+                # Mobile-safe: emit each row as a rich_text_section
+                for row in table_buf:
+                    cells = [c.strip() for c in row.strip('|').split('|')]
+                    if len(cells) >= 2:
+                        rt_elems.append({
+                            "type": "rich_text_section",
+                            "elements": [
+                                {"type": "text", "text": cells[0], "style": {"bold": True}},
+                                {"type": "text", "text": "  " + "  ".join(cells[1:])},
+                            ],
+                        })
+            else:
+                # Wide table — keep preformatted + add mobile warning
+                table_text = '\n'.join(table_buf)
+                rt_elems.append({
+                    "type": "rich_text_preformatted",
+                    "elements": [{"type": "text", "text": table_text}],
+                })
+                rt_elems.append({
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text",
+                                  "text": "⚠ Table may scroll horizontally on mobile",
+                                  "style": {"italic": True}}],
+                })
+            return []
+
         for raw_line in part.split('\n'):
             if _FENCE_RE.match(raw_line):
                 if in_fence:
@@ -1173,13 +1205,8 @@ def _text_to_blocks(text: str) -> list:
                 continue
 
             if table_buf:
-                table_text = '\n'.join(table_buf)
-                log.debug("[text_to_blocks] pipe table fallback triggered: %d rows", len(table_buf))
-                rt_elems.append({
-                    "type": "rich_text_preformatted",
-                    "elements": [{"type": "text", "text": table_text}],
-                })
-                table_buf = []
+                log.debug("[text_to_blocks] pipe table flush: %d rows", len(table_buf))
+                table_buf = _flush_table(table_buf, rt_elems)
 
             if _BULLET_RE.match(stripped):
                 item_text = _BULLET_RE.sub('', stripped)
@@ -1207,12 +1234,8 @@ def _text_to_blocks(text: str) -> list:
                 line_buf.append(stripped)
 
         if table_buf:
-            table_text = '\n'.join(table_buf)
-            log.debug("[text_to_blocks] pipe table fallback triggered: %d rows", len(table_buf))
-            rt_elems.append({
-                "type": "rich_text_preformatted",
-                "elements": [{"type": "text", "text": table_text}],
-            })
+            log.debug("[text_to_blocks] pipe table flush (end): %d rows", len(table_buf))
+            _flush_table(table_buf, rt_elems)
         if list_buf:
             el = _flush_list(list_buf)
             if el:
