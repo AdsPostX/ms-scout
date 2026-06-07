@@ -1510,7 +1510,7 @@ def _build_monitor_alert_blocks(
     """Canonical Block Kit alert for all silent monitors and revenue tracker.
 
     Typography contract:
-    - Title: bold via _build_signal_header (single-space emoji separator).
+    - Title: native header block (plain_text, emoji: true) + divider.
     - Items: bullet list, capped at 8. When more exist, a count line is appended
       so readers know they're not seeing the full picture.
     - CTA: context block using backtick so the command is copy-pasteable. Phrased
@@ -1519,7 +1519,13 @@ def _build_monitor_alert_blocks(
     _ITEM_CAP = 8
     _BLOCK_TEXT_LIMIT = 2900  # Slack section block mrkdwn limit is 3000 chars
     fallback = f"{emoji} {title}"
-    blocks: list[dict] = [*_build_signal_header(emoji, title)]
+    header_text = f"{emoji} {title}"
+    if len(header_text) > _HEADER_PLAIN_TEXT_MAX:
+        header_text = header_text[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
+    blocks: list[dict] = [
+        {"type": "header", "text": {"type": "plain_text", "text": header_text, "emoji": True}},
+        {"type": "divider"},
+    ]
     if items:
         visible = items[:_ITEM_CAP]
         overflow = len(items) - len(visible)
