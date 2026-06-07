@@ -6180,7 +6180,7 @@ def ask_with_attachment(
         api_key=api_key,
         default_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
     )
-    prefix = _build_prefix_context(user_message, user_id, user_tz)
+    prefix = _build_prefix_context(user_id, user_tz)
     _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
     _ask_tools = TOOLS
     if _intent_dict:
@@ -6230,6 +6230,7 @@ def ask_with_attachment(
     return _run_tool_loop(
         messages, client, SYSTEM_PROMPT, _intent_name, _intent_dict,
         _ask_tools, _start_ms, _tools_called,
+        user_message=user_message,
         user_id=user_id, permalink=permalink,
     )
 
