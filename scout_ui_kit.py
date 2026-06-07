@@ -1497,7 +1497,7 @@ def _build_monitor_alert_blocks(
     items: list[str],
     cta_query: str = "",
 ) -> "tuple[str, list[dict]]":
-    """Canonical Block Kit alert for all silent monitors and revenue tracker.
+    """Test fixture — not called by production code (live path: _alert_blocks → wrap_response).
 
     Typography contract:
     - Title: native header block (plain_text, emoji: true) + divider.
