@@ -3094,6 +3094,252 @@ def test_fleet_health_v2_schema():
     return True, "v2 σ-based implementation confirmed (9/9 schema keys present, v1 params absent)"
 
 
+# ── PR-B Phase 5: attachment ingestion smoke tests ───────────────────────────
+
+@test("sheets_url_detection_slack_wrap")
+def test_sheets_url_detection_slack_wrap():
+    try:
+        from scout_attachments import detect_sheets_url
+    except Exception as e:
+        return False, f"import scout_attachments failed: {e}"
+    wrapped = "hi <https://docs.google.com/spreadsheets/d/ABC123/edit?usp=sharing|My Sheet> please"
+    r1 = detect_sheets_url(wrapped)
+    if not r1 or "ABC123" not in r1:
+        return False, f"slack-wrap not unwrapped: {r1!r}"
+    fragment = "plain https://docs.google.com/spreadsheets/d/XYZ789/edit#gid=42 thx"
+    r2 = detect_sheets_url(fragment)
+    if not r2 or "XYZ789" not in r2 or "gid=42" not in r2:
+        return False, f"gid fragment not preserved: {r2!r}"
+    if detect_sheets_url("no sheet here") is not None:
+        return False, "expected None for non-sheets text"
+    if detect_sheets_url("") is not None:
+        return False, "expected None for empty string"
+    return True, "slack-wrap unwrapped, gid preserved, None on absence"
+
+
+@test("sheets_url_wiring")
+def test_sheets_url_wiring():
+    try:
+        import scout_attachments
+    except Exception as e:
+        return False, f"import scout_attachments failed (pandas missing?): {e}"
+
+    fixture = b"name,value\nGORDON_FIXTURE_MARKER,42\nother,7\n"
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._data = data
+            self.headers = {"Content-Length": str(len(data))}
+        def read(self, n=-1):
+            return self._data if n == -1 else self._data[:n]
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _fake_open(req, timeout=15):
+        return _FakeResp(fixture)
+
+    with patch.object(scout_attachments.socket, "gethostbyname", return_value="142.250.0.0"), \
+         patch("urllib.request.OpenerDirector.open", side_effect=_fake_open):
+        result = scout_attachments.extract_sheets_url(
+            "https://docs.google.com/spreadsheets/d/FAKE_ID/edit"
+        )
+    if result.kind != "text":
+        return False, f"expected kind=text, got {result.kind} err={result.error}"
+    if result.source != "sheets_url":
+        return False, f"expected source=sheets_url, got {result.source}"
+    if "GORDON_FIXTURE_MARKER" not in (result.text or ""):
+        return False, f"marker not in extracted text: {(result.text or '')[:120]}"
+    return True, "fetch mocked, CSV parsed, marker present in summary"
+
+
+@test("sheets_auth_required")
+def test_sheets_auth_required():
+    try:
+        import scout_attachments
+    except Exception as e:
+        return False, f"import scout_attachments failed: {e}"
+
+    html_body = b"<!DOCTYPE html><html><body>Sign in</body></html>"
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._data = data
+            self.headers = {"Content-Length": str(len(data))}
+        def read(self, n=-1):
+            return self._data if n == -1 else self._data[:n]
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _fake_open(req, timeout=15):
+        return _FakeResp(html_body)
+
+    with patch.object(scout_attachments.socket, "gethostbyname", return_value="142.250.0.0"), \
+         patch("urllib.request.OpenerDirector.open", side_effect=_fake_open):
+        result = scout_attachments.extract_sheets_url(
+            "https://docs.google.com/spreadsheets/d/FAKE_ID/edit"
+        )
+    if result.kind != "auth_required":
+        return False, f"expected auth_required, got kind={result.kind} err={result.error}"
+    if "login_html_returned" not in (result.error or ""):
+        return False, f"expected login_html_returned in error, got: {result.error!r}"
+    return True, f"HTML login body → auth_required ({result.error})"
+
+
+@test("ssrf_redirect_blocked")
+def test_ssrf_redirect_blocked():
+    try:
+        import scout_attachments
+    except Exception as e:
+        return False, f"import scout_attachments failed: {e}"
+
+    import urllib.error
+    import io as _io
+
+    def _fake_open(req, timeout=15):
+        raise urllib.error.HTTPError(
+            url=req.get_full_url() if hasattr(req, "get_full_url") else "x",
+            code=302,
+            msg="Found",
+            hdrs={"Location": "http://169.254.169.254/"},
+            fp=_io.BytesIO(b""),
+        )
+
+    with patch.object(scout_attachments.socket, "gethostbyname", return_value="142.250.0.0"), \
+         patch("urllib.request.OpenerDirector.open", side_effect=_fake_open):
+        result = scout_attachments.extract_sheets_url(
+            "https://docs.google.com/spreadsheets/d/FAKE_ID/edit"
+        )
+    if result.kind != "error":
+        return False, f"expected kind=error, got {result.kind} err={result.error}"
+    err = (result.error or "").lower()
+    if "host_not_allowed" not in err and "private_ip" not in err:
+        return False, f"SSRF guard not surfaced in error: {result.error!r}"
+    return True, f"redirect to link-local IP blocked ({result.error})"
+
+
+@test("file_attachment_wiring")
+def test_file_attachment_wiring():
+    try:
+        import scout_attachments
+    except Exception as e:
+        return False, f"import scout_attachments failed: {e}"
+
+    body = b"hello MOMENTSCIENCE_FIXTURE_KEYWORD world\n"
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._data = data
+        def read(self, n=-1):
+            return self._data if n == -1 else self._data[:n]
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    file_obj = {
+        "id": "F1", "name": "test.txt", "mimetype": "text/plain",
+        "url_private": "https://files.slack.com/files-pri/T1/F1/test.txt",
+        "size": len(body),
+    }
+    with patch("scout_attachments.urllib.request.urlopen", return_value=_FakeResp(body)):
+        result = scout_attachments.extract_file(file_obj, "fake_token")
+    if result.kind != "text":
+        return False, f"expected kind=text, got {result.kind} err={result.error}"
+    if result.source != "file":
+        return False, f"expected source=file, got {result.source}"
+    if "MOMENTSCIENCE_FIXTURE_KEYWORD" not in (result.text or ""):
+        return False, f"marker missing in text: {(result.text or '')[:120]}"
+    return True, "Slack download mocked, text decoded, marker present"
+
+
+@test("attachment_too_large")
+def test_attachment_too_large():
+    try:
+        import scout_attachments
+    except Exception as e:
+        return False, f"import scout_attachments failed: {e}"
+
+    file_obj = {
+        "id": "F2", "name": "big.txt", "mimetype": "text/plain",
+        "url_private": "https://files.slack.com/files-pri/T1/F2/big.txt",
+        "size": 20 * 1024 * 1024,
+    }
+    sentinel = AssertionError("should not fetch")
+    with patch("scout_attachments.urllib.request.urlopen", side_effect=sentinel) as m:
+        result = scout_attachments.extract_file(file_obj, "token")
+    if result.kind != "too_large":
+        return False, f"expected too_large, got {result.kind} err={result.error}"
+    if m.called:
+        return False, "urlopen was called for an oversized file — short-circuit broken"
+    return True, "20MB rejected without download"
+
+
+@test("image_content_block_shape")
+def test_image_content_block_shape():
+    try:
+        import scout_agent, scout_attachments
+    except Exception as e:
+        return False, f"import failed: {e}"
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._data = data
+        def read(self, n=-1):
+            return self._data if n == -1 else self._data[:n]
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    file_obj = {
+        "id": "F3", "name": "tiny.png", "mimetype": "image/png",
+        "url_private": "https://files.slack.com/files-pri/T1/F3/tiny.png",
+        "size": len(png_bytes),
+    }
+    with patch("scout_attachments.urllib.request.urlopen", return_value=_FakeResp(png_bytes)):
+        att = scout_attachments.extract_file(file_obj, "token")
+    if att.kind != "image":
+        return False, f"expected image, got {att.kind} err={att.error}"
+
+    captured = {}
+
+    def _capture(messages, client, *a, **kw):
+        captured["messages"] = messages
+        from scout_agent import AskResult
+        return AskResult(text="ok", tools_called=[], duration_ms=1)
+
+    # Ensure ANTHROPIC_API_KEY appears set so ask_with_attachment doesn't early-return
+    os.environ.setdefault("ANTHROPIC_API_KEY", "smoke-fake-key")
+
+    with patch("scout_agent._route_deterministic", return_value=None), \
+         patch("scout_agent.anthropic.Anthropic", return_value=object()), \
+         patch("scout_agent._run_tool_loop", side_effect=_capture):
+        scout_agent.ask_with_attachment(
+            user_message="describe",
+            history=[],
+            user_id="smoke",
+            attached_image={"b64": att.image_b64, "media_type": att.image_media_type},
+        )
+
+    msgs = captured.get("messages")
+    if not msgs:
+        return False, "messages never captured — patch path wrong"
+    content = msgs[-1].get("content")
+    if not isinstance(content, list):
+        return False, f"final user content should be list, got {type(content).__name__}"
+    if len(content) < 2:
+        return False, f"expected ≥2 blocks (image + text), got {len(content)}"
+    img = content[0]
+    if img.get("type") != "image":
+        return False, f"first block type should be image, got {img.get('type')}"
+    src = img.get("source") or {}
+    if src.get("type") != "base64":
+        return False, f"source.type should be base64, got {src.get('type')}"
+    if src.get("media_type") != "image/png":
+        return False, f"source.media_type should be image/png, got {src.get('media_type')}"
+    if content[1].get("type") != "text":
+        return False, f"second block should be text, got {content[1].get('type')}"
+    return True, "image content block has correct Anthropic shape (base64 + text)"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
