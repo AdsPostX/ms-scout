@@ -493,7 +493,7 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
     weekday    = total["weekday"]
     samples    = total["sample_days"]
 
-    # Body items (no header — _build_monitor_alert_blocks supplies it)
+    # Body items only — header is supplied by the alert renderer at the call site
     items = [
         f"Platform so far ({as_of}): *${today_rev:,.0f}* | projected: *${projected:,.0f}* | expected [{weekday}]: ~*${expected:,.0f}*",
         f"Tracking at *{pct}%* of expected ({samples} same-weekday samples)",
