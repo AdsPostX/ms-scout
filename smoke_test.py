@@ -3399,14 +3399,19 @@ def test_sheets_host_allowlist_googleusercontent_redirect():
     """
     from scout_attachments import _is_sheets_host_allowed
 
-    # Should allow
-    assert _is_sheets_host_allowed("docs.google.com"), "docs.google.com blocked"
-    assert _is_sheets_host_allowed("accounts.google.com"), "accounts.google.com blocked"
-    assert _is_sheets_host_allowed("sheets.googleusercontent.com"), "exact suffix blocked"
-    assert _is_sheets_host_allowed("doc-0s-b4-sheets.googleusercontent.com"), \
-        "real Google CSV redirect target blocked — this kills the feature"
-    assert _is_sheets_host_allowed("doc-99-zz-sheets.googleusercontent.com"), \
-        "Google subdomain pattern blocked"
+    # Should allow — match the file's prevailing `if not condition: return False` style
+    # instead of using assert (asserts would also fire, but inconsistent with the rest
+    # of smoke_test.py and harder to extend with detailed failure messages).
+    if not _is_sheets_host_allowed("docs.google.com"):
+        return False, "docs.google.com blocked (was previously allowed)"
+    if not _is_sheets_host_allowed("accounts.google.com"):
+        return False, "accounts.google.com blocked (auth-redirect detection needs this)"
+    if not _is_sheets_host_allowed("sheets.googleusercontent.com"):
+        return False, "exact sheets.googleusercontent.com blocked — regex broken"
+    if not _is_sheets_host_allowed("doc-0s-b4-sheets.googleusercontent.com"):
+        return False, "real Google CSV redirect target blocked — this kills the feature"
+    if not _is_sheets_host_allowed("doc-99-zz-sheets.googleusercontent.com"):
+        return False, "Google subdomain pattern blocked"
 
     # Should still block
     if _is_sheets_host_allowed("googleusercontent.com"):
