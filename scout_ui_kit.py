@@ -417,7 +417,7 @@ def wrap_response(
         )
         blocks.append({
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"_Scout · {elapsed_str}_"}],
+            "elements": [{"type": "mrkdwn", "text": f"_⏱ {elapsed_str}_"}],
         })
 
     # 5. Card-level extra actions (e.g. drill-down CTAs from Card.actions)
@@ -472,7 +472,7 @@ def context_block(
     if period:
         parts.append(f"{period} lookback")
     if latency_ms is not None:
-        parts.append(f"{latency_ms}ms")
+        parts.append(f"⏱ {latency_ms}ms")
     text = " · ".join(parts) if parts else "Scout"
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_{text}_"}]}
 
@@ -564,7 +564,7 @@ def _pitch_signal(score: float) -> str:
         return "✅ Pitch-ready"
     if score > 0:
         return "⚠️ Low signal"
-    return "🔍 Rate TBD"
+    return "— Rate TBD"
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +764,7 @@ def _build_advertiser_rpm_context_blocks(ctx: dict, scout_estimate: float = 0) -
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": f":bar_chart:  *{' · '.join(parts[:2])}*"},
+                {"type": "mrkdwn", "text": f":bar_chart: *{' · '.join(parts[:2])}*"},
             ] + ([{"type": "mrkdwn", "text": estimate_str}] if estimate_str else []),
         }
     ]
@@ -984,7 +984,7 @@ def _build_opportunity_cards(offers: list, thread_ts: str = "") -> list:
         ms_status  = offer.get("ms_status", "")
 
         meta_parts = [p for p in [payout, category, geo] if p]
-        meta_str = "  ·  ".join(meta_parts) if meta_parts else ""
+        meta_str = " · ".join(meta_parts) if meta_parts else ""
 
         detail_parts = []
         if perf_note:
@@ -993,7 +993,7 @@ def _build_opportunity_cards(offers: list, thread_ts: str = "") -> list:
             detail_parts.append(f"Scout: ${score:.2f} RPM")
         if ms_status and ms_status != "Not in System":
             detail_parts.append(ms_status)
-        detail_str = "  ·  ".join(detail_parts) if detail_parts else ""
+        detail_str = " · ".join(detail_parts) if detail_parts else ""
 
         text = f"*{advertiser}*"
         if meta_str:
@@ -1398,7 +1398,7 @@ def _build_feedback_buttons(query_hash: str) -> list:
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": "_React 👎 if this is off — I'll retry. Or hit ✏️ Correct this._",
+                "text": "_Not what you needed? Use the buttons above._",
             }],
         },
     ]
@@ -1417,7 +1417,7 @@ def _build_feedback_buttons(query_hash: str) -> list:
 
 def _build_signal_header(emoji: str, title: str, context: str = "") -> list[dict]:
     """Canonical Pulse signal group header. 1 section + optional context."""
-    blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": f"{emoji}  *{title}*"}}]
+    blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": f"{emoji} *{title}*"}}]
     if context:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": context}]})
     return blocks
@@ -1465,7 +1465,7 @@ def _build_publisher_card(
 ) -> list[dict]:
     """Canonical publisher card: 2-col fields + combined context."""
     pct = float(delta_pct)
-    left = f"*{pct:+.0f}%*  ·  {revenue_str}/mo"
+    left = f"*{pct:+.0f}%* · {revenue_str}/mo"
     right = f"*Top Advertiser*\n{attribution}" if attribution else ""
     context_parts: list[str] = []
     if hypothesis:
@@ -1484,16 +1484,32 @@ def _build_monitor_alert_blocks(
     items: list[str],
     cta_query: str = "",
 ) -> "tuple[str, list[dict]]":
-    """Canonical Block Kit alert for all silent monitors and revenue tracker."""
+    """Canonical Block Kit alert for all silent monitors and revenue tracker.
+
+    Typography contract:
+    - Title: bold via _build_signal_header (single-space emoji separator).
+    - Items: bullet list, capped at 8. When more exist, a count line is appended
+      so readers know they're not seeing the full picture.
+    - CTA: context block using backtick so the command is copy-pasteable. Phrased
+      as an action ("for the full breakdown") rather than a passive footnote.
+    """
+    _ITEM_CAP = 8
+    _BLOCK_TEXT_LIMIT = 2900  # Slack section block mrkdwn limit is 3000 chars
     fallback = f"{emoji} {title}"
     blocks: list[dict] = [*_build_signal_header(emoji, title)]
     if items:
-        bullet_text = "\n".join(f"• {item}" for item in items[:8])
+        visible = items[:_ITEM_CAP]
+        overflow = len(items) - len(visible)
+        bullet_text = "\n".join(f"• {item}" for item in visible)
+        if overflow > 0:
+            bullet_text += f"\n_+ {overflow} more_"
+        if len(bullet_text) > _BLOCK_TEXT_LIMIT:
+            bullet_text = bullet_text[:_BLOCK_TEXT_LIMIT] + "…"
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": bullet_text}})
     if cta_query:
         blocks.append({
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"_`@Scout {cta_query}` for the full breakdown_"}],
+            "elements": [{"type": "mrkdwn", "text": f"→ `@Scout {cta_query}` for the full breakdown"}],
         })
     blocks = enforce(blocks, Surface.MONITOR_ALARM)
     return fallback, blocks
@@ -1641,13 +1657,19 @@ def _fmt_money_short(cents: int) -> str:
 
 
 def _fmt_delta_pct(today: int, baseline: int) -> str:
-    """Signed Δ% with arrow glyph. Returns '—' when baseline is zero."""
+    """Signed Δ% with direction indicator. Returns '—' when baseline is zero.
+
+    Uses emoji arrows for mobile scannability: 📈 up, 📉 down, → flat.
+    The sign (+/-) is preserved for accessibility (color-blind readers).
+    """
     if not baseline:
         return "—"
     pct = round(100.0 * (today - baseline) / baseline, 1)
-    arrow = "↗" if pct > 0 else ("↘" if pct < 0 else "→")
-    sign = "+" if pct > 0 else ""
-    return f"{arrow} {sign}{pct}%"
+    if pct > 0:
+        return f"📈 +{pct}%"
+    if pct < 0:
+        return f"📉 {pct}%"
+    return "→ 0%"
 
 
 def _build_sparkline_url(series: "list[int]") -> "str | None":
@@ -1790,12 +1812,12 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
 
     firing = list(alerts or [])
     if not firing:
-        health_text = "🟢 *All systems normal.*"
+        health_text = "🟢 *All clear* — no active alerts"
     elif len(firing) == 1:
         name = firing[0].alert_name.replace("_", " ")
-        health_text = f"🟠 *1 alert firing:* {name}"
+        health_text = f"🟠 *Alert:* {name}"
     else:
-        health_text = f"🔴 *{len(firing)} alerts firing.*"
+        health_text = f"🔴 *{len(firing)} alerts firing* — check monitor channel"
 
     blocks.append({
         "type": "section",
