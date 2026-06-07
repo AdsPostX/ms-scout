@@ -282,7 +282,8 @@ _HEADER_PLAIN_TEXT_MAX = 150
 
 # Strings that signal markdown-formatted body content — route through _text_to_blocks()
 # instead of a plain mrkdwn section. Checked at the START of wrap_response() body routing.
-_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•")
+# "- " and "• " handle bodies that START with a single bullet (no leading \n).
+_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ")
 
 
 def _escape_md_code(text: str) -> str:
