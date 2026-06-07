@@ -47,26 +47,20 @@ class TestKitLint(unittest.TestCase):
         )
 
     def test_monitor_alert_enforces_budget_when_kit_enabled(self):
-        """Monitor alerts are a paging surface. When the kit is on, output
-        MUST be capped at BUDGETS[MONITOR_ALARM] so we never overflow Slack
-        on a noisy day. Regression guard for the PR-2 budget wrapping."""
+        """Monitor alert surface has a strict 6-block budget. wrap_response must
+        enforce it even when card body + facts would otherwise exceed the cap."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
-        # Force re-import so module-level constants pick up the env var
         for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
-        from scout_ui_kit import BUDGETS, Surface, _build_monitor_alert_blocks
-
-        # 50 items would otherwise render 50+ blocks; we cap at 8 bullets per
-        # section, but the surrounding header+context+section still need budget.
-        many_items = [f"item {i}" for i in range(50)]
-        _fallback, blocks = _build_monitor_alert_blocks(
-            ":warning:", "Stress test", many_items, "test cta"
-        )
+        from scout_ui_kit import Card, Severity, Surface, wrap_response, BUDGETS
+        # body + 10 facts would produce >6 blocks without enforcement
+        facts = [(f"Pub {i}", f"${i*10}K") for i in range(10)]
+        card = Card(Severity.WARN, "Enforce test", body="• alert\n• detail", facts=facts)
+        _fallback, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
         cap = BUDGETS[Surface.MONITOR_ALARM]
         self.assertLessEqual(
             len(blocks), cap,
-            f"_build_monitor_alert_blocks returned {len(blocks)} blocks; "
-            f"MONITOR_ALARM budget is {cap}. enforce() not wired correctly.",
+            f"wrap_response returned {len(blocks)} blocks; MONITOR_ALARM budget is {cap}",
         )
 
     def test_home_view_action_ids_are_unique(self):
@@ -98,15 +92,13 @@ class TestKitLint(unittest.TestCase):
         )
 
     def test_monitor_alert_blocks_basic_sanity(self):
-        """Sanity: _build_monitor_alert_blocks must not crash and must return blocks."""
+        """Sanity: wrap_response on MONITOR_ALARM must not crash and must return blocks."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
         for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
-        from scout_ui_kit import _build_monitor_alert_blocks
-
-        _fallback, blocks = _build_monitor_alert_blocks(
-            ":warning:", "Passthrough test", ["a", "b"], ""
-        )
+        from scout_ui_kit import Card, Severity, Surface, wrap_response
+        card = Card(Severity.WARN, "Passthrough test", body="• a\n• b")
+        _fallback, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
         self.assertGreater(len(blocks), 0)
 
     def test_no_section_accessory_buttons(self):
@@ -322,7 +314,7 @@ class TestKitLint(unittest.TestCase):
     def test_monitor_alarm_warn_gets_native_header_block(self):
         """MONITOR_ALARM + WARN severity must emit a native header block (not mrkdwn section).
         Regression guard: wrap_response previously excluded MONITOR_ALARM from native headers
-        even though _build_monitor_alert_blocks (the 'specialised path') was never called."""
+        even when the surface was explicitly passed."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
         for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
