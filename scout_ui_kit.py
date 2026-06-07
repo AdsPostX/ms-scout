@@ -1494,6 +1494,7 @@ def _build_monitor_alert_blocks(
       as an action ("for the full breakdown") rather than a passive footnote.
     """
     _ITEM_CAP = 8
+    _BLOCK_TEXT_LIMIT = 2900  # Slack section block mrkdwn limit is 3000 chars
     fallback = f"{emoji} {title}"
     blocks: list[dict] = [*_build_signal_header(emoji, title)]
     if items:
@@ -1502,6 +1503,8 @@ def _build_monitor_alert_blocks(
         bullet_text = "\n".join(f"• {item}" for item in visible)
         if overflow > 0:
             bullet_text += f"\n_+ {overflow} more_"
+        if len(bullet_text) > _BLOCK_TEXT_LIMIT:
+            bullet_text = bullet_text[:_BLOCK_TEXT_LIMIT] + "…"
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": bullet_text}})
     if cta_query:
         blocks.append({
