@@ -242,7 +242,7 @@ _HEADER_PLAIN_TEXT_MAX = 150
 # Strings that signal markdown-formatted body content — route through _text_to_blocks()
 # instead of a plain mrkdwn section. Checked at the START of wrap_response() body routing.
 # "- " and "• " handle bodies that START with a single bullet (no leading \n).
-_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ")
+_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ", "\n|")
 
 
 def _escape_md_code(text: str) -> str:
@@ -269,6 +269,34 @@ def _escape_md_code(text: str) -> str:
         return "`" + m.group(1).replace("_", r"\_") + "`"
 
     return _CODE_SPAN_RE.sub(_escape_underscores, text)
+
+
+def _build_facts_blocks(facts: list[tuple[str, str]]) -> list[dict]:
+    """Render (label, value) pairs as a single rich_text block.
+    All rows share one block — safe for tight budgets (1 block regardless of row count)."""
+    if not facts:
+        return []
+    visible = facts[:10]
+    overflow = len(facts) - len(visible)
+    sections = [
+        {
+            "type": "rich_text_section",
+            "elements": [
+                {"type": "text", "text": str(lbl), "style": {"bold": True}},
+                {"type": "text", "text": "  "},
+                {"type": "text", "text": str(val)},
+            ],
+        }
+        for lbl, val in visible
+    ]
+    blocks: list[dict] = [{"type": "rich_text", "elements": sections}]
+    if overflow > 0:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn",
+                          "text": f"_+ {overflow} more — ask Scout for the full breakdown_"}],
+        })
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -348,11 +376,7 @@ def wrap_response(
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _escape_md_code(card.body)}})
 
     if card.facts:
-        fields = [
-            {"type": "mrkdwn", "text": f"*{lbl}*\n{_escape_md_code(str(val))}"}
-            for lbl, val in card.facts[:10]
-        ]
-        blocks.append({"type": "section", "fields": fields})
+        blocks.extend(_build_facts_blocks(card.facts))
 
     # 2. Feedback row (protected — placed before suggestions so enforce() keeps it)
     if feedback == "button" and query_hash:
