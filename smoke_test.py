@@ -3542,6 +3542,172 @@ def test_threshold_history_falls_through_to_llm():
         return False, err
 
 
+@test("dispatch_table_routes_each_known_format")
+def test_dispatch_table_routes_each_known_format():
+    """Single source of truth for "what formats Scout recognizes". If you add a
+    new extractor, add a row here. If this test fails, the dispatch is broken
+    OR a format you thought was supported isn't.
+
+    Verifies BOTH that supported formats find a matching predicate AND that
+    unsupported formats fall through cleanly (no false-match on long-tail types).
+    """
+    from scout_attachments import _EXTRACTORS
+
+    def _find_extractor(mimetype: str, ext: str):
+        for predicate, extractor in _EXTRACTORS:
+            if predicate(mimetype.lower(), ext.lower()):
+                return extractor
+        return None
+
+    expected_supported = [
+        ("application/pdf", ".pdf"),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+        ("application/vnd.ms-excel", ".xls"),
+        ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"),
+        ("text/csv", ".csv"),
+        ("image/png", ".png"),
+        ("image/jpeg", ".jpg"),
+        ("text/plain", ".txt"),
+        ("text/markdown", ".md"),
+        ("application/json", ".json"),
+    ]
+    for mt, ext in expected_supported:
+        if _find_extractor(mt, ext) is None:
+            return False, f"expected-supported format ({mt}, {ext}) found no extractor — dispatch broken"
+
+    # Critical regression: vnd.ms-excel must NOT route to CSV anymore. Before this
+    # PR it did, which would crash pd.read_csv on binary .xls bytes in production.
+    from scout_attachments import _is_csv, _is_xls
+    if _is_csv("application/vnd.ms-excel", ".xls"):
+        return False, "vnd.ms-excel still matches CSV predicate — the misrouting bug is back"
+    if not _is_xls("application/vnd.ms-excel", ".xls"):
+        return False, "vnd.ms-excel doesn't match XLS predicate — would fall through to unsupported"
+
+    expected_unsupported = [
+        ("application/zip", ".zip"),
+        ("video/mp4", ".mp4"),
+        ("application/octet-stream", ".bin"),
+        ("", ".pages"),  # Apple Numbers/Pages — explicit not-yet-supported
+        ("", ""),
+    ]
+    for mt, ext in expected_unsupported:
+        if _find_extractor(mt, ext) is not None:
+            return False, f"unsupported format ({mt!r}, {ext!r}) unexpectedly matched an extractor"
+
+    return True, f"{len(expected_supported)} supported types route correctly; {len(expected_unsupported)} unsupported types fall through; vnd.ms-excel misrouting fixed"
+
+
+@test("xlsx_extraction_finds_marker")
+def test_xlsx_extraction_finds_marker():
+    """Build a tiny xlsx in memory with openpyxl, run it through extract_file's
+    dispatch (mocking the Slack download). Asserts the extracted summary contains
+    the known marker — proves the full xlsx → read_excel → summarize path works.
+
+    Caught by Sidd's live testing: AT&T Views .xlsx fell to "unsupported" because
+    the previous dispatch didn't know about the modern Excel mimetype.
+    """
+    from unittest.mock import patch
+    from io import BytesIO
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        return False, "openpyxl not installed — pip install openpyxl"
+
+    # Build an xlsx with a known marker in row 2
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["Publisher", "Revenue"])
+    ws.append(["GORDON_XLSX_FIXTURE", 12345])
+    # Second sheet so we can verify multi-sheet header
+    ws2 = wb.create_sheet("Q3_Notes")
+    ws2.append(["only", "this", "sheet", "name"])
+    buf = BytesIO()
+    wb.save(buf)
+    xlsx_bytes = buf.getvalue()
+
+    file_obj = {
+        "id": "F1",
+        "name": "att-views.xlsx",
+        "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "url_private": "https://files.slack.com/files-pri/T1/F1/att-views.xlsx",
+        "size": len(xlsx_bytes),
+    }
+
+    class _FakeResp:
+        def __init__(self, b): self._b = b
+        def read(self, n=None): return self._b[:n] if n else self._b
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+
+    with patch("scout_attachments.urllib.request.urlopen", return_value=_FakeResp(xlsx_bytes)):
+        from scout_attachments import extract_file
+        result = extract_file(file_obj, bot_token="fake")
+
+    if result.kind != "text":
+        return False, f"expected kind=text, got kind={result.kind!r} error={result.error!r}"
+    if "GORDON_XLSX_FIXTURE" not in (result.text or ""):
+        return False, "marker missing from extracted text — pd.read_excel didn't see row 2"
+    if "Q3_Notes" not in (result.text or ""):
+        return False, "multi-sheet header missing — user wouldn't know other sheets exist"
+
+    return True, "xlsx → read_excel → summary works; multi-sheet header surfaces other tabs"
+
+
+@test("docx_extraction_finds_paragraphs_and_tables")
+def test_docx_extraction_finds_paragraphs_and_tables():
+    """Build a tiny docx in memory with python-docx (paragraphs + a table),
+    run through extract_file dispatch. Verifies both paragraph and table text
+    is captured.
+    """
+    from unittest.mock import patch
+    from io import BytesIO
+    try:
+        from docx import Document
+    except ImportError:
+        return False, "python-docx not installed — pip install python-docx"
+
+    doc = Document()
+    doc.add_paragraph("PARTNER_BRIEF_HEADLINE")
+    doc.add_paragraph("Some body text describing the offer.")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Advertiser"
+    table.cell(0, 1).text = "Payout"
+    table.cell(1, 0).text = "Cars.com"
+    table.cell(1, 1).text = "$50 CPA"
+    buf = BytesIO()
+    doc.save(buf)
+    docx_bytes = buf.getvalue()
+
+    file_obj = {
+        "id": "F2",
+        "name": "partner-brief.docx",
+        "mimetype": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "url_private": "https://files.slack.com/files-pri/T1/F2/partner-brief.docx",
+        "size": len(docx_bytes),
+    }
+
+    class _FakeResp:
+        def __init__(self, b): self._b = b
+        def read(self, n=None): return self._b[:n] if n else self._b
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+
+    with patch("scout_attachments.urllib.request.urlopen", return_value=_FakeResp(docx_bytes)):
+        from scout_attachments import extract_file
+        result = extract_file(file_obj, bot_token="fake")
+
+    if result.kind != "text":
+        return False, f"expected kind=text, got kind={result.kind!r} error={result.error!r}"
+    text = result.text or ""
+    if "PARTNER_BRIEF_HEADLINE" not in text:
+        return False, "paragraph marker missing — python-docx didn't see the first paragraph"
+    if "Cars.com" not in text or "$50 CPA" not in text:
+        return False, "table cells missing — python-docx didn't extract tabular content"
+
+    return True, "docx paragraphs + tables both captured"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
