@@ -16,6 +16,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import replace as _dc_replace
 
 from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 from slack_sdk.socket_mode import SocketModeClient
@@ -24,6 +25,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web import WebClient
 
 from scout_agent import ask
+from scout_attachments import detect_sheets_url, extract_sheets_url, extract_file
 from scout_notion import (
     _generate_offer_copy, _write_to_notion_queue, _update_notion_status,
     _queue_copy_enrichment,
@@ -138,9 +140,25 @@ def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
     def _worker():
         try:
             from scout_telemetry import capture as _lat_capture
+            # Dispatch to ask_with_attachment when attachment kwargs are present.
+            # Otherwise call vanilla ask() to preserve existing behavior contract.
+            _has_attachment = (
+                kwargs.get("attached_text") is not None
+                or kwargs.get("attached_image") is not None
+            )
+            if _has_attachment:
+                from scout_agent import ask_with_attachment as _ask_fn
+            else:
+                _ask_fn = ask
+                # Strip attachment kwargs — vanilla ask() doesn't accept them.
+                # Without this, every text-only @mention raises TypeError because
+                # the handler always passes attached_text=None, attached_image=None
+                # through to _ask_with_timeout. Caught by CodeRabbit on PR #234.
+                kwargs.pop("attached_text", None)
+                kwargs.pop("attached_image", None)
             result_box["resp"] = _lat_capture(
                 "scout/agent",
-                lambda: ask(query, **kwargs),
+                lambda: _ask_fn(query, **kwargs),
                 {"user_id": kwargs.get("user_id", "")},
                 distinct_id=kwargs.get("user_id", "") or None,
             )
@@ -2693,6 +2711,63 @@ def _handle_event_impl(req: SocketModeRequest):
             ] + history
             log.info(f"Injected thread context for {thread_ts}: {ctx_line}")
 
+    # ── Attachment detection (Phase 2 of PR-B file upload) ──────────────────────
+    # Builds attached_text / attached_image / attachment_note for both the DM and
+    # @mention paths. No-op when there's no file and no Sheets URL in the message,
+    # preserving existing behavior (AC-9).
+    attached_text = None
+    attached_image = None
+    attachment_note = None
+
+    _files = event.get("files") or []
+    _sheets_url = detect_sheets_url(event.get("text", ""))
+
+    # File takes priority over URL if both present
+    if _files:
+        if len(_files) > 1:
+            attachment_note = (
+                f"_I see {len(_files)} files attached — using the first one "
+                f"({_files[0].get('name', 'unknown')})._"
+            )
+        _result = extract_file(_files[0], os.getenv("SLACK_BOT_TOKEN", ""))
+    elif _sheets_url:
+        _result = extract_sheets_url(_sheets_url)
+    else:
+        _result = None
+
+    if _result is not None:
+        if _result.kind == "text":
+            attached_text = _result.text
+        elif _result.kind == "image":
+            attached_image = {
+                "b64": _result.image_b64,
+                "media_type": _result.image_media_type,
+            }
+        elif _result.kind == "too_large":
+            # Post friendly rejection immediately, do NOT call ask
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts or msg_ts,
+                text=":warning: That file is too big for me — try splitting it or pasting the relevant section into chat. (cap: 10MB)",
+            )
+            return
+        elif _result.kind == "auth_required":
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts or msg_ts,
+                text=":lock: I couldn't access that sheet — share it as 'anyone with the link can view' and try again.",
+            )
+            return
+        elif _result.kind == "unsupported":
+            attachment_note = (
+                f"_Couldn't read `{_result.name}` (type not supported yet) — "
+                f"answering the text question only._"
+            )
+        elif _result.kind == "error":
+            attachment_note = (
+                f"_Couldn't read `{_result.name}` ({_result.error}) — "
+                f"answering the text question only._"
+            )
+        # else: shouldn't happen, but degrade gracefully
+
     # ── DM path: emoji-reaction, no placeholder, no GIF, no spinner ─────────────
     if is_dm:
         # Add 🤔 reaction to the user's message — the "I saw it, thinking" signal.
@@ -2708,7 +2783,13 @@ def _handle_event_impl(req: SocketModeRequest):
             response = _ask_with_timeout(
                 query, history=history, user_id=user_id, permalink=_permalink,
                 user_tz=_get_user_tz(web, user_id), thread_ts=thread_ts or "",
+                attached_text=attached_text, attached_image=attached_image,
             )
+            # Prepend attachment_note (e.g. unsupported/error fallback notice)
+            # to Scout's response text. AskResult is frozen — use dataclasses.replace
+            # to honor the boundary contract instead of __setattr__ bypass.
+            if attachment_note and response is not None:
+                response = _dc_replace(response, text=f"{attachment_note}\n\n{response.text}")
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
             _tools_called = response.tools_called
@@ -2822,7 +2903,13 @@ def _handle_event_impl(req: SocketModeRequest):
         _t0 = time.monotonic()
         _permalink = _permalink_for(web, channel, msg_ts)
         response = _ask_with_timeout(query, history=history, user_id=user_id, permalink=_permalink,
-                                     thread_ts=thread_ts or "")
+                                     thread_ts=thread_ts or "",
+                                     attached_text=attached_text, attached_image=attached_image)
+        # Prepend attachment_note (e.g. unsupported/error fallback notice)
+        # to Scout's response text. AskResult is frozen — use dataclasses.replace
+        # to honor the boundary contract instead of __setattr__ bypass.
+        if attachment_note and response is not None:
+            response = _dc_replace(response, text=f"{attachment_note}\n\n{response.text}")
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting

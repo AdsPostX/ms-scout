@@ -6129,6 +6129,112 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     )
 
 
+def ask_with_attachment(
+    user_message: str,
+    history: list | None = None,
+    user_id: str = "",
+    permalink: str = "",
+    user_tz: str = "",
+    thread_ts: str = "",
+    attached_text: str | None = None,
+    attached_image: dict | None = None,
+) -> AskResult:
+    """Variant of ask() that supports per-turn attached content (file or sheet).
+
+    Falls back to ask() when no attachment is present, so callers can use this
+    unconditionally without paying any cost when there's no attachment.
+
+    Note on _smart_history non-collision: attached content is injected into
+    messages[-1] (the current user turn) AFTER _build_initial_messages composes
+    the history+prefix layer. The attachment is per-turn and never enters the
+    history list — do not cache or hoist the effective message string, or the
+    "attachments are turn-scoped" invariant breaks.
+    """
+    # No attachments → delegate to vanilla ask(), zero new code path
+    if attached_text is None and attached_image is None:
+        return ask(
+            user_message,
+            history=history,
+            user_id=user_id,
+            permalink=permalink,
+            user_tz=user_tz,
+            thread_ts=thread_ts,
+        )
+
+    # Same setup as ask() — pre-router check, client, prefix context, intent
+    _start_ms = time.monotonic()
+    _tools_called: list = []
+    _routed = _route_deterministic(user_message, user_id)
+    if _routed is not None:
+        return _routed  # control-surface verbs never attach files
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return AskResult(
+            text="ANTHROPIC_API_KEY not set — Scout can't respond.",
+            tools_called=[],
+            duration_ms=int((time.monotonic() - _start_ms) * 1000),
+        )
+
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        default_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+    )
+    prefix = _build_prefix_context(user_id, user_tz)
+    _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
+    _ask_tools = TOOLS
+    if _intent_dict:
+        _primary = set(_intent_dict["primary_tools"])
+        _narrowed = [t for t in TOOLS if t["name"] in _primary]
+        if _narrowed:
+            _ask_tools = _narrowed
+
+    # Cap attached_text defense-in-depth (scout_attachments also caps)
+    if attached_text and len(attached_text) > 30_000:
+        attached_text = attached_text[:30_000] + "…[trimmed]"
+
+    # Use PR-A's _build_initial_messages for the standard history+prefix layer
+    messages = _build_initial_messages(user_message, history, prefix)
+
+    # MUTATE the final user message in messages[-1] to inject attachment content
+    if attached_image:
+        # Convert final user turn from string to content-block list
+        original_text = messages[-1]["content"]
+        if attached_text:
+            original_text = (
+                f"[Attached file content follows between fences:]\n"
+                f"```\n{attached_text}\n```\n\n"
+                f"{original_text}"
+            )
+        messages[-1]["content"] = [
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": attached_image["media_type"],
+                "data": attached_image["b64"],
+            }},
+            {"type": "text", "text": original_text},
+        ]
+    elif attached_text:
+        # Text-only attachment — prepend fenced block to the user message string
+        messages[-1]["content"] = (
+            f"[Attached file content follows between fences:]\n"
+            f"```\n{attached_text}\n```\n\n"
+            f"{messages[-1]['content']}"
+        )
+
+    log.info(
+        f"ask_with_attachment: attached_text={len(attached_text) if attached_text else 0}c, "
+        f"attached_image={'present' if attached_image else 'absent'}"
+    )
+
+    return _run_tool_loop(
+        messages, client, SYSTEM_PROMPT, _intent_name, _intent_dict,
+        _ask_tools, _start_ms, _tools_called,
+        user_message=user_message,
+        user_id=user_id, permalink=permalink,
+    )
+
+
 # ── CLI test ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

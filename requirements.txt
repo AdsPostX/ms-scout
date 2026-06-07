@@ -11,3 +11,8 @@ pytz~=2026.1
 upstash-redis~=1.1
 # Transitive via google-api-core; pinned floor to keep ≥5.29.6 (GHSA-7gcm-g887-7qv7 / CVE-2026-0994).
 protobuf>=5.29.6,<7.0
+# scout_attachments.py — Sheets CSV + uploaded CSV parsing + markdown summary
+pandas~=2.2
+tabulate~=0.9
+# scout_attachments.py — pdftotext CLI fallback if poppler-utils not installed at runtime
+pdfplumber~=0.11
