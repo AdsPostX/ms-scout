@@ -761,7 +761,16 @@ def _revenue_tracker_daemon() -> None:
                         slot = today_str  # not used below in daily mode
 
                     channel = _get_channel()
-                    web = WebClient(token=os.getenv("SLACK_BOT_TOKEN", ""))
+                    _bot_token = os.getenv("SLACK_BOT_TOKEN")
+                    if not _bot_token:
+                        log.error("[revenue-tracker] SLACK_BOT_TOKEN not set — skipping slot.")
+                        if not hourly_enabled:
+                            _save_revenue_alert_date(today_str)
+                        else:
+                            _save_revenue_alert_slot(slot)
+                        record_job_run("revenue_tracker", status="error", error="SLACK_BOT_TOKEN not set", duration_ms=0)
+                        continue
+                    web = WebClient(token=_bot_token)
                     ch  = _get_ch_client()
 
                     _t0 = _time.monotonic()
@@ -770,7 +779,7 @@ def _revenue_tracker_daemon() -> None:
                     try:
                         total = _query_intraday_revenue_total(ch)
                     except Exception as e:
-                        log.warning("[revenue-tracker] Phase 1 query failed: %s", e)
+                        log.warning("[revenue-tracker] Phase 1 query failed: %s", e, exc_info=True)
                         if not hourly_enabled:
                             _save_revenue_alert_date(today_str)  # avoid hammering on CH error
                         else:
@@ -827,11 +836,13 @@ def _revenue_tracker_daemon() -> None:
                         # else: worsened_enough — fall through to fire
 
                     # Phase 2: per-publisher decomposition
+                    _phase2_error: str | None = None
                     try:
                         publishers = _query_intraday_revenue_by_publisher(ch, total)
                     except Exception as e:
-                        log.warning("[revenue-tracker] Phase 2 query failed: %s", e)
+                        log.warning("[revenue-tracker] Phase 2 query failed: %s", e, exc_info=True)
                         publishers = []
+                        _phase2_error = str(e)[:400]
 
                     fallback, blocks = _format_revenue_alert(total, publishers)
                     web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
@@ -850,7 +861,8 @@ def _revenue_tracker_daemon() -> None:
                     )
                     record_job_run(
                         "revenue_tracker",
-                        status="success",
+                        status="partial_error" if _phase2_error else "success",
+                        error=_phase2_error,
                         duration_ms=duration_ms,
                     )
 
