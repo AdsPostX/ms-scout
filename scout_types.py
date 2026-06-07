@@ -129,7 +129,7 @@ class Brief(TypedDict, total=False):
 
 
 # ── PulseSignal ────────────────────────────────────────────────────────────────
-# Shape used by signal format functions in scout_slack_ui.py.
+# Shape used by signal format functions in scout_ui_kit.py.
 
 class PulseSignal(TypedDict, total=False):
     signal_type: str     # "ghost" | "cap" | "velocity" | "fill"

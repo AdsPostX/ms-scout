@@ -33,7 +33,7 @@ from scout_notion import (
 from scout_ui_kit import (
     Card, Severity, Surface, wrap_response, context_block,
     _build_brief_blocks, _queue_confirm_blocks, _build_opportunity_cards,
-    _build_suggestion_buttons, _build_help_blocks, _build_feedback_buttons,
+    _build_help_blocks,
     _build_home_view, _build_queue_card, _text_to_blocks, _is_help_query,
     _build_advertiser_rpm_context_blocks,
 )

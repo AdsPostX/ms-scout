@@ -9,7 +9,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
-    "scout_agent", "scout_bot", "scout_handlers", "scout_slack_ui",
+    "scout_agent", "scout_bot", "scout_handlers",
     "scout_state", "scout_types", "scout_notion", "scout_digest", "queries"
 ]
 
