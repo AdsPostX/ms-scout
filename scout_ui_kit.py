@@ -1666,9 +1666,9 @@ def _fmt_delta_pct(today: int, baseline: int) -> str:
         return "—"
     pct = round(100.0 * (today - baseline) / baseline, 1)
     if pct > 0:
-        return f"📈 +{pct}%"
+        return f"📈 +{pct:.1f}%"
     if pct < 0:
-        return f"📉 {pct}%"
+        return f"📉 {pct:.1f}%"
     return "→ 0%"
 
 
