@@ -2045,9 +2045,8 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 filled = round(ratio * width)
                 return "█" * filled + "░" * (width - filled)
 
-            def _ceiling(n: int) -> int:
-                # Round up to nearest 100, add 200 headroom
-                return (n // 100 + 1) * 100 + 200
+            # Mirrors smoke_test.py ceilings — keep in sync if gates change.
+            _CEILINGS = {"scout_agent.py": 6600, "queries.py": 2700, "offer_scraper.py": 2600}
 
             modules = [
                 ("scout_agent.py",   _count_lines("scout_agent.py")),
@@ -2057,7 +2056,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
 
             bar_lines = []
             for name, count in modules:
-                ceil = _ceiling(count)
+                ceil = _CEILINGS.get(name, 9999)
                 bar  = _fill_bar(count, ceil)
                 # Fixed-width name column (17 chars)
                 bar_lines.append(f"`{name:<17}` {bar}  {count:,}/{ceil:,}")
