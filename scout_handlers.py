@@ -2900,9 +2900,10 @@ def _handle_event_impl(req: SocketModeRequest):
                                      thread_ts=thread_ts or "",
                                      attached_text=attached_text, attached_image=attached_image)
         # Prepend attachment_note (e.g. unsupported/error fallback notice)
-        # to Scout's response text. AskResult is frozen — use __setattr__.
+        # to Scout's response text. AskResult is frozen — use dataclasses.replace
+        # to honor the boundary contract instead of __setattr__ bypass.
         if attachment_note and response is not None:
-            object.__setattr__(response, "text", f"{attachment_note}\n\n{response.text}")
+            response = _dc_replace(response, text=f"{attachment_note}\n\n{response.text}")
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting

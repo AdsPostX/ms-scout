@@ -196,19 +196,28 @@ def _host_from_url(url: str) -> str:
     return (urlparse(url).hostname or "").lower()
 
 def _resolves_to_private_ip(host: str) -> bool:
+    """Check ALL A/AAAA records (not just first) so a host with both public and
+    private IPs is rejected. Uses getaddrinfo to enumerate every address family.
+    Fail-closed on resolution error — if we can't resolve, don't fetch."""
     try:
-        ip = socket.gethostbyname(host)
-        addr = ipaddress.ip_address(ip)
-        return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except Exception:
-        return True  # fail-closed: if we can't resolve, don't fetch
+        return True  # fail-closed
+    for family, _type, _proto, _canon, sockaddr in infos:
+        ip_str = sockaddr[0]
+        try:
+            addr = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return True  # unparseable IP — fail-closed
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast:
+            return True
+    return False
 
 def _slack_download(url: str, bot_token: str, max_bytes: int) -> bytes:
-    """Download a Slack file via url_private with bot token. Slack-hosted only — no SSRF guard
-    needed for Slack's CDN domain, but cap size."""
-    if not url.startswith("https://files.slack.com/") and not url.startswith("https://slack.com/"):
-        # Defensive: Slack's url_private should only point at Slack's CDN
-        # If it doesn't, refuse rather than fetch
+    """Download a Slack file via url_private with bot token. Slack CDN only — cap size."""
+    # url_private always points at files.slack.com (the Slack CDN). Narrower
+    # than the original `slack.com` prefix to reduce attack surface.
+    if not url.startswith("https://files.slack.com/"):
         raise ValueError(f"unexpected_slack_url: {url[:80]}")
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {bot_token}"})
     with urllib.request.urlopen(req, timeout=15) as resp:
