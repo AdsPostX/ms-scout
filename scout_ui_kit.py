@@ -164,47 +164,6 @@ class Card:
     facts: list[tuple[str, str]] = field(default_factory=list)
     actions: list[tuple[str, str, str, str]] = field(default_factory=list)
 
-    def render(self, surface: Surface) -> list[dict]:
-        """Render to Block Kit blocks. Caller must pass through enforce() before send."""
-        blocks: list[dict] = []
-
-        # Header section: severity emoji + bold headline
-        header_text = f"{self.severity.emoji} *{self.headline}*"
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": header_text},
-        })
-
-        # Body section (optional)
-        if self.body:
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": _escape_md_code(self.body)},
-            })
-
-        # Facts as section.fields (max 10 fields — Slack limit)
-        if self.facts:
-            fields = []
-            for label, value in self.facts[:10]:
-                fields.append({"type": "mrkdwn", "text": f"*{label}*\n{_escape_md_code(str(value))}"})
-            blocks.append({"type": "section", "fields": fields})
-
-        # Actions row (optional)
-        if self.actions:
-            elements = []
-            for label, action_id, value, style in self.actions[:25]:  # Slack Block Kit limit: 25
-                btn: dict = {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": label},
-                    "action_id": action_id,
-                    "value": value,
-                }
-                if style in ("primary", "danger"):
-                    btn["style"] = style
-                elements.append(btn)
-            blocks.append({"type": "actions", "elements": elements})
-
-        return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +562,12 @@ def _build_alert_block(severity: str, title: str, body: str = "") -> list[dict]:
         "info": Severity.INFO,
     }
     kit_sev = _KIT_MAP.get(severity, Severity.INFO)
-    return Card(severity=kit_sev, headline=title, body=body).render(Surface.EPHEMERAL)
+    _fallback, blocks = wrap_response(
+        card=Card(severity=kit_sev, headline=title, body=body),
+        surface=Surface.EPHEMERAL,
+        feedback="none",
+    )
+    return blocks
 
 
 # ---------------------------------------------------------------------------
