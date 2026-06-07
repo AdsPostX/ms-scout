@@ -30,7 +30,7 @@ from scout_notion import (
     _copy_coalescer_loop,
     _notion_watcher_loop,
 )
-from scout_ui_kit import Card, Severity, Surface, enforce, wrap_response, context_block, _KIT_ENABLED, _build_monitor_alert_blocks
+from scout_ui_kit import Card, Severity, Surface, enforce, wrap_response, context_block, _KIT_ENABLED
 from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_state import (
     _DATA_DIR,

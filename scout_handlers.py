@@ -2789,7 +2789,6 @@ def _handle_event_impl(req: SocketModeRequest):
             )
         else:
             response_text  = _sanitize_slack(response.text)[:3000]
-            content_blocks = _text_to_blocks(response_text)
             # No elapsed-time footer in DMs — the reaction disappearing IS the signal
             _dm6_card = Card(Severity.INFO, "", body=response_text)
             _dm6_fallback, _dm6_blocks = wrap_response(
@@ -2950,7 +2949,6 @@ def _handle_event_impl(req: SocketModeRequest):
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
         response_text  = _sanitize_slack(response.text)[:3000]
-        content_blocks = _text_to_blocks(response_text)
         _ch8_card = Card(Severity.INFO, "", body=response_text)
         _ch8_fallback, _ch8_blocks = wrap_response(
             card=_ch8_card, surface=Surface.CHANNEL_ROOT,
