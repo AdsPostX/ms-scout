@@ -369,22 +369,24 @@ def _extract_excel(body_bytes: bytes, name: str, engine: str = "openpyxl") -> At
     Caught by Sidd's live testing on PR #236: AT&T Views .xlsx fell through
     to "unsupported" because the dispatch only knew CSV/PDF/image/text.
     """
+    # Lazy enumeration via pd.ExcelFile — `sheet_name=None` on read_excel would
+    # eagerly materialize every sheet into memory even though we only summarize
+    # the first one (caught by CodeRabbit on PR #238). For a workbook with many
+    # tabs the difference is meaningful in memory + parse latency.
     try:
-        all_sheets = pd.read_excel(io.BytesIO(body_bytes), sheet_name=None, engine=engine)
+        with pd.ExcelFile(io.BytesIO(body_bytes), engine=engine) as xls:
+            sheet_names = list(xls.sheet_names)
+            if not sheet_names:
+                return AttachmentResult(kind="error", source="file", name=name,
+                                        error="excel_empty_or_no_sheets")
+            first_name = sheet_names[0]
+            first_df = pd.read_excel(xls, sheet_name=first_name)
     except ImportError as e:
         return AttachmentResult(kind="error", source="file", name=name,
                                 error=f"excel_engine_missing: install {engine}: {e}")
     except Exception as e:
         return AttachmentResult(kind="error", source="file", name=name,
                                 error=f"excel_parse_failed: {type(e).__name__}: {e}")
-
-    if not all_sheets:
-        return AttachmentResult(kind="error", source="file", name=name,
-                                error="excel_empty_or_no_sheets")
-
-    sheet_names = list(all_sheets.keys())
-    first_name = sheet_names[0]
-    first_df = all_sheets[first_name]
 
     if len(sheet_names) > 1:
         header = (
