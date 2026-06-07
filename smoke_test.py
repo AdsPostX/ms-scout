@@ -3387,6 +3387,42 @@ def test_text_only_routes_to_vanilla_ask_no_typeerror():
     return True, f"vanilla ask() received clean kwargs: {captured.get('kwargs_keys')}"
 
 
+@test("sheets_host_allowlist_googleusercontent_redirect")
+def test_sheets_host_allowlist_googleusercontent_redirect():
+    """Regression: Google's CSV export 302-redirects to *.sheets.googleusercontent.com
+    to actually serve the bytes. The allowlist must include that subdomain family or
+    every public Sheets URL fails with host_not_allowed. Caught in live testing on
+    PR #234 — original sheet share gave `hostnotallowed: doc-0s-b4-sheets.googleusercontent.com`.
+
+    Also verifies that arbitrary *.googleusercontent.com (e.g. Drive previews) is
+    still blocked — only the sheets. subdomain family is allowed.
+    """
+    from scout_attachments import _is_sheets_host_allowed
+
+    # Should allow
+    assert _is_sheets_host_allowed("docs.google.com"), "docs.google.com blocked"
+    assert _is_sheets_host_allowed("accounts.google.com"), "accounts.google.com blocked"
+    assert _is_sheets_host_allowed("sheets.googleusercontent.com"), "exact suffix blocked"
+    assert _is_sheets_host_allowed("doc-0s-b4-sheets.googleusercontent.com"), \
+        "real Google CSV redirect target blocked — this kills the feature"
+    assert _is_sheets_host_allowed("doc-99-zz-sheets.googleusercontent.com"), \
+        "Google subdomain pattern blocked"
+
+    # Should still block
+    if _is_sheets_host_allowed("googleusercontent.com"):
+        return False, "bare googleusercontent.com leaked through allowlist (no leading dot match)"
+    if _is_sheets_host_allowed("drive.googleusercontent.com"):
+        return False, "Drive googleusercontent leaked through (only sheets. should match)"
+    if _is_sheets_host_allowed("evilsheets.googleusercontent.com"):
+        return False, "subdomain-prefix attack: evilsheets.googleusercontent.com leaked"
+    if _is_sheets_host_allowed("evil.com"):
+        return False, "unrelated host leaked through"
+    if _is_sheets_host_allowed("sheets.googleusercontent.com.evil.com"):
+        return False, "suffix-confusion attack leaked through"
+
+    return True, "Google sheets CDN allowed; arbitrary googleusercontent.com still blocked"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

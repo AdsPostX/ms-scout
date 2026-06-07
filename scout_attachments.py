@@ -23,6 +23,22 @@ MAX_TEXT_CHARS = 30_000                   # extracted text cap
 PDFTOTEXT_TIMEOUT_S = 10
 MAX_REDIRECT_HOPS = 3
 ALLOWED_SHEETS_HOSTS = frozenset({"docs.google.com", "accounts.google.com"})
+# Google's CSV export 302-redirects to `doc-XX-YY-sheets.googleusercontent.com`
+# (where XX-YY are random tokens) to serve the bytes. The `sheets` is part of the
+# subdomain string itself, not a sub-label — so a literal `.sheets.googleusercontent.com`
+# suffix check would miss it. Tight regex below: optional `[a-z0-9-]+-` prefix
+# followed by `sheets.googleusercontent.com` — matches Google's actual pattern,
+# rejects prefix-confusion attacks (e.g. `evilsheets.googleusercontent.com`).
+_GOOGLE_SHEETS_HOST_RE = re.compile(r'^(?:[a-z0-9-]+-)?sheets\.googleusercontent\.com$')
+
+
+def _is_sheets_host_allowed(host: str) -> bool:
+    """Allow exact hosts plus the doc-*-sheets.googleusercontent.com family."""
+    if host in ALLOWED_SHEETS_HOSTS:
+        return True
+    if _GOOGLE_SHEETS_HOST_RE.match(host):
+        return True
+    return False
 
 # --- Result type -------------------------------------------------------------
 
@@ -156,7 +172,7 @@ def _safe_fetch(url: str, max_bytes: int) -> tuple[bytes, str]:
     current_url = url
     for hop in range(MAX_REDIRECT_HOPS + 1):
         host = _host_from_url(current_url)
-        if host not in ALLOWED_SHEETS_HOSTS:
+        if not _is_sheets_host_allowed(host):
             raise ValueError(f"host_not_allowed: {host}")
         if _resolves_to_private_ip(host):
             raise ValueError(f"private_ip: {host}")

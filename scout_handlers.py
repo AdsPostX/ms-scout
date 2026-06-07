@@ -2761,10 +2761,26 @@ def _handle_event_impl(req: SocketModeRequest):
                 f"_Couldn't read `{_result.name}` (type not supported yet) — "
                 f"answering the text question only._"
             )
+            # Tell Claude what happened so it doesn't hallucinate "I can't access X" —
+            # the user-visible attachment_note is post-hoc; this is pre-call context.
+            query = (
+                f"[Note for Scout: a URL/file was shared but its type isn't supported "
+                f"({_result.name}). Don't claim you can't access URLs/files in general — "
+                f"this specific resource just couldn't be parsed. If the user's question "
+                f"depends on the resource, suggest they paste the data inline.]\n\n{query}"
+            )
         elif _result.kind == "error":
             attachment_note = (
                 f"_Couldn't read `{_result.name}` ({_result.error}) — "
                 f"answering the text question only._"
+            )
+            query = (
+                f"[Note for Scout: a URL/file was shared but extraction failed: "
+                f"{_result.error}. Don't claim you can't access URLs in general — "
+                f"this specific resource just couldn't be fetched (common: host blocked, "
+                f"sheet not shared with 'anyone with the link', network error). If the "
+                f"user's question depends on the data, suggest they paste it inline or "
+                f"verify the share settings.]\n\n{query}"
             )
         # else: shouldn't happen, but degrade gracefully
 
