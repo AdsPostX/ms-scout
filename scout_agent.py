@@ -5558,6 +5558,9 @@ def _select_model(user_message: str) -> str:
 # Bypasses the LLM for exact-match phrasing so `@scout alert thresholds` always
 # lands on list_thresholds(), not get_scout_status(). LLM stays as fallback for
 # anything not matched here.
+#
+# New routes only justified when: (1) bare word, no parameterization needed,
+# and (2) the tool accepts no arguments. get_threshold_history violates rule 2.
 _ROUTE_KEYWORDS: dict[str, str] = {
     "alert thresholds":   "list_thresholds",
     "thresholds":         "list_thresholds",
@@ -5569,8 +5572,6 @@ _ROUTE_KEYWORDS: dict[str, str] = {
     "config":             "get_scout_config",
     "status":             "get_scout_status",
     "scout status":       "get_scout_status",
-    "threshold history":  "get_threshold_history",
-    "overrides history":  "get_threshold_history",
 }
 
 _SET_RE_FULL  = re.compile(
@@ -5729,6 +5730,14 @@ def _synthesize_status_text(data: dict) -> str:
     return "\n".join(lines)
 
 
+# Maps keyword-routed tool names → synthesizer functions. Add an entry here
+# when a new tool is added to _ROUTE_KEYWORDS and needs readable output.
+# _format_dict_response remains the genuine fallback for unregistered tools.
+_SYNTH_MAP: dict[str, object] = {
+    "get_scout_status": _synthesize_status_text,
+}
+
+
 def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]:
     """Match raw user text against control-surface verbs and execute directly.
 
@@ -5784,17 +5793,13 @@ def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]
     # to prevent. Let the caller decide how to surface the failure.
     data = tool()
 
-    if tool_name == "get_scout_status":
-        return AskResult(
-            text=_synthesize_status_text(data),
-            tools_called=(tool_name,),
-            duration_ms=0,
-        )
+    synth = _SYNTH_MAP.get(tool_name)
+    if synth:
+        return AskResult(text=synth(data), tools_called=(tool_name,), duration_ms=0)
 
     titles = {
-        "list_thresholds":       "Scout thresholds",
-        "get_scout_config":      "Scout config",
-        "get_threshold_history": "Threshold history",
+        "list_thresholds": "Scout thresholds",
+        "get_scout_config": "Scout config",
     }
     return AskResult(
         text=_format_dict_response(titles.get(tool_name, tool_name), data),
