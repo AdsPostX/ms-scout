@@ -5723,47 +5723,12 @@ def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]
     )
 
 
-def ask(user_message: str, history: list | None = None, user_id: str = "",
-        permalink: str = "", user_tz: str = "", thread_ts: str = "") -> AskResult:
+def _build_prefix_context(user_id: str, user_tz: str) -> str:
+    """Build date/caller/corrections prefix prepended to user_message.
+
+    Pure helper extracted from ask() so other entry points (e.g. attachment-bearing
+    variants) can reuse identical context construction without duplicating logic.
     """
-    Send a message to Scout and get a response.
-    history: optional list of prior {"role": "user"/"assistant", "content": str} messages
-             from the Slack thread, providing conversation context.
-    user_id: Slack user ID of the caller — injected into context so tools like
-             get_usage_report can enforce admin-only access.
-
-    Returns: AskResult — typed boundary contract carrying text, tools_called list,
-    duration_ms, and optional payload dict for structured Slack rendering
-    (brief / opportunities / text_with_context). See plan v3 §4.
-    """
-    _start_ms = time.monotonic()
-    _tools_called: list = []
-    def _dur() -> int:
-        return int((time.monotonic() - _start_ms) * 1000)
-
-    # Deterministic pre-router: control-surface verbs (thresholds/config/status/set)
-    # are matched against the RAW user_message before any LLM call. Context prefixes
-    # added below would defeat exact-match. LLM stays as fallback for misses.
-    _routed = _route_deterministic(user_message, user_id)
-    if _routed is not None:
-        return AskResult(
-            text=_routed.text,
-            tools_called=_routed.tools_called,
-            duration_ms=_dur(),
-            payload=_routed.payload,
-        )
-
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        return AskResult(
-            text="ANTHROPIC_API_KEY not set — Scout can't respond.",
-            tools_called=[], duration_ms=_dur(),
-        )
-
-    client = anthropic.Anthropic(
-        api_key=api_key,
-        default_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
-    )
     corrections_ctx = _get_corrections_context()
     caller_ctx      = f"[Caller Slack user_id: {user_id}]\n" if user_id else ""
     # Inject current CT date/time so the model never guesses "today" from UTC.
@@ -5790,40 +5755,71 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
             )
         except Exception:
             pass  # unknown tz string — skip, CT context is still present
-    prefix = date_ctx + caller_ctx + corrections_ctx
+    return date_ctx + caller_ctx + corrections_ctx
+
+
+def _build_initial_messages(user_message: str, history: list | None, prefix: str) -> list[dict]:
+    """Build the Anthropic messages array: history + prefix-augmented user turn.
+
+    Pure function — returns a fresh list, does not mutate inputs.
+    """
     effective_message = (prefix + user_message) if prefix else user_message
-    messages = list(history or []) + [{"role": "user", "content": effective_message}]
-    # List of brief results — append each draft_campaign_brief call result.
-    # We use the FIRST successful result as the primary (handles multi-brief
-    # requests where Claude calls the tool multiple times in one turn).
-    _brief_results: list = []
-    # Raw offer list from get_top_opportunities — drives per-offer card rendering in scout_bot.
-    _opportunity_offers: list = []
-    # All tool results from every loop iteration — used for entity extraction.
-    _all_tool_results: list = []
+    return list(history or []) + [{"role": "user", "content": effective_message}]
+
+
+def _run_tool_loop(
+    messages: list,
+    client,
+    system_prompt: str,
+    intent_name,
+    intent_dict,
+    ask_tools,
+    _start_ms: float,
+    _tools_called: list,
+    user_message: str = "",
+    _brief_results: list | None = None,
+    _opportunity_offers: list | None = None,
+    _all_tool_results: list | None = None,
+    user_id: str = "",
+    permalink: str = "",
+) -> AskResult:
+    """Run the bounded tool-use loop and synthesize the final AskResult.
+
+    All previously-closure-scoped state from ask() is passed explicitly. Mutable
+    accumulators default to None (instantiated locally) so callers can supply
+    pre-seeded lists or rely on per-call lists.
+    """
+    def _dur() -> int:
+        return int((time.monotonic() - _start_ms) * 1000)
+
+    if _brief_results is None:
+        _brief_results = []
+    if _opportunity_offers is None:
+        _opportunity_offers = []
+    if _all_tool_results is None:
+        _all_tool_results = []
+
+    # user_message is the RAW pre-prefix string — passed explicitly so the
+    # MAX_ROUNDS warning log line matches pre-refactor behavior (logging the
+    # user's actual question, not the prefix-augmented effective_message).
+
+    _intent_name, _intent_dict = intent_name, intent_dict
+    _ask_tools = ask_tools
 
     MAX_ROUNDS = 12  # hard cap — prevents runaway loops on complex / ambiguous queries
     _round = 0
 
-    # Intent classification — narrow tool surface and prepend focused context.
-    # Runs once per ask() call, outside the retry loop.
-    _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
-    _ask_tools = TOOLS
     if _intent_dict:
-        _primary = set(_intent_dict["primary_tools"])
-        _narrowed = [t for t in TOOLS if t["name"] in _primary]
-        if _narrowed:  # fall back to full TOOLS if no bucket tools found in public list
-            _ask_tools = _narrowed
         # Two-block system array: intent context is small/dynamic (no cache),
         # SYSTEM_PROMPT is large/static (always cached). Keeps one shared cache
         # entry for SYSTEM_PROMPT regardless of which intent bucket fires.
         _system_blocks = [
             {"type": "text", "text": _intent_dict["context"]},
-            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
         ]
     else:
         _system_blocks = [
-            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
         ]
 
     while _round < MAX_ROUNDS:
@@ -6070,6 +6066,66 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
         ),
         tools_called=_tools_called,
         duration_ms=_dur(),
+    )
+
+
+def ask(user_message: str, history: list | None = None, user_id: str = "",
+        permalink: str = "", user_tz: str = "", thread_ts: str = "") -> AskResult:
+    """
+    Send a message to Scout and get a response.
+    history: optional list of prior {"role": "user"/"assistant", "content": str} messages
+             from the Slack thread, providing conversation context.
+    user_id: Slack user ID of the caller — injected into context so tools like
+             get_usage_report can enforce admin-only access.
+
+    Returns: AskResult — typed boundary contract carrying text, tools_called list,
+    duration_ms, and optional payload dict for structured Slack rendering
+    (brief / opportunities / text_with_context). See plan v3 §4.
+    """
+    _start_ms = time.monotonic()
+    _tools_called: list = []
+    def _dur() -> int:
+        return int((time.monotonic() - _start_ms) * 1000)
+
+    # Deterministic pre-router: control-surface verbs (thresholds/config/status/set)
+    # are matched against the RAW user_message before any LLM call. Context prefixes
+    # added below would defeat exact-match. LLM stays as fallback for misses.
+    _routed = _route_deterministic(user_message, user_id)
+    if _routed is not None:
+        return AskResult(
+            text=_routed.text,
+            tools_called=_routed.tools_called,
+            duration_ms=_dur(),
+            payload=_routed.payload,
+        )
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return AskResult(
+            text="ANTHROPIC_API_KEY not set — Scout can't respond.",
+            tools_called=[], duration_ms=_dur(),
+        )
+
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        default_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+    )
+    prefix = _build_prefix_context(user_id, user_tz)
+    # Intent classification — narrow tool surface and prepend focused context.
+    # Runs once per ask() call, outside the retry loop.
+    _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
+    _ask_tools = TOOLS
+    if _intent_dict:
+        _primary = set(_intent_dict["primary_tools"])
+        _narrowed = [t for t in TOOLS if t["name"] in _primary]
+        if _narrowed:  # fall back to full TOOLS if no bucket tools found in public list
+            _ask_tools = _narrowed
+    messages = _build_initial_messages(user_message, history, prefix)
+    return _run_tool_loop(
+        messages, client, SYSTEM_PROMPT, _intent_name, _intent_dict,
+        _ask_tools, _start_ms, _tools_called,
+        user_message=user_message,
+        user_id=user_id, permalink=permalink,
     )
 
 
