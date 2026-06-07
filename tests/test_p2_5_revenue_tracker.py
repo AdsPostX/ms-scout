@@ -191,5 +191,44 @@ class TestModuleImports(unittest.TestCase):
         self.assertTrue(callable(_format_revenue_alert))
 
 
+# ---------------------------------------------------------------------------
+# T4: Block Kit output shape from the canonical scout_bot implementation
+# ---------------------------------------------------------------------------
+
+class TestFormatRevenueAlertBlockShape(unittest.TestCase):
+    """_format_revenue_alert must return ScoutKit MONITOR_ALARM block structure."""
+
+    _TOTAL = {
+        "pct_of_expected": 62,
+        "today_revenue": 5200.0,
+        "projected_full_day": 8400.0,
+        "dow_median": 13500.0,
+        "weekday": "Tuesday",
+        "sample_days": 8,
+    }
+
+    def _call(self):
+        from scout_bot import _format_revenue_alert
+        return _format_revenue_alert(self._TOTAL, [], as_of="10am CT")
+
+    def test_returns_two_tuple(self):
+        result = self._call()
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+
+    def test_fallback_starts_with_red_circle(self):
+        fallback, _ = self._call()
+        self.assertIsInstance(fallback, str)
+        self.assertTrue(fallback.startswith("🔴"), f"fallback={fallback!r}")
+
+    def test_blocks_nonempty_list_of_typed_dicts(self):
+        _, blocks = self._call()
+        self.assertIsInstance(blocks, list)
+        self.assertGreater(len(blocks), 0)
+        for b in blocks:
+            self.assertIsInstance(b, dict, f"block is not a dict: {b!r}")
+            self.assertIn("type", b, f"block missing 'type' key: {b!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -855,7 +855,7 @@ def _revenue_tracker_daemon() -> None:
                     )
 
                 except Exception as e:
-                    log.warning("[revenue-tracker] Unexpected error: %s", e)
+                    log.warning("[revenue-tracker] Unexpected error: %s", e, exc_info=True)
 
         except Exception as e:
             log.error("[revenue-tracker] Fatal crash — restarting in 30s: %s", e, exc_info=True)
