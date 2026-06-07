@@ -82,8 +82,6 @@ services:
       # Slack — required for monitor alarms to post alerts
       - key: SLACK_BOT_TOKEN
         sync: false
-      - key: SLACK_APP_TOKEN
-        sync: false
       # Affiliate network credentials — set all in Render dashboard, never commit values
       - key: IMPACT_SID
         sync: false

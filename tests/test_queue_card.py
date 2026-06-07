@@ -1,7 +1,7 @@
 """
-Queue card renderer tests for _build_queue_card() in scout_slack_ui.py.
+Queue card renderer tests for _build_queue_card() in scout_ui_kit.py.
 Tests _build_queue_card() directly — NOT _build_home_view() — to avoid the deferred
-scout_agent import at line ~1556 of scout_slack_ui.py pulling in ClickHouse/.env state.
+scout_agent import at line ~1556 of scout_ui_kit.py pulling in ClickHouse/.env state.
 All tests are pure unit tests: no external calls, no env var requirements.
 """
 import sys
