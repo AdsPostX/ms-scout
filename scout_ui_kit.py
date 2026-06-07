@@ -1669,7 +1669,7 @@ def _fmt_delta_pct(today: int, baseline: int) -> str:
         return f"📈 +{pct}%"
     if pct < 0:
         return f"📉 {pct}%"
-    return f"→ 0%"
+    return "→ 0%"
 
 
 def _build_sparkline_url(series: "list[int]") -> "str | None":
