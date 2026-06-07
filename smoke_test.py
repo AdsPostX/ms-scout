@@ -36,6 +36,8 @@ import time
 import types
 from unittest.mock import patch
 
+import pytest
+
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -3706,6 +3708,89 @@ def test_docx_extraction_finds_paragraphs_and_tables():
         return False, "table cells missing — python-docx didn't extract tabular content"
 
     return True, "docx paragraphs + tables both captured"
+
+
+# ── Gate: module size ceilings ────────────────────────────────────────────────
+
+@test("module_size_within_ceiling")
+def test_module_size_within_ceiling():
+    """Each core module must stay under its line-count ceiling.
+
+    Ceilings are set at (round-up-to-100 above current count) + 200 headroom.
+    If a file hits its ceiling, split it before adding more code.
+    """
+    ceilings = {
+        "scout_agent.py": 6600,
+        "queries.py":     2700,
+        "offer_scraper.py": 2600,
+    }
+    violations = []
+    for fname, ceiling in ceilings.items():
+        fpath = pathlib.Path(__file__).parent / fname
+        if not fpath.exists():
+            violations.append(f"{fname} not found")
+            continue
+        lines = len(fpath.read_text().splitlines())
+        if lines > ceiling:
+            violations.append(
+                f"{fname} is {lines} lines — ceiling is {ceiling}. Split before adding more."
+            )
+    if violations:
+        return False, " | ".join(violations)
+    counts = {
+        fname: len((pathlib.Path(__file__).parent / fname).read_text().splitlines())
+        for fname in ceilings
+    }
+    return True, "; ".join(f"{f}={c}" for f, c in counts.items())
+
+
+# ── Gate: slash command coverage ─────────────────────────────────────────────
+
+@test("slash_command_coverage")
+def test_slash_command_coverage():
+    """Each /scout-* command should have a corresponding test_scout_<cmd> function.
+
+    Missing stubs are warned (not hard-failed) since some are intentionally deferred.
+    """
+    commands = [
+        "cap", "vel", "ghost", "fill", "signal-status",
+        "revenue", "pub", "enter", "queue", "status", "help", "health",
+    ]
+    src = pathlib.Path(__file__).read_text()
+    missing = []
+    for cmd in commands:
+        # Convert hyphenated command to underscore function name
+        fn_name = "def test_scout_" + cmd.replace("-", "_")
+        if fn_name not in src:
+            missing.append(f"/scout-{cmd} → {fn_name}")
+    if missing:
+        print(f"  [WARN] slash_command_coverage: missing stubs for: {missing}")
+    return True, (
+        f"{len(commands) - len(missing)}/{len(commands)} commands have stubs"
+        + (f"; missing: {[m.split(' → ')[0] for m in missing]}" if missing else "")
+    )
+
+
+# ── Deferred skip stubs ───────────────────────────────────────────────────────
+
+@pytest.mark.skip(reason="DEFERRED: persist fires_log to disk | GATE: autocheck unattended 5+ days | CHECK-IN: 2026-06-14 | KILL-IF-UNMET: no")
+def test_fires_log_persistence():
+    pass
+
+
+@pytest.mark.skip(reason="DEFERRED: App Home drill modals (PR 2) | GATE: Jon/Todd/Roj open Home tab | CHECK-IN: 2026-07-18 | KILL-IF-UNMET: yes")
+def test_app_home_drill_modals():
+    pass
+
+
+@pytest.mark.skip(reason="DEFERRED: alert_registry Redis backend | GATE: same as App Home PR 2 | CHECK-IN: 2026-07-18 | KILL-IF-UNMET: yes")
+def test_alert_registry_redis():
+    pass
+
+
+@pytest.mark.skip(reason="DEFERRED: MS platform campaign creation | GATE: Vamsee delivers CAMPAIGN_CREATE_WEBHOOK_URL + API key | CHECK-IN: 2026-06-21 | KILL-IF-UNMET: flip todos to BLOCKED")
+def test_ms_platform_campaign_creation():
+    pass
 
 
 if __name__ == "__main__":

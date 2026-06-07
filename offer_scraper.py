@@ -265,10 +265,12 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
                     category = best.get("TrackerType", "")
                     payout_type = _CATEGORY_TO_PTYPE.get(category, category)
                     # SALE/CPS contracts often leave PayoutAmount blank and put the
-                    # rate in Percentage instead. Without this, every revshare campaign
-                    # silently fails the no_payout gate downstream.
+                    # rate in PercentageRate, PercentAmount, or legacy Percentage fields.
+                    # Without this, every revshare campaign silently fails the no_payout
+                    # gate downstream.
                     if (not payout or payout in ("0", "0.00")) and category == "SALE":
-                        pct = (best.get("Percentage") or best.get("PercentPayout")
+                        pct = (best.get("PercentageRate") or best.get("PercentAmount")
+                               or best.get("Percentage") or best.get("PercentPayout")
                                or best.get("PayoutPercent") or "")
                         if pct:
                             payout = f"{pct}%"
