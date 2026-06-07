@@ -355,7 +355,7 @@ def wrap_response(
     # 1. Headline + body from Card
     blocks: list[dict] = []
 
-    # 3d. Sentence-case enforcement: if headline is ALL CAPS (> 3 chars), convert to title case.
+    # 3d. Title-case enforcement: if headline is ALL CAPS (> 3 chars), convert to title case.
     headline = card.headline
     if headline and headline.isupper() and len(headline) > 3:
         headline = headline.title()
@@ -458,8 +458,12 @@ def wrap_response(
             "elements": [{"type": "mrkdwn", "text": "✓  Scout confirmed"}],
         })
 
-    # 3a. CRITICAL on non-EPHEMERAL surfaces: trailing divider bookend
-    if card.severity is Severity.CRITICAL and surface is not Surface.EPHEMERAL:
+    # 3a. CRITICAL on message-feed surfaces: trailing divider bookend (iOS visibility fix).
+    # Excluded from MONITOR_ALARM (budget=6, dedicated ops channel — header+divider at top
+    # already anchors the alert; trailing divider would be first truncated by enforce()).
+    if card.severity is Severity.CRITICAL and surface in (
+        Surface.CHANNEL_ROOT, Surface.DM, Surface.THREAD
+    ):
         blocks.append({"type": "divider"})
 
     # 6. Budget enforcement — always last
