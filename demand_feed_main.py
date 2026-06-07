@@ -354,29 +354,34 @@ def _projection_autocheck_daemon() -> None:
     Kill switch: PROJECTION_AUTOCHECK_ENABLED env var (default false — off).
     Wired to job_runs telemetry.
     """
-    import time as _time
-    import pytz
-    from datetime import datetime as _dt
-    from scout_ch import _get_ch_client
-    from scout_ch import project_today_revenue, _query_intraday_revenue_total
-    from scout_state import (
-        _load_projection_autocheck_slot,
-        _save_projection_autocheck_slot,
-        _load_eod_posted_date,
-        _save_eod_posted_date,
-        _load_projection_autocheck_fires,
-        _append_projection_autocheck_fire,
-        _evict_stale_projection_autocheck_fires,
-    )
-    from scout_core.job_runs import record_job_run
-    from slack_sdk.web import WebClient
-
     while True:  # outer restart wrapper
         try:
+            import time as _time
+            import pytz
+            from datetime import datetime as _dt
+            from scout_ch import _get_ch_client
+            from scout_ch import project_today_revenue, _query_intraday_revenue_total
+            from scout_state import (
+                _load_projection_autocheck_slot,
+                _save_projection_autocheck_slot,
+                _load_eod_posted_date,
+                _save_eod_posted_date,
+                _load_projection_autocheck_fires,
+                _append_projection_autocheck_fire,
+                _evict_stale_projection_autocheck_fires,
+            )
+            from scout_core.job_runs import record_job_run
+            from slack_sdk.web import WebClient
+
             CT_TZ   = pytz.timezone("America/Chicago")
             channel = os.getenv("SCOUT_QA_CHANNEL", "#sidd-qa")
             tag     = "[projection-autocheck]"
-            web     = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+            _bot_token = os.getenv("SLACK_BOT_TOKEN")
+            if not _bot_token:
+                log.error("[projection-autocheck] SLACK_BOT_TOKEN not set — retrying in 60s.")
+                _time.sleep(60)
+                continue
+            web = WebClient(token=_bot_token)
 
             # Seed in-memory slot from persisted state so a mid-hour restart
             # does not re-fire the current slot.
@@ -552,7 +557,8 @@ def _projection_autocheck_daemon() -> None:
 
         except Exception as e:
             log.error(f"[projection-autocheck] fatal crash — restarting in 30s: {e}", exc_info=True)
-            _time.sleep(30)
+            import time
+            time.sleep(30)
 
 
 def _start_http_server() -> None:
@@ -692,21 +698,6 @@ def _revenue_tracker_daemon() -> None:
     Outer restart wrapper: any unhandled crash logs the traceback and restarts
     after 30s so the thread stays alive indefinitely without a Render redeploy.
     """
-    from scout_bot import _format_revenue_alert
-    import time as _time
-    import pytz
-    from datetime import datetime as _dt
-    from slack_sdk.web import WebClient
-    from scout_ch import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher, _get_ch_client
-    from scout_state import (
-        _load_revenue_alert_state, _save_revenue_alert_date,
-        _load_revenue_alert_slot, _save_revenue_alert_slot,
-        _load_revenue_alert_context, _save_revenue_alert_context,
-        _clear_revenue_alert_context,
-    )
-    from scout_core.job_runs import record_job_run
-    from scout_agent import SCOUT_THRESHOLDS as _ST
-
     _HQ_CHANNEL = "C0AQEECF800"  # #bot-qa fallback (matches scout_bot._SCOUT_HQ_CHANNEL)
 
     def _get_channel() -> str:
@@ -717,6 +708,21 @@ def _revenue_tracker_daemon() -> None:
 
     while True:  # outer restart wrapper — self-heals any unhandled crash
         try:
+            from scout_bot import _format_revenue_alert
+            import time as _time
+            import pytz
+            from datetime import datetime as _dt
+            from slack_sdk.web import WebClient
+            from scout_ch import _query_intraday_revenue_total, _query_intraday_revenue_by_publisher, _get_ch_client
+            from scout_state import (
+                _load_revenue_alert_state, _save_revenue_alert_date,
+                _load_revenue_alert_slot, _save_revenue_alert_slot,
+                _load_revenue_alert_context, _save_revenue_alert_context,
+                _clear_revenue_alert_context,
+            )
+            from scout_core.job_runs import record_job_run
+            from scout_agent import SCOUT_THRESHOLDS as _ST
+
             CT_TZ      = pytz.timezone("America/Chicago")
             sig        = _ST.get("signals", {})
             check_hour = int(sig.get("revenue_tracker_check_hour_ct",
@@ -871,7 +877,8 @@ def _revenue_tracker_daemon() -> None:
 
         except Exception as e:
             log.error("[revenue-tracker] Fatal crash — restarting in 30s: %s", e, exc_info=True)
-            _time.sleep(30)
+            import time
+            time.sleep(30)
 
 
 def _nightly_harvest_daemon() -> None:

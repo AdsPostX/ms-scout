@@ -198,14 +198,15 @@ class TestModuleImports(unittest.TestCase):
 class TestFormatRevenueAlertBlockShape(unittest.TestCase):
     """_format_revenue_alert must return ScoutKit MONITOR_ALARM block structure."""
 
-    _TOTAL = {
-        "pct_of_expected": 62,
-        "today_revenue": 5200.0,
-        "projected_full_day": 8400.0,
-        "dow_median": 13500.0,
-        "weekday": "Tuesday",
-        "sample_days": 8,
-    }
+    def setUp(self):
+        self._TOTAL = {
+            "pct_of_expected": 62,
+            "today_revenue": 5200.0,
+            "projected_full_day": 8400.0,
+            "dow_median": 13500.0,
+            "weekday": "Tuesday",
+            "sample_days": 8,
+        }
 
     def _call(self):
         from scout_bot import _format_revenue_alert
