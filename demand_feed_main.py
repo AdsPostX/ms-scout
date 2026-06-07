@@ -557,7 +557,8 @@ def _projection_autocheck_daemon() -> None:
 
         except Exception as e:
             log.error(f"[projection-autocheck] fatal crash — restarting in 30s: {e}", exc_info=True)
-            import time; time.sleep(30)
+            import time
+            time.sleep(30)
 
 
 def _start_http_server() -> None:
@@ -876,7 +877,8 @@ def _revenue_tracker_daemon() -> None:
 
         except Exception as e:
             log.error("[revenue-tracker] Fatal crash — restarting in 30s: %s", e, exc_info=True)
-            import time; time.sleep(30)
+            import time
+            time.sleep(30)
 
 
 def _nightly_harvest_daemon() -> None:
