@@ -376,7 +376,12 @@ def _projection_autocheck_daemon() -> None:
             CT_TZ   = pytz.timezone("America/Chicago")
             channel = os.getenv("SCOUT_QA_CHANNEL", "#sidd-qa")
             tag     = "[projection-autocheck]"
-            web     = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+            _bot_token = os.getenv("SLACK_BOT_TOKEN")
+            if not _bot_token:
+                log.error("[projection-autocheck] SLACK_BOT_TOKEN not set — retrying in 60s.")
+                _time.sleep(60)
+                continue
+            web = WebClient(token=_bot_token)
 
             # Seed in-memory slot from persisted state so a mid-hour restart
             # does not re-fire the current slot.
