@@ -150,6 +150,12 @@ def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
                 from scout_agent import ask_with_attachment as _ask_fn
             else:
                 _ask_fn = ask
+                # Strip attachment kwargs — vanilla ask() doesn't accept them.
+                # Without this, every text-only @mention raises TypeError because
+                # the handler always passes attached_text=None, attached_image=None
+                # through to _ask_with_timeout. Caught by CodeRabbit on PR #234.
+                kwargs.pop("attached_text", None)
+                kwargs.pop("attached_image", None)
             result_box["resp"] = _lat_capture(
                 "scout/agent",
                 lambda: _ask_fn(query, **kwargs),

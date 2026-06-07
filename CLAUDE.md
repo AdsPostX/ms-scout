@@ -178,7 +178,7 @@ Scout extracts content from @mention attachments and Google Sheets URLs and pass
 - SSRF protection on Sheets fetch — host allowlist (`docs.google.com`, `accounts.google.com`), max 3 redirect hops, private/loopback/link-local IP blocked via `_resolves_to_private_ip`
 - pdftotext runs via `subprocess.run` with timeout, `tempfile.mkstemp`, no shell — never `shell=True`
 - `_NoRedirect` custom handler prevents urllib auto-following redirects we haven't validated
-- Slack `url_private` downloads gated on `files.slack.com` / `slack.com` prefix
+- Slack `url_private` downloads gated on `https://files.slack.com/` prefix only (CDN host, narrowest allowlist)
 
 **Boundary:** `ask()` is NOT modified — `ask_with_attachment()` is a separate function that composes `_build_initial_messages` + `_run_tool_loop` with attachment-aware message construction. AC-9 ("no regression on text-only @mentions") is structurally guaranteed.
 

@@ -3340,6 +3340,53 @@ def test_image_content_block_shape():
     return True, "image content block has correct Anthropic shape (base64 + text)"
 
 
+@test("text_only_routes_to_vanilla_ask_no_typeerror")
+def test_text_only_routes_to_vanilla_ask_no_typeerror():
+    """Regression: text-only @mentions must NOT pass attached_text/attached_image
+    kwargs to vanilla ask() (which doesn't accept them) — would raise TypeError.
+
+    Caught by CodeRabbit on PR #234. Without the kwargs-pop in _ask_with_timeout,
+    every text-only @mention crashes in production.
+    """
+    import os as _os
+    from unittest.mock import patch
+    import scout_handlers
+    import scout_agent
+
+    _os.environ.setdefault("ANTHROPIC_API_KEY", "fake-for-test")
+
+    captured = {}
+
+    def fake_ask(user_message, **kwargs):
+        captured["kwargs_keys"] = sorted(kwargs.keys())
+        captured["query"] = user_message
+        return scout_agent.AskResult(text="ok", tools_called=(), duration_ms=0)
+
+    def fake_lat_capture(name, fn, props=None, **_kw):
+        return fn()
+
+    # Patch ask AT scout_handlers (which imports it at module load — patching
+    # scout_agent.ask wouldn't affect the already-imported reference inside
+    # _ask_with_timeout). Also patch telemetry capture so we don't hit Anthropic.
+    with patch.object(scout_handlers, "ask", side_effect=fake_ask) as _mock_ask, \
+         patch("scout_telemetry.capture", side_effect=fake_lat_capture):
+        # Simulate handler call: text-only message → kwargs include attached_text=None,
+        # attached_image=None (handler always passes them post-Phase 2 wiring).
+        result = scout_handlers._ask_with_timeout(
+            "what's revenue today?",
+            history=[], user_id="U_TEST", permalink="", thread_ts="",
+            attached_text=None, attached_image=None,
+        )
+
+    if not _mock_ask.called:
+        return False, "vanilla ask() was never reached (dispatch logic broken)"
+    if "attached_text" in captured.get("kwargs_keys", []):
+        return False, f"attached_text leaked into vanilla ask() kwargs: {captured['kwargs_keys']}"
+    if "attached_image" in captured.get("kwargs_keys", []):
+        return False, f"attached_image leaked into vanilla ask() kwargs: {captured['kwargs_keys']}"
+    return True, f"vanilla ask() received clean kwargs: {captured.get('kwargs_keys')}"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

@@ -89,7 +89,7 @@ When a user @mentions Scout with either (a) a Google Sheets URL in the message t
 |---|---|---|
 | `scout_attachments.py` | **NEW** — unified dispatch: URL detector + extractors (Sheets, PDF, CSV, image, text) | Low (isolated) |
 | `scout_handlers.py` | Pre-`_ask_with_timeout`: check `event.files[]` AND scan `event.text` for Sheets URLs; pass extracted content through | Medium (touches DM + mention paths) |
-| `scout_agent.py` | `ask()` accepts `attached_text` + `attached_image`; image becomes vision content block | Medium (hot path) |
+| `scout_agent.py` | NEW `ask_with_attachment()` accepts `attached_text` + `attached_image`; image becomes vision content block. `ask()` is NOT modified (v2.2 boundary) | Low (new code path) |
 | `smoke_test.py` | 3 new tests (Sheets URL wiring, file wiring, size-cap rejection) | None (additive) |
 | `requirements.txt` | `pdfplumber` as `pdftotext` fallback (if not already present) | Low |
 | `CLAUDE.md` | Document new `files:read` Slack scope; document Sheets share requirement | None |
@@ -144,7 +144,8 @@ def ask(user_message, history=None, user_id="", permalink="", user_tz="", thread
 - Signature: `def _build_initial_messages(user_message: str, history: list | None, prefix: str) -> list[dict]`
 - Pure function: no side effects, no I/O, deterministic
 - `ask()` calls it: `messages = _build_initial_messages(user_message, history, prefix)`
-- Verify with `python -c "from scout_agent import _build_initial_messages; print(_build_initial_messages('test', [], ''))"` — returns expected shape
+- **Also extract `_build_prefix_context(user_id: str, user_tz: str) -> str`** — the date/caller/channel/corrections concatenation. Pure function. Required by `ask_with_attachment` in PR-B, so it must be a callable module-level helper, not inlined.
+- Verify with `python -c "from scout_agent import _build_initial_messages, _build_prefix_context; print('imports ok')"`
 
 ### R3: Extract `_run_tool_loop` (~30 min)
 - Move the `while _round < MAX_ROUNDS` block + all tool dispatch + result accumulation into a module-level function
@@ -510,7 +511,7 @@ When fetching Sheets URLs, `urllib.request` follows redirects by default and has
 - Allowlist: hop hostnames must be in `{"docs.google.com", "accounts.google.com"}` — anything else → `kind="error"` with `error="redirect_blocked: {host}"`
 - Block RFC1918 (10.*, 172.16-31.*, 192.168.*), link-local (169.254.*), localhost
 - Max 3 hops; deeper = `kind="error"`
-- Resolve the final URL's hostname via `socket.gethostbyname` and re-check it's not a private IP after DNS resolution (defense-in-depth — host header allowlist + IP block)
+- Resolve the final URL's hostname via `socket.getaddrinfo` to enumerate ALL A/AAAA records (IPv4 + IPv6) and reject if ANY resolves to private/loopback/link-local/multicast — gethostbyname only checks one IPv4, allowing dual-stack hosts to bypass the check
 
 Acceptance: a new smoke test `test_ssrf_redirect_blocked` asserts that a mock Sheets export returning a 302 to `http://169.254.169.254/` is rejected with `kind="error"`.
 
