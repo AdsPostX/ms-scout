@@ -24,7 +24,8 @@ from scout_agent import (  # noqa: E402
 
 
 class TestKeywordRoutes(unittest.TestCase):
-    """Each phrase in the footer-trained vocabulary must route to its tool."""
+    """Deterministic keyword routes — data-driven from _ROUTE_KEYWORDS so test
+    coverage auto-syncs when the routing table changes."""
 
     def _route(self, msg: str):
         with unittest.mock.patch.object(scout_agent, "TOOL_MAP", {
@@ -35,25 +36,21 @@ class TestKeywordRoutes(unittest.TestCase):
         }):
             return _route_deterministic(msg, user_id="U1")
 
-    def test_alert_thresholds_routes_to_list_thresholds(self):
-        r = self._route("alert thresholds")
-        self.assertIsInstance(r, AskResult)
-        self.assertEqual(r.tools_called, ("list_thresholds",))
+    def test_all_keyword_routes(self):
+        """Every phrase in _ROUTE_KEYWORDS must route to its declared tool."""
+        for phrase, expected_tool in scout_agent._ROUTE_KEYWORDS.items():
+            with self.subTest(phrase=phrase):
+                r = self._route(phrase)
+                self.assertIsNotNone(r, f"{phrase!r} fell through — missing from TOOL_MAP mock?")
+                self.assertEqual(r.tools_called, (expected_tool,))
 
-    def test_thresholds_routes_to_list_thresholds(self):
-        self.assertEqual(self._route("thresholds").tools_called, ("list_thresholds",))
-
-    def test_settings_routes_to_list_thresholds(self):
-        self.assertEqual(self._route("settings").tools_called, ("list_thresholds",))
-
-    def test_config_routes_to_get_scout_config(self):
-        self.assertEqual(self._route("config").tools_called, ("get_scout_config",))
-
-    def test_status_routes_to_get_scout_status(self):
-        self.assertEqual(self._route("status").tools_called, ("get_scout_status",))
-
-    def test_threshold_history_routes_correctly(self):
-        self.assertEqual(self._route("threshold history").tools_called, ("get_threshold_history",))
+    def test_threshold_history_falls_through_to_llm(self):
+        # "threshold history" was intentionally removed from _ROUTE_KEYWORDS.
+        # The bare deterministic route called get_threshold_history() with no key
+        # param, returning an unfiltered 50-entry changelog — worse than the LLM
+        # path which handles "show changes to cap_alert_pct" with proper filtering.
+        # smoke_test.test_threshold_history_falls_through_to_llm guards the same invariant.
+        self.assertIsNone(self._route("threshold history"))
 
     def test_unknown_phrase_falls_through_to_llm(self):
         self.assertIsNone(self._route("how is revenue trending"))

@@ -1548,6 +1548,15 @@ def publisher_top_categories(ch, pub_id: int) -> list[str]:
 # Revenue trends (publisher and advertiser)
 # ===========================================================================
 
+def _trend(delta: float) -> str:
+    """Map a revenue delta percentage to a trend label (shared by publisher + advertiser trends)."""
+    if delta <= -15:
+        return "down"
+    if delta >= 15:
+        return "up"
+    return "flat"
+
+
 def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[dict]:
     """
     DEPRECATED for velocity alerts — use velocity_alerts() instead.
@@ -1641,13 +1650,6 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
             "min_periods": int(min_periods),
         },
     ).result_rows
-
-    def _trend(delta: float) -> str:
-        if delta <= -15:
-            return "down"
-        if delta >= 15:
-            return "up"
-        return "flat"
 
     return [
         {
@@ -1946,13 +1948,6 @@ def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[d
             "min_periods": int(min_periods),
         },
     ).result_rows
-
-    def _trend(delta: float) -> str:
-        if delta <= -15:
-            return "down"
-        if delta >= 15:
-            return "up"
-        return "flat"
 
     return [
         {
