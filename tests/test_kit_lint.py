@@ -319,6 +319,26 @@ class TestKitLint(unittest.TestCase):
                 f"suggestions={empty!r} produced actions blocks: {action_blocks}",
             )
 
+    def test_monitor_alarm_warn_gets_native_header_block(self):
+        """MONITOR_ALARM + WARN severity must emit a native header block (not mrkdwn section).
+        Regression guard: wrap_response previously excluded MONITOR_ALARM from native headers
+        even though _build_monitor_alert_blocks (the 'specialised path') was never called."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response, BUDGETS
+        _, blocks = wrap_response(
+            card=Card(Severity.WARN, "Cap alert", body="• Advertiser A: 85% of cap"),
+            surface=Surface.MONITOR_ALARM,
+            feedback="none",
+        )
+        self.assertEqual(blocks[0]["type"], "header", "First block must be native header")
+        self.assertEqual(blocks[1]["type"], "divider", "Second block must be divider")
+        self.assertLessEqual(
+            len(blocks), BUDGETS[Surface.MONITOR_ALARM],
+            f"Block count {len(blocks)} exceeds MONITOR_ALARM budget {BUDGETS[Surface.MONITOR_ALARM]}",
+        )
+
     def test_fallback_text_nonempty(self):
         """Every wrap_response return must have a non-empty fallback string.
         Mobile push previews go blank when fallback is empty."""
