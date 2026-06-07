@@ -12,8 +12,6 @@ Use capture() to attach a named span to a specific prompt:
 Named spans in use:
     scout/agent             — every user-facing query through ask()
     scout/entity-parse      — "remember" command entity extraction
-    scout/context-compress  — channel context compression (harvest)
-    scout/entity-extract    — entity fact extraction (harvest)
 
 If LATITUDE_API_KEY is not set, capture() is a no-op pass-through.
 All exceptions from the telemetry layer are swallowed — Scout never
