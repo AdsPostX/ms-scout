@@ -1491,48 +1491,6 @@ def _build_publisher_card(
     return _build_item_card(name, left, right, "  \n".join(context_parts))
 
 
-def _build_monitor_alert_blocks(
-    emoji: str,
-    title: str,
-    items: list[str],
-    cta_query: str = "",
-) -> "tuple[str, list[dict]]":
-    """Test fixture — not called by production code (live path: _alert_blocks → wrap_response).
-
-    Typography contract:
-    - Title: native header block (plain_text, emoji: true) + divider.
-    - Items: native rich_text_list (bullet), capped at 8. Renders with proper
-      left-margin on iOS — no horizontal scroll. Overflow shown in context block.
-    - CTA: context block using backtick so the command is copy-pasteable. Phrased
-      as an action ("for the full breakdown") rather than a passive footnote.
-    """
-    _ITEM_CAP = 8
-    fallback = f"{emoji} {title}"
-    header_text = f"{emoji} {title}"
-    if len(header_text) > _HEADER_PLAIN_TEXT_MAX:
-        header_text = header_text[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
-    blocks: list[dict] = [
-        {"type": "header", "text": {"type": "plain_text", "text": header_text, "emoji": True}},
-        {"type": "divider"},
-    ]
-    if items:
-        visible = items[:_ITEM_CAP]
-        overflow = len(items) - len(visible)
-        blocks.extend(_build_rich_text_list(visible))
-        if overflow > 0:
-            blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"_+ {overflow} more_"}],
-            })
-    if cta_query:
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"→ `@Scout {cta_query}` for the full breakdown"}],
-        })
-    blocks = enforce(blocks, Surface.MONITOR_ALARM)
-    return fallback, blocks
-
-
 # ---------------------------------------------------------------------------
 # Queue card helpers
 # ---------------------------------------------------------------------------
