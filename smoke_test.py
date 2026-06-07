@@ -3716,8 +3716,8 @@ def test_docx_extraction_finds_paragraphs_and_tables():
 def test_module_size_within_ceiling():
     """Each core module must stay under its line-count ceiling.
 
-    Ceilings are set at (round-up-to-100 above current count) + 200 headroom.
     If a file hits its ceiling, split it before adding more code.
+    Ceilings are mirrored in scout_handlers.py (_CEILINGS) — keep in sync.
     """
     ceilings = {
         "scout_agent.py": 6600,
@@ -3725,22 +3725,20 @@ def test_module_size_within_ceiling():
         "offer_scraper.py": 2600,
     }
     violations = []
+    counts = {}
     for fname, ceiling in ceilings.items():
         fpath = pathlib.Path(__file__).parent / fname
         if not fpath.exists():
             violations.append(f"{fname} not found")
             continue
         lines = len(fpath.read_text().splitlines())
+        counts[fname] = lines
         if lines > ceiling:
             violations.append(
                 f"{fname} is {lines} lines — ceiling is {ceiling}. Split before adding more."
             )
     if violations:
         return False, " | ".join(violations)
-    counts = {
-        fname: len((pathlib.Path(__file__).parent / fname).read_text().splitlines())
-        for fname in ceilings
-    }
     return True, "; ".join(f"{f}={c}" for f, c in counts.items())
 
 
