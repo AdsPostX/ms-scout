@@ -170,7 +170,16 @@ Scout extracts content from @mention attachments and Google Sheets URLs and pass
 
 **Supported sources:**
 - Google Sheets URLs in `@mention` text — fetched anonymously via `export?format=csv`. Sheet must be shared as **anyone with the link can view** (no service-account OAuth in v1). Auto-unwraps Slack's `<url|label>` formatting and handles `#gid=` fragments.
-- File attachments via `event.files[]` — PDF (pdftotext + pdfplumber fallback), CSV (pandas), images (Claude vision via base64 content block), text/JSON/markdown.
+- File attachments via `event.files[]`, routed via the dispatch table in `scout_attachments.py` (`_EXTRACTORS`):
+  - **PDF** — pdftotext + pdfplumber fallback
+  - **Excel** — `.xlsx` via openpyxl, `.xls` via xlrd (multi-sheet: reads first, lists all sheet names in summary)
+  - **Word** — `.docx` via python-docx (paragraphs + table cells)
+  - **CSV** — pandas (Shape + Head + numeric describe summary)
+  - **Images** — `.png` / `.jpg` / `.gif` / `.webp` via Claude vision (base64 content block)
+  - **Text** — `.txt` / `.md` / `.markdown` / `.json` / `.log`
+- Unsupported types (`.zip`, `.mp4`, `.numbers`, `.pages`, etc.) degrade gracefully: Scout answers the text question and prepends a one-line note. The handler injects the failure context into Claude's prompt so it doesn't hallucinate "I can't access URLs."
+
+**Adding a new format:** implement an extractor in `scout_attachments.py` + add one row to `_EXTRACTORS`. The dispatch table is the single source of truth — `smoke_test.test_dispatch_table_routes_each_known_format` is the regression guard.
 
 **Limits:** 10MB per file/sheet, 30K char extracted text, 5MB raw image bytes before base64. Single source per @mention (file takes priority over URL if both present).
 

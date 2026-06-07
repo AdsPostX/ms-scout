@@ -8,6 +8,7 @@ Read-only by design. No write-back to external systems.
 """
 from __future__ import annotations
 import re, base64, ipaddress, subprocess, tempfile, urllib.request, urllib.error, socket
+import pathlib
 from dataclasses import dataclass
 from typing import Literal, Optional
 import logging
@@ -128,15 +129,76 @@ def extract_sheets_url(url: str) -> AttachmentResult:
 
 # --- File extraction ---------------------------------------------------------
 
+# --- Format dispatch table ---------------------------------------------------
+# Single source of truth for "what file types can Scout extract?"
+# Each entry is (predicate, extractor). Predicates match on lowercase mimetype +
+# lowercase extension (including the leading dot, e.g. ".xlsx" or "" if none).
+# Extractor signature: (body_bytes, name, mimetype) -> AttachmentResult.
+# Order matters — first match wins. To add a new format: implement an extractor
+# + add one row. The if/elif chain this replaces grew misaligned (vnd.ms-excel
+# was misrouted to read_csv, .xlsx and .docx were silently dropped). Table form
+# makes coverage visible and additions one-line.
+
+def _is_pdf(mt: str, ext: str) -> bool:
+    return mt == "application/pdf" or ext == ".pdf"
+
+def _is_xlsx(mt: str, ext: str) -> bool:
+    # Modern Excel (Office Open XML)
+    return (mt == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            or ext == ".xlsx")
+
+def _is_xls(mt: str, ext: str) -> bool:
+    # Legacy Excel 97-2003 (binary). Previous code routed this to read_csv which
+    # crashes on real .xls bytes — bug, not just gap. Use read_excel + xlrd.
+    return mt == "application/vnd.ms-excel" or ext == ".xls"
+
+def _is_docx(mt: str, ext: str) -> bool:
+    # Modern Word (Office Open XML). Partner briefs, RFP responses arrive as .docx.
+    return (mt == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            or ext == ".docx")
+
+def _is_csv(mt: str, ext: str) -> bool:
+    return mt == "text/csv" or ext == ".csv"
+
+def _is_image(mt: str, ext: str) -> bool:
+    return (mt in ("image/png", "image/jpeg", "image/gif", "image/webp")
+            or (mt.startswith("image/") and ext in (".png", ".jpg", ".jpeg", ".gif", ".webp")))
+
+def _is_text(mt: str, ext: str) -> bool:
+    return (mt.startswith("text/") or mt == "application/json"
+            or ext in (".txt", ".md", ".markdown", ".json", ".log"))
+
+
+def _dispatch_image(b: bytes, n: str, m: str) -> "AttachmentResult":
+    return _extract_image(b, m, n)
+
+
+# Order matters — first match wins. Excel/PDF/Docx checked before generic text
+# because their mimetypes don't overlap and they have richer parsers.
+_EXTRACTORS = [
+    (_is_pdf,   lambda b, n, m: _extract_pdf(b, n)),
+    (_is_xlsx,  lambda b, n, m: _extract_excel(b, n, engine="openpyxl")),
+    (_is_xls,   lambda b, n, m: _extract_excel(b, n, engine="xlrd")),
+    (_is_docx,  lambda b, n, m: _extract_docx(b, n)),
+    (_is_csv,   lambda b, n, m: _extract_csv(b, n)),
+    (_is_image, _dispatch_image),
+    (_is_text,  lambda b, n, m: _extract_text(b, n)),
+]
+
+
 def extract_file(file_obj: dict, bot_token: str) -> AttachmentResult:
     """Extract content from a Slack event.files[i] dict.
 
-    Dispatch by mimetype: PDF → pdftotext, CSV → pandas, image → base64, text → raw.
+    Dispatch by the _EXTRACTORS table above: PDF, Excel (xlsx + xls), Word docx,
+    CSV, images, plain text/JSON/markdown. Unsupported types degrade gracefully
+    with a friendly note; scout_handlers injects the failure into the Claude
+    prompt so users get a useful "I couldn't read X, but I can do Y" response.
     """
     name = file_obj.get("name", "unknown")
     mimetype = (file_obj.get("mimetype") or "").lower()
     size = int(file_obj.get("size") or 0)
     url = file_obj.get("url_private", "")
+    ext = pathlib.Path(name).suffix.lower()
 
     if size > MAX_FILE_BYTES:
         return AttachmentResult(kind="too_large", source="file", name=name)
@@ -148,19 +210,13 @@ def extract_file(file_obj: dict, bot_token: str) -> AttachmentResult:
         return AttachmentResult(kind="error", source="file", name=name,
                                 error=f"download_failed: {type(e).__name__}: {e}")
 
-    # Dispatch
-    if mimetype == "application/pdf" or name.lower().endswith(".pdf"):
-        return _extract_pdf(body_bytes, name)
-    if mimetype in ("text/csv", "application/vnd.ms-excel") or name.lower().endswith(".csv"):
-        return _extract_csv(body_bytes, name)
-    if mimetype.startswith("image/"):
-        return _extract_image(body_bytes, mimetype, name)
-    if mimetype.startswith("text/") or mimetype in ("application/json",) or \
-       name.lower().endswith((".txt", ".md", ".json")):
-        return _extract_text(body_bytes, name)
+    for predicate, extractor in _EXTRACTORS:
+        if predicate(mimetype, ext):
+            return extractor(body_bytes, name, mimetype)
 
     return AttachmentResult(kind="unsupported", source="file", name=name,
-                            error=f"unsupported_mimetype: {mimetype or 'unknown'}")
+                            error=f"unsupported_mimetype: {mimetype or 'unknown'} "
+                                  f"(extension: {ext or 'none'})")
 
 # --- Internal helpers --------------------------------------------------------
 
@@ -301,6 +357,85 @@ def _extract_csv(body_bytes: bytes, name: str) -> AttachmentResult:
     if len(summary) > MAX_TEXT_CHARS:
         summary = summary[:MAX_TEXT_CHARS] + "\n…[trimmed]"
     return AttachmentResult(kind="text", source="file", name=name, text=summary)
+
+
+def _extract_excel(body_bytes: bytes, name: str, engine: str = "openpyxl") -> AttachmentResult:
+    """Extract content from .xlsx (engine='openpyxl') or .xls (engine='xlrd').
+
+    Reads ALL sheets but summarizes the first one only — keeps the response
+    bounded. Sheet names are surfaced in the summary so users can ask Scout
+    to drill into a specific sheet in a follow-up turn.
+
+    Caught by Sidd's live testing on PR #236: AT&T Views .xlsx fell through
+    to "unsupported" because the dispatch only knew CSV/PDF/image/text.
+    """
+    # Lazy enumeration via pd.ExcelFile — `sheet_name=None` on read_excel would
+    # eagerly materialize every sheet into memory even though we only summarize
+    # the first one (caught by CodeRabbit on PR #238). For a workbook with many
+    # tabs the difference is meaningful in memory + parse latency.
+    try:
+        with pd.ExcelFile(io.BytesIO(body_bytes), engine=engine) as xls:
+            sheet_names = list(xls.sheet_names)
+            if not sheet_names:
+                return AttachmentResult(kind="error", source="file", name=name,
+                                        error="excel_empty_or_no_sheets")
+            first_name = sheet_names[0]
+            first_df = pd.read_excel(xls, sheet_name=first_name)
+    except ImportError as e:
+        return AttachmentResult(kind="error", source="file", name=name,
+                                error=f"excel_engine_missing: install {engine}: {e}")
+    except Exception as e:
+        return AttachmentResult(kind="error", source="file", name=name,
+                                error=f"excel_parse_failed: {type(e).__name__}: {e}")
+
+    if len(sheet_names) > 1:
+        header = (
+            f"Workbook has {len(sheet_names)} sheets: {sheet_names!r}. "
+            f"Analyzing first sheet ({first_name!r}); ask to drill into others by name.\n"
+        )
+    else:
+        header = f"Sheet: {first_name!r}\n"
+
+    summary = header + _summarize_dataframe(first_df)
+    if len(summary) > MAX_TEXT_CHARS:
+        summary = summary[:MAX_TEXT_CHARS] + "\n…[trimmed]"
+    return AttachmentResult(kind="text", source="file", name=name, text=summary)
+
+
+def _extract_docx(body_bytes: bytes, name: str) -> AttachmentResult:
+    """Extract paragraphs + table cells from a .docx (Office Open XML) file.
+
+    python-docx skips embedded images; we get text only. Tables become
+    tab-separated rows so Claude can still read tabular content. Real use
+    case: partner briefs, RFP responses, integration specs in ad-tech all
+    arrive as .docx, not text.
+    """
+    try:
+        from docx import Document  # python-docx
+    except ImportError:
+        return AttachmentResult(kind="error", source="file", name=name,
+                                error="docx_engine_missing: install python-docx")
+    try:
+        doc = Document(io.BytesIO(body_bytes))
+    except Exception as e:
+        return AttachmentResult(kind="error", source="file", name=name,
+                                error=f"docx_parse_failed: {type(e).__name__}: {e}")
+
+    parts = []
+    for para in doc.paragraphs:
+        t = para.text.strip()
+        if t:
+            parts.append(t)
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            parts.append("\t".join(cells))
+
+    text = "\n".join(parts) if parts else "(empty document)"
+    if len(text) > MAX_TEXT_CHARS:
+        text = text[:MAX_TEXT_CHARS] + "\n…[trimmed]"
+    return AttachmentResult(kind="text", source="file", name=name, text=text)
+
 
 def _extract_image(body_bytes: bytes, mimetype: str, name: str) -> AttachmentResult:
     if len(body_bytes) > MAX_IMAGE_BYTES:
