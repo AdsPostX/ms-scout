@@ -366,13 +366,10 @@ def wrap_response(
 
     # 1. Headline + body from Card
     blocks: list[dict] = []
-    # Non-INFO severity on non-MONITOR_ALARM surfaces: native header block (always bold
-    # in Slack, renders on mobile) followed by divider. The section-based headline is
-    # suppressed to avoid duplication.
-    # MONITOR_ALARM is excluded — its 6-block budget is tight and it has its own
-    # specialized render path via _build_monitor_alert_blocks().
+    # Non-INFO severity: native header block (always bold in Slack, renders on mobile)
+    # followed by divider. The section-based headline is suppressed to avoid duplication.
     # INFO: existing section layout unchanged.
-    if card.headline and card.severity is not Severity.INFO and surface is not Surface.MONITOR_ALARM:
+    if card.headline and card.severity is not Severity.INFO:
         raw_header = f"{card.severity.emoji} {card.headline}"
         if len(raw_header) > _HEADER_PLAIN_TEXT_MAX:
             raw_header = raw_header[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
