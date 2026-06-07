@@ -1428,18 +1428,11 @@ def _build_feedback_buttons(query_hash: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Pulse signal rendering primitives
-# ── RENDERING CONTRACT ────────────────────────────────────────────────────
-# All Pulse signal rendering MUST use these primitives.
-# Primitives:
-#   _build_signal_header(emoji, title, context="") → list[dict]
-#   _build_item_card(name, left_body, right_body="", context="") → list[dict]
-#   _build_action_row(buttons) → dict
-#   _build_monitor_alert_blocks(emoji, title, items, cta_query) → monitors + revenue tracker
+# Signal rendering primitives — queue card and monitor alert shared helpers
 # ---------------------------------------------------------------------------
 
 def _build_signal_header(emoji: str, title: str, context: str = "") -> list[dict]:
-    """Canonical Pulse signal group header. 1 section + optional context."""
+    """Canonical group header for queue card status groups. 1 section + optional context."""
     blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": f"{emoji} *{title}*"}}]
     if context:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": context}]})
@@ -1511,13 +1504,12 @@ def _build_monitor_alert_blocks(
 
     Typography contract:
     - Title: native header block (plain_text, emoji: true) + divider.
-    - Items: bullet list, capped at 8. When more exist, a count line is appended
-      so readers know they're not seeing the full picture.
+    - Items: native rich_text_list (bullet), capped at 8. Renders with proper
+      left-margin on iOS — no horizontal scroll. Overflow shown in context block.
     - CTA: context block using backtick so the command is copy-pasteable. Phrased
       as an action ("for the full breakdown") rather than a passive footnote.
     """
     _ITEM_CAP = 8
-    _BLOCK_TEXT_LIMIT = 2900  # Slack section block mrkdwn limit is 3000 chars
     fallback = f"{emoji} {title}"
     header_text = f"{emoji} {title}"
     if len(header_text) > _HEADER_PLAIN_TEXT_MAX:
@@ -1529,12 +1521,12 @@ def _build_monitor_alert_blocks(
     if items:
         visible = items[:_ITEM_CAP]
         overflow = len(items) - len(visible)
-        bullet_text = "\n".join(f"• {item}" for item in visible)
+        blocks.extend(_build_rich_text_list(visible))
         if overflow > 0:
-            bullet_text += f"\n_+ {overflow} more_"
-        if len(bullet_text) > _BLOCK_TEXT_LIMIT:
-            bullet_text = bullet_text[:_BLOCK_TEXT_LIMIT] + "…"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": bullet_text}})
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"_+ {overflow} more_"}],
+            })
     if cta_query:
         blocks.append({
             "type": "context",
