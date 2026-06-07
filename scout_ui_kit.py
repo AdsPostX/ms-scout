@@ -242,7 +242,7 @@ _HEADER_PLAIN_TEXT_MAX = 150
 # Strings that signal markdown-formatted body content — route through _text_to_blocks()
 # instead of a plain mrkdwn section. Checked at the START of wrap_response() body routing.
 # "- " and "• " handle bodies that START with a single bullet (no leading \n).
-_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ")
+_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ", "\n|")
 
 
 def _escape_md_code(text: str) -> str:
@@ -269,6 +269,34 @@ def _escape_md_code(text: str) -> str:
         return "`" + m.group(1).replace("_", r"\_") + "`"
 
     return _CODE_SPAN_RE.sub(_escape_underscores, text)
+
+
+def _build_facts_blocks(facts: list[tuple[str, str]]) -> list[dict]:
+    """Render (label, value) pairs as a single rich_text block.
+    All rows share one block — safe for tight budgets (1 block regardless of row count)."""
+    if not facts:
+        return []
+    visible = facts[:10]
+    overflow = len(facts) - len(visible)
+    sections = [
+        {
+            "type": "rich_text_section",
+            "elements": [
+                {"type": "text", "text": str(lbl), "style": {"bold": True}},
+                {"type": "text", "text": "  "},
+                {"type": "text", "text": str(val)},
+            ],
+        }
+        for lbl, val in visible
+    ]
+    blocks: list[dict] = [{"type": "rich_text", "elements": sections}]
+    if overflow > 0:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn",
+                          "text": f"_+ {overflow} more — ask Scout for the full breakdown_"}],
+        })
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -348,11 +376,7 @@ def wrap_response(
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _escape_md_code(card.body)}})
 
     if card.facts:
-        fields = [
-            {"type": "mrkdwn", "text": f"*{lbl}*\n{_escape_md_code(str(val))}"}
-            for lbl, val in card.facts[:10]
-        ]
-        blocks.append({"type": "section", "fields": fields})
+        blocks.extend(_build_facts_blocks(card.facts))
 
     # 2. Feedback row (protected — placed before suggestions so enforce() keeps it)
     if feedback == "button" and query_hash:
@@ -1108,6 +1132,38 @@ def _text_to_blocks(text: str) -> list:
         in_fence = False
         fence_buf: list = []
 
+        def _flush_table(table_buf: list, rt_elems: list) -> list:
+            """Flush accumulated pipe-table rows into rt_elems. Returns empty list to reset table_buf."""
+            if not table_buf:
+                return []
+            col_count = len(table_buf[0].strip('|').split('|'))  # do NOT filter empty — sparse cols count
+            if col_count <= 3:
+                # Mobile-safe: emit each row as a rich_text_section
+                for row in table_buf:
+                    cells = [c.strip() for c in row.strip('|').split('|')]
+                    if len(cells) >= 2:
+                        rt_elems.append({
+                            "type": "rich_text_section",
+                            "elements": [
+                                {"type": "text", "text": cells[0], "style": {"bold": True}},
+                                {"type": "text", "text": "  " + "  ".join(cells[1:])},
+                            ],
+                        })
+            else:
+                # Wide table — keep preformatted + add mobile warning
+                table_text = '\n'.join(table_buf)
+                rt_elems.append({
+                    "type": "rich_text_preformatted",
+                    "elements": [{"type": "text", "text": table_text}],
+                })
+                rt_elems.append({
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text",
+                                  "text": "⚠ Table may scroll horizontally on mobile",
+                                  "style": {"italic": True}}],
+                })
+            return []
+
         for raw_line in part.split('\n'):
             if _FENCE_RE.match(raw_line):
                 if in_fence:
@@ -1149,13 +1205,8 @@ def _text_to_blocks(text: str) -> list:
                 continue
 
             if table_buf:
-                table_text = '\n'.join(table_buf)
-                log.debug("[text_to_blocks] pipe table fallback triggered: %d rows", len(table_buf))
-                rt_elems.append({
-                    "type": "rich_text_preformatted",
-                    "elements": [{"type": "text", "text": table_text}],
-                })
-                table_buf = []
+                log.debug("[text_to_blocks] pipe table flush: %d rows", len(table_buf))
+                table_buf = _flush_table(table_buf, rt_elems)
 
             if _BULLET_RE.match(stripped):
                 item_text = _BULLET_RE.sub('', stripped)
@@ -1183,12 +1234,8 @@ def _text_to_blocks(text: str) -> list:
                 line_buf.append(stripped)
 
         if table_buf:
-            table_text = '\n'.join(table_buf)
-            log.debug("[text_to_blocks] pipe table fallback triggered: %d rows", len(table_buf))
-            rt_elems.append({
-                "type": "rich_text_preformatted",
-                "elements": [{"type": "text", "text": table_text}],
-            })
+            log.debug("[text_to_blocks] pipe table flush (end): %d rows", len(table_buf))
+            _flush_table(table_buf, rt_elems)
         if list_buf:
             el = _flush_list(list_buf)
             if el:

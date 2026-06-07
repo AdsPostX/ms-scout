@@ -353,5 +353,47 @@ class TestKitLint(unittest.TestCase):
             )
 
 
+    def test_facts_render_as_rich_text(self):
+        """card.facts must render as a rich_text block, not section.fields.
+        Verifies _build_facts_blocks is wired into wrap_response."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response
+        card = Card(Severity.INFO, "Publisher rev",
+                    facts=[("Pub A", "$42K"), ("Pub B", "$38K"), ("Pub C", "$21K")])
+        _f, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, feedback="none")
+        facts_block = next((b for b in blocks if b.get("type") == "rich_text"), None)
+        self.assertIsNotNone(facts_block, "Expected a rich_text block for facts")
+
+    def test_facts_overflow_context(self):
+        """12 facts: first 10 visible, remaining 2 trigger a context overflow block."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response
+        card = Card(Severity.INFO, "All pubs",
+                    facts=[(f"Pub {i}", f"${i*1000}") for i in range(12)])
+        _f, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, feedback="none")
+        ctx_blocks = [b for b in blocks if b.get("type") == "context"]
+        overflow_text = any("2 more" in str(b) for b in ctx_blocks)
+        self.assertTrue(overflow_text, "Expected context block mentioning '2 more'")
+
+    def test_facts_budget_is_one_block(self):
+        """10 facts on MONITOR_ALARM must occupy exactly 1 rich_text block, not 10 sections.
+        This keeps us inside the 6-block budget regardless of fact count."""
+        os.environ["SCOUT_KIT_ENABLED"] = "true"
+        for mod in ("scout_ui_kit",):
+            sys.modules.pop(mod, None)
+        from scout_ui_kit import Card, Severity, Surface, wrap_response, BUDGETS
+        card = Card(Severity.WARN, "Cap alert", facts=[(f"Pub {i}", "12%") for i in range(10)])
+        _f, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+        rich_text_blocks = [b for b in blocks if b.get("type") == "rich_text"]
+        self.assertEqual(len(rich_text_blocks), 1,
+                         "All 10 facts must collapse into exactly 1 rich_text block")
+        self.assertLessEqual(len(blocks), BUDGETS[Surface.MONITOR_ALARM],
+                             f"Block count {len(blocks)} exceeds MONITOR_ALARM budget")
+
+
 if __name__ == "__main__":
     unittest.main()
