@@ -149,7 +149,7 @@ class Card:
     severity:  Severity enum value
     headline:  Short title (≤150 chars, no mrkdwn needed — rendered bold)
     body:      Optional main body text (mrkdwn supported)
-    facts:     Optional list of (label, value) pairs rendered as section.fields
+    facts:     Optional list of (label, value) pairs rendered as rich_text (mobile-safe)
     actions:   Optional list of (label, action_id, value, style) button tuples
                action_id: Slack action_id for block_action routing
                style: "primary" | "danger" | "" (default/unstyled)
@@ -315,7 +315,8 @@ def wrap_response(
     """Single entry-point for every ask() reply surface.
 
     Composition order (earlier items are protected from enforce() truncation):
-        headline → body → feedback → suggestions → footer → enforce()
+        headline → body → facts → feedback → suggestions → elapsed → actions →
+        POSITIVE context footer → CRITICAL trailing divider → enforce()
 
     Args:
         card:             Card to render (severity + headline + optional body/facts/actions).
@@ -353,11 +354,18 @@ def wrap_response(
 
     # 1. Headline + body from Card
     blocks: list[dict] = []
+
+    # 3d. Title-case enforcement: if headline is ALL CAPS (> 3 chars), convert to title case.
+    headline = card.headline
+    if headline and headline.isupper() and len(headline) > 3:
+        headline = headline.title()
+
     # Non-INFO severity: native header block (always bold in Slack, renders on mobile)
     # followed by divider. The section-based headline is suppressed to avoid duplication.
-    # INFO: existing section layout unchanged.
-    if card.headline and card.severity is not Severity.INFO:
-        raw_header = f"{card.severity.emoji} {card.headline}"
+    # INFO on CHANNEL_ROOT/DM: section-based visual anchor (3b).
+    # INFO on other surfaces (EPHEMERAL, THREAD, MONITOR_ALARM): no headline block.
+    if headline and card.severity is not Severity.INFO:
+        raw_header = f"{card.severity.emoji} {headline}"
         if len(raw_header) > _HEADER_PLAIN_TEXT_MAX:
             raw_header = raw_header[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
         blocks.append({
@@ -365,8 +373,9 @@ def wrap_response(
             "text": {"type": "plain_text", "text": raw_header, "emoji": True},
         })
         blocks.append({"type": "divider"})
-    elif card.headline:
-        header_text = f"{card.severity.emoji} *{card.headline}*"
+    elif headline and surface in (Surface.CHANNEL_ROOT, Surface.DM):
+        # 3b. INFO on visible surfaces: single-line visual anchor
+        header_text = f"{card.severity.emoji}  *{headline}*"
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
 
     if card.body:
@@ -413,6 +422,7 @@ def wrap_response(
         blocks.append({"type": "actions", "elements": elements})
 
     # 4. Elapsed footer (ops surfaces; skip on DM)
+    # Ordering: content → facts → elapsed → actions → (CRITICAL trailing divider)
     if elapsed_seconds is not None and surface not in (Surface.DM, Surface.EPHEMERAL):
         elapsed_str = (
             f"{elapsed_seconds}s" if elapsed_seconds < 60
@@ -440,6 +450,21 @@ def wrap_response(
                 btn["style"] = style
             elements.append(btn)
         blocks.append({"type": "actions", "elements": elements})
+
+    # 3c. POSITIVE with non-empty body: append "Scout confirmed" context footer
+    if card.severity is Severity.POSITIVE and card.body:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "✓  Scout confirmed"}],
+        })
+
+    # 3a. CRITICAL on message-feed surfaces: trailing divider bookend (iOS visibility fix).
+    # Excluded from MONITOR_ALARM (budget=6, dedicated ops channel — header+divider at top
+    # already anchors the alert; trailing divider would be first truncated by enforce()).
+    if card.severity is Severity.CRITICAL and surface in (
+        Surface.CHANNEL_ROOT, Surface.DM, Surface.THREAD
+    ):
+        blocks.append({"type": "divider"})
 
     # 6. Budget enforcement — always last
     blocks = enforce(blocks, surface)
