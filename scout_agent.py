@@ -276,22 +276,10 @@ _ENTITY_OVERRIDES_PATH = pathlib.Path(__file__).parent / "data" / "entity_overri
 
 
 def _load_entity_overrides() -> dict:
-    """Load publisher/advertiser knowledge store. Returns empty structure if missing or corrupt.
-
-    Harvester-authored entries (added_by == "harvester") are silently excluded at read time
-    so any legacy rows on disk never reach LLM context.
-    """
+    """Load publisher/advertiser knowledge store. Returns empty structure if missing or corrupt."""
     try:
         if _ENTITY_OVERRIDES_PATH.exists():
-            raw = json.loads(_ENTITY_OVERRIDES_PATH.read_text())
-            for section in ("publishers", "advertisers"):
-                bucket = raw.get(section) or {}
-                raw[section] = {
-                    name: entry
-                    for name, entry in bucket.items()
-                    if (entry or {}).get("added_by", "") != "harvester"
-                }
-            return raw
+            return json.loads(_ENTITY_OVERRIDES_PATH.read_text())
     except Exception as e:
         log.debug("_load_entity_overrides swallowed: %s", e)
     return {"publishers": {}, "advertisers": {}}
@@ -354,51 +342,6 @@ def _get_corrections_context() -> str:
         + "\n\n"
     )
 
-
-_CHANNEL_CONTEXT_PATH = pathlib.Path(__file__).parent / "data" / "channel_context.json"
-
-
-def _get_channel_context(query: str) -> str:
-    """
-    Load compressed channel notes from nightly harvest.
-    Inject global notes always + all publisher entries (short-form).
-    Returns empty string if file missing, expired, or empty.
-    """
-    try:
-        if not _CHANNEL_CONTEXT_PATH.exists():
-            return ""
-        data = json.loads(_CHANNEL_CONTEXT_PATH.read_text())
-
-        # Check expiry
-        expires = data.get("expires_at", "")
-        if expires and expires < datetime.now().strftime("%Y-%m-%d"):
-            return ""  # stale context is worse than no context
-
-        parts = []
-        harvested = data.get("harvested_at", "unknown")
-
-        # Global notes — always injected
-        global_ctx = data.get("global", "").strip()
-        if global_ctx:
-            parts.append(global_ctx)
-
-        # All publisher notes — short-form, all of them (no alias matching needed)
-        publishers = data.get("publishers", {})
-        for pub_name, notes in publishers.items():
-            if notes and notes.strip():
-                parts.append(f"Publisher: {pub_name} — {notes.strip()}")
-
-        if not parts:
-            return ""
-
-        return (
-            f"TEAM CONTEXT (from Slack as of {harvested} — treat as current ground truth):\n"
-            + "\n".join(parts)
-            + "\n\n"
-        )
-    except Exception as e:
-        log.debug("_get_channel_context swallowed: %s", e)
-        return ""
 
 
 def _merge_learned_benchmarks() -> None:
@@ -5821,8 +5764,6 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
         api_key=api_key,
         default_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
     )
-    # Prepend team context (from Slack channels) + corrections as grounding context
-    channel_ctx     = _get_channel_context(user_message)
     corrections_ctx = _get_corrections_context()
     caller_ctx      = f"[Caller Slack user_id: {user_id}]\n" if user_id else ""
     # Inject current CT date/time so the model never guesses "today" from UTC.
@@ -5849,7 +5790,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
             )
         except Exception:
             pass  # unknown tz string — skip, CT context is still present
-    prefix = date_ctx + caller_ctx + channel_ctx + corrections_ctx
+    prefix = date_ctx + caller_ctx + corrections_ctx
     effective_message = (prefix + user_message) if prefix else user_message
     messages = list(history or []) + [{"role": "user", "content": effective_message}]
     # List of brief results — append each draft_campaign_brief call result.

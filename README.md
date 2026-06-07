@@ -139,10 +139,6 @@ scout_digest.py         Weekly offer digest
                         Scores new offers against CVR benchmarks, deduplicates, ranks by impact
                         Posts to #scout-offers every Monday
 
-context_harvester.py    Nightly Slack context extractor
-                        Reads #revenue-operations + all internal clients-* channels
-                        Builds ambient context so Scout knows what's happening with each partner
-
 campaign_builder.py     MS Platform campaign automation (Playwright)
                         STATUS: PARKED — see file header for details
 ```

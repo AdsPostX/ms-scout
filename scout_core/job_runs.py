@@ -1,6 +1,6 @@
 """Best-effort writers for the P2.3 job-run telemetry tables.
 
-Three thin functions that demand-feed daemons (scraper, harvester,
+Three thin functions that demand-feed daemons (scraper,
 hourly_shadow, revenue_tracker, autocheck — P2.5-P2.8) call to record
 "how did my last run go" into ClickHouse.
 
