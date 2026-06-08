@@ -24,9 +24,19 @@ import logging
 import argparse
 import requests
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 from scout_types import Offer  # type: ignore[import]  # noqa: F401
+
+
+@dataclass
+class PayoutResult:
+    """Structured return type for parse_payout() — makes enrichment failures explicit."""
+    value: Optional[float]  # numeric amount (None if unparseable or zero)
+    payout_type: str         # normalized type string e.g. "% of Sale"
+    state: str               # "enriched" | "no_data" | "failed"
+    source_field: str        # which raw input contributed the value
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -274,22 +284,34 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
                                or best.get("PayoutPercent") or "")
                         if pct:
                             payout = f"{pct}%"
-                    merged[str(cid)] = {"payout": payout, "payout_type": payout_type}
+                    payout_state = "enriched" if payout else "failed"
+                    merged[str(cid)] = {"payout": payout, "payout_type": payout_type, "payout_state": payout_state}
                     if DEBUG and idx % 25 == 0:
                         log.info(f"  [{idx}/{len(missing)}] {cid}: {payout} {payout_type}")
                 else:
                     # 200 OK but no contract terms — treat like 404 to avoid re-fetching forever
-                    merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": "Rate TBD"}
+                    merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": "Rate TBD", "payout_state": "no_data"}
             elif resp.status_code == 404:
-                merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": "Rate TBD"}
+                merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": "Rate TBD", "payout_state": "no_data"}
             else:
                 log.warning(f"  Campaign {cid}: status {resp.status_code}")
+                merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": f"HTTP {resp.status_code}", "payout_state": "failed"}
         except Exception as e:
             log.warning(f"  Campaign {cid}: {e}")
+            merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": "request_error", "payout_state": "failed"}
 
         time.sleep(0.1)  # stay within Impact rate limits
 
     _save_payout_cache(merged)
+
+    if os.environ.get("SCOUT_LOG_PAYOUT_FAILURES"):
+        enriched_n = sum(1 for v in merged.values() if v.get("payout_state") == "enriched")
+        failed_n = sum(1 for v in merged.values() if v.get("payout_state") == "failed")
+        no_data_n = sum(1 for v in merged.values() if v.get("payout_state") == "no_data")
+        log.info(
+            f"Payout enrichment summary: {enriched_n} enriched, {failed_n} failed, {no_data_n} no_data"
+        )
+
     return merged
 
 
@@ -804,8 +826,15 @@ def normalize_categories(raw: str, advertiser: str = "") -> list:
     return matched[:3] if matched else ["Other"]  # cap at 3 tags
 
 
-def parse_payout(raw_payout: str, raw_type: str) -> tuple:
-    """Return (numeric_float_or_None, normalized_payout_type_str)."""
+def parse_payout(raw_payout: str, raw_type: str) -> "PayoutResult":
+    """Parse raw payout string + type into a PayoutResult with explicit enrichment state.
+
+    state semantics:
+      "enriched" — a positive numeric payout was parsed successfully
+      "no_data"  — both inputs were empty (no enrichment data available)
+      "failed"   — had a type or non-empty payout string but no numeric value emerged
+                   (common cause: Impact CPS/SALE contract with missing PercentageRate)
+    """
     ptype_map = {
         "percentage": "% of Sale",
         "% of sale": "% of Sale",
@@ -829,18 +858,27 @@ def parse_payout(raw_payout: str, raw_type: str) -> tuple:
             break
 
     num = None
+    source_field = ""
     if raw_payout:
-        # Strip % and $ signs, find the first number
         nums = re.findall(r"[\d]+(?:\.\d+)?", raw_payout.replace(",", ""))
         if nums:
             parsed = float(nums[0])
-            num = parsed if parsed > 0 else None  # 0 payout has no signal value
+            num = parsed if parsed > 0 else None
         if "%" in raw_payout and norm_type == "Unknown":
             norm_type = "% of Sale"
         elif "$" in raw_payout and norm_type == "Unknown":
             norm_type = "$ per Lead"
+        source_field = "raw_payout"
 
-    return num, norm_type
+    if num is not None:
+        state = "enriched"
+    elif not raw_payout and not raw_type:
+        state = "no_data"
+    else:
+        # Had a type or non-empty string but couldn't extract a positive number
+        state = "failed"
+
+    return PayoutResult(value=num, payout_type=norm_type, state=state, source_field=source_field)
 
 
 def normalize_status(raw: str) -> str:
@@ -1067,7 +1105,7 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
             continue
         geo = normalize_geo(o.get("geo", ""))
         categories = normalize_categories(o.get("category", ""), o.get("advertiser", ""))
-        payout_num, payout_type_norm = parse_payout(
+        payout_result = parse_payout(
             str(o.get("payout", "")), str(o.get("payout_type", ""))
         )
         ms_status, ms_internal_name = match_ms_status(o, ms_index)
@@ -1077,8 +1115,9 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
             "geo":               geo,
             "category":          ", ".join(categories),
             "_categories":       categories,          # list form for Notion multi-select
-            "_payout_num":       payout_num,
-            "_payout_type_norm": payout_type_norm,
+            "_payout_num":       payout_result.value,
+            "_payout_type_norm": payout_result.payout_type,
+            "_payout_state":     payout_result.state,
             "_raw_payout":       o.get("_raw_payout", ""),  # preserve through cleaning
             "_unique_key":       f"{o['network']}:{o['offer_id']}",
             "_ms_status":        ms_status,

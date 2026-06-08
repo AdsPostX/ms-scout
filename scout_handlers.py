@@ -2079,13 +2079,43 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 if deferred else "_None_"
             )
 
+            # Data quality — count payout_cache entries with failed/ambiguous enrichment
+            _payout_empty_cps = 0
+            _payout_failed = 0
+            _payout_cache_path = os.path.join(_THIS_DIR, "data", "payout_cache.json")
+            try:
+                with open(_payout_cache_path) as _pcf:
+                    _pc = json.load(_pcf)
+                for _entry in _pc.values():
+                    if _entry.get("payout_state") == "failed":
+                        _payout_failed += 1
+                    elif _entry.get("payout") == "" and _entry.get("payout_type") in ("CPS", "SALE"):
+                        _payout_empty_cps += 1
+            except (OSError, json.JSONDecodeError):
+                _payout_cache_path = None  # cache missing — skip data quality section
+
+            dq_lines = []
+            if _payout_cache_path is not None:
+                if _payout_failed:
+                    dq_lines.append(f":red_circle: {_payout_failed} enrichment failure(s) (`payout_state=failed`)")
+                if _payout_empty_cps:
+                    dq_lines.append(f":warning: {_payout_empty_cps} ambiguous entry(ies) (empty payout + CPS/SALE type)")
+                if not dq_lines:
+                    dq_lines.append(":white_check_mark: No payout data quality issues found")
+            else:
+                dq_lines.append("_payout_cache.json not found — run offer_scraper.py first_")
+
             body = (
                 "*Module line counts*\n"
                 + "\n".join(bar_lines)
+                + "\n\n*Payout data quality*\n"
+                + "\n".join(dq_lines)
                 + "\n\n*Deferred items (smoke_test.py)*\n"
                 + deferred_text
             )
-            card = Card(severity=Severity.INFO, headline="Scout codebase health", body=body)
+            _cache_missing = _payout_cache_path is None
+            _health_sev = Severity.WARN if (_cache_missing or _payout_failed or _payout_empty_cps) else Severity.POSITIVE
+            card = Card(severity=_health_sev, headline="Scout codebase health", body=body)
             _, health_blocks = wrap_response(
                 card=card,
                 surface=Surface.EPHEMERAL,
