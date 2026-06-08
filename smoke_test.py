@@ -3791,6 +3791,56 @@ def test_ms_platform_campaign_creation():
     pass
 
 
+@test("parse_payout — idempotent + explicit state")
+def test_parse_payout_idempotent():
+    try:
+        from offer_scraper import parse_payout, PayoutResult
+        cases = [
+            ("15%",  "CPS",  "enriched",  15.0),
+            ("2.00", "CPL",  "enriched",   2.0),
+            ("",     "CPS",  "failed",    None),
+            ("",     "",     "no_data",   None),
+            ("0",    "CPS",  "failed",    None),
+        ]
+        for raw, typ, exp_state, exp_val in cases:
+            r1 = parse_payout(raw, typ)
+            r2 = parse_payout(raw, typ)
+            assert r1 == r2, f"Not idempotent: parse_payout({raw!r}, {typ!r})"
+            assert isinstance(r1, PayoutResult), f"Expected PayoutResult, got {type(r1)}"
+            assert r1.state == exp_state, f"parse_payout({raw!r}, {typ!r}).state={r1.state!r}, want {exp_state!r}"
+            assert r1.value == exp_val, f"parse_payout({raw!r}, {typ!r}).value={r1.value}, want {exp_val}"
+        return True, f"{len(cases)} cases: idempotency + state semantics verified"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("data_quality_invariants")
+def test_data_quality_invariants():
+    """Fails on ambiguous enrichment entries — detection gate for payout_state rollout."""
+    cache_path = "data/payout_cache.json"
+    if not os.path.exists(cache_path):
+        return True, "SKIP: payout_cache.json not found"
+    with open(cache_path) as f:
+        cache = json.load(f)
+    if not cache:
+        return True, "SKIP: payout_cache.json is empty"
+    # New-style: entries written by PR B have payout_state; "failed" means enrichment broke
+    new_style_failures = [k for k, v in cache.items() if v.get("payout_state") == "failed"]
+    # Legacy-style: pre-PR B entries that had a type but no amount (the original CPS bug)
+    legacy_violations = [
+        k for k, v in cache.items()
+        if "payout_state" not in v and v.get("payout") == "" and v.get("payout_type") in ("CPS", "SALE")
+    ]
+    failures = new_style_failures + legacy_violations
+    if failures:
+        return False, (
+            f"Enrichment failures: {len(failures)} entries "
+            f"({len(new_style_failures)} explicit, {len(legacy_violations)} legacy) — "
+            f"examples: {failures[:3]}"
+        )
+    return True, f"No failures; {len(cache)} cache entries checked"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
