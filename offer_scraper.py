@@ -295,8 +295,10 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
                 merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": "Rate TBD", "payout_state": "no_data"}
             else:
                 log.warning(f"  Campaign {cid}: status {resp.status_code}")
+                merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": f"HTTP {resp.status_code}", "payout_state": "failed"}
         except Exception as e:
             log.warning(f"  Campaign {cid}: {e}")
+            merged[str(cid)] = {"payout": "", "payout_type": "", "payout_note": "request_error", "payout_state": "failed"}
 
         time.sleep(0.1)  # stay within Impact rate limits
 

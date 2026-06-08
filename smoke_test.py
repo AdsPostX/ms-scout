@@ -3867,7 +3867,10 @@ def test_data_quality_invariants():
     # Legacy-style: pre-PR B entries that had a type but no amount (the original CPS bug)
     legacy_violations = [
         k for k, v in cache.items()
-        if "payout_state" not in v and v.get("payout") == "" and v.get("payout_type") in ("CPS", "SALE")
+        if isinstance(v, dict)
+        and "payout_state" not in v
+        and v.get("payout") in ("", None)
+        and v.get("payout_type") in ("CPS", "SALE")
     ]
     failures = new_style_failures + legacy_violations
     if failures:
