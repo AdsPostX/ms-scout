@@ -36,8 +36,6 @@ import time
 import types
 from unittest.mock import patch
 
-import pytest
-
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -3771,22 +3769,22 @@ def test_slash_command_coverage():
 
 # ── Deferred skip stubs ───────────────────────────────────────────────────────
 
-@pytest.mark.skip(reason="DEFERRED: persist fires_log to disk | GATE: autocheck unattended 5+ days | CHECK-IN: 2026-06-14 | KILL-IF-UNMET: no")
+# DEFERRED: persist fires_log to disk | GATE: autocheck unattended 5+ days | CHECK-IN: 2026-06-14 | KILL-IF-UNMET: no
 def test_fires_log_persistence():
     pass
 
 
-@pytest.mark.skip(reason="DEFERRED: App Home drill modals (PR 2) | GATE: Jon/Todd/Roj open Home tab | CHECK-IN: 2026-07-18 | KILL-IF-UNMET: yes")
+# DEFERRED: App Home drill modals (PR 2) | GATE: Jon/Todd/Roj open Home tab | CHECK-IN: 2026-07-18 | KILL-IF-UNMET: yes
 def test_app_home_drill_modals():
     pass
 
 
-@pytest.mark.skip(reason="DEFERRED: alert_registry Redis backend | GATE: same as App Home PR 2 | CHECK-IN: 2026-07-18 | KILL-IF-UNMET: yes")
+# DEFERRED: alert_registry Redis backend | GATE: same as App Home PR 2 | CHECK-IN: 2026-07-18 | KILL-IF-UNMET: yes
 def test_alert_registry_redis():
     pass
 
 
-@pytest.mark.skip(reason="DEFERRED: MS platform campaign creation | GATE: Vamsee delivers CAMPAIGN_CREATE_WEBHOOK_URL + API key | CHECK-IN: 2026-06-21 | KILL-IF-UNMET: flip todos to BLOCKED")
+# DEFERRED: MS platform campaign creation | GATE: Vamsee delivers CAMPAIGN_CREATE_WEBHOOK_URL + API key | CHECK-IN: 2026-06-21 | KILL-IF-UNMET: flip todos to BLOCKED
 def test_ms_platform_campaign_creation():
     pass
 
