@@ -126,6 +126,8 @@ Starting any Scout session:
 3. Read `scout_agent.py` SYSTEM_PROMPT + TOOLS + TOOL_MAP if planning anything new
 4. Run `python3 smoke_test.py` to confirm baseline — "it worked last time" is not a baseline
 
+**Product principle:** Scout never surfaces unverified data silently. If Scout shows a number, it was verified. If Scout cannot verify, Scout says so in the response. Implement this as: (a) `PayoutResult.state` catches enrichment failures at parse time, (b) failed Impact offers appear as a footer count in the digest, (c) `/scout-health` shows the data quality section alongside module sizes.
+
 ## Scout Response Patterns
 
 Scout uses ScoutKit (`scout_ui_kit.py`) for all Slack output. Every response maps to one of six patterns. Match pattern → surface → severity before writing new handlers.

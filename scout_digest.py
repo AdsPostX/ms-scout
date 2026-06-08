@@ -1684,6 +1684,15 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     except Exception as _e:
         log.warning(f"[digest] sourcing intelligence failed (non-fatal): {_e}")
 
+    # Data quality footer — surfaces enrichment failures so Scout never hides bad data silently.
+    # Count Impact offers excluded at the no_payout gate (most common cause: failed CPS enrichment).
+    _impact_no_payout = sel_meta.get("no_score_reasons", {}).get("impact", {}).get("no_payout", 0)
+    if _impact_no_payout > 0:
+        blocks = blocks + [
+            {"type": "context", "elements": [{"type": "mrkdwn",
+                "text": f":warning: {_impact_no_payout} Impact offer{'s' if _impact_no_payout != 1 else ''} excluded — payout enrichment failed"}]},
+        ]
+
     fallback = (
         f"🎯 Scout Signal — {run_date} (forced): {total_selected} offers across {len(offers_by_network)} networks"
         if is_force else
