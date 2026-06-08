@@ -284,7 +284,7 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
                                or best.get("PayoutPercent") or "")
                         if pct:
                             payout = f"{pct}%"
-                    payout_state = "enriched" if payout else "failed"
+                    payout_state = parse_payout(payout, payout_type).state
                     merged[str(cid)] = {"payout": payout, "payout_type": payout_type, "payout_state": payout_state}
                     if DEBUG and idx % 25 == 0:
                         log.info(f"  [{idx}/{len(missing)}] {cid}: {payout} {payout_type}")
