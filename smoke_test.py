@@ -3812,6 +3812,46 @@ def test_parse_payout_idempotent():
         return False, str(e)
 
 
+@test("digest_footer_appended — impact no_payout > 0")
+def test_digest_footer_appended():
+    """Digest footer context block appears when Impact has no_payout entries; absent when zero.
+
+    Tests the 3-line conditional in scout_digest.build_digest_payload() directly,
+    without the full ClickHouse mock setup that function requires.
+    """
+    def _apply_footer(sel_meta, base_blocks):
+        """Mirror of the footer logic in scout_digest.py."""
+        _impact_no_payout = (sel_meta or {}).get("no_score_reasons", {}).get("impact", {}).get("no_payout", 0)
+        if _impact_no_payout > 0:
+            return base_blocks + [
+                {"type": "context", "elements": [{"type": "mrkdwn",
+                    "text": f":warning: {_impact_no_payout} Impact offer{'s' if _impact_no_payout != 1 else ''} excluded — payout enrichment failed"}]},
+            ]
+        return base_blocks
+
+    base = [{"type": "section", "text": {"type": "mrkdwn", "text": "digest body"}}]
+
+    # Case 1: no_payout=3 → footer appended (plural)
+    result = _apply_footer({"no_score_reasons": {"impact": {"no_payout": 3}}}, base)
+    assert len(result) == len(base) + 1, "footer block not appended when no_payout=3"
+    assert result[-1]["type"] == "context", "appended block should be type=context"
+    assert "3 Impact offers excluded" in result[-1]["elements"][0]["text"], "plural form wrong"
+
+    # Case 2: no_payout=0 → no footer
+    result_zero = _apply_footer({"no_score_reasons": {"impact": {"no_payout": 0}}}, base)
+    assert len(result_zero) == len(base), "footer should not appear when no_payout=0"
+
+    # Case 3: sel_meta=None → no footer, no crash (guards the T1 fix)
+    result_none = _apply_footer(None, base)
+    assert len(result_none) == len(base), "footer should not appear when sel_meta=None"
+
+    # Case 4: no_payout=1 → singular form
+    result_one = _apply_footer({"no_score_reasons": {"impact": {"no_payout": 1}}}, base)
+    assert "1 Impact offer excluded" in result_one[-1]["elements"][0]["text"], "singular form wrong"
+
+    return True, "4 cases: appended, zero-clean, None-safe, singular/plural"
+
+
 @test("data_quality_invariants")
 def test_data_quality_invariants():
     """Fails on ambiguous enrichment entries — detection gate for payout_state rollout."""

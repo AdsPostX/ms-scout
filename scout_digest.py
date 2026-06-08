@@ -1686,7 +1686,7 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
 
     # Data quality footer — surfaces enrichment failures so Scout never hides bad data silently.
     # Count Impact offers excluded at the no_payout gate (most common cause: failed CPS enrichment).
-    _impact_no_payout = sel_meta.get("no_score_reasons", {}).get("impact", {}).get("no_payout", 0)
+    _impact_no_payout = (sel_meta or {}).get("no_score_reasons", {}).get("impact", {}).get("no_payout", 0)
     if _impact_no_payout > 0:
         blocks = blocks + [
             {"type": "context", "elements": [{"type": "mrkdwn",

@@ -2113,7 +2113,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 + "\n\n*Deferred items (smoke_test.py)*\n"
                 + deferred_text
             )
-            card = Card(severity=Severity.INFO, headline="Scout codebase health", body=body)
+            card = Card(severity=Severity.POSITIVE, headline="Scout codebase health", body=body)
             _, health_blocks = wrap_response(
                 card=card,
                 surface=Surface.EPHEMERAL,
