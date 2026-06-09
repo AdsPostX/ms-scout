@@ -236,10 +236,7 @@ class TestRawMessageRouting(unittest.TestCase):
             "[Caller Slack user_id: U1]\n"
             "alert thresholds"
         )
-        with unittest.mock.patch.object(scout_agent, "TOOL_MAP", {
-            "list_thresholds": lambda: {"thresholds": {}, "overridden": {}},
-        }):
-            r = _route_deterministic(prefixed, user_id="U1")
+        r = _route_deterministic(prefixed, user_id="U1")
         # Prefixed text is not equal to "alert thresholds" → falls through to LLM
         self.assertIsNone(r)
 
