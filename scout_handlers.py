@@ -56,6 +56,12 @@ from scout_state import (
 
 log = logging.getLogger("scout_handlers")
 
+
+def _is_under_maintenance(user_id: str) -> bool:
+    from scout_state import get_maintenance
+    from scout_agent import _is_admin
+    return bool(get_maintenance()) and not _is_admin(user_id)
+
 # Injected at startup by scout_bot.main() — avoids circular import
 _BOT_USER_ID: str = ""
 _LAST_THREAD_PER_CHANNEL: dict = {}
@@ -1253,6 +1259,15 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
     action    = actions[0]
     action_id = action.get("action_id", "")
     channel   = (payload.get("channel") or {}).get("id", "")
+    user_id   = payload.get("user", {}).get("id", "")
+
+    if _is_under_maintenance(user_id):
+        from scout_state import log_maintenance_attempt
+        log_maintenance_attempt(user_id, action_id[:80])
+        if channel:
+            web.chat_postEphemeral(channel=channel, user=user_id,
+                text=":wrench: Scout is offline for maintenance.")
+        return
 
     log.info(f"Block action: {action_id!r} in {channel}")
 
@@ -1746,6 +1761,15 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
     command  = payload.get("command", "")
     user_id  = payload.get("user_id", "")
     channel  = payload.get("channel_id", "")
+    text     = payload.get("text", "").strip()
+
+    if command != "/scout-maintenance" and _is_under_maintenance(user_id):
+        from scout_state import log_maintenance_attempt
+        log_maintenance_attempt(user_id, f"{command} {text}"[:80])
+        cmd_echo = f"{command} {text}".strip()
+        web.chat_postEphemeral(channel=channel, user=user_id,
+            text=f":wrench: Scout is offline for maintenance.\n\nYour command: `{cmd_echo}`")
+        return
 
     try:
         if command == "/scout-queue":
@@ -2129,8 +2153,8 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
 
         elif command == "/scout-maintenance":
             from scout_state import get_maintenance, set_maintenance, clear_maintenance
-            _admin_id = os.getenv("SCOUT_ADMIN_USER_ID", "")
-            if _admin_id and user_id != _admin_id:
+            from scout_agent import _is_admin
+            if not _is_admin(user_id):
                 web.chat_postEphemeral(channel=channel, user=user_id,
                                        text="Only admins can toggle maintenance mode.")
                 return
@@ -2218,6 +2242,15 @@ def _handle_event_impl(req: SocketModeRequest):
     if event.get("type") == "app_home_opened":
         user_id = event.get("user", "")
         if user_id:
+            if _is_under_maintenance(user_id):
+                from scout_state import log_maintenance_attempt
+                log_maintenance_attempt(user_id, "[home]")
+                web.views_publish(user_id=user_id, view={
+                    "type": "home",
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn",
+                        "text": ":wrench: Scout is offline for maintenance."}}]
+                })
+                return
             # Best-effort scoreboard rollup. Each source is independently
             # try/excepted — a CH failure should not prevent the activation
             # surface from rendering. None propagates as "—" in the UI.
@@ -2273,6 +2306,11 @@ def _handle_event_impl(req: SocketModeRequest):
     # We log the user's rating and (for 👎) drop a threaded "remember" hint.
     if event.get("type") == "reaction_added" and event.get("reaction") in ("+1", "-1"):
         rater_id = event.get("user", "")
+        emoji_name = event.get("reaction", "")
+        if _is_under_maintenance(rater_id):
+            from scout_state import log_maintenance_attempt
+            log_maintenance_attempt(rater_id, emoji_name[:80])
+            return
         # Scout no longer seeds 👍/👎 on its own messages, so the
         # "ignore Scout's own seed reactions" branch is gone.
         item = event.get("item", {})
@@ -2358,16 +2396,12 @@ def _handle_event_impl(req: SocketModeRequest):
     user_id = user_id_event  # alias used by ask() and usage logging below
 
     # ── Maintenance gate — block non-admins when Scout is in the shop ──────────
-    from scout_state import get_maintenance, log_maintenance_attempt
-    _admin_id = os.getenv("SCOUT_ADMIN_USER_ID", "")
-    _maint = get_maintenance()
-    if _maint and (not _admin_id or user_id != _admin_id):
-        log_maintenance_attempt(user_id, query[:80])
-        web.chat_postMessage(
-            channel=channel,
-            thread_ts=thread_ts,
-            text="🔧 Scout is offline for maintenance.",
-        )
+    if _is_under_maintenance(user_id):
+        from scout_state import log_maintenance_attempt
+        log_maintenance_attempt(user_id, (query or "")[:80])
+        _echo = (query or "")[:200]
+        web.chat_postEphemeral(channel=channel, user=user_id,
+            text=f":wrench: Scout is offline for maintenance.\n\nYour message: \"{_echo}\"")
         return
 
     # ── Correction capture — if this thread has a pending correction, store it ─
