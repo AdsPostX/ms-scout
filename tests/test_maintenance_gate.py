@@ -55,68 +55,40 @@ class TestIsAdmin(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestInlineMaintenanceGate(unittest.TestCase):
-    """The mention-path gate at scout_handlers.py lines 2360-2371.
+    """scout_handlers._is_under_maintenance() — the centralized gate helper.
 
-    Tests the observable contract: when maintenance is active and the user is
-    not the SCOUT_ADMIN_USER_ID, chat_postMessage is called with the offline
-    text and the handler returns early.
-
-    We extract and exercise the gate logic directly rather than driving a full
-    SocketModeRequest to avoid circular import complexity.
+    Exercises the production function directly with patched dependencies.
     """
 
-    def _run_gate(self, maint_state, user_id: str, admin_id: str) -> tuple[bool, list]:
-        """Reproduce the gate check.  Returns (blocked, postMessage_calls)."""
-        calls = []
-
-        class _FakeWeb:
-            def chat_postMessage(self, **kwargs):
-                calls.append(kwargs)
-
-        web = _FakeWeb()
-
-        with unittest.mock.patch("scout_state.get_maintenance", return_value=maint_state):
-            from scout_state import get_maintenance
-            _admin_id = admin_id
-            _maint = get_maintenance()
-            blocked = bool(_maint and (not _admin_id or user_id != _admin_id))
-            if blocked:
-                web.chat_postMessage(
-                    channel="C_TEST",
-                    thread_ts=None,
-                    text="🔧 Scout is offline for maintenance.",
-                )
-        return blocked, calls
+    def _call(self, maint_state, is_admin_result: bool, user_id: str = "U_USER") -> bool:
+        import scout_handlers
+        with unittest.mock.patch("scout_state.get_maintenance", return_value=maint_state), \
+             unittest.mock.patch("scout_agent._is_admin", return_value=is_admin_result):
+            return scout_handlers._is_under_maintenance(user_id)
 
     def test_maintenance_active_non_admin_is_blocked(self):
         maint = {"active": True, "set_by": "U_ADMIN", "attempts": []}
-        blocked, calls = self._run_gate(maint, user_id="U_USER", admin_id="U_ADMIN")
-        self.assertTrue(blocked)
-        self.assertEqual(len(calls), 1)
-        self.assertIn("offline for maintenance", calls[0]["text"])
+        self.assertTrue(self._call(maint, is_admin_result=False))
 
     def test_maintenance_active_admin_passes(self):
         maint = {"active": True, "set_by": "U_ADMIN", "attempts": []}
-        blocked, calls = self._run_gate(maint, user_id="U_ADMIN", admin_id="U_ADMIN")
-        self.assertFalse(blocked)
-        self.assertEqual(calls, [])
+        self.assertFalse(self._call(maint, is_admin_result=True))
 
     def test_maintenance_not_active_passes(self):
-        blocked, calls = self._run_gate(None, user_id="U_USER", admin_id="U_ADMIN")
-        self.assertFalse(blocked)
-        self.assertEqual(calls, [])
+        self.assertFalse(self._call(None, is_admin_result=False))
 
     def test_maintenance_empty_dict_falsy_passes(self):
         """get_maintenance() returns {} (falsy) → gate open."""
-        blocked, calls = self._run_gate({}, user_id="U_USER", admin_id="U_ADMIN")
-        self.assertFalse(blocked)
+        self.assertFalse(self._call({}, is_admin_result=False))
 
-    def test_no_admin_env_blocks_everyone(self):
-        """When SCOUT_ADMIN_USER_ID is unset (''), the condition `not _admin_id` is
-        True, so the gate blocks all users — old (pre-fix) behaviour to pin."""
+    def test_empty_user_id_short_circuits(self):
+        """Empty user_id (bot/system events) → always False, no get_maintenance call."""
+        import scout_handlers
         maint = {"active": True, "set_by": "U_ADMIN", "attempts": []}
-        blocked, calls = self._run_gate(maint, user_id="U_ADMIN", admin_id="")
-        self.assertTrue(blocked)
+        with unittest.mock.patch("scout_state.get_maintenance", return_value=maint) as mock_gm:
+            result = scout_handlers._is_under_maintenance("")
+        self.assertFalse(result)
+        mock_gm.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

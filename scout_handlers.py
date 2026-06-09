@@ -1276,8 +1276,8 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
                     "blocks": [{"type": "section", "text": {"type": "mrkdwn",
                         "text": ":wrench: Scout is offline for maintenance."}}]
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("[maintenance] views_publish failed for %s: %s", user_id, e)
         return
 
     log.info(f"Block action: {action_id!r} in {channel}")
