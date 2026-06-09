@@ -670,6 +670,21 @@ _MESSAGE_POOLS = {
 }
 
 
+def _pool_key_for(query: str) -> str:
+    """Return the _MESSAGE_POOLS key that best matches the query content."""
+    q = (query or "").lower()
+    if any(w in q for w in ("brief", "campaign", "build a brief", "draft", "write")):
+        return "pool_brief"
+    if any(w in q for w in ("queue", "status", "pending", "live", "launch", "enter")):
+        return "pool_ops"
+    if any(w in q for w in ("revenue", "projection", "cap", "budget", "forecast",
+                             "performance", "rpm", "cvr", "data", "benchmark", "report", "rank")):
+        return "pool_data"
+    if any(w in q for w in ("publisher", "partner", "integration", "network")):
+        return "pool_publisher"
+    return "pool_generic"
+
+
 def _pick_loading_message(query: str = "") -> str:
     """Pick a context-aware loading message based on query content and time of day."""
     from datetime import datetime
@@ -682,24 +697,7 @@ def _pick_loading_message(query: str = "") -> str:
     except Exception:
         is_late = False
 
-    q = (query or "").lower()
-
-    if any(w in q for w in ("brief", "campaign", "build a brief", "draft", "write")):
-        pool_key = "pool_brief"
-    elif any(w in q for w in ("queue", "status", "pending", "live", "launch", "enter")):
-        pool_key = "pool_ops"
-    elif any(w in q for w in ("revenue", "projection", "cap", "budget", "forecast")):
-        pool_key = "pool_data"
-    elif any(w in q for w in ("performance", "rpm", "cvr", "data", "benchmark", "report", "rank")):
-        pool_key = "pool_data"
-    elif any(w in q for w in ("publisher", "partner", "integration", "network")):
-        pool_key = "pool_publisher"
-    elif any(w in q for w in ("find", "opportunity", "gap", "search")):
-        pool_key = "pool_generic"
-    else:
-        pool_key = "pool_generic"
-
-    pool = _MESSAGE_POOLS.get(pool_key, _MESSAGE_POOLS["pool_generic"])
+    pool = _MESSAGE_POOLS.get(_pool_key_for(query), _MESSAGE_POOLS["pool_generic"])
     tone = "late" if is_late else "grind"
     candidates = [e for e in pool if e["tone"] == tone] or pool
     return random.choice(candidates)["text"]
@@ -733,11 +731,12 @@ def _rotating_status(
     channel: str,
     ts: str,
     interval: float = 2.0,
+    query: str = "",
 ):
     """Rotating status with typing indicator — returns stop function."""
     stop_event = threading.Event()
     start = time.monotonic()
-    pool = _MESSAGE_POOLS.get("pool_generic", [])
+    pool = _MESSAGE_POOLS.get(_pool_key_for(query), _MESSAGE_POOLS["pool_generic"])
     msgs = [e["text"] for e in pool] or ["Thinking..."]
     random.shuffle(msgs)
     idx = [0]
