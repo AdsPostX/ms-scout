@@ -1940,20 +1940,17 @@ def _thread_watchdog(web: WebClient) -> None:
 
 def _on_startup(web: WebClient) -> None:
     """Post 'Scout is back' to sidd-qa on every boot.
-    If recovering from an active maintenance window, reports who was blocked."""
-    from scout_state import get_maintenance, clear_maintenance
+    If maintenance is active, reports the count and tells admin to run /scout-maintenance off.
+    Does NOT auto-clear maintenance — clearing is done only via /scout-maintenance off."""
+    from scout_state import get_maintenance
     m = get_maintenance()
-    attempts = clear_maintenance() if m else []
     sidd_qa = os.getenv("SIDD_QA_CHANNEL_ID", "")
     if not sidd_qa:
         return
     msg = ":white_check_mark: Scout is back online."
-    if attempts:
-        users: dict[str, int] = {}
-        for a in attempts:
-            users[a["user_id"]] = users.get(a["user_id"], 0) + 1
-        breakdown = ", ".join(f"<@{u}> ×{c}" for u, c in users.items())
-        msg += f" {len(attempts)} missed message(s) during maintenance: {breakdown}"
+    if m:
+        attempt_count = len(m.get("attempts", []))
+        msg += f" :wrench: Maintenance is still active ({attempt_count} blocked attempt(s) so far). Run `/scout-maintenance off` to re-open."
     try:
         web.chat_postMessage(channel=sidd_qa, text=msg)
     except Exception as e:
