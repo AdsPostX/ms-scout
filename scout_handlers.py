@@ -58,6 +58,8 @@ log = logging.getLogger("scout_handlers")
 
 
 def _is_under_maintenance(user_id: str) -> bool:
+    if not user_id:
+        return False
     from scout_state import get_maintenance
     from scout_agent import _is_admin
     return bool(get_maintenance()) and not _is_admin(user_id)
@@ -1267,6 +1269,15 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         if channel:
             web.chat_postEphemeral(channel=channel, user=user_id,
                 text=":wrench: Scout is offline for maintenance.")
+        else:
+            try:
+                web.views_publish(user_id=user_id, view={
+                    "type": "home",
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn",
+                        "text": ":wrench: Scout is offline for maintenance."}}]
+                })
+            except Exception:
+                pass
         return
 
     log.info(f"Block action: {action_id!r} in {channel}")
@@ -2285,6 +2296,11 @@ def _handle_event_impl(req: SocketModeRequest):
     # Any team member can add a :wastebasket: reaction to a Scout message to delete it.
     # Scout only deletes messages it posted (bot_id check). Works on any channel.
     if event.get("type") == "reaction_added" and event.get("reaction") == "wastebasket":
+        rater_id = event.get("user", "")
+        if _is_under_maintenance(rater_id):
+            from scout_state import log_maintenance_attempt
+            log_maintenance_attempt(rater_id, "wastebasket")
+            return
         item = event.get("item", {})
         if item.get("type") == "message":
             try:
@@ -2398,10 +2414,9 @@ def _handle_event_impl(req: SocketModeRequest):
     # ── Maintenance gate — block non-admins when Scout is in the shop ──────────
     if _is_under_maintenance(user_id):
         from scout_state import log_maintenance_attempt
-        log_maintenance_attempt(user_id, (query or "")[:80])
-        _echo = (query or "")[:200]
+        log_maintenance_attempt(user_id, query[:80])
         web.chat_postEphemeral(channel=channel, user=user_id,
-            text=f":wrench: Scout is offline for maintenance.\n\nYour message: \"{_echo}\"")
+            text=f":wrench: Scout is offline for maintenance.\n\nYour message: \"{query[:200]}\"")
         return
 
     # ── Correction capture — if this thread has a pending correction, store it ─
