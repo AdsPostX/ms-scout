@@ -16,7 +16,7 @@ Tests covered:
   7. Slack token — auth.test confirms bot identity
   8. Notion queue DB ID — NOTION_QUEUE_DB_ID env var is set
   9. Handler symbols — SocketModeResponse and RateLimitErrorRetryHandler importable
- 10. scout_state runtime — _pick_loading_message and _smart_history callable
+ 10. scout_state runtime — _THINKING constant and _smart_history callable
  11. _build_advertiser_rpm_context_blocks — pure function, no DB
  12. get_scout_status() — digest_env + digest_routing fields present
  13. get_scout_status() — available_networks is a list when offers exist
@@ -169,19 +169,16 @@ def test_handler_imports():
 
 # ── Test 11: scout_state runtime functions ────────────────────────────────────
 
-@test("scout_state runtime — _pick_loading_message and _smart_history callable")
+@test("scout_state runtime — _THINKING constant and _smart_history callable")
 def test_scout_state_runtime():
     """
-    Verify that functions in scout_state.py are importable AND callable at runtime.
-    Test 10 catches missing module-level imports; this test catches missing stdlib
-    imports used only inside function bodies — the same class of bug that caused
-    Scout to be silent on every @mention (random/re/threading not imported).
+    Verify that scout_state.py exports expected symbols and functions are callable.
+    Catches missing module-level imports used only inside function bodies.
     """
     try:
-        from scout_state import _pick_loading_message, _smart_history
-        msg = _pick_loading_message("ghost campaigns")
-        if not msg:
-            return False, "_pick_loading_message returned empty message"
+        from scout_state import _THINKING, _smart_history
+        if not _THINKING:
+            return False, "_THINKING is empty"
         result = _smart_history([])
         if result != []:
             return False, f"_smart_history([]) should return [] but got: {result}"
@@ -189,7 +186,7 @@ def test_scout_state_runtime():
         trimmed = _smart_history(long_history)
         if len(trimmed) > 6:
             return False, f"_smart_history didn't truncate: got {len(trimmed)} messages"
-        return True, f"_pick_loading_message ✓  _smart_history ✓  (msg='{msg[:30]}…')"
+        return True, f"_THINKING='{_THINKING}'  _smart_history ✓"
     except Exception as e:
         return False, f"scout_state runtime function failed: {e}"
 

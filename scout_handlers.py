@@ -48,7 +48,7 @@ from scout_state import (
     _DATA_DIR,
     _strip_mention, _sanitize_slack, _slack_thread_url,
     _route_channel,
-    _pick_loading_message,
+    _THINKING,
     _rotating_status,
     _smart_history,
     _post_error_update,
@@ -1475,7 +1475,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     "close": {"type": "plain_text", "text": "Close", "emoji": False},
                     "blocks": [{
                         "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{_pick_loading_message(query)}"},
+                        "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{_THINKING}"},
                     }],
                 },
             )
@@ -1506,9 +1506,8 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 the query has been running — prevents "is this frozen?" anxiety.
                 """
                 _STEPS = [
-                    _pick_loading_message(query),
+                    _THINKING,
                     "Still working…",
-                    "Crunching the numbers…",
                     "Almost there…",
                 ]
                 _hb_start = time.monotonic()
@@ -1610,10 +1609,9 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
         assert intro.get("ok"), f"chat_postMessage intro failed: {intro.get('error')}"
         thread_ts = intro["ts"]
 
-        _msg_text = _pick_loading_message(query)
         placeholder = web.chat_postMessage(
-            channel=dm_channel, thread_ts=thread_ts, text=_msg_text,
-            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
+            channel=dm_channel, thread_ts=thread_ts, text=_THINKING,
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _THINKING}}],
         )
         _placeholder_ts_ah = placeholder["ts"]
         _stage: list = [""]

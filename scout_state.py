@@ -639,68 +639,7 @@ def _route_channel(purpose: str, force: bool = False) -> str:
 
 # ── Loading messages (from scout_bot for handler use) ──────────────────────────────
 
-_MESSAGE_POOLS = {
-    "pool_generic": [
-        {"text": "Checking the vault...", "tone": "grind"}, {"text": "Pulling signals...", "tone": "grind"},
-        {"text": "Running the numbers...", "tone": "grind"}, {"text": "Mining the data...", "tone": "grind"},
-        {"text": "Asking the oracle...", "tone": "grind"}, {"text": "Crunching the numbers...", "tone": "grind"},
-        {"text": "Consulting the archives...", "tone": "late"}, {"text": "Wake up, Neo...", "tone": "late"},
-        {"text": "Deep thought in progress...", "tone": "late"},
-    ],
-    "pool_ops": [
-        {"text": "Checking the queue...", "tone": "grind"}, {"text": "Scanning active campaigns...", "tone": "grind"},
-        {"text": "Loading pipeline...", "tone": "grind"}, {"text": "Syncing with Notion...", "tone": "grind"},
-        {"text": "Midnight oil...", "tone": "late"}, {"text": "Night watch...", "tone": "late"},
-    ],
-    "pool_data": [
-        {"text": "Computing revenue...", "tone": "grind"}, {"text": "Crunching performance...", "tone": "grind"},
-        {"text": "Benchmarking...", "tone": "grind"}, {"text": "Running regression...", "tone": "grind"},
-        {"text": "Data mine running...", "tone": "late"}, {"text": "Calculating...", "tone": "late"},
-    ],
-    "pool_brief": [
-        {"text": "Drafting brief...", "tone": "grind"}, {"text": "Building campaign...", "tone": "grind"},
-        {"text": "Writing copy...", "tone": "grind"}, {"text": "Loading creative...", "tone": "grind"},
-        {"text": "Late night drafting...", "tone": "late"}, {"text": "Burning the midnight oil...", "tone": "late"},
-    ],
-    "pool_publisher": [
-        {"text": "Checking integrations...", "tone": "grind"}, {"text": "Loading partners...", "tone": "grind"},
-        {"text": "Verifying connections...", "tone": "grind"}, {"text": "Mapping the network...", "tone": "grind"},
-        {"text": "Late night debugging...", "tone": "late"}, {"text": "Syncing...", "tone": "late"},
-    ],
-}
-
-
-def _pool_key_for(query: str) -> str:
-    """Return the _MESSAGE_POOLS key that best matches the query content."""
-    q = (query or "").lower()
-    if any(w in q for w in ("brief", "campaign", "build a brief", "draft", "write")):
-        return "pool_brief"
-    if any(w in q for w in ("queue", "status", "pending", "live", "launch", "enter")):
-        return "pool_ops"
-    if any(w in q for w in ("revenue", "projection", "cap", "budget", "forecast",
-                             "performance", "rpm", "cvr", "data", "benchmark", "report", "rank")):
-        return "pool_data"
-    if any(w in q for w in ("publisher", "partner", "integration", "network")):
-        return "pool_publisher"
-    return "pool_generic"
-
-
-def _pick_loading_message(query: str = "") -> str:
-    """Pick a context-aware loading message based on query content and time of day."""
-    from datetime import datetime
-    import pytz
-
-    try:
-        chicago = pytz.timezone("America/Chicago")
-        hour = datetime.now(chicago).hour
-        is_late = hour >= 21 or hour < 6
-    except Exception:
-        is_late = False
-
-    pool = _MESSAGE_POOLS.get(_pool_key_for(query), _MESSAGE_POOLS["pool_generic"])
-    tone = "late" if is_late else "grind"
-    candidates = [e for e in pool if e["tone"] == tone] or pool
-    return random.choice(candidates)["text"]
+_THINKING = "Thinking…"
 
 
 # ── Smart history truncation (from scout_bot for handler use) ────────
@@ -775,19 +714,11 @@ def _rotating_status(
     """Rotating status with typing indicator — returns stop function."""
     stop_event = threading.Event()
     start = time.monotonic()
-    pool = _MESSAGE_POOLS.get(_pool_key_for(query), _MESSAGE_POOLS["pool_generic"])
-    msgs = [e["text"] for e in pool] or ["Thinking..."]
-    random.shuffle(msgs)
-    idx = [0]
 
     def _run():
         while not stop_event.wait(interval):
             elapsed = int(time.monotonic() - start)
-            # Use stage signal when active; fall back to pool cycling
-            active_stage = stage_ref[0] if (stage_ref and stage_ref[0]) else ""
-            msg = active_stage if active_stage else msgs[idx[0] % len(msgs)]
-            if not active_stage:
-                idx[0] += 1
+            msg = (stage_ref[0] if (stage_ref and stage_ref[0]) else "") or _THINKING
             update_text = f"_{msg}_ · {elapsed}s"
             try:
                 web.chat_update(
