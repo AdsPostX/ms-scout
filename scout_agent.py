@@ -5554,25 +5554,7 @@ def _select_model(user_message: str) -> str:
 
 
 # ── Deterministic pre-router ─────────────────────────────────────────────────
-# Reliable routing for control-surface verbs (threshold list/history/config/set).
-# Bypasses the LLM for exact-match phrasing so `@scout alert thresholds` always
-# lands on list_thresholds(), not get_scout_status(). LLM stays as fallback for
-# anything not matched here.
-#
-# New routes only justified when: (1) bare word, no parameterization needed,
-# and (2) the tool accepts no arguments. get_threshold_history violates rule 2.
-_ROUTE_KEYWORDS: dict[str, str] = {
-    "alert thresholds":   "list_thresholds",
-    "thresholds":         "list_thresholds",
-    "show thresholds":    "list_thresholds",
-    "current thresholds": "list_thresholds",
-    "threshold config":   "list_thresholds",
-    "scout config":       "get_scout_config",
-    "settings":           "list_thresholds",
-    "config":             "get_scout_config",
-    "status":             "get_scout_status",
-    "scout status":       "get_scout_status",
-}
+# Handles only structured set_threshold commands. All other queries go to the LLM.
 
 _SET_RE_FULL  = re.compile(
     r"^set\s+([\w.]+)\s+to\s+(-?\d+(?:\.\d+)?|true|false)\s+because\s+(.+)$",
@@ -5668,75 +5650,6 @@ _NETWORK_DISPLAY_NAMES: dict[str, str] = {
 }
 
 
-def _synthesize_status_text(data: dict) -> str:
-    """Synthesize get_scout_status() data into the same compact human-readable
-    format the LLM produces, so `@Scout status` and `@Scout what's the status?`
-    render identically through wrap_response in scout_handlers.py.
-    """
-    ok          = data.get("ok", True)
-    icon        = ":large_green_circle:" if ok else ":red_circle:"
-    label       = "all systems nominal" if ok else "degraded"
-    bm          = data.get("benchmarks", "unknown")
-    offers      = data.get("offer_inventory", 0)
-    advertisers = data.get("unique_advertisers", 0)
-    ch          = data.get("clickhouse", "unknown")
-    ch_icon     = ":large_green_circle:" if ch == "ok" else ":warning:"
-    by_network  = data.get("by_network") or {}
-    unconfigured = data.get("unconfigured_networks") or []
-    queue       = data.get("queue_depth", 0)
-    queue_items = data.get("queue_items") or []
-    warns       = data.get("warnings") or []
-
-    lines = [
-        f"{icon} *Scout status — {label}*",
-        f"Benchmarks: {bm} · Offer Inventory: *{offers:,} offers* ({advertisers} advertisers)"
-        f" · ClickHouse: {ch_icon} {ch}",
-    ]
-
-    if by_network:
-        def _net_name(k: str) -> str:
-            return _NETWORK_DISPLAY_NAMES.get(k.lower(), k.title())
-        net_parts = " · ".join(
-            f"{_net_name(k)} ({v:,})"
-            for k, v in sorted(by_network.items(), key=lambda x: -x[1])
-        )
-        net_line = f"Network coverage: {net_parts}"
-        if unconfigured:
-            display = ", ".join(_net_name(n) for n in unconfigured)
-            net_line += f" — {display} missing creds"
-        lines.append(net_line)
-
-    if queue > 0:
-        if queue_items:
-            preview = queue_items[:5]
-            remaining = queue - len(preview)
-            extra = f", and {remaining} more" if remaining > 0 else ""
-            lines.append(
-                f"Queue depth: *{queue} offers awaiting entry*"
-                f" ({', '.join(preview)}{extra})"
-            )
-        else:
-            lines.append(f"Queue depth: *{queue} offers awaiting entry*")
-
-    # Only show warnings not already captured by the unconfigured_networks note
-    unconfigured_lower = {n.lower() for n in unconfigured}
-    for w in warns:
-        if not any(n in w.lower() for n in unconfigured_lower):
-            lines.append(f":warning: {w}")
-
-    if queue > 0:
-        lines.append(f":zap: *Action:* Review queue — {queue} pending offers ready for review.")
-
-    return "\n".join(lines)
-
-
-# Maps keyword-routed tool names → synthesizer functions. Add an entry here
-# when a new tool is added to _ROUTE_KEYWORDS and needs readable output.
-# _format_dict_response remains the genuine fallback for unregistered tools.
-_SYNTH_MAP: dict[str, object] = {
-    "get_scout_status": _synthesize_status_text,
-}
-
 
 def _route_deterministic(user_message: str, user_id: str, on_stage=None) -> Optional[AskResult]:
     """Match raw user text against control-surface verbs and execute directly.
@@ -5748,7 +5661,6 @@ def _route_deterministic(user_message: str, user_id: str, on_stage=None) -> Opti
     raw = re.sub(r"<@[A-Z0-9]+>", "", user_message or "").strip()
     if not raw:
         return None
-    low = raw.lower()
 
     # set_threshold — admin-gated, deterministic arg parsing
     m = _SET_RE_FULL.match(raw)
@@ -5779,40 +5691,7 @@ def _route_deterministic(user_message: str, user_id: str, on_stage=None) -> Opti
             tools_called=(), duration_ms=0,
         )
 
-    tool_name = _ROUTE_KEYWORDS.get(low)
-    if not tool_name:
-        return None
-
-    tool = TOOL_MAP.get(tool_name)
-    if tool is None:
-        return None
-    # Re-raise tool failures rather than silently falling back to the LLM —
-    # the pre-router exists to guarantee determinism for control-surface verbs.
-    # A silent fall-through would let a transient ClickHouse blip return free-form
-    # prose for `@scout status`, which is exactly the misroute we shipped this fix
-    # to prevent. Let the caller decide how to surface the failure.
-    if on_stage:
-        try:
-            from scout_state import _STAGE_LABELS as _sl
-            on_stage(_sl.get(tool_name, "Working…"))
-        except Exception:
-            pass
-
-    data = tool()
-
-    synth = _SYNTH_MAP.get(tool_name)
-    if synth:
-        return AskResult(text=synth(data), tools_called=(tool_name,), duration_ms=0)
-
-    titles = {
-        "list_thresholds": "Scout thresholds",
-        "get_scout_config": "Scout config",
-    }
-    return AskResult(
-        text=_format_dict_response(titles.get(tool_name, tool_name), data),
-        tools_called=(tool_name,),
-        duration_ms=0,
-    )
+    return None
 
 
 def _build_prefix_context(user_id: str, user_tz: str) -> str:

@@ -23,48 +23,27 @@ from scout_agent import (  # noqa: E402
 )
 
 
-class TestKeywordRoutes(unittest.TestCase):
-    """Deterministic keyword routes — data-driven from _ROUTE_KEYWORDS so test
-    coverage auto-syncs when the routing table changes."""
+class TestDeterministicRouterFallthrough(unittest.TestCase):
+    """Non-set_threshold queries fall through to the LLM — _route_deterministic returns None."""
 
     def _route(self, msg: str):
-        with unittest.mock.patch.object(scout_agent, "TOOL_MAP", {
-            "list_thresholds":       lambda: {"thresholds": {"signals": {"cap_alert_pct": 85}}, "overridden": {}},
-            "get_scout_config":      lambda: {"version": "test"},
-            "get_scout_status":      lambda: {"status": "ok"},
-            "get_threshold_history": lambda: {"entries": [], "count": 0},
-        }):
-            return _route_deterministic(msg, user_id="U1")
+        return _route_deterministic(msg, user_id="U1")
 
-    def test_all_keyword_routes(self):
-        """Every phrase in _ROUTE_KEYWORDS must route to its declared tool."""
-        for phrase, expected_tool in scout_agent._ROUTE_KEYWORDS.items():
-            with self.subTest(phrase=phrase):
-                r = self._route(phrase)
-                self.assertIsNotNone(r, f"{phrase!r} fell through — missing from TOOL_MAP mock?")
-                self.assertEqual(r.tools_called, (expected_tool,))
-
-    def test_threshold_history_falls_through_to_llm(self):
-        # "threshold history" was intentionally removed from _ROUTE_KEYWORDS.
-        # The bare deterministic route called get_threshold_history() with no key
-        # param, returning an unfiltered 50-entry changelog — worse than the LLM
-        # path which handles "show changes to cap_alert_pct" with proper filtering.
-        # smoke_test.test_threshold_history_falls_through_to_llm guards the same invariant.
-        self.assertIsNone(self._route("threshold history"))
-
-    def test_unknown_phrase_falls_through_to_llm(self):
+    def test_arbitrary_phrase_falls_through_to_llm(self):
         self.assertIsNone(self._route("how is revenue trending"))
 
-    def test_mention_token_is_stripped(self):
-        r = self._route("<@U123ABC> alert thresholds")
-        self.assertIsNotNone(r)
-        self.assertEqual(r.tools_called, ("list_thresholds",))
+    def test_threshold_query_falls_through_to_llm(self):
+        self.assertIsNone(self._route("thresholds"))
 
-    def test_case_insensitive(self):
-        self.assertEqual(self._route("ALERT THRESHOLDS").tools_called, ("list_thresholds",))
+    def test_threshold_history_falls_through_to_llm(self):
+        self.assertIsNone(self._route("threshold history"))
 
-    def test_whitespace_trimmed(self):
-        self.assertEqual(self._route("  thresholds  ").tools_called, ("list_thresholds",))
+    def test_status_falls_through_to_llm(self):
+        self.assertIsNone(self._route("status"))
+
+    def test_mention_token_stripped_then_falls_through(self):
+        # Mention token is stripped; no keyword routing exists, so falls through to LLM.
+        self.assertIsNone(self._route("<@U123ABC> alert thresholds"))
 
 
 class TestSetThresholdRegex(unittest.TestCase):
@@ -219,20 +198,6 @@ class TestAmbiguousKeyInRouter(unittest.TestCase):
         self.assertIn("multiple sections", r.text)
 
 
-class TestRouterReraisesToolFailures(unittest.TestCase):
-    """Tool exceptions must propagate — silent fallback would defeat determinism."""
-
-    def test_tool_exception_propagates(self):
-        def boom():
-            raise RuntimeError("clickhouse exploded")
-
-        with unittest.mock.patch.object(scout_agent, "TOOL_MAP", {
-            "list_thresholds": boom,
-        }):
-            with self.assertRaises(RuntimeError):
-                _route_deterministic("alert thresholds", user_id="U1")
-
-
 class TestBaseSchemaValidation(unittest.TestCase):
     """set_threshold must validate against the base schema, not the merged read-view.
 
@@ -271,10 +236,7 @@ class TestRawMessageRouting(unittest.TestCase):
             "[Caller Slack user_id: U1]\n"
             "alert thresholds"
         )
-        with unittest.mock.patch.object(scout_agent, "TOOL_MAP", {
-            "list_thresholds": lambda: {"thresholds": {}, "overridden": {}},
-        }):
-            r = _route_deterministic(prefixed, user_id="U1")
+        r = _route_deterministic(prefixed, user_id="U1")
         # Prefixed text is not equal to "alert thresholds" → falls through to LLM
         self.assertIsNone(r)
 

@@ -75,32 +75,6 @@ def test_entity_overrides():
         return False, str(e)
 
 
-# ── Test 5: ask() round-trip ──────────────────────────────────────────────────
-
-@test("ask('status') — LLM + tool round-trip")
-def test_ask_status():
-    try:
-        from scout_agent import ask
-        t0 = time.monotonic()
-        result = ask("status", history=[], user_id="smoke-test")
-        elapsed = time.monotonic() - t0
-
-        text = result.text
-        # Check for Scout self-reporting failure — not ops vocabulary like "tracking errors"
-        _fail_phrases = ("something broke", "i got an error", "encountered an error", "failed to retrieve")
-        if not text or any(p in text.lower() for p in _fail_phrases):
-            return False, f"Bad response: {str(text)[:120]}"
-        # Positive check: a status response must contain at least one health keyword
-        _status_keywords = ("healthy", "degraded", "available", "version", "benchmark", "offer", "uptime")
-        if not any(kw in text.lower() for kw in _status_keywords):
-            return False, f"Unexpected response (no status keywords found): {str(text)[:120]}"
-        first_line = str(text).split('\n')[0].strip()
-        preview = (first_line[:60] + "…") if len(first_line) > 60 else first_line
-        return True, f"Responded in {elapsed:.1f}s — {preview}"
-    except Exception as e:
-        return False, str(e)
-
-
 # ── Test 6: tool-calling path ─────────────────────────────────────────────────
 
 @test("ask('ghost campaigns') — tool-calling path")
@@ -3478,65 +3452,6 @@ def test_attachment_error_does_not_inject_prompt():
         return False, "user's original question got lost in the augmentation"
 
     return True, "attacker payload json-escaped; framing intact; user question preserved"
-
-
-@test("thresholds keyword → deterministic route to list_thresholds")
-def test_thresholds_keyword_route_hits_deterministic():
-    """Regression: 'thresholds' must hit _route_deterministic and return list_thresholds output.
-
-    Zero tests covered keyword-routed phrases before this. A broken synthesizer or
-    missing _ROUTE_KEYWORDS entry would pass all 124 prior tests undetected.
-    """
-    try:
-        from scout_agent import ask
-        result = ask("thresholds", history=[], user_id="smoke-test")
-        assert result.tools_called == ("list_thresholds",), (
-            f"Wrong tools: {result.tools_called}"
-        )
-        assert result.text, "Empty response from list_thresholds"
-        return True, f"Routed to list_thresholds — {str(result.text)[:60]}"
-    except Exception as e:
-        return False, str(e)
-
-
-@test("scout config keyword → deterministic route to get_scout_config")
-def test_scout_config_keyword_route_hits_deterministic():
-    """Regression: 'scout config' must hit _route_deterministic and return config output."""
-    try:
-        from scout_agent import ask
-        result = ask("scout config", history=[], user_id="smoke-test")
-        assert result.tools_called == ("get_scout_config",), (
-            f"Wrong tools: {result.tools_called}"
-        )
-        assert result.text, "Empty response from get_scout_config"
-        return True, f"Routed to get_scout_config — {str(result.text)[:60]}"
-    except Exception as e:
-        return False, str(e)
-
-
-@test("threshold history falls through to LLM after router removal")
-def test_threshold_history_falls_through_to_llm():
-    """Regression: 'threshold history' must NOT hit the deterministic router.
-
-    After removing 'threshold history' / 'overrides history' from _ROUTE_KEYWORDS,
-    a bare keyword hit would return an unfiltered 50-entry changelog with no key
-    param — strictly worse than the LLM path which accepts 'show changes to cap_alert_pct'.
-
-    In the smoke env (no valid API key) the LLM path raises an Anthropic 401 —
-    that error is proof-of-LLM-reach and counts as a pass here.
-    """
-    try:
-        from scout_agent import ask
-        result = ask("threshold history", history=[], user_id="smoke-test")
-        is_bare_deterministic = result.tools_called == ("get_threshold_history",)
-        if is_bare_deterministic:
-            return False, "Still hitting deterministic router — not removed from _ROUTE_KEYWORDS"
-        return True, f"Correctly bypasses deterministic router — tools: {result.tools_called}"
-    except Exception as e:
-        err = str(e)
-        if "401" in err or "authentication_error" in err or "x-api-key" in err:
-            return True, "LLM path reached (Anthropic 401 expected in smoke env — no valid key)"
-        return False, err
 
 
 @test("dispatch_table_routes_each_known_format")
