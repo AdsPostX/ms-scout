@@ -726,12 +726,51 @@ def _smart_history(history: list, max_full: int = 4) -> list:
     ] + recent
 
 
+# Maps tool names → short stage labels shown in the rotating placeholder.
+# Keys must match the exact function names in TOOL_MAP / TOOLS in scout_agent.py.
+_STAGE_LABELS: dict = {
+    "run_sql_query":                        "Querying ClickHouse…",
+    "get_revenue_today":                    "Computing revenue…",
+    "get_revenue_today_projection":         "Computing revenue…",
+    "get_advertiser_revenue_projection":    "Computing revenue…",
+    "get_advertiser_revenue_trends":        "Computing revenue…",
+    "get_publisher_revenue_trends":         "Computing revenue…",
+    "get_category_performance":             "Computing performance…",
+    "get_exposure_rate_anomalies":          "Computing performance…",
+    "get_publisher_health":                 "Pulling publisher data…",
+    "get_publisher_fleet_health":           "Pulling publisher data…",
+    "get_publisher_competitive_landscape":  "Pulling publisher data…",
+    "get_perkswall_engagement":             "Pulling publisher data…",
+    "search_offers":                        "Checking offer catalog…",
+    "get_top_opportunities":                "Checking offer catalog…",
+    "get_top_revenue_opportunities":        "Checking offer catalog…",
+    "get_offers_for_publisher":             "Checking offer catalog…",
+    "get_fallback_candidates":              "Checking offer catalog…",
+    "get_running_offers":                   "Checking offer catalog…",
+    "get_offer_stats":                      "Checking offer catalog…",
+    "get_supply_demand_gaps":               "Checking offer catalog…",
+    "get_queue_status":                     "Checking demand queue…",
+    "get_demand_queue_status":              "Checking demand queue…",
+    "get_pipeline_health":                  "Checking pipeline…",
+    "get_ghost_campaigns":                  "Finding ghost campaigns…",
+    "get_low_fill_publishers":              "Checking fill rate…",
+    "get_expiring_campaigns":               "Checking expiring campaigns…",
+    "get_campaign_status":                  "Checking campaign status…",
+    "draft_campaign_brief":                 "Drafting campaign brief…",
+    "run_offer_scraper":                    "Running scraper…",
+    "get_scout_status":                     "Checking Scout status…",
+    "get_pulse_summary":                    "Pulling pulse data…",
+}
+_STAGE_SYNTHESIZING = "Synthesizing…"
+
+
 def _rotating_status(
     web,
     channel: str,
     ts: str,
     interval: float = 2.0,
     query: str = "",
+    stage_ref: "list[str] | None" = None,
 ):
     """Rotating status with typing indicator — returns stop function."""
     stop_event = threading.Event()
@@ -744,7 +783,11 @@ def _rotating_status(
     def _run():
         while not stop_event.wait(interval):
             elapsed = int(time.monotonic() - start)
-            msg = msgs[idx[0] % len(msgs)]
+            # Use stage signal when active; fall back to pool cycling
+            active_stage = stage_ref[0] if (stage_ref and stage_ref[0]) else ""
+            msg = active_stage if active_stage else msgs[idx[0] % len(msgs)]
+            if not active_stage:
+                idx[0] += 1
             update_text = f"_{msg}_ · {elapsed}s"
             try:
                 web.chat_update(
@@ -753,7 +796,6 @@ def _rotating_status(
                 )
             except Exception:
                 pass
-            idx[0] += 1
 
     _t = threading.Thread(target=_run, daemon=True)
     _t.start()
