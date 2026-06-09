@@ -1107,13 +1107,14 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     if not query or not channel or not thread_ts:
         return
 
-    _msg_text = _pick_loading_message(query)
+    _q_preview = (query[:80] + "…") if len(query) > 80 else query
+    _msg_text = f"_{_q_preview}_"
     placeholder = web.chat_postMessage(
         channel=channel, thread_ts=thread_ts, text=_msg_text,
         blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
     _placeholder_ts_sg = placeholder["ts"]
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg)
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, query=query)
 
     # Build thread history (mirrors handle_event)
     history = []
@@ -1241,7 +1242,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         (response.payload or {}).get("extracted_context", {}).get("period")
         if response.payload else None
     )
-    _sg2_blocks = [*_sg2_blocks, context_block(queried_at="just now", period=_sg2_period)]
+    _sg2_blocks = [*_sg2_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_sg2_period)]
     web.chat_update(
         channel=channel, ts=_placeholder_ts_sg,
         text=_sg2_fallback, blocks=_sg2_blocks,
@@ -1613,7 +1614,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
         )
         _placeholder_ts_ah = placeholder["ts"]
-        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah)
+        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, query=query)
 
         try:
             _t0 = time.monotonic()
@@ -3068,7 +3069,7 @@ def _handle_event_impl(req: SocketModeRequest):
                 (response.payload or {}).get("extracted_context", {}).get("period")
                 if response.payload else None
             )
-            _dm6_blocks = [*_dm6_blocks, context_block(queried_at="just now", period=_dm_period)]
+            _dm6_blocks = [*_dm6_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_dm_period)]
             _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=_dm6_fallback, blocks=_dm6_blocks,
@@ -3077,13 +3078,14 @@ def _handle_event_impl(req: SocketModeRequest):
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
 
-    _msg_text = _pick_loading_message(query)
+    _q_preview = (query[:80] + "…") if len(query) > 80 else query
+    _msg_text = f"_{_q_preview}_"
     placeholder = web.chat_postMessage(
         channel=channel, thread_ts=thread_ts, text=_msg_text,
         blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
     _placeholder_ts = placeholder["ts"]
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts)
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts, query=query)
 
     try:
         _t0 = time.monotonic()
@@ -3233,7 +3235,7 @@ def _handle_event_impl(req: SocketModeRequest):
             (response.payload or {}).get("extracted_context", {}).get("period")
             if response.payload else None
         )
-        _ch8_blocks = [*_ch8_blocks, context_block(queried_at="just now", period=_period)]
+        _ch8_blocks = [*_ch8_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_period)]
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
