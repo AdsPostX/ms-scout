@@ -48,7 +48,7 @@ from scout_state import (
     _DATA_DIR,
     _strip_mention, _sanitize_slack, _slack_thread_url,
     _route_channel,
-    _pick_loading_message,
+    _THINKING,
     _rotating_status,
     _smart_history,
     _post_error_update,
@@ -1114,7 +1114,8 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
     _placeholder_ts_sg = placeholder["ts"]
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, query=query)
+    _stage: list = [""]
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, query=query, stage_ref=_stage)
 
     # Build thread history (mirrors handle_event)
     history = []
@@ -1156,7 +1157,8 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     try:
         _t0 = time.monotonic()
         response = ask(query, history=history, user_id=user_id,
-                       user_tz=_get_user_tz(web, user_id), thread_ts=thread_ts or "")
+                       user_tz=_get_user_tz(web, user_id), thread_ts=thread_ts or "",
+                       on_stage=lambda s: _stage.__setitem__(0, s))
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
     except Exception as e:
@@ -1473,7 +1475,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     "close": {"type": "plain_text", "text": "Close", "emoji": False},
                     "blocks": [{
                         "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{_pick_loading_message(query)}"},
+                        "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{_THINKING}"},
                     }],
                 },
             )
@@ -1504,9 +1506,8 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 the query has been running — prevents "is this frozen?" anxiety.
                 """
                 _STEPS = [
-                    _pick_loading_message(query),
+                    _THINKING,
                     "Still working…",
-                    "Crunching the numbers…",
                     "Almost there…",
                 ]
                 _hb_start = time.monotonic()
@@ -1608,18 +1609,18 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
         assert intro.get("ok"), f"chat_postMessage intro failed: {intro.get('error')}"
         thread_ts = intro["ts"]
 
-        _msg_text = _pick_loading_message(query)
         placeholder = web.chat_postMessage(
-            channel=dm_channel, thread_ts=thread_ts, text=_msg_text,
-            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
+            channel=dm_channel, thread_ts=thread_ts, text=_THINKING,
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _THINKING}}],
         )
         _placeholder_ts_ah = placeholder["ts"]
-        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, query=query)
+        _stage: list = [""]
+        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, query=query, stage_ref=_stage)
 
         try:
             _t0 = time.monotonic()
             try:
-                response = _ask_with_timeout(query)
+                response = _ask_with_timeout(query, on_stage=lambda s: _stage.__setitem__(0, s))
             except AskTimeout:
                 # stop_rotating() handled by finally below
                 web.chat_update(
@@ -3085,14 +3086,16 @@ def _handle_event_impl(req: SocketModeRequest):
         blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
     _placeholder_ts = placeholder["ts"]
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts, query=query)
+    _stage: list = [""]
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts, query=query, stage_ref=_stage)
 
     try:
         _t0 = time.monotonic()
         _permalink = _permalink_for(web, channel, msg_ts)
         response = _ask_with_timeout(agent_query, history=history, user_id=user_id, permalink=_permalink,
                                      thread_ts=thread_ts or "",
-                                     attached_text=attached_text, attached_image=attached_image)
+                                     attached_text=attached_text, attached_image=attached_image,
+                                     on_stage=lambda s: _stage.__setitem__(0, s))
         # Prepend attachment_note (e.g. unsupported/error fallback notice)
         # to Scout's response text. AskResult is frozen — use dataclasses.replace
         # to honor the boundary contract instead of __setattr__ bypass.

@@ -5738,7 +5738,7 @@ _SYNTH_MAP: dict[str, object] = {
 }
 
 
-def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]:
+def _route_deterministic(user_message: str, user_id: str, on_stage=None) -> Optional[AskResult]:
     """Match raw user text against control-surface verbs and execute directly.
 
     Returns AskResult on hit; None to let the LLM handle the query. Must be
@@ -5791,6 +5791,13 @@ def _route_deterministic(user_message: str, user_id: str) -> Optional[AskResult]
     # A silent fall-through would let a transient ClickHouse blip return free-form
     # prose for `@scout status`, which is exactly the misroute we shipped this fix
     # to prevent. Let the caller decide how to surface the failure.
+    if on_stage:
+        try:
+            from scout_state import _STAGE_LABELS as _sl
+            on_stage(_sl.get(tool_name, "Working…"))
+        except Exception:
+            pass
+
     data = tool()
 
     synth = _SYNTH_MAP.get(tool_name)
@@ -5867,6 +5874,7 @@ def _run_tool_loop(
     _all_tool_results: list | None = None,
     user_id: str = "",
     permalink: str = "",
+    on_stage=None,
 ) -> AskResult:
     """Run the bounded tool-use loop and synthesize the final AskResult.
 
@@ -5907,8 +5915,15 @@ def _run_tool_loop(
             {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
         ]
 
+    _stage_labels = None  # lazy import to avoid circular at module load
+
     while _round < MAX_ROUNDS:
         _round += 1
+        if _round > 1 and on_stage:
+            try:
+                on_stage("Synthesizing…")
+            except Exception:
+                pass
         for attempt in range(4):
             try:
                 response = client.messages.create(
@@ -6052,6 +6067,19 @@ def _run_tool_loop(
                        if block.type == "tool_use"]
         tool_results = []
 
+        if tool_blocks and on_stage:
+            if _stage_labels is None:
+                try:
+                    from scout_state import _STAGE_LABELS as _sl
+                    _stage_labels = _sl
+                except Exception:
+                    _stage_labels = {}
+            _first_tool = tool_blocks[0][1].name
+            try:
+                on_stage(_stage_labels.get(_first_tool, "Working…"))
+            except Exception:
+                pass
+
         if len(tool_blocks) > 1:
             # Multiple tool calls — run in parallel, then reassemble in original order
             # Falls back to sequential if executor is unavailable (e.g. during shutdown)
@@ -6155,7 +6183,8 @@ def _run_tool_loop(
 
 
 def ask(user_message: str, history: list | None = None, user_id: str = "",
-        permalink: str = "", user_tz: str = "", thread_ts: str = "") -> AskResult:
+        permalink: str = "", user_tz: str = "", thread_ts: str = "",
+        on_stage=None) -> AskResult:
     """
     Send a message to Scout and get a response.
     history: optional list of prior {"role": "user"/"assistant", "content": str} messages
@@ -6175,7 +6204,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     # Deterministic pre-router: control-surface verbs (thresholds/config/status/set)
     # are matched against the RAW user_message before any LLM call. Context prefixes
     # added below would defeat exact-match. LLM stays as fallback for misses.
-    _routed = _route_deterministic(user_message, user_id)
+    _routed = _route_deterministic(user_message, user_id, on_stage=on_stage)
     if _routed is not None:
         return AskResult(
             text=_routed.text,
@@ -6211,6 +6240,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
         _ask_tools, _start_ms, _tools_called,
         user_message=user_message,
         user_id=user_id, permalink=permalink,
+        on_stage=on_stage,
     )
 
 
@@ -6223,6 +6253,7 @@ def ask_with_attachment(
     thread_ts: str = "",
     attached_text: str | None = None,
     attached_image: dict | None = None,
+    on_stage=None,
 ) -> AskResult:
     """Variant of ask() that supports per-turn attached content (file or sheet).
 
@@ -6244,12 +6275,13 @@ def ask_with_attachment(
             permalink=permalink,
             user_tz=user_tz,
             thread_ts=thread_ts,
+            on_stage=on_stage,
         )
 
     # Same setup as ask() — pre-router check, client, prefix context, intent
     _start_ms = time.monotonic()
     _tools_called: list = []
-    _routed = _route_deterministic(user_message, user_id)
+    _routed = _route_deterministic(user_message, user_id, on_stage=on_stage)
     if _routed is not None:
         return _routed  # control-surface verbs never attach files
 
@@ -6317,6 +6349,7 @@ def ask_with_attachment(
         _ask_tools, _start_ms, _tools_called,
         user_message=user_message,
         user_id=user_id, permalink=permalink,
+        on_stage=on_stage,
     )
 
 
