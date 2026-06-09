@@ -1234,7 +1234,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         (response.payload or {}).get("extracted_context", {}).get("period")
         if response.payload else None
     )
-    _sg2_blocks = [*_sg2_blocks, context_block(queried_at=f"answered in {_elapsed_str}", period=_sg2_period)]
+    _sg2_blocks = [*_sg2_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_sg2_period)]
     web.chat_update(
         channel=channel, ts=_placeholder_ts_sg,
         text=_sg2_fallback, blocks=_sg2_blocks,
@@ -3020,7 +3020,7 @@ def _handle_event_impl(req: SocketModeRequest):
                 (response.payload or {}).get("extracted_context", {}).get("period")
                 if response.payload else None
             )
-            _dm6_blocks = [*_dm6_blocks, context_block(queried_at=f"answered in {_elapsed_str}", period=_dm_period)]
+            _dm6_blocks = [*_dm6_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_dm_period)]
             _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=_dm6_fallback, blocks=_dm6_blocks,
@@ -3186,7 +3186,7 @@ def _handle_event_impl(req: SocketModeRequest):
             (response.payload or {}).get("extracted_context", {}).get("period")
             if response.payload else None
         )
-        _ch8_blocks = [*_ch8_blocks, context_block(queried_at=f"answered in {_elapsed_str}", period=_period)]
+        _ch8_blocks = [*_ch8_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_period)]
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
