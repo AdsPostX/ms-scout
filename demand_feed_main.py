@@ -1094,7 +1094,9 @@ def _make_shadow_daemon(cfg: dict):
         signal_fn = getattr(sig_mod, cfg["signal_fn"])
         if cfg.get("signal_filter"):
             _raw, _filt = signal_fn, cfg["signal_filter"]
-            signal_fn = lambda ch, _r=_raw, _f=_filt: _f(_r(ch))
+            def _filtered_signal_fn(ch, _r=_raw, _f=_filt):
+                return _f(_r(ch))
+            signal_fn = _filtered_signal_fn
         fmt_mod   = _il.import_module(cfg["format_module"])
         format_fn = getattr(fmt_mod, cfg["format_fn"])
         state_mod = _il.import_module(cfg["state_module"])
