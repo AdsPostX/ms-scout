@@ -2,7 +2,9 @@
 queries.py — All ClickHouse SQL for Scout.
 
 Rules (enforced here, not aspirational):
-  - Every function: typed parameters, no f-strings, docstring explaining return shape
+  - Every function: typed parameters, no f-strings (exception: f-string interpolation of
+    _ch_date_filter(N) with hardcoded int literals only — safe, no user input), docstring
+    explaining return shape
   - Returns list[dict] (never raw rows) — callers never unpack tuples
   - Named for what it fetches, not for the tool that uses it
   - Shared functions (used by both agent tools AND Pulse) live here, not in scout_agent.py
@@ -21,6 +23,27 @@ from zoneinfo import ZoneInfo
 from typing import Optional
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SQL helpers
+# ---------------------------------------------------------------------------
+
+def _ch_date_filter(days: int) -> str:
+    """Return the ClickHouse SQL fragment for filtering rows within the last *days* days.
+
+    Usage in f-string SQL::
+
+        f"WHERE created_at >= {_ch_date_filter(7)}"
+        # → "WHERE created_at >= today() - 7"
+
+    The integer-subtraction form (``today() - N``) is semantically identical to
+    ``today() - INTERVAL N DAY`` in ClickHouse and is the canonical form used here.
+
+    Safe for f-string interpolation because *days* is always a hardcoded int literal
+    at every call site — never user input or a runtime variable.
+    """
+    return f"today() - {days}"
 
 
 # ---------------------------------------------------------------------------
@@ -273,28 +296,28 @@ def ghost_campaigns(ch, recency_hours: int = 48, as_of_date: str | None = None) 
         first_impression_date, publisher_ids, publisher_names
     Raises on ClickHouse error — callers must catch.
     """
-    sql = """
+    sql = f"""
 WITH imp_agg AS (
     SELECT campaign_id, count() AS impressions_7d, min(created_at)::Date AS first_impression_date
     FROM adpx_impressions_details
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-    WHERE created_at >= today() - 7
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(7)})
+    WHERE created_at >= {_ch_date_filter(7)}
     GROUP BY campaign_id
     HAVING impressions_7d > 5000
 ),
 recent_imp AS (
     SELECT campaign_id, count() AS impressions_2d
     FROM adpx_impressions_details
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(subtractHours(now(), {recency_hours:UInt32}))
-    WHERE created_at >= subtractHours(now(), {recency_hours:UInt32})
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM(subtractHours(now(), {{recency_hours:UInt32}}))
+    WHERE created_at >= subtractHours(now(), {{recency_hours:UInt32}})
     GROUP BY campaign_id
     HAVING impressions_2d >= 2000
 ),
 click_agg AS (
     SELECT campaign_id, count() AS clicks_7d
     FROM adpx_tracked_clicks
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-    WHERE created_at >= today() - 7
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(7)})
+    WHERE created_at >= {_ch_date_filter(7)}
     GROUP BY campaign_id
     HAVING clicks_7d > 100
 ),
@@ -303,8 +326,8 @@ rev_agg AS (
            coalesce(sum(toFloat64OrNull(revenue)), 0) AS revenue_7d,
            count()                                    AS conversion_count_7d
     FROM adpx_conversionsdetails
-    PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 7)
-    WHERE created_at >= today() - 7
+    PREWHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(7)})
+    WHERE created_at >= {_ch_date_filter(7)}
     GROUP BY campaign_id
 )
 SELECT
@@ -331,7 +354,7 @@ LEFT JOIN from_airbyte_publisher_campaigns pc
     ON toString(pc.campaign_id) = toString(ia.campaign_id) AND pc.is_active = 1
 LEFT JOIN from_airbyte_users u ON pc.user_id = u.id
 WHERE coalesce(ra.conversion_count_7d, 0) = 0
-  AND ia.first_impression_date <= today() - 7
+  AND ia.first_impression_date <= {_ch_date_filter(7)}
   AND c.deleted_at IS NULL
 GROUP BY c.id, c.adv_name, c.title, ia.impressions_7d, ri.impressions_2d, ca.clicks_7d, revenue_7d, ia.first_impression_date
 HAVING impressions_7d > 5000 AND clicks_7d > 200
@@ -639,19 +662,19 @@ def supply_gap_opportunities(ch, pub_id: int) -> list[dict]:
         adv_name, pub_count (int), impressions_30d (int), revenue_30d (float), rpm (float)
     """
     rows = ch.query(
-        """
+        f"""
         WITH imp_agg AS (
             SELECT campaign_id, count() AS impressions_30d
             FROM adpx_impressions_details
-            WHERE created_at >= today() - 30
-              AND toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+            WHERE created_at >= {_ch_date_filter(30)}
+              AND toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(30)})
             GROUP BY campaign_id
         ),
         conv_agg AS (
             SELECT campaign_id, sum(toFloat64OrNull(revenue)) AS revenue_30d
             FROM adpx_conversionsdetails
-            WHERE created_at >= today() - 30
-              AND toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+            WHERE created_at >= {_ch_date_filter(30)}
+              AND toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(30)})
             GROUP BY campaign_id
         )
         SELECT
@@ -667,7 +690,7 @@ def supply_gap_opportunities(ch, pub_id: int) -> list[dict]:
         LEFT JOIN conv_agg ca ON ca.campaign_id = toUInt64(pc.campaign_id)
         WHERE pc.is_active = true
           AND pc.deleted_at IS NULL AND c.deleted_at IS NULL
-          AND pc.user_id != {pub_id: Int64}
+          AND pc.user_id != {{pub_id: Int64}}
         GROUP BY c.adv_name
         HAVING revenue_30d > 0 AND pub_count >= 2
         ORDER BY revenue_30d DESC
@@ -697,15 +720,15 @@ def supply_dead_weight(ch, pub_id: int, pub_pid: str) -> list[dict]:
     Returns: list of dicts with keys: adv_name, provisioned_since (date | str)
     """
     rows = ch.query(
-        """
+        f"""
         SELECT c.adv_name, min(pc.created_at) AS provisioned_since
         FROM from_airbyte_publisher_campaigns pc
         JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
         LEFT JOIN adpx_impressions_details i
             ON i.campaign_id = toUInt64(pc.campaign_id)
-            AND i.pid = {pub_pid: String}
-            AND i.created_at >= today() - 30
-        WHERE pc.user_id = {pub_id: Int64}
+            AND i.pid = {{pub_pid: String}}
+            AND i.created_at >= {_ch_date_filter(30)}
+        WHERE pc.user_id = {{pub_id: Int64}}
           AND pc.is_active = true
           AND pc.deleted_at IS NULL AND c.deleted_at IS NULL
           AND i.campaign_id IS NULL
@@ -725,12 +748,12 @@ def publisher_sessions_30d(ch, pub_id: int) -> int:
     Returns: session count (int)
     """
     rows = ch.query(
-        """
+        f"""
         SELECT count() AS sessions
         FROM adpx_sdk_sessions
-        WHERE user_id = {pub_id: Int64}
-          AND created_at >= today() - 30
-          AND toYYYYMM(created_at) >= toYYYYMM(today() - 30)
+        WHERE user_id = {{pub_id: Int64}}
+          AND created_at >= {_ch_date_filter(30)}
+          AND toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(30)})
         """,
         parameters={"pub_id": pub_id},
     ).result_rows
@@ -786,15 +809,15 @@ def publishers_missing_advertiser(ch, active_pub_ids: list[int]) -> list[dict]:
     Returns: list of dicts with keys: publisher_id (int), organization (str), sessions_30d (int)
     """
     rows = ch.query(
-        """
+        f"""
         -- mv_adpx_users is a lightweight MV (id, organization, is_test, parent_id only)
         -- — prefer over from_airbyte_users for simple name lookups.
         SELECT s.user_id, coalesce(u.organization, '') AS organization, count() AS sessions_30d
         FROM adpx_sdk_sessions s
         LEFT JOIN mv_adpx_users u ON s.user_id = u.id
-        WHERE s.created_at >= today() - 30
-          AND toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
-          AND s.user_id NOT IN {active_ids: Array(Int64)}
+        WHERE s.created_at >= {_ch_date_filter(30)}
+          AND toYYYYMM(s.created_at) >= toYYYYMM({_ch_date_filter(30)})
+          AND s.user_id NOT IN {{active_ids: Array(Int64)}}
         GROUP BY s.user_id, coalesce(u.organization, '')
         HAVING sessions_30d > 1000
         ORDER BY sessions_30d DESC
@@ -1009,16 +1032,16 @@ def low_fill_publishers(ch, placements: list[str]) -> list[dict]:
     Raises on ClickHouse error — callers must catch.
     """
     rows = ch.query(
-        """
+        f"""
         WITH sessions_agg AS (
             SELECT
                 toInt64(user_id) AS publisher_id,
                 placement,
                 count() AS sessions_30d
             FROM adpx_sdk_sessions
-            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-            WHERE created_at >= today() - 30
-              AND placement IN {placements: Array(String)}
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(30)})
+            WHERE created_at >= {_ch_date_filter(30)}
+              AND placement IN {{placements: Array(String)}}
             GROUP BY user_id, placement
             HAVING sessions_30d > 10000
         ),
@@ -1027,8 +1050,8 @@ def low_fill_publishers(ch, placements: list[str]) -> list[dict]:
                 toInt64(pid) AS publisher_id,
                 count(DISTINCT session_id) AS sessions_with_imps
             FROM adpx_impressions_details
-            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-            WHERE created_at >= today() - 30
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(30)})
+            WHERE created_at >= {_ch_date_filter(30)}
             GROUP BY pid
         ),
         rev_agg AS (
@@ -1037,8 +1060,8 @@ def low_fill_publishers(ch, placements: list[str]) -> list[dict]:
                 coalesce(sum(toFloat64OrNull(revenue)), 0) AS revenue_30d,
                 count(DISTINCT session_id) AS converting_sessions
             FROM adpx_conversionsdetails
-            PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - 30)
-            WHERE created_at >= today() - 30
+            PREWHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(30)})
+            WHERE created_at >= {_ch_date_filter(30)}
             GROUP BY user_id
         )
         SELECT
@@ -1098,7 +1121,7 @@ def revenue_opportunities(ch) -> list[dict]:
     Raises on ClickHouse error — callers must catch.
     """
     rows = ch.query(
-        """
+        f"""
         WITH adv_perf AS (
             SELECT
                 c.adv_name,
@@ -1108,8 +1131,8 @@ def revenue_opportunities(ch) -> list[dict]:
                       / nullIf(count(DISTINCT cv.user_id), 0), 2)        AS avg_rev_per_pub
             FROM adpx_conversionsdetails cv
             JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
-            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - 30)
-              AND cv.created_at >= today() - 30
+            WHERE toYYYYMM(cv.created_at) >= toYYYYMM({_ch_date_filter(30)})
+              AND cv.created_at >= {_ch_date_filter(30)}
             GROUP BY c.adv_name
             HAVING publisher_count >= 2 AND rev_30d >= 10000
         ),
@@ -1122,8 +1145,8 @@ def revenue_opportunities(ch) -> list[dict]:
                 count()                         AS sessions_30d
             FROM adpx_sdk_sessions s
             LEFT JOIN mv_adpx_users u ON s.user_id = u.id
-            WHERE toYYYYMM(s.created_at) >= toYYYYMM(today() - 30)
-              AND s.created_at >= today() - 30
+            WHERE toYYYYMM(s.created_at) >= toYYYYMM({_ch_date_filter(30)})
+              AND s.created_at >= {_ch_date_filter(30)}
             GROUP BY s.user_id, coalesce(u.organization, '')
             HAVING sessions_30d > 100000
         ),
@@ -1207,7 +1230,7 @@ def cvr_anomaly(
     Raises on ClickHouse error — callers must catch.
     """
     rows = ch.query(
-        """
+        f"""
         WITH imp_7d AS (
                 -- adpx_impressions_details.pid is the publisher ID (string) —
                 -- no session join needed; eliminates the FillingRightJoinSide OOM.
@@ -1216,10 +1239,10 @@ def cvr_anomaly(
                     campaign_id,
                     count()                           AS impressions_7d
                 FROM adpx_impressions_details
-                WHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
-                  AND created_at >= today() - INTERVAL 7 DAY
+                WHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(8)})
+                  AND created_at >= {_ch_date_filter(7)}
                 GROUP BY publisher_id, campaign_id
-                HAVING impressions_7d >= {min_impressions_7d: Int64}
+                HAVING impressions_7d >= {{min_impressions_7d: Int64}}
             ),
             imp_yesterday AS (
                 SELECT
@@ -1240,10 +1263,10 @@ def cvr_anomaly(
                     count()                           AS conversions_7d,
                     avg(toFloat64OrNull(payout))       AS payout_per_conversion
                 FROM adpx_conversionsdetails
-                WHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
-                  AND created_at >= today() - INTERVAL 7 DAY
+                WHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(8)})
+                  AND created_at >= {_ch_date_filter(7)}
                 GROUP BY publisher_id, campaign_id
-                HAVING payout_per_conversion >= {min_payout: Float64}
+                HAVING payout_per_conversion >= {{min_payout: Float64}}
             ),
             conv_yesterday AS (
                 SELECT
@@ -1303,7 +1326,7 @@ def cvr_anomaly(
         SELECT *
         FROM final
         WHERE exposure_cvr_7d > 0
-          AND delta_pct <= -{drop_pct: Float64}
+          AND delta_pct <= -{{drop_pct: Float64}}
         ORDER BY delta_pct ASC
         """,
         parameters={
@@ -1346,14 +1369,14 @@ def expiring_campaigns(ch, warning_days: int = 7) -> list[dict]:
     Raises on ClickHouse error — callers must catch.
     """
     rows = ch.query(
-        """
+        f"""
         WITH expiring_raw AS (
             SELECT
                 id                                              AS campaign_id,
                 adv_name,
                 toDate(end_date)                                AS end_date_dt
             FROM from_airbyte_campaigns
-            WHERE toDate(end_date) BETWEEN today() AND today() + INTERVAL {warning_days: Int32} DAY
+            WHERE toDate(end_date) BETWEEN today() AND today() + INTERVAL {{warning_days: Int32}} DAY
               AND trim(status) = 'Active'
               AND deleted_at IS NULL
         ),
@@ -1372,8 +1395,8 @@ def expiring_campaigns(ch, warning_days: int = 7) -> list[dict]:
                 count()                                   AS impressions_7d,
                 count(DISTINCT toUInt64OrZero(pid))       AS publisher_count
             FROM adpx_impressions_details
-            WHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
-              AND created_at >= today() - INTERVAL 7 DAY
+            WHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(8)})
+              AND created_at >= {_ch_date_filter(7)}
             GROUP BY campaign_id
         ),
         rev_agg AS (
@@ -1381,8 +1404,8 @@ def expiring_campaigns(ch, warning_days: int = 7) -> list[dict]:
                 toInt64(cv.campaign_id)               AS campaign_id,
                 round(sum(toFloat64OrNull(cv.revenue)), 2) AS revenue_7d
             FROM adpx_conversionsdetails cv
-            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 8 DAY)
-              AND cv.created_at >= today() - INTERVAL 7 DAY
+            WHERE toYYYYMM(cv.created_at) >= toYYYYMM({_ch_date_filter(8)})
+              AND cv.created_at >= {_ch_date_filter(7)}
             GROUP BY campaign_id
         )
         SELECT
