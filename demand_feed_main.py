@@ -1018,6 +1018,109 @@ def _run_shadow_monitor(
 from scout_core.monitors import _run_hourly_with_web  # noqa: E402 — defined after top-level imports
 
 
+# ── Shadow monitor config table + factory ─────────────────────────────────
+# Each entry drives one _run_shadow_monitor daemon. Adding a new monitor =
+# add one dict here. signal_filter is optional (velocity_down uses it).
+_SHADOW_MONITOR_CONFIG: list[dict] = [
+    {
+        "monitor_name":  "velocity-down-monitor",
+        "config_key":    "velocity_down",
+        "signal_module": "scout_bot",
+        "signal_fn":     "_pulse_signal_velocity",
+        "signal_filter": lambda rows: [v for v in rows if v.get("direction") == "down"],
+        "format_module": "scout_bot",
+        "format_fn":     "_format_velocity_down_alert",
+        "state_module":  "scout_state",
+        "load_fn":       "_load_velocity_down_alert_state",
+        "save_fn":       "_save_velocity_down_alert_date",
+    },
+    {
+        "monitor_name":  "ghost-monitor",
+        "config_key":    "ghost",
+        "signal_module": "scout_bot",
+        "signal_fn":     "_pulse_signal_ghost",
+        "format_module": "scout_bot",
+        "format_fn":     "_format_ghost_alert",
+        "state_module":  "scout_state",
+        "load_fn":       "_load_ghost_alert_state",
+        "save_fn":       "_save_ghost_alert_date",
+    },
+    {
+        "monitor_name":  "fill-monitor",
+        "config_key":    "fill",
+        "signal_module": "scout_bot",
+        "signal_fn":     "_pulse_signal_fill_rate",
+        "format_module": "scout_bot",
+        "format_fn":     "_format_fill_alert",
+        "state_module":  "scout_state",
+        "load_fn":       "_load_fill_alert_state",
+        "save_fn":       "_save_fill_alert_date",
+    },
+    {
+        "monitor_name":  "cvr-anomaly-monitor",
+        "config_key":    "cvr_anomaly",
+        "signal_module": "scout_ch",
+        "signal_fn":     "_query_cvr_anomaly",
+        "format_module": "scout_bot",
+        "format_fn":     "_format_cvr_alert",
+        "state_module":  "scout_state",
+        "load_fn":       "_load_cvr_anomaly_alert_state",
+        "save_fn":       "_save_cvr_anomaly_alert_date",
+    },
+    {
+        "monitor_name":  "expiration-monitor",
+        "config_key":    "expiration",
+        "signal_module": "scout_ch",
+        "signal_fn":     "_query_expiring_campaigns",
+        "format_module": "scout_bot",
+        "format_fn":     "_format_expiration_alert",
+        "state_module":  "scout_state",
+        "load_fn":       "_load_expiration_alert_state",
+        "save_fn":       "_save_expiration_alert_date",
+    },
+]
+
+
+def _make_shadow_daemon(cfg: dict):
+    """Factory: returns a zero-arg daemon fn from a _SHADOW_MONITOR_CONFIG entry.
+
+    Uses importlib to preserve lazy-import semantics and avoid circular imports
+    that arise from top-level scout_bot / scout_ch / scout_state imports here.
+    """
+    import importlib as _il
+
+    def _daemon() -> None:
+        sig_mod   = _il.import_module(cfg["signal_module"])
+        signal_fn = getattr(sig_mod, cfg["signal_fn"])
+        if cfg.get("signal_filter"):
+            _raw, _filt = signal_fn, cfg["signal_filter"]
+            def _filtered_signal_fn(ch, _r=_raw, _f=_filt):
+                return _f(_r(ch))
+            signal_fn = _filtered_signal_fn
+        fmt_mod   = _il.import_module(cfg["format_module"])
+        format_fn = getattr(fmt_mod, cfg["format_fn"])
+        state_mod = _il.import_module(cfg["state_module"])
+        load_fn   = getattr(state_mod, cfg["load_fn"])
+        save_fn   = getattr(state_mod, cfg["save_fn"])
+        _run_shadow_monitor(
+            monitor_name=cfg["monitor_name"],
+            config_key=cfg["config_key"],
+            signal_fn=signal_fn,
+            format_fn=format_fn,
+            load_state_fn=load_fn,
+            save_state_fn=save_fn,
+        )
+
+    return _daemon
+
+
+_velocity_down_monitor_daemon = _make_shadow_daemon(_SHADOW_MONITOR_CONFIG[0])
+_ghost_monitor_daemon         = _make_shadow_daemon(_SHADOW_MONITOR_CONFIG[1])
+_fill_monitor_daemon          = _make_shadow_daemon(_SHADOW_MONITOR_CONFIG[2])
+_cvr_anomaly_monitor_daemon   = _make_shadow_daemon(_SHADOW_MONITOR_CONFIG[3])
+_expiration_monitor_daemon    = _make_shadow_daemon(_SHADOW_MONITOR_CONFIG[4])
+
+
 def _cap_monitor_daemon() -> None:
     from scout_state import (
         _load_cap_alert_slot, _save_cap_alert_slot,
@@ -1050,64 +1153,6 @@ def _cap_monitor_daemon() -> None:
             signal_fn=_pulse_signal_cap, format_fn=_format_cap_alert,
             load_state_fn=_load_cap_alert_state, save_state_fn=_save_cap_alert_date,
         )
-
-
-def _velocity_down_monitor_daemon() -> None:
-    from scout_state import _load_velocity_down_alert_state, _save_velocity_down_alert_date
-    from scout_bot import _pulse_signal_velocity
-    from scout_bot import _format_velocity_down_alert
-    def _signal_down_only(ch):
-        rows = _pulse_signal_velocity(ch)
-        return [v for v in rows if v.get("direction") == "down"]
-    _run_shadow_monitor(
-        monitor_name="velocity-down-monitor", config_key="velocity_down",
-        signal_fn=_signal_down_only, format_fn=_format_velocity_down_alert,
-        load_state_fn=_load_velocity_down_alert_state, save_state_fn=_save_velocity_down_alert_date,
-    )
-
-
-def _ghost_monitor_daemon() -> None:
-    from scout_state import _load_ghost_alert_state, _save_ghost_alert_date
-    from scout_bot import _pulse_signal_ghost
-    from scout_bot import _format_ghost_alert
-    _run_shadow_monitor(
-        monitor_name="ghost-monitor", config_key="ghost",
-        signal_fn=_pulse_signal_ghost, format_fn=_format_ghost_alert,
-        load_state_fn=_load_ghost_alert_state, save_state_fn=_save_ghost_alert_date,
-    )
-
-
-def _fill_monitor_daemon() -> None:
-    from scout_state import _load_fill_alert_state, _save_fill_alert_date
-    from scout_bot import _pulse_signal_fill_rate
-    from scout_bot import _format_fill_alert
-    _run_shadow_monitor(
-        monitor_name="fill-monitor", config_key="fill",
-        signal_fn=_pulse_signal_fill_rate, format_fn=_format_fill_alert,
-        load_state_fn=_load_fill_alert_state, save_state_fn=_save_fill_alert_date,
-    )
-
-
-def _cvr_anomaly_monitor_daemon() -> None:
-    from scout_state import _load_cvr_anomaly_alert_state, _save_cvr_anomaly_alert_date
-    from scout_ch import _query_cvr_anomaly
-    from scout_bot import _format_cvr_alert
-    _run_shadow_monitor(
-        monitor_name="cvr-anomaly-monitor", config_key="cvr_anomaly",
-        signal_fn=_query_cvr_anomaly, format_fn=_format_cvr_alert,
-        load_state_fn=_load_cvr_anomaly_alert_state, save_state_fn=_save_cvr_anomaly_alert_date,
-    )
-
-
-def _expiration_monitor_daemon() -> None:
-    from scout_state import _load_expiration_alert_state, _save_expiration_alert_date
-    from scout_ch import _query_expiring_campaigns
-    from scout_bot import _format_expiration_alert
-    _run_shadow_monitor(
-        monitor_name="expiration-monitor", config_key="expiration",
-        signal_fn=_query_expiring_campaigns, format_fn=_format_expiration_alert,
-        load_state_fn=_load_expiration_alert_state, save_state_fn=_save_expiration_alert_date,
-    )
 
 
 # ── Queue storage ─────────────────────────────────────────────────────────────
