@@ -639,7 +639,7 @@ def _route_channel(purpose: str, force: bool = False) -> str:
 
 # ── Loading messages (from scout_bot for handler use) ──────────────────────────────
 
-_THINKING = "Thinking…"
+_LOADING_MSG = "Grindin'…"
 
 
 # ── Smart history truncation (from scout_bot for handler use) ────────
@@ -700,15 +700,11 @@ _STAGE_LABELS: dict = {
     "get_scout_status":                     "Checking Scout status…",
     "get_pulse_summary":                    "Pulling pulse data…",
 }
-_STAGE_SYNTHESIZING = "Synthesizing…"
-
-
 def _rotating_status(
     web,
     channel: str,
     ts: str,
     interval: float = 2.0,
-    query: str = "",
     stage_ref: "list[str] | None" = None,
 ):
     """Rotating status with typing indicator — returns stop function."""
@@ -718,7 +714,7 @@ def _rotating_status(
     def _run():
         while not stop_event.wait(interval):
             elapsed = int(time.monotonic() - start)
-            msg = (stage_ref[0] if (stage_ref and stage_ref[0]) else "") or _THINKING
+            msg = (stage_ref[0] if (stage_ref and stage_ref[0]) else "") or _LOADING_MSG
             update_text = f"_{msg}_ · {elapsed}s"
             try:
                 web.chat_update(

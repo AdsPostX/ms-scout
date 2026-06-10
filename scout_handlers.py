@@ -48,7 +48,7 @@ from scout_state import (
     _DATA_DIR,
     _strip_mention, _sanitize_slack, _slack_thread_url,
     _route_channel,
-    _THINKING,
+    _LOADING_MSG,
     _rotating_status,
     _smart_history,
     _post_error_update,
@@ -1115,7 +1115,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     )
     _placeholder_ts_sg = placeholder["ts"]
     _stage: list = [""]
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, query=query, stage_ref=_stage)
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, stage_ref=_stage)
 
     # Build thread history (mirrors handle_event)
     history = []
@@ -1475,7 +1475,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     "close": {"type": "plain_text", "text": "Close", "emoji": False},
                     "blocks": [{
                         "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{_THINKING}"},
+                        "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{_LOADING_MSG}"},
                     }],
                 },
             )
@@ -1506,7 +1506,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 the query has been running — prevents "is this frozen?" anxiety.
                 """
                 _STEPS = [
-                    _THINKING,
+                    _LOADING_MSG,
                     "Still working…",
                     "Almost there…",
                 ]
@@ -1610,12 +1610,12 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
         thread_ts = intro["ts"]
 
         placeholder = web.chat_postMessage(
-            channel=dm_channel, thread_ts=thread_ts, text=_THINKING,
-            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _THINKING}}],
+            channel=dm_channel, thread_ts=thread_ts, text=_LOADING_MSG,
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _LOADING_MSG}}],
         )
         _placeholder_ts_ah = placeholder["ts"]
         _stage: list = [""]
-        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, query=query, stage_ref=_stage)
+        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, stage_ref=_stage)
 
         try:
             _t0 = time.monotonic()
@@ -3087,7 +3087,7 @@ def _handle_event_impl(req: SocketModeRequest):
     )
     _placeholder_ts = placeholder["ts"]
     _stage: list = [""]
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts, query=query, stage_ref=_stage)
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts, stage_ref=_stage)
 
     try:
         _t0 = time.monotonic()
