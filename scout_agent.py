@@ -5921,7 +5921,7 @@ def _run_tool_loop(
         _round += 1
         if _round > 1 and on_stage:
             try:
-                on_stage("Synthesizing…")
+                on_stage("")  # clear tool label — rotating falls back to cycling
             except Exception:
                 pass
         for attempt in range(4):

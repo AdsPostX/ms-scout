@@ -700,7 +700,7 @@ _STAGE_LABELS: dict = {
     "get_scout_status":                     "Checking Scout status…",
     "get_pulse_summary":                    "Pulling pulse data…",
 }
-_STAGE_SYNTHESIZING = "Synthesizing…"
+_FALLBACK_MSGS = ["Thinking…", "Working…", "Grindin'…"]
 
 
 def _rotating_status(
@@ -714,11 +714,17 @@ def _rotating_status(
     """Rotating status with typing indicator — returns stop function."""
     stop_event = threading.Event()
     start = time.monotonic()
+    idx = [0]
 
     def _run():
         while not stop_event.wait(interval):
             elapsed = int(time.monotonic() - start)
-            msg = (stage_ref[0] if (stage_ref and stage_ref[0]) else "") or _THINKING
+            active_stage = stage_ref[0] if (stage_ref and stage_ref[0]) else ""
+            if active_stage:
+                msg = active_stage
+            else:
+                msg = _FALLBACK_MSGS[idx[0] % len(_FALLBACK_MSGS)]
+                idx[0] += 1
             update_text = f"_{msg}_ · {elapsed}s"
             try:
                 web.chat_update(
