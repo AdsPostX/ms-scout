@@ -639,7 +639,7 @@ def _route_channel(purpose: str, force: bool = False) -> str:
 
 # ── Loading messages (from scout_bot for handler use) ──────────────────────────────
 
-_THINKING = "Thinking…"
+_THINKING = "Grindin'…"
 
 
 # ── Smart history truncation (from scout_bot for handler use) ────────
@@ -700,7 +700,7 @@ _STAGE_LABELS: dict = {
     "get_scout_status":                     "Checking Scout status…",
     "get_pulse_summary":                    "Pulling pulse data…",
 }
-_FALLBACK_MSGS = ["Thinking…", "Working…", "Grindin'…"]
+_FALLBACK_MSGS = [_THINKING]
 
 
 def _rotating_status(
