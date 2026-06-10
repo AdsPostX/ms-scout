@@ -1785,20 +1785,9 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
             web.chat_postEphemeral(channel=channel, user=user_id, text=fallback, blocks=queue_blocks)
 
         elif command == "/scout-status":
-            s       = get_scout_status()
-            ch_stat = s.get("clickhouse", "unknown")
-            ch_icon = ":white_check_mark:" if ch_stat == "ok" else ":warning:"
-            bm_age  = s.get("benchmarks", "unknown")
-            offers  = s.get("offer_inventory", 0)
-            queue   = s.get("queue_depth", 0)
-            warns   = s.get("warnings", [])
-            lines   = [
-                ":satellite: *Scout Status*",
-                f"Benchmarks: `{bm_age}`  ·  Offers: `{offers:,}`  ·  Queue: `{queue} pending`  ·  ClickHouse: {ch_icon}",
-            ]
-            for w in warns:
-                lines.append(f":warning: {w}")
-            web.chat_postEphemeral(channel=channel, user=user_id, text="\n".join(lines))
+            from scout_agent import get_scout_status, _format_status_response
+            web.chat_postEphemeral(channel=channel, user=user_id,
+                                   text=_format_status_response(get_scout_status()))
 
         elif command == "/scout-enter":
             # Formatted entry card for a queued offer — all fields pre-formatted

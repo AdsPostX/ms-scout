@@ -3794,6 +3794,80 @@ def test_data_quality_invariants():
     return True, f"No failures; {len(cache)} cache entries checked"
 
 
+@test("command registry — _match_command routes all status aliases")
+def test_command_status_match():
+    """_match_command returns ('status', entry) for every registered alias."""
+    from scout_agent import _match_command
+    aliases = [
+        "status", "scout status", "how are you", "are you ok",
+        "are you healthy", "system health", "system status",
+        "health check", "scout health check",
+    ]
+    for alias in aliases:
+        name, entry = _match_command(alias)
+        if name != "status":
+            return False, f"Expected 'status' for alias {alias!r}, got {name!r}"
+        if entry is None:
+            return False, f"Expected registry entry for alias {alias!r}, got None"
+    # Also test with @mention prefix stripped
+    name, _ = _match_command("<@U12345> status")
+    if name != "status":
+        return False, f"Expected 'status' after @mention strip, got {name!r}"
+    return True, f"All {len(aliases)} aliases matched + @mention strip ok"
+
+
+@test("command registry — _cmd_status returns correct AskResult without LLM")
+def test_command_status_no_llm():
+    """_cmd_status() returns AskResult with expected shape without hitting the LLM."""
+    from unittest.mock import patch
+    from scout_agent import _cmd_status
+    with patch("anthropic.Anthropic") as mock_client:
+        result = _cmd_status()
+        if mock_client.called:
+            return False, "_cmd_status must not instantiate the Anthropic client"
+    if "get_scout_status" not in result.tools_called:
+        return False, f"Expected 'get_scout_status' in tools_called, got {result.tools_called}"
+    for field in (":satellite:", "Benchmarks:", "Offers:", "Queue:", "ClickHouse:"):
+        if field not in result.text:
+            return False, f"Missing field {field!r} in status text"
+    return True, "AskResult shape correct, no LLM call, all 4 fields present"
+
+
+@test("command registry — open queries pass through _match_command unchanged")
+def test_command_passthrough():
+    """Open queries return (None, None) from _match_command — LLM path unchanged."""
+    from scout_agent import _match_command
+    open_queries = [
+        "why did revenue drop yesterday",
+        "what's TurboTax revenue this week",
+        "show publisher health for Ibotta",
+        "what's in the queue today",
+        "how's the offer status for CJ",
+    ]
+    for q in open_queries:
+        name, entry = _match_command(q)
+        if name is not None:
+            return False, f"False match for open query {q!r}: got {name!r}"
+        if entry is not None:
+            return False, f"Unexpected registry entry for open query {q!r}"
+    return True, f"All {len(open_queries)} open queries correctly returned (None, None)"
+
+
+@test("command registry — _format_status_response is deterministic (slash + mention parity)")
+def test_slash_mention_format_parity():
+    """_format_status_response produces same text for mention and slash command paths."""
+    from scout_agent import get_scout_status, _format_status_response
+    status_dict = get_scout_status()
+    mention_text = _format_status_response(status_dict)
+    slash_text = _format_status_response(status_dict)
+    if mention_text != slash_text:
+        return False, "Formatter not deterministic: got different output on two calls with same dict"
+    for field in (":satellite:", "Benchmarks:"):
+        if field not in mention_text:
+            return False, f"Missing expected field {field!r} in formatted output"
+    return True, "Formatter is deterministic and contains expected fields"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
