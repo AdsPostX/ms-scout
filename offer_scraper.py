@@ -105,6 +105,31 @@ _NETWORK_PTYPE_MAP: dict[str, str] = {
     "cpa": "CPA", "cpl": "CPL", "cps": "CPS", "cpc": "CPC", "revshare": "CPS",
 }
 
+# Impact API category → canonical payout type code.
+_CATEGORY_TO_PTYPE: dict[str, str] = {
+    "LEAD":  "CPL",
+    "SALE":  "CPS",
+    "CLICK": "CPC",
+}
+
+# Impact raw payout-type string → human-readable display label.
+_IMPACT_DISPLAY_PTYPE_MAP: dict[str, str] = {
+    "percentage": "% of Sale",
+    "% of sale":  "% of Sale",
+    "% per sale": "% of Sale",
+    "per sale":   "% of Sale",
+    "cps":        "% of Sale",
+    "revshare":   "% of Sale",
+    "per lead":   "$ per Lead",
+    "$ per lead": "$ per Lead",
+    "cpl":        "$ per Lead",
+    "per click":  "$ per Click",
+    "$ per click":"$ per Click",
+    "cpc":        "$ per Click",
+    "fixed":      "Fixed",
+    "flat":       "Fixed",
+}
+
 # Notion — primary output destination
 # Setup: notion.so/my-integrations → create integration → copy secret_... token
 #        Then share the "Offer Inventory — MS Network" database with that integration
@@ -255,11 +280,6 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
              f"{len(existing_cache)} already cached)...")
 
     merged = dict(existing_cache)
-    _CATEGORY_TO_PTYPE = {
-        "LEAD":  "CPL",
-        "SALE":  "CPS",
-        "CLICK": "CPC",
-    }
 
     for idx, cid in enumerate(missing, 1):
         # Payout lives in the active contract, not a separate /Actions endpoint
@@ -841,24 +861,8 @@ def parse_payout(raw_payout: str, raw_type: str) -> "PayoutResult":
       "failed"   — had a type or non-empty payout string but no numeric value emerged
                    (common cause: Impact CPS/SALE contract with missing PercentageRate)
     """
-    ptype_map = {
-        "percentage": "% of Sale",
-        "% of sale": "% of Sale",
-        "% per sale": "% of Sale",
-        "per sale": "% of Sale",
-        "cps": "% of Sale",
-        "revshare": "% of Sale",
-        "per lead": "$ per Lead",
-        "$ per lead": "$ per Lead",
-        "cpl": "$ per Lead",
-        "per click": "$ per Click",
-        "$ per click": "$ per Click",
-        "cpc": "$ per Click",
-        "fixed": "Fixed",
-        "flat": "Fixed",
-    }
     norm_type = "Unknown"
-    for key, val in ptype_map.items():
+    for key, val in _IMPACT_DISPLAY_PTYPE_MAP.items():
         if key in raw_type.lower():
             norm_type = val
             break
