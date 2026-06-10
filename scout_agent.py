@@ -6087,7 +6087,7 @@ def _format_status_response(s: dict) -> str:
     bm_age  = s.get("benchmarks", "unknown")
     offers  = s.get("offer_inventory", 0)
     queue   = s.get("queue_depth", 0)
-    warns   = s.get("warnings", [])
+    warns   = s.get("warnings") or []
     lines   = [
         ":satellite: *Scout Status*",
         f"Benchmarks: `{bm_age}`  ·  Offers: `{offers:,}`  ·  Queue: `{queue} pending`  ·  ClickHouse: {ch_icon}",
@@ -6097,20 +6097,14 @@ def _format_status_response(s: dict) -> str:
     return "\n".join(lines)
 
 
-def _cmd_status() -> AskResult:
+def _cmd_status() -> tuple[str, tuple]:
     """Canonical handler for @Scout status.
 
-    Calls get_scout_status() directly and formats with _format_status_response().
-    No LLM synthesis — output shape is deterministic for any alias that matches
-    the 'status' command.
+    Returns (text, tools_called). Timing is the caller's responsibility —
+    ask() uses _dur() and ask_with_attachment() uses its own _start_ms.
     """
-    _start = time.monotonic()
     s = get_scout_status()
-    return AskResult(
-        text=_format_status_response(s),
-        tools_called=("get_scout_status",),
-        duration_ms=int((time.monotonic() - _start) * 1000),
-    )
+    return _format_status_response(s), ("get_scout_status",)
 
 
 def ask(user_message: str, history: list | None = None, user_id: str = "",
@@ -6149,8 +6143,8 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     # _classify_intent (which is for open queries only).
     _cmd_name, _ = _match_command(user_message)
     if _cmd_name == "status":
-        result = _cmd_status()
-        return AskResult(text=result.text, tools_called=result.tools_called, duration_ms=_dur())
+        text, tools_called = _cmd_status()
+        return AskResult(text=text, tools_called=tools_called, duration_ms=_dur())
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -6226,10 +6220,10 @@ def ask_with_attachment(
 
     _cmd_name, _ = _match_command(user_message)
     if _cmd_name == "status":
-        result = _cmd_status()
+        text, tools_called = _cmd_status()
         return AskResult(
-            text=result.text,
-            tools_called=result.tools_called,
+            text=text,
+            tools_called=tools_called,
             duration_ms=int((time.monotonic() - _start_ms) * 1000),
         )
 

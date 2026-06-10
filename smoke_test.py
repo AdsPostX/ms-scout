@@ -3816,21 +3816,21 @@ def test_command_status_match():
     return True, f"All {len(aliases)} aliases matched + @mention strip ok"
 
 
-@test("command registry — _cmd_status returns correct AskResult without LLM")
+@test("command registry — _cmd_status returns correct (text, tools) without LLM")
 def test_command_status_no_llm():
-    """_cmd_status() returns AskResult with expected shape without hitting the LLM."""
+    """_cmd_status() returns (text, tools_called) tuple without hitting the LLM."""
     from unittest.mock import patch
     from scout_agent import _cmd_status
     with patch("anthropic.Anthropic") as mock_client:
-        result = _cmd_status()
+        text, tools_called = _cmd_status()
         if mock_client.called:
             return False, "_cmd_status must not instantiate the Anthropic client"
-    if "get_scout_status" not in result.tools_called:
-        return False, f"Expected 'get_scout_status' in tools_called, got {result.tools_called}"
+    if "get_scout_status" not in tools_called:
+        return False, f"Expected 'get_scout_status' in tools_called, got {tools_called}"
     for field in (":satellite:", "Benchmarks:", "Offers:", "Queue:", "ClickHouse:"):
-        if field not in result.text:
+        if field not in text:
             return False, f"Missing field {field!r} in status text"
-    return True, "AskResult shape correct, no LLM call, all 4 fields present"
+    return True, "(text, tools_called) shape correct, no LLM call, all 4 fields present"
 
 
 @test("command registry — open queries pass through _match_command unchanged")
