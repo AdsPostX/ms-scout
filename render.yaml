@@ -114,12 +114,85 @@ services:
         sync: false
       - key: SHAREASALE_API_SECRET
         sync: false
+      - key: SHAREASALE_AFFILIATE_ID
+        value: "3279349"
       - key: RAKUTEN_API_TOKEN
         sync: false
+      - key: RAKUTEN_PUBLISHER_ID
+        value: "3948979"
       - key: AWIN_PUBLISHER_ID
         sync: false
       - key: AWIN_API_KEY
         sync: false
+      # TUNE network instances — add TUNE_{NAME}_NETWORK_ID + API_KEY + BASE_URL per instance
+      - key: TUNE_ADACTION_NETWORK_ID
+        value: "adactioninteractive"
+      - key: TUNE_ADACTION_API_KEY
+        sync: false
+      - key: TUNE_ADACTION_BASE_URL
+        value: "https://adactioninteractive.api.hasoffers.com"
+      - key: TUNE_REVOFFERS_NETWORK_ID
+        value: "7359"
+      - key: TUNE_REVOFFERS_API_KEY
+        sync: false
+      - key: TUNE_REVOFFERS_BASE_URL
+        value: "https://7359.api.hasoffers.com"
+      - key: TUNE_KASHKICK_NETWORK_ID
+        value: "kashkick"
+      - key: TUNE_KASHKICK_API_KEY
+        sync: false
+      - key: TUNE_KASHKICK_BASE_URL
+        value: "https://kashkick.hasoffers.com"
+      - key: TUNE_BROWNBOOTS_NETWORK_ID
+        value: ""
+      - key: TUNE_BROWNBOOTS_API_KEY
+        sync: false
+      - key: TUNE_BROWNBOOTS_BASE_URL
+        value: ""
+      - key: TUNE_ADBLOOM_NETWORK_ID
+        value: ""
+      - key: TUNE_ADBLOOM_API_KEY
+        sync: false
+      - key: TUNE_ADBLOOM_BASE_URL
+        value: ""
+      - key: TUNE_SUCCESSFUL_MEDIA_NETWORK_ID
+        value: ""
+      - key: TUNE_SUCCESSFUL_MEDIA_API_KEY
+        sync: false
+      - key: TUNE_SUCCESSFUL_MEDIA_BASE_URL
+        value: ""
+      # Everflow network instances — add EVERFLOW_{NAME}_API_KEY + BASE_URL per instance
+      - key: EVERFLOW_GIDDYUP_API_KEY
+        sync: false
+      - key: EVERFLOW_GIDDYUP_BASE_URL
+        value: "https://giddyup.everflowclient.io"
+      - key: EVERFLOW_ACCIOADS_API_KEY
+        sync: false
+      - key: EVERFLOW_ACCIOADS_BASE_URL
+        value: "https://accioads.everflowclient.io"
+      - key: EVERFLOW_KLAYMEDIA_API_KEY
+        sync: false
+      - key: EVERFLOW_KLAYMEDIA_BASE_URL
+        value: "https://klaymedia.everflowclient.io"
+      - key: EVERFLOW_CREDITCOM_API_KEY
+        sync: false
+      - key: EVERFLOW_CREDITCOM_BASE_URL
+        value: "https://partners.credit.com"
+      - key: EVERFLOW_MWKCONSULTING_API_KEY
+        sync: false
+      - key: EVERFLOW_MWKCONSULTING_BASE_URL
+        value: "https://mwkconsulting.everflowclient.io"
+      - key: EVERFLOW_PAWZITIVITY_API_KEY
+        sync: false
+      - key: EVERFLOW_PAWZITIVITY_BASE_URL
+        value: "https://pawz.everflowclient.io"
+      - key: EVERFLOW_ARAGONPREMIUM_API_KEY
+        sync: false
+      - key: EVERFLOW_ARAGONPREMIUM_BASE_URL
+        value: "https://aragonpremium.everflowclient.io"
+      # Google Sheets legacy ID (used by old scraper; kept for reference)
+      - key: GSHEET_ID
+        value: "1Nr2YNtgwvJDcj1Tb6Pl_tSoR6KORhJCbLODQX6JJYYQ"
       # Notion — offer inventory database
       - key: NOTION_TOKEN
         sync: false
