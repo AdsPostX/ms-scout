@@ -6041,6 +6041,74 @@ def _run_tool_loop(
     )
 
 
+# ── Command registry ──────────────────────────────────────────────────────────
+# Maps canonical command names to their alias sets.
+# Matching is alias-exact: the full normalized message must equal one alias —
+# not merely contain a keyword. "how's the offer status for CJ" does NOT match
+# "status". This is structurally different from _classify_intent signal matching,
+# which does substring search for open queries.
+_COMMAND_REGISTRY: dict[str, dict] = {
+    "status": {
+        "aliases": frozenset({
+            "status", "scout status", "how are you", "are you ok",
+            "are you healthy", "system health", "system status",
+            "health check", "scout health check",
+        }),
+        "description": "System health snapshot: benchmarks, offer inventory, queue, ClickHouse",
+    },
+}
+
+
+def _match_command(raw: str) -> tuple[str | None, dict | None]:
+    """Match a normalized user message against the command registry.
+
+    Alias-exact: the entire normalized message must equal one alias.
+    Substring matching is intentionally avoided so queries like
+    'what's the revenue status today' never collide with 'status'.
+
+    Returns (command_name, registry_entry) on hit, (None, None) on miss.
+    Must be called on the raw message with @mention stripped.
+    """
+    normalized = re.sub(r"<@[A-Z0-9]+>", "", raw or "").strip().lower()
+    if not normalized:
+        return None, None
+    for name, entry in _COMMAND_REGISTRY.items():
+        if normalized in entry["aliases"]:
+            return name, entry
+    return None, None
+
+
+def _format_status_response(s: dict) -> str:
+    """Format get_scout_status() dict into canonical Scout status text.
+
+    Single source of truth for both @Scout status (mention path via _cmd_status)
+    and /scout-status (slash command path via _handle_slash_command).
+    """
+    ch_stat = s.get("clickhouse", "unknown")
+    ch_icon = ":white_check_mark:" if ch_stat == "ok" else ":warning:"
+    bm_age  = s.get("benchmarks", "unknown")
+    offers  = s.get("offer_inventory", 0)
+    queue   = s.get("queue_depth", 0)
+    warns   = s.get("warnings") or []
+    lines   = [
+        ":satellite: *Scout Status*",
+        f"Benchmarks: `{bm_age}`  ·  Offers: `{offers:,}`  ·  Queue: `{queue} pending`  ·  ClickHouse: {ch_icon}",
+    ]
+    for w in warns:
+        lines.append(f":warning: {w}")
+    return "\n".join(lines)
+
+
+def _cmd_status() -> tuple[str, tuple]:
+    """Canonical handler for @Scout status.
+
+    Returns (text, tools_called). Timing is the caller's responsibility —
+    ask() uses _dur() and ask_with_attachment() uses its own _start_ms.
+    """
+    s = get_scout_status()
+    return _format_status_response(s), ("get_scout_status",)
+
+
 def ask(user_message: str, history: list | None = None, user_id: str = "",
         permalink: str = "", user_tz: str = "", thread_ts: str = "",
         on_stage=None) -> AskResult:
@@ -6071,6 +6139,14 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
             duration_ms=_dur(),
             payload=_routed.payload,
         )
+
+    # Command registry — named operational invocations bypass LLM synthesis.
+    # Runs after _route_deterministic (same raw-message requirement) and before
+    # _classify_intent (which is for open queries only).
+    _cmd_name, _ = _match_command(user_message)
+    if _cmd_name == "status":
+        text, tools_called = _cmd_status()
+        return AskResult(text=text, tools_called=tools_called, duration_ms=_dur())
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -6143,6 +6219,15 @@ def ask_with_attachment(
     _routed = _route_deterministic(user_message, user_id, on_stage=on_stage)
     if _routed is not None:
         return _routed  # control-surface verbs never attach files
+
+    _cmd_name, _ = _match_command(user_message)
+    if _cmd_name == "status":
+        text, tools_called = _cmd_status()
+        return AskResult(
+            text=text,
+            tools_called=tools_called,
+            duration_ms=int((time.monotonic() - _start_ms) * 1000),
+        )
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
