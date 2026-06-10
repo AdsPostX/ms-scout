@@ -1251,6 +1251,26 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     )
     log.info(f"Suggestion answered in {channel} (thread {thread_ts}): {query!r}")
 
+# ── Pulse button dispatch ─────────────────────────────────────────────────────
+# Maps static pulse action_ids to the query Scout runs. Dynamic ones (pub-scoped)
+# are handled separately below because they require action.value.
+_PULSE_QUERIES: dict[str, str] = {
+    "pulse_ghost_brief":     "ghost campaigns",
+    "pulse_fill_rate_brief": "fill rate brief",
+    "pulse_top_opps":        "top revenue opportunities",
+}
+
+
+def _run_pulse_action(
+    query: str, channel: str, user_id: str, msg_ts: str, web: WebClient, *, sanitize: bool = False,
+) -> None:
+    def _run(q=query, ch=channel, u=user_id, t=msg_ts):
+        resp = ask(q, history=[], user_id=u)
+        text = _sanitize_slack(str(resp.text)) if sanitize else resp.text
+        web.chat_postMessage(channel=ch, thread_ts=t, text=f"<@{u}> {text}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _handle_block_action(req: SocketModeRequest, web: WebClient):
     """Handle Slack interactive button clicks (block_actions)."""
     payload = req.payload
@@ -1332,46 +1352,19 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
         return
 
     # ── Pulse interactive buttons ─────────────────────────────────────────────
-    if action_id == "pulse_ghost_brief":
-        user_id = payload.get("user", {}).get("id", "")
-        msg_ts  = (payload.get("message") or {}).get("ts", "")
-        def _run_ghost(u=user_id, t=msg_ts):
-            resp = ask("ghost campaigns", history=[], user_id=u)
-            text = resp.text
-            web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
-        threading.Thread(target=_run_ghost, daemon=True).start()
-        return
-
-    if action_id == "pulse_fill_rate_brief":
-        user_id = payload.get("user", {}).get("id", "")
-        msg_ts  = (payload.get("message") or {}).get("ts", "")
-        def _run_fill(u=user_id, t=msg_ts):
-            resp = ask("fill rate brief", history=[], user_id=u)
-            text = resp.text
-            web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
-        threading.Thread(target=_run_fill, daemon=True).start()
-        return
-
-    if action_id == "pulse_top_opps":
-        user_id = payload.get("user", {}).get("id", "")
-        msg_ts  = (payload.get("message") or {}).get("ts", "")
-        def _run_opps(u=user_id, t=msg_ts):
-            resp = ask("top revenue opportunities", history=[], user_id=u)
-            text = resp.text
-            web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {_sanitize_slack(str(text))}")
-        threading.Thread(target=_run_opps, daemon=True).start()
+    if action_id in _PULSE_QUERIES:
+        msg_ts = (payload.get("message") or {}).get("ts", "")
+        _run_pulse_action(
+            _PULSE_QUERIES[action_id], channel, user_id, msg_ts, web,
+            sanitize=(action_id == "pulse_top_opps"),
+        )
         return
 
     if action_id in ("pulse_scout_offers", "pulse_dig_in"):
-        pub     = action.get("value", "").strip()
-        user_id = payload.get("user", {}).get("id", "")
-        msg_ts  = (payload.get("message") or {}).get("ts", "")
-        query   = f"offers for {pub}" if action_id == "pulse_scout_offers" else f"dig into {pub}"
-        def _run_pub(q=query, u=user_id, t=msg_ts):
-            resp = ask(q, history=[], user_id=u)
-            text = resp.text
-            web.chat_postMessage(channel=channel, thread_ts=t, text=f"<@{u}> {text}")
-        threading.Thread(target=_run_pub, daemon=True).start()
+        pub    = action.get("value", "").strip()
+        msg_ts = (payload.get("message") or {}).get("ts", "")
+        query  = f"offers for {pub}" if action_id == "pulse_scout_offers" else f"dig into {pub}"
+        _run_pulse_action(query, channel, user_id, msg_ts, web)
         return
 
 def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
