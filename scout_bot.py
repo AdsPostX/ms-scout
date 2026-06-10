@@ -674,6 +674,13 @@ def _alert_blocks(headline: str, body: str, severity: Severity = Severity.WARN) 
     return f"🟠 {headline}", blocks
 
 
+def _build_alert_body(items: list[str], action_footer: str = "") -> str:
+    body = "\n".join(f"• {item}" for item in items)
+    if body and action_footer:
+        return f"{body}\n\n{action_footer}"
+    return body or action_footer
+
+
 def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for advertisers nearing monthly cap.
 
@@ -702,10 +709,7 @@ def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Cap alert — advertisers approaching monthly budget"
-    body = "\n".join(f"• {item}" for item in items) if items else ""
-    action_footer = "→ Contact advertiser or lower bid floor before cap hits"
-    full_body = f"{body}\n\n{action_footer}" if body else action_footer
-    return _alert_blocks(headline, full_body)
+    return _alert_blocks(headline, _build_alert_body(items, "→ Contact advertiser or lower bid floor before cap hits"))
 
 
 def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
@@ -739,10 +743,7 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
         items.append(line)
 
     headline = "Revenue velocity — publishers tracking down"
-    body = "\n".join(f"• {item}" for item in items) if items else ""
-    action_footer = "→ Check publisher fill rate and CPM floor"
-    full_body = f"{body}\n\n{action_footer}" if body else action_footer
-    return _alert_blocks(headline, full_body)
+    return _alert_blocks(headline, _build_alert_body(items, "→ Check publisher fill rate and CPM floor"))
 
 
 def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
@@ -764,10 +765,7 @@ def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Ghost campaigns — impressions without revenue"
-    body = "\n".join(f"• {item}" for item in items) if items else ""
-    action_footer = "→ Check tracking pixel / confirm creative is live"
-    full_body = f"{body}\n\n{action_footer}" if body else action_footer
-    return _alert_blocks(headline, full_body)
+    return _alert_blocks(headline, _build_alert_body(items, "→ Check tracking pixel / confirm creative is live"))
 
 
 def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
@@ -791,10 +789,7 @@ def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Low fill rate — publishers with significant unfilled sessions"
-    body = "\n".join(f"• {item}" for item in items) if items else ""
-    action_footer = "→ Review floor price or supply source health"
-    full_body = f"{body}\n\n{action_footer}" if body else action_footer
-    return _alert_blocks(headline, full_body)
+    return _alert_blocks(headline, _build_alert_body(items, "→ Review floor price or supply source health"))
 
 
 def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
@@ -814,8 +809,7 @@ def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "CVR anomalies — significant conversion rate drops since yesterday"
-    body = "\n".join(f"• {item}" for item in items) if items else ""
-    return _alert_blocks(headline, body)
+    return _alert_blocks(headline, _build_alert_body(items))
 
 
 def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
@@ -834,8 +828,7 @@ def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Expiring campaigns — active campaigns ending within the alert window"
-    body = "\n".join(f"• {item}" for item in items) if items else ""
-    return _alert_blocks(headline, body)
+    return _alert_blocks(headline, _build_alert_body(items))
 
 
 def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
