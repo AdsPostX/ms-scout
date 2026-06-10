@@ -2,7 +2,9 @@
 queries.py — All ClickHouse SQL for Scout.
 
 Rules (enforced here, not aspirational):
-  - Every function: typed parameters, no f-strings, docstring explaining return shape
+  - Every function: typed parameters, no f-strings (exception: f-string interpolation of
+    _ch_date_filter(N) with hardcoded int literals only — safe, no user input), docstring
+    explaining return shape
   - Returns list[dict] (never raw rows) — callers never unpack tuples
   - Named for what it fetches, not for the tool that uses it
   - Shared functions (used by both agent tools AND Pulse) live here, not in scout_agent.py
@@ -37,6 +39,9 @@ def _ch_date_filter(days: int) -> str:
 
     The integer-subtraction form (``today() - N``) is semantically identical to
     ``today() - INTERVAL N DAY`` in ClickHouse and is the canonical form used here.
+
+    Safe for f-string interpolation because *days* is always a hardcoded int literal
+    at every call site — never user input or a runtime variable.
     """
     return f"today() - {days}"
 
