@@ -136,25 +136,31 @@ services:
       - key: TUNE_REVOFFERS_API_KEY
         sync: false
       - key: TUNE_REVOFFERS_BASE_URL
-        sync: false
+        value: "https://7359.api.hasoffers.com"
       - key: TUNE_KASHKICK_NETWORK_ID
-        sync: false
+        value: "kashkick"
       - key: TUNE_KASHKICK_API_KEY
         sync: false
       - key: TUNE_KASHKICK_BASE_URL
         value: "https://kashkick.hasoffers.com"
       - key: TUNE_BROWNBOOTS_NETWORK_ID
-        sync: false
+        value: ""
       - key: TUNE_BROWNBOOTS_API_KEY
         sync: false
       - key: TUNE_BROWNBOOTS_BASE_URL
+        value: ""
+      - key: TUNE_ADBLOOM_NETWORK_ID
+        value: ""
+      - key: TUNE_ADBLOOM_API_KEY
         sync: false
+      - key: TUNE_ADBLOOM_BASE_URL
+        value: ""
       - key: TUNE_SUCCESSFUL_MEDIA_NETWORK_ID
-        sync: false
+        value: ""
       - key: TUNE_SUCCESSFUL_MEDIA_API_KEY
         sync: false
       - key: TUNE_SUCCESSFUL_MEDIA_BASE_URL
-        sync: false
+        value: ""
       # Everflow network instances — add EVERFLOW_{NAME}_API_KEY + BASE_URL per instance
       - key: EVERFLOW_GIDDYUP_API_KEY
         sync: false
