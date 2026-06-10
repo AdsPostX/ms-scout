@@ -1256,7 +1256,6 @@ TOOLS = [
         "name": "get_revenue_today",
         "description": (
             "Return today's intraday revenue vs 30-day daily average, broken down by publisher. "
-            "Returns a pre-formatted Slack mrkdwn string — deliver verbatim. "
             "Use ONLY for 'how is revenue today / right now / so far'. "
             "Do NOT use for 'project / estimate / forecast / EOD / end of day / how will today land / "
             "after it ends' — use get_revenue_today_projection for those. "
@@ -1273,9 +1272,9 @@ TOOLS = [
         "name": "get_revenue_today_projection",
         "description": (
             "Project today's END-OF-DAY revenue using a 90-day hour-of-day arrival curve and "
-            "8-week same-weekday median baseline. Returns a pre-formatted Slack mrkdwn string — "
-            "deliver verbatim. Leads with one number plus a confidence range, pace vs typical at "
-            "this hour, and typical same-weekday EOD comparison. Refuses to project before 10am CT "
+            "8-week same-weekday median baseline. Leads with one number plus a confidence range, "
+            "pace vs typical at this hour, and typical same-weekday EOD comparison. "
+            "Refuses to project before 10am CT "
             "or when the curve sample is thin. "
             "Use for: 'project today's revenue', 'estimate today's revenue', 'EOD revenue', "
             "'what will today land at', 'how much will we make today', 'forecast today', "
@@ -1778,9 +1777,8 @@ _INTENT_ROUTER: dict[str, dict] = {
         ],
         "context": (
             "You are answering a fleet-level publisher health question. "
-            "Use get_publisher_fleet_health — it returns a pre-formatted ranked fleet summary "
-            "with at-risk publishers first. Deliver the formatted string verbatim. "
-            "Always return visible output."
+            "Use get_publisher_fleet_health — it returns a formatted ranked fleet summary "
+            "with at-risk publishers first. Always return visible output."
         ),
     },
     "publisher_health": {
@@ -3318,7 +3316,7 @@ def get_advertiser_revenue_projection(
         "data_quality":              _data_quality_tier(30, total_sessions_30d),
     }
 
-    # Build pre-formatted Slack output — prevents silent LLM synthesis failures
+    # Build formatted Slack output for LLM synthesis
     _lines = []
     if result.get("cap_applied"):
         _monthly_cap = result.get("monthly_cap_total", 0)
@@ -3350,7 +3348,6 @@ def get_advertiser_revenue_projection(
             _pshare = _pub.get("share_pct", 0)
             _lines.append(f"• {_pname}: ${_prev:,.0f} ({_pshare:.0f}%)")
     result["formatted"] = "\n".join(_lines)
-    result["pre_formatted"] = True
 
     return result
 
@@ -4728,7 +4725,7 @@ def get_offers_for_publisher(publisher_name: str) -> dict:  # returns dict since
 def get_revenue_today() -> dict:
     """
     Return today's intraday revenue by publisher vs 30-day rolling average.
-    Pre-formatted as Slack mrkdwn — deliver verbatim, do not reformat.
+    Returns formatted Slack mrkdwn in the 'formatted' key for LLM synthesis.
 
     Format spec:
         *$14K today*, 58% of daily avg. Still early.
@@ -4824,7 +4821,6 @@ GROUP BY c.user_id
         if not publishers:
             return {
                 "formatted": "_No revenue data yet today. Check back after 9am CT._",
-                "pre_formatted": True,
             }
 
         # Headline
@@ -4848,7 +4844,7 @@ GROUP BY c.user_id
             rest_total = sum(p["rev"] for p in rest)
             lines.append(f"> {len(rest)} others · {_fmt_rev(rest_total)} combined")
 
-        return {"formatted": "\n".join(lines), "pre_formatted": True}
+        return {"formatted": "\n".join(lines)}
 
     except Exception as e:
         from scout_ch import CHBusyError
@@ -4857,23 +4853,22 @@ GROUP BY c.user_id
         log.exception("get_revenue_today failed")
         return {
             "formatted": "⚠️ Revenue data unavailable — query failed. Try again or check ClickHouse.",
-            "pre_formatted": True,
         }
 
 
 def get_revenue_today_projection() -> dict:
     """
     Project today's end-of-day revenue using a 60-day hour-of-day arrival curve
-    and 8-week same-weekday median baseline. Pre-formatted Slack mrkdwn —
-    deliver verbatim, do not reformat.
+    and 8-week same-weekday median baseline. Returns formatted Slack mrkdwn
+    in the 'formatted' key for LLM synthesis.
 
     Status dispatch:
         ok                    → "Projected EOD: *$X* (range $Y-$Z based on ±10% pace error).
                                  Currently *$A* — tracking *B%* of typical for this hour.
                                  Typical {weekday} lands ~*$C*."
-        too_early             → verbatim helper string (before 10am CT)
-        insufficient_history  → verbatim helper string
-        unstable / error      → verbatim helper string
+        too_early             → formatted helper string (before 10am CT)
+        insufficient_history  → formatted helper string
+        unstable / error      → formatted helper string
     """
     try:
         ch = _get_ch_client()
@@ -4882,7 +4877,7 @@ def get_revenue_today_projection() -> dict:
 
         if status != "ok":
             formatted = result.get("formatted") or "⚠️ Projection unavailable."
-            return {"formatted": formatted, "pre_formatted": True}
+            return {"formatted": formatted}
 
         projected = result.get("projected_full_day") or 0.0
         today_rev = result.get("today_revenue") or 0.0
@@ -4922,13 +4917,12 @@ def get_revenue_today_projection() -> dict:
         if warning:
             lines.append(f"⚠️ {warning}")
 
-        return {"formatted": "\n".join(lines), "pre_formatted": True}
+        return {"formatted": "\n".join(lines)}
 
     except Exception:
         log.exception("get_revenue_today_projection failed")
         return {
             "formatted": "⚠️ Projection unavailable — query failed. Try again or check ClickHouse.",
-            "pre_formatted": True,
         }
 
 
@@ -5133,7 +5127,7 @@ def get_publisher_fleet_health(
     - Healthy: on or above baseline (top 3 gains shown)
     - Platform alarm: > 5 Act Now publishers simultaneously
 
-    Returns pre_formatted Slack text for direct rendering.
+    Returns formatted Slack text in the 'formatted' key.
     """
     try:
         days = max(1, min(90, int(days)))
@@ -5142,13 +5136,12 @@ def get_publisher_fleet_health(
         ch = _get_ch_client()
         result = get_publisher_fleet_health_data(ch, days=days)
 
-        return {"formatted": _format_fleet_health(result, days), "pre_formatted": True}
+        return {"formatted": _format_fleet_health(result, days)}
 
     except Exception:
         log.exception("get_publisher_fleet_health failed")
         return {
             "formatted": "⚠️ Fleet health unavailable — query failed. Try again or check ClickHouse.",
-            "pre_formatted": True,
         }
 
 
@@ -6029,21 +6022,6 @@ def _run_tool_loop(
                         duration_ms=_dur(),
                     )
             return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur())
-
-        # Short-circuit for pre-formatted tool results — bypass the LLM entirely.
-        # The LLM cannot reliably deliver mrkdwn strings verbatim across a tool_result
-        # boundary; returning directly is the only way to guarantee format fidelity.
-        for tr in tool_results:
-            try:
-                payload = json.loads(tr.get("content", "{}"))
-            except (ValueError, AttributeError):
-                continue
-            if isinstance(payload, dict) and payload.get("pre_formatted") and payload.get("formatted"):
-                return AskResult(
-                    text=payload["formatted"],
-                    tools_called=_tools_called,
-                    duration_ms=_dur(),
-                )
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
