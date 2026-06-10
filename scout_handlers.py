@@ -1115,7 +1115,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     )
     _placeholder_ts_sg = placeholder["ts"]
     _stage: list = [""]
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, query=query, stage_ref=_stage)
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, stage_ref=_stage)
 
     # Build thread history (mirrors handle_event)
     history = []
@@ -1615,7 +1615,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
         )
         _placeholder_ts_ah = placeholder["ts"]
         _stage: list = [""]
-        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, query=query, stage_ref=_stage)
+        stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, stage_ref=_stage)
 
         try:
             _t0 = time.monotonic()
@@ -3087,7 +3087,7 @@ def _handle_event_impl(req: SocketModeRequest):
     )
     _placeholder_ts = placeholder["ts"]
     _stage: list = [""]
-    stop_rotating = _rotating_status(web, channel, _placeholder_ts, query=query, stage_ref=_stage)
+    stop_rotating = _rotating_status(web, channel, _placeholder_ts, stage_ref=_stage)
 
     try:
         _t0 = time.monotonic()

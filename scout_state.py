@@ -705,7 +705,6 @@ def _rotating_status(
     channel: str,
     ts: str,
     interval: float = 2.0,
-    query: str = "",
     stage_ref: "list[str] | None" = None,
 ):
     """Rotating status with typing indicator — returns stop function."""
