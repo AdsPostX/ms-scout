@@ -33,7 +33,7 @@ slash/mention format parity.
 
 ## Verification
 
-```
+```bash
 python3 smoke_test.py → ALL PASS (4 new tests included)
 python3 -c "from scout_agent import _match_command, _format_status_response, _cmd_status; print('ok')" → ok
 grep -c "Benchmarks:.*Offers:.*Queue" scout_handlers.py → 0
