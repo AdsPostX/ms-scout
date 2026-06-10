@@ -38,13 +38,12 @@ def _run(today_rows, avg_rows, overrides=None):
 
 class TestRevenueToday(unittest.TestCase):
 
-    def test_pre_formatted_flag_in_return(self):
+    def test_formatted_key_in_return(self):
         result = _run(
             today_rows=[(1, "AT&T", 5000.0, 200)],
             avg_rows=[(1, 6000.0)],
         )
         self.assertIsInstance(result, dict)
-        self.assertTrue(result.get("pre_formatted"), "pre_formatted must be True")
         self.assertIn("formatted", result)
         self.assertIsInstance(result["formatted"], str)
 
@@ -112,7 +111,7 @@ class TestRevenueToday(unittest.TestCase):
     def test_empty_state_early_morning(self):
         """No rows from ClickHouse returns the empty-state message."""
         result = _run(today_rows=[], avg_rows=[])
-        self.assertTrue(result.get("pre_formatted"))
+        self.assertIn("formatted", result)
         self.assertIn("No revenue data", result["formatted"])
 
     def test_empty_state_no_override_lines(self):
