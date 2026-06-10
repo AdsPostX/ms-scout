@@ -1741,7 +1741,7 @@ def publisher_fleet_health_stats(
             FROM mv_adpx_users
         ),
         tiers AS (
-            SELECT user_id AS publisher_id, toString(tier) AS tier
+            SELECT toString(user_id) AS publisher_id, toString(tier) AS tier
             FROM from_airbyte_partner_categories
         )
         SELECT
@@ -1763,7 +1763,7 @@ def publisher_fleet_health_stats(
         FROM baseline b
         LEFT JOIN publishers p ON p.publisher_id = b.publisher_id
         LEFT JOIN current_window cw ON cw.publisher_id = b.publisher_id
-        LEFT JOIN tiers t ON t.publisher_id = b.publisher_id
+        LEFT JOIN tiers t ON t.publisher_id = toString(b.publisher_id)
         WHERE b.revenue_mean >= {min_revenue: Float64}
         ORDER BY (b.revenue_mean - coalesce(cw.revenue_actual, 0)) DESC
         """,
