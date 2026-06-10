@@ -79,6 +79,14 @@ services:
     envVars:
       - key: DEMAND_FEED_PORT
         value: "8080"
+      # Monitor routing — shadow/QA mode posts to #sidd-qa
+      - key: SCOUT_HOURLY_SHADOW_ENABLED
+        value: "true"
+      - key: SCOUT_SHADOW_CHANNEL
+        value: C0AQEECF800   # #sidd-qa
+      # Revenue tracker — enabled
+      - key: REVENUE_TRACKER_ENABLED
+        value: "true"
       # Slack — required for monitor alarms to post alerts
       - key: SLACK_BOT_TOKEN
         sync: false
