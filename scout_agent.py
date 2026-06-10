@@ -1261,7 +1261,8 @@ TOOLS = [
             "after it ends' — use get_revenue_today_projection for those. "
             "Use for: 'how is revenue today', 'how are we doing today', 'how we looking', "
             "'today's revenue', 'revenue so far today', 'what's revenue at', 'how we doing'. "
-            "Do NOT use run_sql_query for today's revenue — this tool exists specifically for this question."
+            "Do NOT use run_sql_query for today's revenue — this tool exists specifically for this question. "
+            "Deliver the value of the 'formatted' key in the result verbatim."
         ),
         "input_schema": {
             "type": "object",
@@ -1279,7 +1280,8 @@ TOOLS = [
             "Use for: 'project today's revenue', 'estimate today's revenue', 'EOD revenue', "
             "'what will today land at', 'how much will we make today', 'forecast today', "
             "'after it ends', 'how much do you estimate our revenue for today'. "
-            "Do NOT use for 'revenue so far today' — that's get_revenue_today."
+            "Do NOT use for 'revenue so far today' — that's get_revenue_today. "
+            "Deliver the value of the 'formatted' key in the result verbatim."
         ),
         "input_schema": {
             "type": "object",
