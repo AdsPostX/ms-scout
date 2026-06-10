@@ -112,8 +112,8 @@ _CATEGORY_TO_PTYPE: dict[str, str] = {
     "CLICK": "CPC",
 }
 
-# Impact raw payout-type string → human-readable display label.
-_IMPACT_DISPLAY_PTYPE_MAP: dict[str, str] = {
+# Raw payout-type string → human-readable display label (used by parse_payout).
+_PAYOUT_TYPE_NORM_MAP: dict[str, str] = {
     "percentage": "% of Sale",
     "% of sale":  "% of Sale",
     "% per sale": "% of Sale",
@@ -862,7 +862,7 @@ def parse_payout(raw_payout: str, raw_type: str) -> "PayoutResult":
                    (common cause: Impact CPS/SALE contract with missing PercentageRate)
     """
     norm_type = "Unknown"
-    for key, val in _IMPACT_DISPLAY_PTYPE_MAP.items():
+    for key, val in _PAYOUT_TYPE_NORM_MAP.items():
         if key in raw_type.lower():
             norm_type = val
             break
