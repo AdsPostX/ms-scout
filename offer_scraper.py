@@ -99,6 +99,12 @@ for _ef_name in ("GIDDYUP", "ACCIOADS", "KLAYMEDIA", "CREDITCOM", "MWKCONSULTING
     if _ef_key and _ef_url:
         EVERFLOW_INSTANCES.append((_ef_name.lower(), _ef_key, _ef_url))
 
+# Shared payout-type abbreviation map used by TUNE and Everflow network adapters.
+# Maps lowercase raw network codes to canonical MS type labels.
+_NETWORK_PTYPE_MAP: dict[str, str] = {
+    "cpa": "CPA", "cpl": "CPL", "cps": "CPS", "cpc": "CPC", "revshare": "CPS",
+}
+
 # Notion — primary output destination
 # Setup: notion.so/my-integrations → create integration → copy secret_... token
 #        Then share the "Offer Inventory — MS Network" database with that integration
@@ -1989,8 +1995,7 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
             if not offer_id or not name:
                 continue
 
-            ptype_map  = {"cpa": "CPA", "cpl": "CPL", "cps": "CPS", "cpc": "CPC", "revshare": "CPS"}
-            ptype      = ptype_map.get(str(ptype_raw).lower(), "CPA")
+            ptype      = _NETWORK_PTYPE_MAP.get(str(ptype_raw).lower(), "CPA")
             payout_str = str(payout_val or "")
             raw_payout = f"${payout_str} {ptype}" if payout_str else "Commission varies"
 
@@ -2115,8 +2120,7 @@ def fetch_everflow_instance(label: str, api_key: str, base_url: str) -> list:
             if not offer_id or not name:
                 continue
 
-            ptype_map = {"cpa": "CPA", "cpl": "CPL", "cps": "CPS", "cpc": "CPC", "revshare": "CPS"}
-            ptype     = ptype_map.get(str(ptype_raw).lower(), "CPA")
+            ptype     = _NETWORK_PTYPE_MAP.get(str(ptype_raw).lower(), "CPA")
             payout_str = str(payout_val or "")
             raw_payout = f"${payout_str} {ptype}" if payout_str and payout_str not in ("0", "0.0") else "Commission varies"
 
