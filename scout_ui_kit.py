@@ -725,45 +725,63 @@ def _build_advertiser_rpm_context_blocks(ctx: dict, scout_estimate: float = 0) -
 
 
 # ---------------------------------------------------------------------------
-# Campaign brief blocks
+# Campaign brief blocks — helpers
 # ---------------------------------------------------------------------------
-def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:  # noqa: ARG001
-    """Build a Slack Block Kit message for a campaign brief."""
-    advertiser   = brief_data.get("advertiser", "Offer")
-    network      = brief_data.get("network", "").title()
-    payout       = brief_data.get("payout", "Rate TBD")
-    geo          = brief_data.get("geo", "")
-    tracking_url = brief_data.get("tracking_url", "")
-    offer_id     = brief_data.get("offer_id", "")
-    performance  = brief_data.get("performance_context", "")
-    hero_url     = brief_data.get("hero_url", "")
-    icon_url     = brief_data.get("icon_url", "")
-    ms_status    = brief_data.get("ms_status", "")
-    score_rpm    = brief_data.get("scout_score_rpm", 0)
-    portal_url   = brief_data.get("portal_url", "")
-    risk_flag    = brief_data.get("risk_flag", "")
-    restrictions = brief_data.get("restrictions", "")
 
-    titles       = copy.get("titles", [])
-    ctas         = copy.get("ctas", [])
-    title        = copy.get("title", "") or (titles[0] if titles else "")
-    title_backup = copy.get("title_backup", "") or (titles[1] if len(titles) > 1 else "")
-    description  = copy.get("description", "")
-    short_desc   = copy.get("short_desc", "")
-    cta          = copy.get("cta") or (ctas[0] if ctas else None)
-    targeting    = copy.get("targeting", "")
-    bottom       = copy.get("bottom_line", "")
+def _brief_extract_fields(brief_data: dict, copy: dict) -> dict:
+    """Unpack brief_data and copy into a flat dict for downstream helpers."""
+    titles = copy.get("titles", [])
+    ctas   = copy.get("ctas", [])
+    return {
+        # from brief_data
+        "advertiser":   brief_data.get("advertiser", "Offer"),
+        "network":      brief_data.get("network", "").title(),
+        "payout":       brief_data.get("payout", "Rate TBD"),
+        "geo":          brief_data.get("geo", ""),
+        "tracking_url": brief_data.get("tracking_url", ""),
+        "offer_id":     brief_data.get("offer_id", ""),
+        "performance":  brief_data.get("performance_context", ""),
+        "hero_url":     brief_data.get("hero_url", ""),
+        "icon_url":     brief_data.get("icon_url", ""),
+        "ms_status":    brief_data.get("ms_status", ""),
+        "score_rpm":    brief_data.get("scout_score_rpm", 0),
+        "portal_url":   brief_data.get("portal_url", ""),
+        "risk_flag":    brief_data.get("risk_flag", ""),
+        "restrictions": brief_data.get("restrictions", ""),
+        # from copy
+        "title":        copy.get("title", "") or (titles[0] if titles else ""),
+        "title_backup": copy.get("title_backup", "") or (titles[1] if len(titles) > 1 else ""),
+        "description":  copy.get("description", ""),
+        "short_desc":   copy.get("short_desc", ""),
+        "cta":          copy.get("cta") or (ctas[0] if ctas else None),
+        "targeting":    copy.get("targeting", ""),
+        "bottom":       copy.get("bottom_line", ""),
+    }
 
-    blocks = []
 
-    status_tag = {"Not in System": " · New", "Live": " · Already Live", "In System": " · In System"}.get(ms_status, "")
-    blocks.append({
+def _build_brief_header(f: dict) -> list:
+    """Return the header block with advertiser name and MS-status tag."""
+    status_tag = {
+        "Not in System": " · New",
+        "Live":          " · Already Live",
+        "In System":     " · In System",
+    }.get(f["ms_status"], "")
+    return [{
         "type": "header",
-        "text": {"type": "plain_text", "text": f"Campaign Brief — {advertiser}{status_tag}", "emoji": False},
-    })
+        "text": {
+            "type":  "plain_text",
+            "text":  f"Campaign Brief — {f['advertiser']}{status_tag}",
+            "emoji": False,
+        },
+    }]
 
+
+def _build_brief_stats(f: dict) -> list:
+    """Return the stats section (network/payout/geo/RPM) plus optional icon."""
     _HIGH_FRICTION_TAGS = ("B2B intent", "Loan/credit", "Medical program", "Biz-opp", "Insurance")
-    is_high_friction = any(tag in (risk_flag or "") for tag in _HIGH_FRICTION_TAGS)
+    is_high_friction = any(tag in (f["risk_flag"] or "") for tag in _HIGH_FRICTION_TAGS)
+    score_rpm   = f["score_rpm"]
+    performance = f["performance"]
 
     if not score_rpm and is_high_friction:
         rpm_display = "Not estimated\n_conversion complexity too high_"
@@ -771,58 +789,76 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
         rpm_display = "N/A\n_no MS data at any tier_"
     elif performance and "Real MS data" in performance:
         rpm_display = f"${score_rpm:,.0f}"
-    elif performance and "advertiser benchmark" in performance:
-        rpm_display = f"~${score_rpm:,.0f} est."
-    elif performance and "benchmark" in performance:
+    elif performance and ("advertiser benchmark" in performance or "benchmark" in performance):
         rpm_display = f"~${score_rpm:,.0f} est."
     else:
         rpm_display = f"~${score_rpm:,.0f} est.\n_broad avg_"
 
     stat_fields = [
-        {"type": "mrkdwn", "text": f"*Network*\n{network}"},
-        {"type": "mrkdwn", "text": f"*Payout*\n{payout}"},
-        {"type": "mrkdwn", "text": f"*Geo*\n{geo or 'Not specified'}"},
+        {"type": "mrkdwn", "text": f"*Network*\n{f['network']}"},
+        {"type": "mrkdwn", "text": f"*Payout*\n{f['payout']}"},
+        {"type": "mrkdwn", "text": f"*Geo*\n{f['geo'] or 'Not specified'}"},
         {"type": "mrkdwn", "text": f"*Est. RPM*\n{rpm_display}"},
     ]
     stats_block: dict = {"type": "section", "fields": stat_fields}
+    icon_url = f["icon_url"]
     if icon_url and icon_url.startswith("http"):
         stats_block["accessory"] = {
-            "type": "image",
+            "type":      "image",
             "image_url": icon_url,
-            "alt_text": advertiser,
+            "alt_text":  f["advertiser"],
         }
-    blocks.append(stats_block)
+    return [stats_block]
 
-    if risk_flag:
-        blocks.extend(_build_alert_block("warning", f"Fit note: {risk_flag}", ""))
 
+def _build_brief_risk(f: dict) -> list:
+    """Return warning alert + divider; alert is omitted when no risk flag is set."""
+    blocks = []
+    if f["risk_flag"]:
+        blocks.extend(_build_alert_block("warning", f"Fit note: {f['risk_flag']}", ""))
     blocks.append({"type": "divider"})
+    return blocks
 
-    _PROHIBITED_CHARS = ("—", "–", "™", "®")
 
-    def _copy_qa(text: str, max_len: int) -> str:
-        length = len(text)
-        has_prohibited = any(c in text for c in _PROHIBITED_CHARS)
-        if has_prohibited:
-            flagged = [c for c in _PROHIBITED_CHARS if c in text]
-            return f"⚠ prohibited chars: {', '.join(repr(c) for c in flagged)}"
-        if length > max_len:
-            return f"⚠ {length} chars (max {max_len})"
-        return f"✓ {length} chars"
+_BRIEF_PROHIBITED_CHARS = ("—", "–", "™", "®")
+
+
+def _brief_copy_qa(text: str, max_len: int) -> str:
+    """Return a QA annotation string for a copy field."""
+    length = len(text)
+    has_prohibited = any(c in text for c in _BRIEF_PROHIBITED_CHARS)
+    if has_prohibited:
+        flagged = [c for c in _BRIEF_PROHIBITED_CHARS if c in text]
+        return f"⚠ prohibited chars: {', '.join(repr(c) for c in flagged)}"
+    if length > max_len:
+        return f"⚠ {length} chars (max {max_len})"
+    return f"✓ {length} chars"
+
+
+def _build_brief_copy(f: dict) -> list:
+    """Return copy blocks: headline, description, short desc, CTA, detail fields, divider."""
+    blocks      = []
+    title        = f["title"]
+    title_backup = f["title_backup"]
+    description  = f["description"]
+    short_desc   = f["short_desc"]
+    cta          = f["cta"]
+    restrictions = f["restrictions"]
+    tracking_url = f["tracking_url"]
+    offer_id     = f["offer_id"]
+    portal_url   = f["portal_url"]
+    network      = f["network"]
 
     if title:
-        title_qa  = _copy_qa(title, 58)
+        title_qa   = _brief_copy_qa(title, 58)
         title_text = f"*Headline:* {title}  _{title_qa}_"
         if title_backup:
-            backup_qa = _copy_qa(title_backup, 58)
+            backup_qa   = _brief_copy_qa(title_backup, 58)
             title_text += f"\n_A/B: {title_backup}  {backup_qa}_"
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": title_text},
-        })
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": title_text}})
 
     if description:
-        desc_qa = _copy_qa(description, 170)
+        desc_qa = _brief_copy_qa(description, 170)
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": f"*Description:* {description}  _{desc_qa}_"},
@@ -858,59 +894,80 @@ def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> li
         })
 
     blocks.append({"type": "divider"})
-
-    context_elements = []
-    footer_parts = []
-    if bottom:
-        footer_parts.append(f"_{bottom}_")
-
-    if footer_parts:
-        context_elements.append({"type": "mrkdwn", "text": "\n".join(footer_parts)})
-    if context_elements:
-        blocks.append({"type": "context", "elements": context_elements})
-
-    if thread_ts:
-        cta_obj = copy.get("cta") or {}
-        _btn_json = json.dumps({
-            "advertiser":   advertiser,
-            "offer_id":     offer_id,
-            "payout":       payout,
-            "network":      network,
-            "tracking_url": tracking_url,
-            "thread_ts":    thread_ts,
-            "t":   (copy.get("title", ""))[:120],
-            "d":   (copy.get("description", ""))[:200],
-            "cy":  (cta_obj.get("yes", ""))[:60],
-            "cn":  (cta_obj.get("no", ""))[:60],
-            "rpm": brief_data.get("scout_score_rpm", 0),
-            "pf":  (brief_data.get("performance_context", ""))[:120],
-            "rf":  (brief_data.get("risk_flag", ""))[:80],
-            "pt":  (brief_data.get("payout_type", "CPA"))[:10],
-        }, separators=(",", ":"))
-        try:
-            json.loads(_btn_json[:2900])
-            btn_val = _btn_json[:2900]
-        except json.JSONDecodeError:
-            btn_val = json.dumps({
-                "advertiser":   advertiser,
-                "offer_id":     offer_id,
-                "payout":       payout,
-                "network":      network,
-                "tracking_url": tracking_url[:200],
-                "thread_ts":    thread_ts,
-            }, separators=(",", ":"))[:2900]
-        blocks.append({
-            "type": "actions",
-            "elements": [{
-                "type":      "button",
-                "text":      {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
-                "style":     "primary",
-                "action_id": "scout_brief_queue",
-                "value":     btn_val,
-            }],
-        })
-
     return blocks
+
+
+def _build_brief_footer(f: dict) -> list:
+    """Return a context block with the bottom-line note, if present."""
+    if not f["bottom"]:
+        return []
+    return [{
+        "type":     "context",
+        "elements": [{"type": "mrkdwn", "text": f"_{f['bottom']}_"}],
+    }]
+
+
+def _build_brief_queue_button(
+    f: dict, copy: dict, brief_data: dict, thread_ts: str
+) -> list:
+    """Return the 'Add to Queue' actions block when thread_ts is set."""
+    if not thread_ts:
+        return []
+    cta_obj   = copy.get("cta") or {}
+    _btn_json = json.dumps({
+        "advertiser":   f["advertiser"],
+        "offer_id":     f["offer_id"],
+        "payout":       f["payout"],
+        "network":      f["network"],
+        "tracking_url": f["tracking_url"],
+        "thread_ts":    thread_ts,
+        "t":   (copy.get("title", ""))[:120],
+        "d":   (copy.get("description", ""))[:200],
+        "cy":  (cta_obj.get("yes", ""))[:60],
+        "cn":  (cta_obj.get("no", ""))[:60],
+        "rpm": brief_data.get("scout_score_rpm", 0),
+        "pf":  (brief_data.get("performance_context", ""))[:120],
+        "rf":  (brief_data.get("risk_flag", ""))[:80],
+        "pt":  (brief_data.get("payout_type", "CPA"))[:10],
+    }, separators=(",", ":"))
+    try:
+        json.loads(_btn_json[:2900])
+        btn_val = _btn_json[:2900]
+    except json.JSONDecodeError:
+        btn_val = json.dumps({
+            "advertiser":   f["advertiser"],
+            "offer_id":     f["offer_id"],
+            "payout":       f["payout"],
+            "network":      f["network"],
+            "tracking_url": f["tracking_url"][:200],
+            "thread_ts":    thread_ts,
+        }, separators=(",", ":"))[:2900]
+    return [{
+        "type": "actions",
+        "elements": [{
+            "type":      "button",
+            "text":      {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
+            "style":     "primary",
+            "action_id": "scout_brief_queue",
+            "value":     btn_val,
+        }],
+    }]
+
+
+# ---------------------------------------------------------------------------
+# Campaign brief blocks — orchestrator
+# ---------------------------------------------------------------------------
+def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:
+    """Build a Slack Block Kit message for a campaign brief."""
+    f = _brief_extract_fields(brief_data, copy)
+    return (
+        _build_brief_header(f)
+        + _build_brief_stats(f)
+        + _build_brief_risk(f)
+        + _build_brief_copy(f)
+        + _build_brief_footer(f)
+        + _build_brief_queue_button(f, copy, brief_data, thread_ts)
+    )
 
 
 # ---------------------------------------------------------------------------
