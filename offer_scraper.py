@@ -99,6 +99,47 @@ for _ef_name in ("GIDDYUP", "ACCIOADS", "KLAYMEDIA", "CREDITCOM", "MWKCONSULTING
     if _ef_key and _ef_url:
         EVERFLOW_INSTANCES.append((_ef_name.lower(), _ef_key, _ef_url))
 
+# ---------------------------------------------------------------------------
+# NETWORK ENDPOINTS — single source of truth for all API URLs.
+# fetch_tune_instance() and fetch_everflow_instance() take base_url as a
+# parameter from the caller (env-var-driven) so they are not listed here.
+# ---------------------------------------------------------------------------
+_NETWORK_ENDPOINTS: dict[str, object] = {
+    "impact": {
+        # All Impact endpoints share the same mediapartner base path.
+        # Caller substitutes {sid} with IMPACT_SID.
+        "base":      "https://api.impact.com/Mediapartners/{sid}",
+        "campaigns": "https://api.impact.com/Mediapartners/{sid}/Campaigns",
+        "ads":       "https://api.impact.com/Mediapartners/{sid}/Ads",
+        "contracts": "https://api.impact.com/Mediapartners/{sid}/Campaigns/{cid}/Contracts/Active",
+    },
+    "flexoffers": {
+        "advertisers": "https://api.flexoffers.com/advertisers",
+    },
+    "maxbounty": {
+        "base": "https://api.maxbounty.com/affiliates/api",
+    },
+    "notion": {
+        "base": "https://api.notion.com/v1",
+    },
+    "cj": {
+        "commissions": "https://commissions.api.cj.com/query",
+        "link_search": "https://linksearch.api.cj.com/v2/link-search",
+    },
+    "shareasale": {
+        "api":     "https://api.shareasale.com/x.cfm",
+        "tracking": "https://www.shareasale.com/r.cfm",
+    },
+    "rakuten": {
+        "advertisers": "https://api.rakutenmarketing.com/1.0/publisher/advertisers",
+        "tracking":    "https://click.linksynergy.com/deeplink",
+    },
+    "awin": {
+        "programmes": "https://api.awin.com/publishers/{publisher_id}/programmes",
+        "tracking":   "https://www.awin1.com/cread.php",
+    },
+}
+
 # Shared payout-type abbreviation map used by TUNE and Everflow network adapters.
 # Maps lowercase raw network codes to canonical MS type labels.
 _NETWORK_PTYPE_MAP: dict[str, str] = {
@@ -283,7 +324,7 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
 
     for idx, cid in enumerate(missing, 1):
         # Payout lives in the active contract, not a separate /Actions endpoint
-        url = f"https://api.impact.com/Mediapartners/{IMPACT_SID}/Campaigns/{cid}/Contracts/Active"
+        url = _NETWORK_ENDPOINTS["impact"]["contracts"].format(sid=IMPACT_SID, cid=cid)
         try:
             resp = requests.get(
                 url,
@@ -356,7 +397,7 @@ def _fetch_impact_ads_data() -> tuple:
                    MediaUrl = full-size ad banner; ThumbnailUrl = smaller preview.
                    Zero extra API calls — this endpoint already runs every scrape cycle.
     """
-    url = f"https://api.impact.com/Mediapartners/{IMPACT_SID}/Ads"
+    url = _NETWORK_ENDPOINTS["impact"]["ads"].format(sid=IMPACT_SID)
     cat_map     = {}
     creative_map = {}
     page = 1
@@ -412,7 +453,7 @@ def _fetch_impact_ads_data() -> tuple:
 
 def _fetch_impact_campaigns_raw() -> list:
     """Fetch raw campaign dicts from Impact API (pagination only, no enrichment)."""
-    url = f"https://api.impact.com/Mediapartners/{IMPACT_SID}/Campaigns"
+    url = _NETWORK_ENDPOINTS["impact"]["campaigns"].format(sid=IMPACT_SID)
     params = {"PageSize": 1000}
     campaigns_all = []
     page = 1
@@ -545,7 +586,7 @@ def fetch_flexoffers() -> list:
     Response root: {"results": [...]}
     """
     log.info("FlexOffers: fetching advertisers...")
-    url = "https://api.flexoffers.com/advertisers"
+    url = _NETWORK_ENDPOINTS["flexoffers"]["advertisers"]
     headers = {"ApiKey": FLEXOFFERS_API_KEY}
     params = {
         "domainId":          FLEXOFFERS_DOMAIN_ID,
@@ -639,7 +680,7 @@ def fetch_maxbounty() -> list:
     Auth: POST /authentication → mb-api-token (expires every 2 hours)
     Campaigns: GET /campaigns/{list} with x-access-token header
     """
-    BASE = "https://api.maxbounty.com/affiliates/api"
+    BASE = _NETWORK_ENDPOINTS["maxbounty"]["base"]
 
     # Step 1: Authenticate
     log.info("MaxBounty: authenticating via REST API...")
@@ -1261,7 +1302,7 @@ def write_notion(offers: list):
         return
 
     headers = _notion_headers()
-    base = "https://api.notion.com/v1"
+    base = _NETWORK_ENDPOINTS["notion"]["base"]
 
     # 1. Fetch all existing pages keyed by unique_key
     log.info("Notion: loading existing offer index...")
@@ -1374,7 +1415,7 @@ def fetch_cj() -> list:
         log.info("CJ: fetching commission rates from publisherCommissions API...")
         try:
             cr = requests.post(
-                "https://commissions.api.cj.com/query",
+                _NETWORK_ENDPOINTS["cj"]["commissions"],
                 headers={**HEADERS, "Content-Type": "application/json"},
                 json={"query": f"""{{
                   publisherCommissions(
@@ -1425,7 +1466,7 @@ def fetch_cj() -> list:
             }
             try:
                 ca_resp = requests.get(
-                    "https://linksearch.api.cj.com/v2/link-search",
+                    _NETWORK_ENDPOINTS["cj"]["link_search"],
                     headers=HEADERS, params=ca_params, timeout=30,
                 )
                 if ca_resp.status_code in (400, 401, 403):
@@ -1464,7 +1505,7 @@ def fetch_cj() -> list:
         }
         try:
             resp = requests.get(
-                "https://linksearch.api.cj.com/v2/link-search",
+                _NETWORK_ENDPOINTS["cj"]["link_search"],
                 headers=HEADERS, params=params, timeout=30,
             )
             if resp.status_code in (400, 401, 403):
@@ -1614,7 +1655,7 @@ def fetch_shareasale() -> list:
             }
             headers = _auth_headers("getMerchants")
             resp = requests.get(
-                f"https://api.shareasale.com/x.cfm",
+                _NETWORK_ENDPOINTS["shareasale"]["api"],
                 headers=headers,
                 params=params,
                 timeout=30,
@@ -1655,7 +1696,7 @@ def fetch_shareasale() -> list:
             else:
                 ptype, raw = "CPA", "Commission varies"
 
-            tracking = f"https://www.shareasale.com/r.cfm?b=1&u={aff_id}&m={merchant_id}"
+            tracking = f"{_NETWORK_ENDPOINTS['shareasale']['tracking']}?b=1&u={aff_id}&m={merchant_id}"
 
             logo = m.get("logoUrl") or m.get("LogoURL") or m.get("thumbnail", "")
             desc_text = m.get("description") or m.get("Description", "")
@@ -1721,7 +1762,7 @@ def fetch_rakuten() -> list:
     while True:
         try:
             resp = requests.get(
-                "https://api.rakutenmarketing.com/1.0/publisher/advertisers",
+                _NETWORK_ENDPOINTS["rakuten"]["advertisers"],
                 headers=headers,
                 params={"network": "2", "page": page, "limit": 100},
                 timeout=30,
@@ -1758,7 +1799,7 @@ def fetch_rakuten() -> list:
 
             # Rakuten publisher link format
             mid     = a.get("mid") or adv_id
-            tracking = f"https://click.linksynergy.com/deeplink?id={RAKUTEN_PUBLISHER_ID}&mid={mid}&murl={site_url}"
+            tracking = f"{_NETWORK_ENDPOINTS['rakuten']['tracking']}?id={RAKUTEN_PUBLISHER_ID}&mid={mid}&murl={site_url}"
 
             commission = a.get("commissionRate") or a.get("baseCommission", "")
             payout_str = str(commission).strip()
@@ -1830,7 +1871,7 @@ def fetch_awin() -> list:
 
     try:
         resp = requests.get(
-            f"https://api.awin.com/publishers/{AWIN_PUBLISHER_ID}/programmes",
+            _NETWORK_ENDPOINTS["awin"]["programmes"].format(publisher_id=AWIN_PUBLISHER_ID),
             headers=headers,
             params={"relationship": "joined", "countryCode": "US"},
             timeout=60,
@@ -1869,7 +1910,7 @@ def fetch_awin() -> list:
         ptype = "CPS"  # Awin is primarily revenue share
         raw   = f"{payout_str}% CPS" if payout_str else "Commission varies"
 
-        tracking = f"https://www.awin1.com/cread.php?awinmid={prog_id}&awinaffid={AWIN_PUBLISHER_ID}&p={site_url}"
+        tracking = f"{_NETWORK_ENDPOINTS['awin']['tracking']}?awinmid={prog_id}&awinaffid={AWIN_PUBLISHER_ID}&p={site_url}"
 
         desc_long  = p.get("longDescription") or p.get("description", "")
         desc_short = p.get("shortDescription") or desc_long
