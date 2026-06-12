@@ -4897,7 +4897,8 @@ def get_revenue_today_projection() -> dict:
 
         # Band sample-size note
         n = result.get("projection_n", 0)
-        band_note = f" ({n} historical {result.get('weekday', weekday)}s)" if n > 0 else ""
+        wd = result.get('weekday', weekday)
+        band_note = f" ({n} historical {wd}{'s' if n != 1 else ''})" if n > 0 else ""
 
         pace_line = (
             f"Currently *{_fmt_rev(today_rev)}* — tracking *{pct_expected:.0f}%* of typical for this hour."

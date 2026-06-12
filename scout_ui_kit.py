@@ -1765,6 +1765,7 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
                 },
             })
 
+        # TODO(App-Home-3.4): wire once scoreboard_rollup() populates these fields
         low_c  = getattr(rollup, "revenue_eod_projection_low_cents",  None)
         high_c = getattr(rollup, "revenue_eod_projection_high_cents", None)
         if low_c and high_c:

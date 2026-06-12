@@ -694,12 +694,14 @@ def _query_intraday_traffic(ch, today_ct, max_hour: int) -> dict:
     imp_sql = """
 SELECT count() AS imps
 FROM adpx_impressions_details
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(toDate({date_str:String}))
 WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate({date_str:String})
   AND toHour(toTimeZone(created_at, 'America/Chicago')) < {max_hour:UInt8}
 """.strip()
     sess_sql = """
 SELECT count() AS sess
 FROM adpx_sdk_sessions
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(toDate({date_str:String}))
 WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate({date_str:String})
   AND toHour(toTimeZone(created_at, 'America/Chicago')) < {max_hour:UInt8}
 """.strip()

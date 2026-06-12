@@ -2866,6 +2866,9 @@ def test_project_today_revenue_band_keys():
              patch("datetime.datetime", _FrozenDt):
             result = scout_ch.project_today_revenue(ch)
 
+        if result.get("status") != "ok":
+            return False, f"expected status=ok, got {result.get('status')!r} — datetime mock may not have applied"
+
         # New keys must be present
         for key in ("projected_low", "projected_high", "projection_n", "diagnostic"):
             if key not in result:
