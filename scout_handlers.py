@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -68,6 +69,39 @@ def _is_under_maintenance(user_id: str) -> bool:
 _BOT_USER_ID: str = ""
 _LAST_THREAD_PER_CHANNEL: dict = {}
 _LAST_THREAD_LOCK = None  # threading.Lock, set by scout_bot
+
+# ── Per-user easter egg responses ────────────────────────────────────────────
+_FUNZONE_USER_ID = "U05BAJK1NH4"
+
+_FUNZONE_QUIPS = [
+    "Hey Toddler :sheep:",
+    "Senior Sheepherder has entered the chat :sheep:",
+    "Easy peazy lemon squeezy. Let me check...",
+    "Before I answer — have you asked Roj for a demo of this?",
+    "On it like a bonnet.",
+    "Baba Ganoush! Okay actually looking...",
+    "Back in your OfferLogic days you just *knew* this stuff.",
+    "Quick Q: is the logo centered? Good. Now —",
+    "Note: this answer would be better as a one-sheeter.",
+    "One line is ideal.. maaaybe two lines max. Anyway —",
+]
+
+def _funzone_preamble() -> str:
+    return random.choice(_FUNZONE_QUIPS)
+
+def _funzone_maintenance_msg(query: str) -> str:
+    q_preview = query[:100]
+    return (
+        ":sheep: *Hey Toddler.*\n\n"
+        "Scout is in the shop right now.\n\n"
+        "Before you spiral:\n"
+        "• Revenue is probably fine\n"
+        "• The logo is almost certainly not centered\n"
+        "• Whatever it is, it's not as bad as Hulu's new CPA\n\n"
+        "We'll be back soon. In the meantime, try asking Roj.\n\n"
+        f"_(your message: \"{q_preview}\")_"
+    )
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _set_bot_user_id(uid: str) -> None:
     global _BOT_USER_ID
@@ -2399,8 +2433,12 @@ def _handle_event_impl(req: SocketModeRequest):
     if _is_under_maintenance(user_id):
         from scout_state import log_maintenance_attempt
         log_maintenance_attempt(user_id, query[:80])
-        web.chat_postEphemeral(channel=channel, user=user_id,
-            text=f":wrench: Scout is offline for maintenance.\n\nYour message: \"{query[:200]}\"")
+        if user_id == _FUNZONE_USER_ID:
+            web.chat_postEphemeral(channel=channel, user=user_id,
+                text=_funzone_maintenance_msg(query))
+        else:
+            web.chat_postEphemeral(channel=channel, user=user_id,
+                text=f":wrench: Scout is offline for maintenance.\n\nYour message: \"{query[:200]}\"")
         return
 
     # ── Correction capture — if this thread has a pending correction, store it ─
@@ -2960,6 +2998,8 @@ def _handle_event_impl(req: SocketModeRequest):
             # to honor the boundary contract instead of __setattr__ bypass.
             if attachment_note and response is not None:
                 response = _dc_replace(response, text=f"{attachment_note}\n\n{response.text}")
+            if user_id == _FUNZONE_USER_ID and response is not None:
+                response = _dc_replace(response, text=f"_{_funzone_preamble()}_\n\n{response.text}")
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
             _tools_called = response.tools_called
@@ -3083,6 +3123,8 @@ def _handle_event_impl(req: SocketModeRequest):
         # to honor the boundary contract instead of __setattr__ bypass.
         if attachment_note and response is not None:
             response = _dc_replace(response, text=f"{attachment_note}\n\n{response.text}")
+        if user_id == _FUNZONE_USER_ID and response is not None:
+            response = _dc_replace(response, text=f"_{_funzone_preamble()}_\n\n{response.text}")
         _elapsed = int(time.monotonic() - _t0)
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting
