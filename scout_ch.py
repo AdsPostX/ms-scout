@@ -857,20 +857,29 @@ def project_today_revenue(ch) -> dict:
     t_band  = curve.get("traffic_by_dow", {}).get(dow, {}).get(curve_hour)
     imp_baseline = t_band.get("impressions_p50", 0) if t_band else 0
 
-    if traffic and t_band and imp_baseline > 0:
-        imp_dev = (traffic["impressions"] - imp_baseline) / imp_baseline
-        dow_median_val = curve["dow_median"].get(dow)
-        denom = dow_median_val or today_revenue or 1.0
-        rev_dev = (today_revenue / denom - p50) / p50
-
-        if rev_dev < -DEVIATION_THRESHOLD and abs(imp_dev) < DEVIATION_THRESHOLD:
-            diagnostic = "efficiency"
-        elif rev_dev < -DEVIATION_THRESHOLD and imp_dev < -DEVIATION_THRESHOLD:
+    if traffic and t_band:
+        if imp_baseline <= 0:
+            # No historical baseline — cannot compute imp_dev; skip classification.
+            pass
+        elif traffic["impressions"] == 0:
+            # Hard traffic outage: zero impressions against a positive baseline.
+            # imp_dev would be -1.0 (100% below baseline) — classify directly
+            # rather than falling through to diagnostic=None.
             diagnostic = "traffic"
-        elif rev_dev > DEVIATION_THRESHOLD and imp_dev > DEVIATION_THRESHOLD:
-            diagnostic = "traffic_upside"
         else:
-            diagnostic = "on_track"
+            imp_dev = (traffic["impressions"] - imp_baseline) / imp_baseline
+            dow_median_val = curve["dow_median"].get(dow)
+            denom = dow_median_val or today_revenue or 1.0
+            rev_dev = (today_revenue / denom - p50) / p50
+
+            if rev_dev < -DEVIATION_THRESHOLD and abs(imp_dev) < DEVIATION_THRESHOLD:
+                diagnostic = "efficiency"
+            elif rev_dev < -DEVIATION_THRESHOLD and imp_dev < -DEVIATION_THRESHOLD:
+                diagnostic = "traffic"
+            elif rev_dev > DEVIATION_THRESHOLD and imp_dev > DEVIATION_THRESHOLD:
+                diagnostic = "traffic_upside"
+            else:
+                diagnostic = "on_track"
 
     base["diagnostic"]                = diagnostic
     base["traffic_impressions_today"] = traffic_impressions_today
