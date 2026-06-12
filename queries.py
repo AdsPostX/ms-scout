@@ -1607,7 +1607,6 @@ def _trend(delta: float) -> str:
 def _revenue_trend_sql(
     entity_col: str,
     group_col: str,
-    period_days: int,
     *,
     actual_metric: str,
     actual_join: str = "",
@@ -1629,12 +1628,6 @@ def _revenue_trend_sql(
                         ``"cv.user_id AS publisher_id"`` or ``"c.adv_name"``.
         group_col:      Column name (no alias) to GROUP BY / JOIN on, e.g.
                         ``"publisher_id"`` or ``"adv_name"``.
-        period_days:    Placeholder — currently unused; ``{days: Int32}`` in
-                        the rendered SQL is bound by the caller at query time.
-                        Present in the signature so future callers can pass
-                        the default window without touching the parameters
-                        dict.  (Must be consistent with the ``days`` key
-                        passed to ``parameters``.)
         actual_metric:  The count/metric column expression for the ``actual``
                         CTE, e.g.
                         ``"count(DISTINCT cv.session_id) AS sessions_actual"``
@@ -1651,7 +1644,8 @@ def _revenue_trend_sql(
         final_select:   The final SELECT … FROM baseline … ORDER BY block
                         (excludes the WITH keyword — that is generated here).
     """
-    _ = period_days  # bound at query time via {days: Int32}
+    if names_cte and not names_cte.lstrip().startswith(","):
+        raise ValueError("names_cte must start with a comma, e.g. \",\\n    names AS (...)\"")
     return f"""
         WITH actual AS (
             SELECT
@@ -1730,7 +1724,6 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
         _revenue_trend_sql(
             entity_col="cv.user_id                                             AS publisher_id",
             group_col="publisher_id",
-            period_days=days,
             actual_metric="count(DISTINCT cv.session_id)                         AS sessions_actual",
             # adpx_conversionsdetails.user_id is the publisher ID — no session join needed.
             actual_join="",
@@ -1998,7 +1991,6 @@ def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[d
         _revenue_trend_sql(
             entity_col="c.adv_name",
             group_col="adv_name",
-            period_days=days,
             actual_metric="count()                                               AS conversions_actual",
             actual_join=_campaign_join,
             historical_join=_campaign_join,
