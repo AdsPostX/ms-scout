@@ -1765,6 +1765,11 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
                 },
             })
 
+        low_c  = getattr(rollup, "revenue_eod_projection_low_cents",  None)
+        high_c = getattr(rollup, "revenue_eod_projection_high_cents", None)
+        if low_c and high_c:
+            blocks.append(context_block(f"Range  ${low_c/100:,.0f} – ${high_c/100:,.0f}"))
+
         from datetime import timezone as _tz
         generated_at = getattr(rollup, "generated_at", None)
         if generated_at is not None:

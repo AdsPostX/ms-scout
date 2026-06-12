@@ -2819,6 +2819,80 @@ def test_too_early_string_verbatim():
         return False, str(e)
 
 
+@test("project_today_revenue_result_has_band_keys")
+def test_project_today_revenue_band_keys():
+    """project_today_revenue result has projected_low, projected_high, projection_n, diagnostic.
+
+    Uses a frozen Wednesday 14:00 CT clock, mocked curve, and mocked traffic so
+    no live ClickHouse connection is needed.
+    """
+    try:
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        import scout_ch
+
+        dow = 3   # Wednesday
+        hour = 14
+        today_rev = 400.0
+
+        curve = {
+            "share_by_dow": {
+                dow: {hour: {"p25": 0.30, "p50": 0.40, "p75": 0.50, "n": 10}}
+            },
+            "dow_median": {dow: 1000.0},
+            "sample_days": {dow: 30},
+            "traffic_by_dow": {
+                dow: {hour: {"impressions_p50": 1000.0, "sessions_p50": 500.0}}
+            },
+        }
+
+        ch = MagicMock()
+        result_mock = MagicMock()
+        result_mock.result_rows = [[today_rev]]
+        ch.query.return_value = result_mock
+
+        frozen_dt = datetime(2026, 6, 3, 14, 0, 0, tzinfo=ZoneInfo("America/Chicago"))
+
+        class _FrozenDt(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen_dt.astimezone(tz) if tz else frozen_dt
+
+        with patch("scout_ch._build_hour_curve", return_value=curve), \
+             patch("scout_ch._query_intraday_traffic",
+                   return_value={"impressions": 950, "sessions": 480}), \
+             patch("scout_ch._revenue_at_hour", return_value=today_rev), \
+             patch("datetime.datetime", _FrozenDt):
+            result = scout_ch.project_today_revenue(ch)
+
+        # New keys must be present
+        for key in ("projected_low", "projected_high", "projection_n", "diagnostic"):
+            if key not in result:
+                return False, f"missing key: {key!r}"
+
+        # Band ordering
+        low = result["projected_low"]
+        mid = result["projected_full_day"]
+        high = result["projected_high"]
+        if low is None or mid is None or high is None:
+            return False, f"band values must not be None when status=ok; got low={low} mid={mid} high={high}"
+        if not (low <= mid <= high):
+            return False, f"band ordering violated: low={low:.2f} mid={mid:.2f} high={high:.2f}"
+
+        # projection_n >= 0
+        n = result["projection_n"]
+        if not isinstance(n, int) or n < 0:
+            return False, f"projection_n must be int >= 0, got {n!r}"
+
+        return True, (
+            f"band keys present; ordering ok (low={low:.0f} mid={mid:.0f} high={high:.0f}); "
+            f"projection_n={n}; diagnostic={result['diagnostic']!r}"
+        )
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Digest UX improvements (markdown + fit_tier + rpm + skip friction) ────────
 
 @test("offer_card_preserves_markdown_in_why_text")

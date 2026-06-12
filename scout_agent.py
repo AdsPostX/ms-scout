@@ -4887,13 +4887,17 @@ def get_revenue_today_projection() -> dict:
         pct_expected = result.get("pct_of_expected")
         as_of_ct = result.get("as_of_ct", "")
 
-        # ±10% pace error band (gates loosen post-backtest in Step 6)
-        low = projected * 0.90
-        high = projected * 1.10
+        # Use p25/p75 historical bands when available; fall back to ±10% arithmetic band
+        low  = result.get("projected_low",  projected * 0.90)
+        high = result.get("projected_high", projected * 1.10)
 
         import datetime as _dt
         from zoneinfo import ZoneInfo as _ZI
         weekday = _dt.datetime.now(_ZI("America/Chicago")).strftime("%A")
+
+        # Band sample-size note
+        n = result.get("projection_n", 0)
+        band_note = f" ({n} historical {result.get('weekday', weekday)}s)" if n > 0 else ""
 
         pace_line = (
             f"Currently *{_fmt_rev(today_rev)}* — tracking *{pct_expected:.0f}%* of typical for this hour."
@@ -4906,12 +4910,23 @@ def get_revenue_today_projection() -> dict:
             else ""
         )
 
+        # Diagnostic labels (experimental)
+        diag_labels = {
+            "efficiency":     "⚠ Traffic normal, revenue soft — conversion efficiency issue (experimental)",
+            "traffic":        "⚠ Both revenue and traffic below baseline — volume issue (experimental)",
+            "traffic_upside": "↑ Traffic and revenue both running ahead of baseline (experimental)",
+        }
+        diag = result.get("diagnostic", "")
+        diag_line = diag_labels.get(diag, "")
+
         lines = [
-            f"Projected EOD: *{_fmt_rev(projected)}* (range {_fmt_rev(low)}-{_fmt_rev(high)} based on ±10% pace error).",
+            f"Projected EOD: *{_fmt_rev(projected)}* (range {_fmt_rev(low)}-{_fmt_rev(high)}{band_note}).",
             pace_line,
         ]
         if median_line:
             lines.append(median_line)
+        if diag_line:
+            lines.append(diag_line)
         if as_of_ct:
             lines.append(f"_As of {as_of_ct} CT._")
 
