@@ -76,6 +76,9 @@ class ScoreboardRollup:
     worry:   list[PublisherDelta] = field(default_factory=list)   # bottom 3 by revenue Δ%
     revenue_7d_series: list[int] = field(default_factory=list)    # 8 daily cents [D-7..D-1, today]
     revenue_eod_projection_cents: int = 0                         # linear EOD extrapolation; 0 = too early
+    revenue_eod_projection_low_cents:  Optional[int] = None      # p25 band from historical distribution
+    revenue_eod_projection_high_cents: Optional[int] = None      # p75 band from historical distribution
+    revenue_eod_diagnostic:            Optional[str] = None      # one of: "efficiency", "traffic", "traffic_upside", "on_track", or None
     revenue_mtd_cents: int = 0                                    # month-to-date revenue in cents
     generated_at: datetime = field(default_factory=datetime.utcnow)
 

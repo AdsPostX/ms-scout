@@ -290,13 +290,28 @@ def _format_projection_autocheck_fire(
                 cmp_line += " ⚠️"
 
         med_line = f" vs ${float(med):,.0f} {wd} median ({pct}%)" if med else ""
-        text = (
-            f"[projection-autocheck] :bar_chart: *Projection autocheck* `{slot}`\n"
-            f"• Today so far: ${today_rev:,.0f}\n"
-            f"• Projected EOD: ${proj:,.0f}{med_line}\n"
-            f"• Curve share: {share} ({source})"
-            f"{cmp_line}"
-        )
+        lines = [
+            f"[projection-autocheck] :bar_chart: *Projection autocheck* `{slot}`",
+            f"• Today so far: ${today_rev:,.0f}",
+            f"• Projected EOD: ${proj:,.0f}{med_line}",
+            f"• Curve share: {share} ({source})",
+        ]
+        if cmp_line:
+            lines.append(cmp_line.lstrip("\n"))
+
+        if result.get("projected_low") and result.get("projected_high"):
+            lines.append(f"• Range:  ${result['projected_low']:,.0f} - ${result['projected_high']:,.0f}")
+
+        diag = result.get("diagnostic")
+        if diag and diag != "on_track":
+            diag_labels = {
+                "efficiency":     "⚠ Efficiency signal — traffic ok, revenue soft (experimental)",
+                "traffic":        "⚠ Traffic signal — volume below baseline (experimental)",
+                "traffic_upside": "↑ Upside signal — traffic + revenue ahead (experimental)",
+            }
+            lines.append(f"• Signal: {diag_labels.get(diag, diag)}")
+
+        text = "\n".join(lines)
     elif status in ("too_early", "insufficient_history", "unstable"):
         formatted = result.get("formatted") or f"status={status}"
         text = f"[projection-autocheck] `{slot}` {formatted}"
@@ -503,6 +518,10 @@ def _projection_autocheck_daemon() -> None:
                                 "pct_of_expected":    result.get("pct_of_expected"),
                                 "daemon_raw":         daemon_raw,
                                 "delta_abs":          delta_abs,
+                                "projected_low":      result.get("projected_low"),
+                                "projected_high":     result.get("projected_high"),
+                                "projection_n":       result.get("projection_n"),
+                                "diagnostic":         result.get("diagnostic"),
                             })
                         except Exception as _e:
                             log.warning(f"{tag} persist fires_log failed: {_e}")
