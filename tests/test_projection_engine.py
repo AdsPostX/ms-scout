@@ -219,6 +219,10 @@ class TestMissingDOWHour(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["curve_source"], "fallback_0.70")
         self.assertEqual(result["projection_n"], 0)
+        # t_band is None (no dow=3 entry in traffic_by_dow) so diagnostic block
+        # is skipped entirely — must be None, not "insufficient_history" or "too_early"
+        self.assertIsNone(result["diagnostic"],
+                          f"Expected diagnostic=None for missing DOW band, got {result['diagnostic']!r}")
 
 
 # ── T7 ────────────────────────────────────────────────────────────────────────
