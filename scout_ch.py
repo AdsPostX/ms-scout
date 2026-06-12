@@ -648,25 +648,21 @@ GROUP BY ct_day, dow, ct_hour
             if 1 <= dow <= 7 and 0 <= hour <= 23:
                 sess_acc[dow][hour].append(float(cnt))
 
-        # Zero-fill: hours absent from query result had 0 traffic that day.
-        # Without this, _median() skips those hours, inflating baselines.
-        imp_seen: dict = {}
-        for (ct_day, dow, hour) in imp_day:
-            imp_seen.setdefault((ct_day, dow), set()).add(hour)
-        for (ct_day, dow), seen_hrs in imp_seen.items():
-            if 1 <= dow <= 7:
+        # Zero-fill: absent (day, hour) pairs had 0 traffic — including full-day
+        # outages that produce no rows at all. Build from an authoritative 90-day
+        # date list so the median isn't conditioned on "day had at least one event."
+        from datetime import datetime as _dtf, timedelta as _tdf
+        from zoneinfo import ZoneInfo as _ZIf
+        _today_ct = _dtf.now(_ZIf("America/Chicago")).date()
+        _all_ct_days = [(_today_ct - _tdf(days=i)) for i in range(1, 91)]
+        for _d in _all_ct_days:
+            _dow = _d.weekday() + 1  # Mon=1..Sun=7, matching toDayOfWeek()
+            if 1 <= _dow <= 7:
                 for h in range(24):
-                    if h not in seen_hrs:
-                        imp_acc[dow][h].append(0.0)
-
-        sess_seen: dict = {}
-        for (ct_day, dow, hour) in sess_day:
-            sess_seen.setdefault((ct_day, dow), set()).add(hour)
-        for (ct_day, dow), seen_hrs in sess_seen.items():
-            if 1 <= dow <= 7:
-                for h in range(24):
-                    if h not in seen_hrs:
-                        sess_acc[dow][h].append(0.0)
+                    if (_d, _dow, h) not in imp_day:
+                        imp_acc[_dow][h].append(0.0)
+                    if (_d, _dow, h) not in sess_day:
+                        sess_acc[_dow][h].append(0.0)
 
     except Exception as exc:
         log.warning("[CH] traffic baseline scan failed (non-fatal): %s", exc)
@@ -815,8 +811,11 @@ def project_today_revenue(ch) -> dict:
         )
         return base
 
-    # Pick curve band; if missing for this hour or p50 implausibly small, fall back.
-    if band is None or band["p50"] < 0.01:
+    # Pick curve band; fall back if missing, p50 implausibly small, or p25/p75
+    # are non-positive (would cause ZeroDivisionError in projected_low/high).
+    if (band is None or band["p50"] < 0.01
+            or band["p25"] <= 0 or band["p75"] <= 0
+            or not (band["p25"] <= band["p50"] <= band["p75"])):
         p50, p25, p75 = 0.70, 0.65, 0.75    # conservative fallback band
         curve_source = "fallback_0.70"
         projection_n = 0

@@ -1768,10 +1768,10 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
         # TODO(App-Home-3.4): wire once scoreboard_rollup() populates these fields
         low_c  = getattr(rollup, "revenue_eod_projection_low_cents",  None)
         high_c = getattr(rollup, "revenue_eod_projection_high_cents", None)
-        if low_c and high_c:
+        if low_c is not None and high_c is not None:
             blocks.append({
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"_Range: ${low_c/100:,.0f} – ${high_c/100:,.0f}_"}],
+                "elements": [{"type": "mrkdwn", "text": f"_Range: ${low_c/100:,.0f} - ${high_c/100:,.0f}_"}],
             })
 
         from datetime import timezone as _tz
