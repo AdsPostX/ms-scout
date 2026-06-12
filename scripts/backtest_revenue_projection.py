@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 # Make repo root importable
 sys.path.insert(0, str(__file__).rsplit("/scripts/", 1)[0])
 
-from scout_ch import _build_hour_curve, _get_ch_client  # type: ignore  # noqa: E402
+from scout_ch import _build_hour_curve, _get_ch_client, _revenue_at_hour  # type: ignore  # noqa: E402
 
 CT = ZoneInfo("America/Chicago")
 HOURS = [10, 12, 14, 16]
@@ -41,29 +41,14 @@ def _business_days(end: date, n: int) -> list[date]:
     return out
 
 
-def _revenue_at(ch, target_date: date, max_hour: int | None) -> float:
-    """Sum CT revenue for target_date up to (but not including) max_hour. None = full day."""
-    if max_hour is None:
-        hour_clause = ""
-    else:
-        hour_clause = f"  AND toHour(toTimeZone(created_at, 'America/Chicago')) < {max_hour}"
-    sql = f"""
-SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS rev
-FROM adpx_conversionsdetails
-PREWHERE toYYYYMM(created_at) >= toYYYYMM(toDate('{target_date.isoformat()}'))
-WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate('{target_date.isoformat()}')
-{hour_clause}
-""".strip()
-    rows = ch.query(sql).result_rows
-    return float(rows[0][0] or 0) if rows else 0.0
-
-
 def _project(curve: dict, today_rev: float, dow: int, hour: int) -> tuple[float | None, str]:
-    share = curve["share_by_dow"].get(dow, {}).get(hour)
+    band = curve["share_by_dow"].get(dow, {}).get(hour)
     source = "90d"
-    if share is None or share < 0.01:
+    if band is None or band["p50"] < 0.01:
         share = 0.70
         source = "fallback_0.70"
+    else:
+        share = band["p50"]
     if share <= 0:
         return None, source
     return today_rev / float(share), source
@@ -78,13 +63,13 @@ def main() -> int:
     rows: list[dict] = []
     sampled_dates: set[str] = set()
     for d in days:
-        actual_eod = _revenue_at(ch, d, None)
+        actual_eod = _revenue_at_hour(ch, d, None)
         if actual_eod <= 0:
             continue
         sampled_dates.add(d.isoformat())
         dow = d.weekday() + 1
         for h in HOURS:
-            rev_so_far = _revenue_at(ch, d, h)
+            rev_so_far = _revenue_at_hour(ch, d, h)
             projected, source = _project(curve, rev_so_far, dow, h)
             if projected is None:
                 continue

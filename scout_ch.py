@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import logging
+import statistics
 import threading
 import time
 
@@ -473,20 +474,30 @@ _HOUR_CURVE_CACHE: dict = {"ts": 0.0, "data": None}
 _HOUR_CURVE_TTL_SEC = 600  # 10 minutes
 
 
-def _build_hour_curve(ch) -> dict:
-    """Return per-DOW cumulative-share curve and per-DOW full-day median from
-    the last 90 CT calendar days (excluding today).
+def _quantile(data: list[float], q: float) -> float:
+    if not data:
+        return 0.0
+    s = sorted(data)
+    idx = q * (len(s) - 1)
+    lo, hi = int(idx), min(int(idx) + 1, len(s) - 1)
+    return s[lo] + (idx - lo) * (s[hi] - s[lo])
 
-    Per-DOW share at hour H is the **median** of `cum_through_H / full_day`
-    across qualifying same-weekday days. Median (not mean) + 90d window
-    cleared the backtest gate (median |% err| 7.25%, P90 17.3% across 40
-    cells); 60d/mean systematically undershot (~12% / 26%).
+
+def _build_hour_curve(ch) -> dict:
+    """Return per-DOW cumulative-share curve, traffic baselines, and per-DOW
+    full-day median from the last 90 CT calendar days (excluding today).
+
+    Per-DOW share at hour H is now a band dict {p25, p50, p75, n} across
+    qualifying same-weekday days. Median (not mean) + 90d window cleared the
+    backtest gate (median |% err| 7.25%, P90 17.3% across 40 cells);
+    60d/mean systematically undershot (~12% / 26%).
 
     Returns:
         {
-            "share_by_dow": { dow_int: { hour_int: float (0..1) } },
-            "dow_median":   { dow_int: float },
-            "sample_days":  { dow_int: int },  # qualifying full-day samples
+            "share_by_dow":    { dow_int: { hour_int: {p25, p50, p75, n} } },
+            "traffic_by_dow":  { dow_int: { hour_int: {impressions_p50, sessions_p50} } },
+            "dow_median":      { dow_int: float },
+            "sample_days":     { dow_int: int },  # qualifying full-day samples
         }
 
     All datetime math is anchored in America/Chicago. dow values match
@@ -525,7 +536,7 @@ GROUP BY ct_day, dow, ct_hour
         rec["by_hour"][int(ct_hour)] = rec["by_hour"].get(int(ct_hour), 0.0) + rev
         rec["full"] += rev
 
-    # Per-DOW: for each hour H, median of (cum_through_H / full_day) across
+    # Per-DOW: for each hour H, collect (cum_through_H / full_day) shares across
     # qualifying days (full_day > 0) in the 90d window.
     share_acc: dict = {dow: {h: [] for h in range(24)} for dow in range(1, 8)}
     # For dow_median we want an 8-week same-weekday baseline (distinct concern
@@ -554,10 +565,14 @@ GROUP BY ct_day, dow, ct_hour
 
     share_by_dow: dict = {}
     for dow, by_hour in share_acc.items():
-        share_by_dow[dow] = {
-            h: _median(vals) if vals else None
-            for h, vals in by_hour.items()
-        }
+        share_by_dow[dow] = {}
+        for h, shares in by_hour.items():
+            share_by_dow[dow][h] = {
+                "p25": _quantile(shares, 0.25),
+                "p50": statistics.median(shares) if shares else 0.0,
+                "p75": _quantile(shares, 0.75),
+                "n":   len(shares),
+            }
 
     # 8-week same-weekday baseline: pick the 8 most recent qualifying same-DOW
     # full-day totals (within the 90d window) and median those. Keeps the
@@ -568,14 +583,130 @@ GROUP BY ct_day, dow, ct_hour
         recent = sorted(dated, key=lambda t: t[0], reverse=True)[:8]
         dow_median[dow] = _median([v for _, v in recent])
 
+    # ── Traffic baselines: impressions and sessions per (DOW, hour) ──────────
+    # Same 90-day window, same DOW/hour grouping as the revenue share scan.
+    imp_sql = """
+SELECT
+    toDate(toTimeZone(created_at, 'America/Chicago'))              AS ct_day,
+    toDayOfWeek(toDate(toTimeZone(created_at, 'America/Chicago'))) AS dow,
+    toHour(toTimeZone(created_at, 'America/Chicago'))              AS ct_hour,
+    count()                                                        AS hour_imps
+FROM adpx_impressions_details
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(
+    toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 95 DAY
+)
+WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
+        >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 90 DAY
+  AND toDate(toTimeZone(created_at, 'America/Chicago'))
+        <  toDate(toTimeZone(now(), 'America/Chicago'))
+GROUP BY ct_day, dow, ct_hour
+""".strip()
+
+    sess_sql = """
+SELECT
+    toDate(toTimeZone(created_at, 'America/Chicago'))              AS ct_day,
+    toDayOfWeek(toDate(toTimeZone(created_at, 'America/Chicago'))) AS dow,
+    toHour(toTimeZone(created_at, 'America/Chicago'))              AS ct_hour,
+    count()                                                        AS hour_sess
+FROM adpx_sdk_sessions
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(
+    toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 95 DAY
+)
+WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
+        >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 90 DAY
+  AND toDate(toTimeZone(created_at, 'America/Chicago'))
+        <  toDate(toTimeZone(now(), 'America/Chicago'))
+GROUP BY ct_day, dow, ct_hour
+""".strip()
+
+    # Accumulate per (day, dow, hour) counts then median by (dow, hour)
+    # imp_by_day_hour[(dow, hour)] -> list of daily counts
+    imp_acc: dict  = {dow: {h: [] for h in range(24)} for dow in range(1, 8)}
+    sess_acc: dict = {dow: {h: [] for h in range(24)} for dow in range(1, 8)}
+
+    try:
+        imp_rows  = ch.query(imp_sql).result_rows
+        sess_rows = ch.query(sess_sql).result_rows
+
+        # Aggregate per (day, dow, hour) — each row is already one hour bucket
+        imp_day: dict = {}   # (ct_day, dow, hour) -> count
+        for ct_day, dow, ct_hour, cnt in imp_rows:
+            key = (ct_day, int(dow), int(ct_hour))
+            imp_day[key] = imp_day.get(key, 0) + int(cnt or 0)
+
+        sess_day: dict = {}
+        for ct_day, dow, ct_hour, cnt in sess_rows:
+            key = (ct_day, int(dow), int(ct_hour))
+            sess_day[key] = sess_day.get(key, 0) + int(cnt or 0)
+
+        # Bucket into accumulators
+        for (ct_day, dow, hour), cnt in imp_day.items():
+            if 1 <= dow <= 7 and 0 <= hour <= 23:
+                imp_acc[dow][hour].append(float(cnt))
+
+        for (ct_day, dow, hour), cnt in sess_day.items():
+            if 1 <= dow <= 7 and 0 <= hour <= 23:
+                sess_acc[dow][hour].append(float(cnt))
+
+    except Exception as exc:
+        log.warning("[CH] traffic baseline scan failed (non-fatal): %s", exc)
+
+    from collections import defaultdict as _defaultdict
+    traffic_by_dow: dict = _defaultdict(dict)
+    for dow in range(1, 8):
+        for h in range(24):
+            traffic_by_dow[dow][h] = {
+                "impressions_p50": _median(imp_acc[dow][h]),
+                "sessions_p50":    _median(sess_acc[dow][h]),
+            }
+
     data = {
-        "share_by_dow": share_by_dow,
-        "dow_median":   dow_median,
-        "sample_days":  sample_days,
+        "share_by_dow":   share_by_dow,
+        "traffic_by_dow": dict(traffic_by_dow),
+        "dow_median":     dow_median,
+        "sample_days":    sample_days,
     }
     _HOUR_CURVE_CACHE["data"] = data
     _HOUR_CURVE_CACHE["ts"] = now
     return data
+
+
+def _revenue_at_hour(ch, target_date, max_hour: int | None) -> float:
+    """Revenue for target_date up to (not including) max_hour CT; None = full day."""
+    from datetime import date as _date
+    if max_hour is None:
+        hour_clause = ""
+    else:
+        hour_clause = f"  AND toHour(toTimeZone(created_at, 'America/Chicago')) < {max_hour}"
+    sql = f"""
+SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS rev
+FROM adpx_conversionsdetails
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(toDate('{target_date.isoformat()}'))
+WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate('{target_date.isoformat()}')
+{hour_clause}
+""".strip()
+    rows = ch.query(sql).result_rows
+    return float(rows[0][0] or 0) if rows else 0.0
+
+
+def _query_intraday_traffic(ch, today_ct, max_hour: int) -> dict:
+    """Impressions and sessions for today up to max_hour CT."""
+    imp_sql = """
+SELECT count() AS imps
+FROM adpx_impressions_details
+WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate({date_str:String})
+  AND toHour(toTimeZone(created_at, 'America/Chicago')) < {max_hour:UInt8}
+""".strip()
+    sess_sql = """
+SELECT count() AS sess
+FROM adpx_sdk_sessions
+WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate({date_str:String})
+  AND toHour(toTimeZone(created_at, 'America/Chicago')) < {max_hour:UInt8}
+""".strip()
+    params = {"date_str": today_ct.isoformat(), "max_hour": max_hour}
+    imps  = int((ch.query(imp_sql,  parameters=params).result_rows or [[0]])[0][0])
+    sess  = int((ch.query(sess_sql, parameters=params).result_rows or [[0]])[0][0])
+    return {"impressions": imps, "sessions": sess}
 
 
 def project_today_revenue(ch) -> dict:
@@ -600,6 +731,7 @@ def project_today_revenue(ch) -> dict:
     too_early_msg = "Too early to project reliably — ask after 10am CT."
 
     now_ct = _dt.now(_Zi("America/Chicago"))
+    today_ct = now_ct.date()
     hour_ct = now_ct.hour
     as_of_ct = now_ct.strftime("%Y-%m-%d %H:%M %Z")
     # dow matches ClickHouse toDayOfWeek (Mon=1..Sun=7)
@@ -609,19 +741,25 @@ def project_today_revenue(ch) -> dict:
                     "Friday", "Saturday", "Sunday"][py_weekday]
 
     base = {
-        "status":             "ok",
-        "formatted":          "",
-        "today_revenue":      None,
-        "projected_full_day": None,
-        "dow_median":         None,
-        "pct_of_expected":    None,
-        "as_of_ct":           as_of_ct,
-        "hour_ct":            hour_ct,
-        "curve_share":        None,
-        "curve_source":       None,
-        "sample_days":        0,
-        "warning":            None,
-        "weekday":            weekday_name,
+        "status":                    "ok",
+        "formatted":                 "",
+        "today_revenue":             None,
+        "projected_full_day":        None,
+        "projected_low":             None,
+        "projected_high":            None,
+        "dow_median":                None,
+        "pct_of_expected":           None,
+        "as_of_ct":                  as_of_ct,
+        "hour_ct":                   hour_ct,
+        "curve_share":               None,
+        "curve_source":              None,
+        "projection_n":              0,
+        "sample_days":               0,
+        "warning":                   None,
+        "weekday":                   weekday_name,
+        "diagnostic":                None,
+        "traffic_impressions_today": 0,
+        "traffic_sessions_today":    0,
     }
 
     if hour_ct < 10:
@@ -629,27 +767,15 @@ def project_today_revenue(ch) -> dict:
         base["formatted"] = too_early_msg
         return base
 
-    # Today's revenue from CT midnight to now.
-    today_sql = """
-SELECT coalesce(sum(toFloat64OrNull(revenue)), 0) AS today_revenue
-FROM adpx_conversionsdetails
-PREWHERE toYYYYMM(created_at) >= toYYYYMM(
-    toDate(toTimeZone(now(), 'America/Chicago'))
-)
-WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
-      = toDate(toTimeZone(now(), 'America/Chicago'))
-  AND toTimeZone(created_at, 'America/Chicago')
-      < toTimeZone(now(), 'America/Chicago')
-""".strip()
-    today_rows = ch.query(today_sql).result_rows
-    today_revenue = float(today_rows[0][0] or 0) if today_rows else 0.0
+    # Today's revenue from CT midnight to now — via shared helper.
+    today_revenue = _revenue_at_hour(ch, today_ct, hour_ct)
     base["today_revenue"] = today_revenue
 
     curve = _build_hour_curve(ch)
     sample = int(curve["sample_days"].get(dow, 0))
     base["sample_days"] = sample
 
-    share = curve["share_by_dow"].get(dow, {}).get(hour_ct)
+    band = curve["share_by_dow"].get(dow, {}).get(hour_ct)
     dow_median = float(curve["dow_median"].get(dow, 0) or 0)
     base["dow_median"] = dow_median if dow_median > 0 else None
 
@@ -661,21 +787,67 @@ WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
         )
         return base
 
-    # Pick curve share; if missing for this hour or implausibly small, fall back.
-    if share is None or share < 0.01:
-        share = 0.70
-        base["curve_source"] = "fallback_0.70"
+    # Pick curve band; if missing for this hour or p50 implausibly small, fall back.
+    if band is None or band["p50"] < 0.01:
+        p50, p25, p75 = 0.70, 0.65, 0.75    # conservative fallback band
+        curve_source = "fallback_0.70"
+        projection_n = 0
         base["warning"] = "Hour-of-day curve unavailable; used fallback 0.70."
     else:
-        base["curve_source"] = "90d"
+        p50, p25, p75 = band["p50"], band["p25"], band["p75"]
+        curve_source = "90d"
+        projection_n = band["n"]
 
-    base["curve_share"] = round(float(share), 4)
+    base["curve_source"]  = curve_source
+    base["projection_n"]  = projection_n
+    base["curve_share"]   = round(float(p50), 4)
 
-    projected = today_revenue / float(share) if share > 0 else today_revenue
-    base["projected_full_day"] = projected
+    projected_full_day = today_revenue / p50
+    projected_low      = today_revenue / p75   # pessimistic: at 75th-pct share pace
+    projected_high     = today_revenue / p25   # optimistic: at 25th-pct share pace
+
+    base["projected_full_day"] = projected_full_day
+    base["projected_low"]      = projected_low
+    base["projected_high"]     = projected_high
 
     if dow_median > 0:
-        base["pct_of_expected"] = round(100.0 * projected / dow_median, 1)
+        base["pct_of_expected"] = round(100.0 * projected_full_day / dow_median, 1)
+
+    # ── Diagnostic classification ─────────────────────────────────────────────
+    DEVIATION_THRESHOLD = 0.08
+
+    diagnostic = None
+    traffic_impressions_today = 0
+    traffic_sessions_today    = 0
+
+    try:
+        traffic = _query_intraday_traffic(ch, today_ct, hour_ct)
+        traffic_impressions_today = traffic["impressions"]
+        traffic_sessions_today    = traffic["sessions"]
+    except Exception:
+        traffic = None   # CH busy or table unavailable — degrade gracefully
+
+    t_band  = curve.get("traffic_by_dow", {}).get(dow, {}).get(hour_ct)
+    imp_baseline = t_band.get("impressions_p50", 0) if t_band else 0
+
+    if traffic and t_band and traffic["impressions"] > 0 and imp_baseline > 0:
+        imp_dev = (traffic["impressions"] - imp_baseline) / imp_baseline
+        dow_median_val = curve["dow_median"].get(dow)
+        denom = dow_median_val or today_revenue or 1.0
+        rev_dev = (today_revenue / denom - p50) / p50
+
+        if rev_dev < -DEVIATION_THRESHOLD and abs(imp_dev) < DEVIATION_THRESHOLD:
+            diagnostic = "efficiency"
+        elif rev_dev < -DEVIATION_THRESHOLD and imp_dev < -DEVIATION_THRESHOLD:
+            diagnostic = "traffic"
+        elif rev_dev > DEVIATION_THRESHOLD and imp_dev > DEVIATION_THRESHOLD:
+            diagnostic = "traffic_upside"
+        else:
+            diagnostic = "on_track"
+
+    base["diagnostic"]                = diagnostic
+    base["traffic_impressions_today"] = traffic_impressions_today
+    base["traffic_sessions_today"]    = traffic_sessions_today
 
     return base
 
