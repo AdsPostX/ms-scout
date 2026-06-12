@@ -807,6 +807,27 @@ def _try_add_to_demand_queue(
 
     return notion_url
 
+
+# ── Shared interaction-payload unpacking ──────────────────────────────────────
+# Extracts the keys every block-action and interactive-component handler needs.
+# Only use for the three keys that appear in 3+ call sites; rare keys are still
+# read inline with payload.get().
+
+def _extract_interaction_context(payload: dict) -> dict:
+    """Return the common subset of fields all block-action handlers need.
+
+    Keys:
+        channel    — channel ID from payload["channel"]["id"]
+        user_id    — Slack user ID from payload["user"]["id"]
+        message_ts — parent message ts from payload["message"]["ts"]
+    """
+    return {
+        "channel":    (payload.get("channel") or {}).get("id", ""),
+        "user_id":    (payload.get("user") or {}).get("id", ""),
+        "message_ts": (payload.get("message") or {}).get("ts", ""),
+    }
+
+
 def _handle_approve(action: dict, payload: dict, web: WebClient):
     """
     Handle ✓ Add to Queue button click from Scout Signal digest.
@@ -823,10 +844,10 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     """
     import scout_digest
 
-    channel    = (payload.get("channel") or {}).get("id", "")
-    message_ts = (payload.get("message") or {}).get("ts", "")
-    user       = payload.get("user", {})
-    user_id    = user.get("id", "unknown")
+    ctx        = _extract_interaction_context(payload)
+    channel    = ctx["channel"]
+    message_ts = ctx["message_ts"]
+    user_id    = ctx["user_id"] or "unknown"
 
     try:
         offer = json.loads(action.get("value", "{}"))
@@ -1016,7 +1037,7 @@ def _handle_brief_queue(action: dict, payload: dict, web: WebClient):
                  (payload.get("channel") or {}).get("id", "")
     message_ts = (payload.get("container") or {}).get("message_ts") or \
                  (payload.get("message") or {}).get("ts", "")
-    user_id    = (payload.get("user") or {}).get("id", "unknown")
+    user_id    = _extract_interaction_context(payload)["user_id"] or "unknown"
 
     advertiser   = data.get("advertiser", "Offer")
     thread_ts    = data.get("thread_ts") or message_ts
@@ -1109,10 +1130,10 @@ def _handle_reject(action: dict, payload: dict, web: WebClient):
     """Handle ✕ Skip button click from Scout Signal digest."""
     import scout_digest
 
-    channel    = (payload.get("channel") or {}).get("id", "")
-    message_ts = (payload.get("message") or {}).get("ts", "")
-    user       = payload.get("user", {})
-    user_id    = user.get("id", "unknown")
+    ctx        = _extract_interaction_context(payload)
+    channel    = ctx["channel"]
+    message_ts = ctx["message_ts"]
+    user_id    = ctx["user_id"] or "unknown"
 
     try:
         offer = json.loads(action.get("value", "{}"))
@@ -1150,11 +1171,12 @@ def _handle_reject(action: dict, payload: dict, web: WebClient):
 
 def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     """User clicked a suggestion button — run it as a Scout query in the same thread."""
-    channel   = (payload.get("channel") or {}).get("id", "")
+    ctx       = _extract_interaction_context(payload)
+    channel   = ctx["channel"]
+    user_id   = ctx["user_id"]
     msg       = payload.get("message", {})
     thread_ts = msg.get("thread_ts") or msg.get("ts", "")
     query     = action.get("value", "").strip()
-    user_id   = (payload.get("user") or {}).get("id", "")
     if not query or not channel or not thread_ts:
         return
 
@@ -1323,101 +1345,58 @@ def _run_pulse_action(
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _handle_block_action(req: SocketModeRequest, web: WebClient):
-    """Handle Slack interactive button clicks (block_actions)."""
-    payload = req.payload
-    if payload.get("type") != "block_actions":
-        return
+# ── Block-action dispatch wrappers ────────────────────────────────────────────
+# Each wrapper has the signature (action, payload, web) so the dispatch table
+# can call them uniformly. Wrappers exist only where _handle_block_action had
+# inline logic that isn't already encapsulated in the named handler.
 
-    actions = payload.get("actions", [])
-    if not actions:
-        return
+def _dispatch_home_try_query(action: dict, payload: dict, web: WebClient) -> None:
+    """Wrapper for home_try_query* buttons — forwards to _handle_home_try_query."""
+    user_id    = _extract_interaction_context(payload)["user_id"]
+    query      = action.get("value", "").strip()
+    trigger_id = payload.get("trigger_id", "")
+    if user_id and query:
+        _handle_home_try_query(web, user_id, query, trigger_id=trigger_id)
 
-    action    = actions[0]
+
+def _dispatch_home_alert_drill(action: dict, payload: dict, web: WebClient) -> None:
+    """Wrapper for home_alert_drill — forwards to _handle_home_alert_drill."""
+    trigger_id = payload.get("trigger_id", "")
+    if trigger_id:
+        _handle_home_alert_drill(web, trigger_id)
+
+
+def _dispatch_pulse_top_opps(action: dict, payload: dict, web: WebClient) -> None:
+    """Wrapper for pulse_top_opps — sanitize=True."""
+    ctx    = _extract_interaction_context(payload)
+    msg_ts = ctx["message_ts"]
+    _run_pulse_action(
+        _PULSE_QUERIES["pulse_top_opps"], ctx["channel"], ctx["user_id"], msg_ts, web,
+        sanitize=True,
+    )
+
+
+def _dispatch_pulse_static(action: dict, payload: dict, web: WebClient) -> None:
+    """Wrapper for pulse_ghost_brief and pulse_fill_rate_brief (no sanitize)."""
     action_id = action.get("action_id", "")
-    channel   = (payload.get("channel") or {}).get("id", "")
-    user_id   = payload.get("user", {}).get("id", "")
+    ctx       = _extract_interaction_context(payload)
+    msg_ts    = ctx["message_ts"]
+    _run_pulse_action(_PULSE_QUERIES[action_id], ctx["channel"], ctx["user_id"], msg_ts, web)
 
-    if _is_under_maintenance(user_id):
-        from scout_state import log_maintenance_attempt
-        log_maintenance_attempt(user_id, action_id[:80])
-        if channel:
-            web.chat_postEphemeral(channel=channel, user=user_id,
-                text=":wrench: Scout is offline for maintenance.")
-        else:
-            try:
-                web.views_publish(user_id=user_id, view={
-                    "type": "home",
-                    "blocks": [{"type": "section", "text": {"type": "mrkdwn",
-                        "text": ":wrench: Scout is offline for maintenance."}}]
-                })
-            except Exception as e:
-                log.warning("[maintenance] views_publish failed for %s: %s", user_id, e)
-        return
 
-    log.info(f"Block action: {action_id!r} in {channel}")
+def _dispatch_pulse_scout_offers(action: dict, payload: dict, web: WebClient) -> None:
+    """Wrapper for pulse_scout_offers — pub-scoped query."""
+    ctx    = _extract_interaction_context(payload)
+    pub    = action.get("value", "").strip()
+    _run_pulse_action(f"offers for {pub}", ctx["channel"], ctx["user_id"], ctx["message_ts"], web)
 
-    # ── Suggestion button clicks ──────────────────────────────────────────────
-    if action_id.startswith("scout_suggestion"):
-        _handle_suggestion(action, payload, web)
-        return
 
-    # ── Scout Signal digest + Sourcing intel actions (shared handler) ────────
-    # Sourcing-signal cards use the same action_ids so approvals go through the
-    # full pipeline: record_approval → Notion write → AI copy → ack thread reply.
-    if action_id == "scout_approve":
-        _handle_approve(action, payload, web)
-        return
-    if action_id == "scout_reject":
-        _handle_reject(action, payload, web)
-        return
-    # ── Brief "Add to Queue" button (from @Scout build a brief for X) ─────────
-    if action_id == "scout_brief_queue":
-        _handle_brief_queue(action, payload, web)
-        return
+def _dispatch_pulse_dig_in(action: dict, payload: dict, web: WebClient) -> None:
+    """Wrapper for pulse_dig_in — pub-scoped query."""
+    ctx = _extract_interaction_context(payload)
+    pub = action.get("value", "").strip()
+    _run_pulse_action(f"dig into {pub}", ctx["channel"], ctx["user_id"], ctx["message_ts"], web)
 
-    # ── App Home "Try it" buttons ─────────────────────────────────────────────
-    # action_ids: home_try_query_hero, home_try_query_0..N (unique per
-    # button so iOS doesn't drop clicks). Backwards-compatible with the
-    # legacy bare "home_try_query" id in case any live message still
-    # references it.
-    if action_id.startswith("home_try_query"):
-        user_id    = payload.get("user", {}).get("id", "")
-        query      = action.get("value", "").strip()
-        trigger_id = payload.get("trigger_id", "")
-        if user_id and query:
-            _handle_home_try_query(web, user_id, query, trigger_id=trigger_id)
-        return
-
-    # ── App Home scoreboard — alert drill modal ───────────────────────────────
-    # "See details →" button on the health line opens a modal listing all
-    # currently-firing alerts. Requires trigger_id from the block_actions event.
-    if action_id == "home_alert_drill":
-        trigger_id = payload.get("trigger_id", "")
-        if trigger_id:
-            _handle_home_alert_drill(web, trigger_id)
-        return
-
-    # ── Feedback buttons (👍 / 👎 / ✏️) ──────────────────────────────────────
-    if action_id in ("scout_feedback_good", "scout_feedback_bad", "scout_feedback_correct"):
-        _handle_feedback(action, payload, web)
-        return
-
-    # ── Pulse interactive buttons ─────────────────────────────────────────────
-    if action_id in _PULSE_QUERIES:
-        msg_ts = (payload.get("message") or {}).get("ts", "")
-        _run_pulse_action(
-            _PULSE_QUERIES[action_id], channel, user_id, msg_ts, web,
-            sanitize=(action_id == "pulse_top_opps"),
-        )
-        return
-
-    if action_id in ("pulse_scout_offers", "pulse_dig_in"):
-        pub    = action.get("value", "").strip()
-        msg_ts = (payload.get("message") or {}).get("ts", "")
-        query  = f"offers for {pub}" if action_id == "pulse_scout_offers" else f"dig into {pub}"
-        _run_pulse_action(query, channel, user_id, msg_ts, web)
-        return
 
 def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
     """
@@ -1429,8 +1408,9 @@ def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
 
     action_id   = action.get("action_id", "")
     query_hash  = action.get("value", "")
-    user_id     = (payload.get("user") or {}).get("id", "")
-    channel     = (payload.get("channel") or {}).get("id", "")
+    ctx         = _extract_interaction_context(payload)
+    user_id     = ctx["user_id"]
+    channel     = ctx["channel"]
     message     = payload.get("message", {})
     thread_ts   = message.get("thread_ts") or message.get("ts", "")
     msg_ts      = message.get("ts", "")
@@ -1778,6 +1758,85 @@ def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
         )
     except Exception:
         log.exception("_handle_home_alert_drill: views_open failed")
+
+
+# ── Block-action dispatch table ───────────────────────────────────────────────
+# Maps exact action_id strings to handler callables with signature
+# (action, payload, web). Prefix-matched action_ids (scout_suggestion*,
+# home_try_query*) are handled via startswith checks in _handle_block_action
+# before this table is consulted.
+#
+# All referenced functions are defined above this point.
+
+_BLOCK_ACTION_DISPATCH: dict = {
+    "scout_approve":           _handle_approve,
+    "scout_reject":            _handle_reject,
+    "scout_brief_queue":       _handle_brief_queue,
+    "home_alert_drill":        _dispatch_home_alert_drill,
+    "scout_feedback_good":     _handle_feedback,
+    "scout_feedback_bad":      _handle_feedback,
+    "scout_feedback_correct":  _handle_feedback,
+    "pulse_ghost_brief":       _dispatch_pulse_static,
+    "pulse_fill_rate_brief":   _dispatch_pulse_static,
+    "pulse_top_opps":          _dispatch_pulse_top_opps,
+    "pulse_scout_offers":      _dispatch_pulse_scout_offers,
+    "pulse_dig_in":            _dispatch_pulse_dig_in,
+}
+
+
+def _handle_block_action(req: SocketModeRequest, web: WebClient):
+    """Handle Slack interactive button clicks (block_actions)."""
+    payload = req.payload
+    if payload.get("type") != "block_actions":
+        return
+
+    actions = payload.get("actions", [])
+    if not actions:
+        return
+
+    action    = actions[0]
+    action_id = action.get("action_id", "")
+    ctx       = _extract_interaction_context(payload)
+    channel   = ctx["channel"]
+    user_id   = ctx["user_id"]
+
+    if _is_under_maintenance(user_id):
+        from scout_state import log_maintenance_attempt
+        log_maintenance_attempt(user_id, action_id[:80])
+        if channel:
+            web.chat_postEphemeral(channel=channel, user=user_id,
+                text=":wrench: Scout is offline for maintenance.")
+        else:
+            try:
+                web.views_publish(user_id=user_id, view={
+                    "type": "home",
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn",
+                        "text": ":wrench: Scout is offline for maintenance."}}]
+                })
+            except Exception as e:
+                log.warning("[maintenance] views_publish failed for %s: %s", user_id, e)
+        return
+
+    log.info(f"Block action: {action_id!r} in {channel}")
+
+    # ── Prefix-matched action_ids (checked before the dispatch table) ─────────
+    # These cannot be keyed by exact string so they stay as explicit branches.
+
+    # Suggestion button clicks (action_ids: scout_suggestion, scout_suggestion_0..N)
+    if action_id.startswith("scout_suggestion"):
+        _handle_suggestion(action, payload, web)
+        return
+
+    # App Home "Try it" buttons (home_try_query_hero, home_try_query_0..N,
+    # legacy bare "home_try_query"). Unique per button so iOS doesn't drop clicks.
+    if action_id.startswith("home_try_query"):
+        _dispatch_home_try_query(action, payload, web)
+        return
+
+    # ── Exact-match dispatch table ────────────────────────────────────────────
+    handler = _BLOCK_ACTION_DISPATCH.get(action_id)
+    if handler is not None:
+        handler(action, payload, web)
 
 
 def _post_maintenance_summary(web: WebClient, channel: str, attempts: list) -> None:
