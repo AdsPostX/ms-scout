@@ -620,99 +620,6 @@ def _build_alert_block(severity: str, title: str, body: str = "") -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Card with hero image
-# ---------------------------------------------------------------------------
-def _build_card_with_image(
-    title: str,
-    subtitle: str,
-    hero_url: str = "",
-    body: str = "",
-    buttons: list[dict] = None,
-    fields: list[dict] = None,
-) -> list[dict]:
-    """Build a visual card with hero image, title, subtitle, body text, and action buttons."""
-    blocks = []
-
-    header_text = f"*{title}*"
-    if subtitle:
-        header_text += f"\n_{subtitle}_"
-
-    section: dict = {
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": header_text},
-    }
-
-    if hero_url and hero_url.startswith("http"):
-        section["accessory"] = {
-            "type": "image",
-            "image_url": hero_url,
-            "alt_text": title,
-        }
-
-    blocks.append(section)
-
-    if body:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": body},
-        })
-
-    if fields:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": ""},
-            "fields": [
-                {"type": "mrkdwn", "text": f"*{f['label']}*\n{f['value']}"}
-                for f in fields if f.get("label") and f.get("value")
-            ],
-        })
-
-    if buttons:
-        blocks.append({
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": btn.get("text", "Action"), "emoji": True},
-                    "style": btn.get("style", "primary"),
-                    "action_id": btn.get("action_id", "action"),
-                    "value": btn.get("value", ""),
-                }
-                for btn in buttons
-            ],
-        })
-
-    return blocks
-
-
-# ---------------------------------------------------------------------------
-# Rich text list
-# ---------------------------------------------------------------------------
-def _build_rich_text_list(items: list[str], ordered: bool = False, indent: int = 0) -> list[dict]:
-    """Build a native rich_text_list block."""
-    if not items:
-        return []
-
-    return [{
-        "type": "rich_text",
-        "elements": [
-            {
-                "type": "rich_text_list",
-                "style": "ordered" if ordered else "bullet",
-                "indent": indent,
-                "elements": [
-                    {
-                        "type": "rich_text_section",
-                        "elements": [{"type": "text", "text": item}]
-                    }
-                    for item in items
-                ],
-            }
-        ],
-    }]
-
-
-# ---------------------------------------------------------------------------
 # Queue confirm blocks
 # ---------------------------------------------------------------------------
 def _queue_confirm_blocks(
@@ -1322,26 +1229,6 @@ def _text_to_blocks(text: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Suggestion buttons (legacy wrapper — kit's wrap_response is the primary path)
-# ---------------------------------------------------------------------------
-def _build_suggestion_buttons(suggestions: list) -> list:
-    """Build a Slack actions block with 2-3 contextual follow-up suggestion buttons."""
-    if not suggestions:
-        return []
-    buttons = [
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": _fit(s), "emoji": False},
-            "value": s,
-            "action_id": f"scout_suggestion_{i}",
-        }
-        for i, s in enumerate(suggestions[:3])
-        if isinstance(s, str) and s.strip()
-    ]
-    return [{"type": "actions", "elements": buttons}] if buttons else []
-
-
-# ---------------------------------------------------------------------------
 # Help blocks
 # ---------------------------------------------------------------------------
 def _build_help_blocks() -> list:
@@ -1422,39 +1309,6 @@ def _build_help_blocks() -> list:
                     "(needs vertical mapping data). Coming when we have it. "
                     "For now — ask about the offer, not the publisher._"
                 ),
-            }],
-        },
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Feedback buttons
-# ---------------------------------------------------------------------------
-def _build_feedback_buttons(query_hash: str) -> list:
-    """Adds 👎 / ✏️ feedback buttons + microcopy to Scout text responses."""
-    return [
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
-                    "action_id": "scout_feedback_bad",
-                    "value": query_hash,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "✏️ Correct this", "emoji": True},
-                    "action_id": "scout_feedback_correct",
-                    "value": query_hash,
-                },
-            ],
-        },
-        {
-            "type": "context",
-            "elements": [{
-                "type": "mrkdwn",
-                "text": "_Not what you needed? Use the buttons above._",
             }],
         },
     ]
