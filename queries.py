@@ -46,6 +46,27 @@ def _ch_date_filter(days: int) -> str:
     return f"today() - {days}"
 
 
+def _ct_today() -> str:
+    """SQL fragment: today's date in America/Chicago timezone."""
+    return "toDate(toTimeZone(now(), 'America/Chicago'))"
+
+
+def _ct_days_ago(n: int) -> str:
+    """SQL fragment: N days ago in America/Chicago timezone."""
+    return f"toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL {n} DAY"
+
+
+def _ct_date(col: str) -> str:
+    """SQL fragment: convert a timestamp column to a CT date.
+
+    Usage::
+
+        f"{_ct_date('cv.created_at')} AS rev_date"
+        # → "toDate(cv.created_at, 'America/Chicago') AS rev_date"
+    """
+    return f"toDate({col}, 'America/Chicago')"
+
+
 # ---------------------------------------------------------------------------
 # Home scoreboard rollup — scoreboard_rollup()
 #
@@ -145,7 +166,7 @@ WHERE c.created_at >= least(month_start_ct, today_start_ct - INTERVAL 7 DAY)
     # Same source table; group by user_id and align with mv_adpx_users / from_airbyte_users
     # for the friendly name. Cap at top/bottom 3; ignore publishers under $50 today
     # (noise floor — single small conversion shouldn't crown a "winner").
-    pub_sql = """
+    pub_sql = f"""
 WITH
     toStartOfDay(toTimeZone(now(), 'America/Chicago')) AS today_start_ct,
     toTimeZone(now(), 'America/Chicago') AS now_ct,
@@ -162,8 +183,8 @@ SELECT
                     toFloat64OrNull(c.revenue), 0)), 0) / 7 AS rev_baseline
 FROM adpx_conversionsdetails c
 LEFT JOIN from_airbyte_users u ON u.id = toInt64(c.user_id)
-PREWHERE toYYYYMM(c.created_at) >= toYYYYMM(toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY)
-WHERE c.created_at >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY
+PREWHERE toYYYYMM(c.created_at) >= toYYYYMM({_ct_days_ago(8)})
+WHERE c.created_at >= {_ct_days_ago(8)}
 GROUP BY uid
 HAVING rev_today >= 50 OR rev_baseline >= 50
 """.strip()
@@ -196,14 +217,14 @@ HAVING rev_today >= 50 OR rev_baseline >= 50
     # ── 7-day daily revenue series (sparkline data) ──
     # Fetches one row per completed day (D-7 through D-1); fills missing days
     # with 0; appends today's partial as the 8th point.
-    series_sql = """
+    series_sql = f"""
 SELECT
-    toDate(toTimeZone(c.created_at, 'America/Chicago')) AS day,
+    {_ct_date('c.created_at')} AS day,
     round(sum(toFloat64OrNull(c.revenue)), 2)           AS daily_rev
 FROM adpx_conversionsdetails c
-WHERE toDate(toTimeZone(c.created_at, 'America/Chicago'))
+WHERE {_ct_date('c.created_at')}
           >= toDate(toStartOfDay(toTimeZone(now(), 'America/Chicago'))) - 7
-  AND toDate(toTimeZone(c.created_at, 'America/Chicago'))
+  AND {_ct_date('c.created_at')}
           < toDate(toStartOfDay(toTimeZone(now(), 'America/Chicago')))
 GROUP BY day
 ORDER BY day
@@ -1583,6 +1604,104 @@ def _trend(delta: float) -> str:
     return "flat"
 
 
+def _revenue_trend_sql(
+    entity_col: str,
+    group_col: str,
+    period_days: int,
+    *,
+    actual_metric: str,
+    actual_join: str = "",
+    historical_join: str = "",
+    names_cte: str = "",
+    final_select: str,
+) -> str:
+    """Build the period-median revenue trend SQL for a given entity dimension.
+
+    Generates the full parameterised ClickHouse SQL used by both
+    ``publisher_revenue_trends`` and ``advertiser_revenue_trends``.  The
+    ClickHouse ``{days: Int32}`` / ``{lookback: Int32}`` / ``{min_periods:
+    Int32}`` bind parameters are left as-is for the caller to supply via
+    ``ch.query(..., parameters=...)``.
+
+    Args:
+        entity_col:     SELECT expression that defines the entity key in the
+                        ``actual`` and ``historical_daily`` CTEs, e.g.
+                        ``"cv.user_id AS publisher_id"`` or ``"c.adv_name"``.
+        group_col:      Column name (no alias) to GROUP BY / JOIN on, e.g.
+                        ``"publisher_id"`` or ``"adv_name"``.
+        period_days:    Placeholder — currently unused; ``{days: Int32}`` in
+                        the rendered SQL is bound by the caller at query time.
+                        Present in the signature so future callers can pass
+                        the default window without touching the parameters
+                        dict.  (Must be consistent with the ``days`` key
+                        passed to ``parameters``.)
+        actual_metric:  The count/metric column expression for the ``actual``
+                        CTE, e.g.
+                        ``"count(DISTINCT cv.session_id) AS sessions_actual"``
+                        or ``"count() AS conversions_actual"``.
+        actual_join:    Optional JOIN clause appended to the ``actual`` CTE's
+                        FROM, e.g.
+                        ``"JOIN from_airbyte_campaigns c ON ..."``
+        historical_join:
+                        Optional JOIN clause appended to the
+                        ``historical_daily`` CTE's FROM.
+        names_cte:      Optional extra CTE block (WITH body, including the
+                        leading comma) inserted before the final SELECT, e.g.
+                        the publisher ``names`` CTE.
+        final_select:   The final SELECT … FROM baseline … ORDER BY block
+                        (excludes the WITH keyword — that is generated here).
+    """
+    _ = period_days  # bound at query time via {days: Int32}
+    return f"""
+        WITH actual AS (
+            SELECT
+                {entity_col},
+                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS revenue_actual,
+                {actual_metric}
+            FROM adpx_conversionsdetails cv
+            {actual_join}
+            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {{days: Int32}} DAY)
+              AND cv.created_at >= today() - INTERVAL {{days: Int32}} DAY
+            GROUP BY {group_col}
+        ),
+        historical_daily AS (
+            SELECT
+                {entity_col},
+                {_ct_date('cv.created_at')}              AS rev_date,
+                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS daily_revenue,
+                intDiv(dateDiff('day',
+                       {_ct_today()} - INTERVAL {{lookback: Int32}} DAY,
+                       rev_date),
+                       {{days: Int32}}) + 1                              AS period_idx
+            FROM adpx_conversionsdetails cv
+            {historical_join}
+            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {{lookback: Int32}} DAY)
+              AND cv.created_at >= today() - INTERVAL {{lookback: Int32}} DAY
+              AND cv.created_at < today() - INTERVAL {{days: Int32}} DAY
+            GROUP BY {group_col}, rev_date
+        ),
+        historical_periods AS (
+            SELECT
+                {group_col},
+                period_idx,
+                sum(daily_revenue)                                     AS period_revenue
+            FROM historical_daily
+            WHERE period_idx BETWEEN 1 AND 8
+            GROUP BY {group_col}, period_idx
+        ),
+        baseline AS (
+            SELECT
+                {group_col},
+                round(median(period_revenue), 2)                       AS revenue_expected,
+                count()                                                AS period_count
+            FROM historical_periods
+            GROUP BY {group_col}
+            HAVING period_count >= {{min_periods: Int32}}
+        ){names_cte}
+        {final_select}
+        """
+
+
 def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[dict]:
     """
     DEPRECATED for velocity alerts — use velocity_alerts() instead.
@@ -1608,56 +1727,20 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
     Raises on ClickHouse error — callers must catch.
     """
     rows = ch.query(
-        """
-        WITH actual AS (
-            -- adpx_conversionsdetails.user_id is the publisher ID — no session join needed.
-            SELECT
-                cv.user_id                                             AS publisher_id,
-                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS revenue_actual,
-                count(DISTINCT cv.session_id)                         AS sessions_actual
-            FROM adpx_conversionsdetails cv
-            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {days: Int32} DAY)
-              AND cv.created_at >= today() - INTERVAL {days: Int32} DAY
-            GROUP BY publisher_id
-        ),
-        historical_daily AS (
-            SELECT
-                cv.user_id                                             AS publisher_id,
-                toDate(cv.created_at, 'America/Chicago')              AS rev_date,
-                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS daily_revenue,
-                intDiv(dateDiff('day',
-                       toDate(now(), 'America/Chicago') - INTERVAL {lookback: Int32} DAY,
-                       rev_date),
-                       {days: Int32}) + 1                              AS period_idx
-            FROM adpx_conversionsdetails cv
-            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {lookback: Int32} DAY)
-              AND cv.created_at >= today() - INTERVAL {lookback: Int32} DAY
-              AND cv.created_at < today() - INTERVAL {days: Int32} DAY
-            GROUP BY publisher_id, rev_date
-        ),
-        historical_periods AS (
-            SELECT
-                publisher_id,
-                period_idx,
-                sum(daily_revenue)                                     AS period_revenue
-            FROM historical_daily
-            WHERE period_idx BETWEEN 1 AND 8
-            GROUP BY publisher_id, period_idx
-        ),
-        baseline AS (
-            SELECT
-                publisher_id,
-                round(median(period_revenue), 2)                       AS revenue_expected,
-                count()                                                AS period_count
-            FROM historical_periods
-            GROUP BY publisher_id
-            HAVING period_count >= {min_periods: Int32}
-        ),
+        _revenue_trend_sql(
+            entity_col="cv.user_id                                             AS publisher_id",
+            group_col="publisher_id",
+            period_days=days,
+            actual_metric="count(DISTINCT cv.session_id)                         AS sessions_actual",
+            # adpx_conversionsdetails.user_id is the publisher ID — no session join needed.
+            actual_join="",
+            historical_join="",
+            names_cte=""",
         names AS (
             SELECT id AS publisher_id, organization AS publisher_name
             FROM mv_adpx_users
-        )
-        SELECT
+        )""",
+            final_select="""SELECT
             b.publisher_id,
             coalesce(n.publisher_name, toString(b.publisher_id))       AS publisher_name,
             coalesce(a.revenue_actual, 0)                              AS revenue_actual,
@@ -1668,8 +1751,8 @@ def publisher_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[di
         FROM baseline b
         LEFT JOIN actual a ON a.publisher_id = b.publisher_id
         LEFT JOIN names n ON n.publisher_id = b.publisher_id
-        ORDER BY delta_pct ASC
-        """,
+        ORDER BY delta_pct ASC""",
+        ),
         parameters={
             "days": int(days),
             "lookback": int(days * 9),
@@ -1910,54 +1993,17 @@ def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[d
         delta_pct (float), trend ("up" | "down" | "flat"), conversions_actual (int)
     Raises on ClickHouse error — callers must catch.
     """
+    _campaign_join = "JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id"
     rows = ch.query(
-        """
-        WITH actual AS (
-            SELECT
-                c.adv_name,
-                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS revenue_actual,
-                count()                                               AS conversions_actual
-            FROM adpx_conversionsdetails cv
-            JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
-            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {days: Int32} DAY)
-              AND cv.created_at >= today() - INTERVAL {days: Int32} DAY
-            GROUP BY c.adv_name
-        ),
-        historical_daily AS (
-            SELECT
-                c.adv_name,
-                toDate(cv.created_at, 'America/Chicago')              AS rev_date,
-                round(sum(toFloat64OrNull(cv.revenue)), 2)            AS daily_revenue,
-                intDiv(dateDiff('day',
-                       toDate(now(), 'America/Chicago') - INTERVAL {lookback: Int32} DAY,
-                       rev_date),
-                       {days: Int32}) + 1                              AS period_idx
-            FROM adpx_conversionsdetails cv
-            JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
-            WHERE toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL {lookback: Int32} DAY)
-              AND cv.created_at >= today() - INTERVAL {lookback: Int32} DAY
-              AND cv.created_at < today() - INTERVAL {days: Int32} DAY
-            GROUP BY c.adv_name, rev_date
-        ),
-        historical_periods AS (
-            SELECT
-                adv_name,
-                period_idx,
-                sum(daily_revenue)                                     AS period_revenue
-            FROM historical_daily
-            WHERE period_idx BETWEEN 1 AND 8
-            GROUP BY adv_name, period_idx
-        ),
-        baseline AS (
-            SELECT
-                adv_name,
-                round(median(period_revenue), 2)                       AS revenue_expected,
-                count()                                                AS period_count
-            FROM historical_periods
-            GROUP BY adv_name
-            HAVING period_count >= {min_periods: Int32}
-        )
-        SELECT
+        _revenue_trend_sql(
+            entity_col="c.adv_name",
+            group_col="adv_name",
+            period_days=days,
+            actual_metric="count()                                               AS conversions_actual",
+            actual_join=_campaign_join,
+            historical_join=_campaign_join,
+            names_cte="",
+            final_select="""SELECT
             b.adv_name,
             coalesce(a.revenue_actual, 0)                             AS revenue_actual,
             b.revenue_expected,
@@ -1966,8 +2012,8 @@ def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[d
             coalesce(a.conversions_actual, 0)                         AS conversions_actual
         FROM baseline b
         LEFT JOIN actual a ON a.adv_name = b.adv_name
-        ORDER BY delta_pct ASC
-        """,
+        ORDER BY delta_pct ASC""",
+        ),
         parameters={
             "days": int(days),
             "lookback": int(days * 9),
