@@ -310,13 +310,14 @@ def wrap_response(
     feedback: Literal["reaction", "button", "none"] = "reaction",
     query_hash: Optional[str] = None,
     elapsed_seconds: Optional[int] = None,
+    interpretation: Optional[str] = None,
     pattern: "ResponsePattern | None" = None,
 ) -> tuple[str, list[dict]]:
     """Single entry-point for every ask() reply surface.
 
     Composition order (earlier items are protected from enforce() truncation):
-        headline → body → facts → feedback → suggestions → elapsed → actions →
-        POSITIVE context footer → CRITICAL trailing divider → enforce()
+        headline → body → facts → feedback → suggestions → elapsed/interpretation →
+        actions → POSITIVE context footer → CRITICAL trailing divider → enforce()
 
     Args:
         card:             Card to render (severity + headline + optional body/facts/actions).
@@ -330,7 +331,11 @@ def wrap_response(
         query_hash:       Message ts / hash used as button value for feedback routing.
                           Required when feedback="button"; pass None to suppress buttons.
         elapsed_seconds:  If provided, appended as a context footer (ops surfaces only;
-                          omit on DM to keep output clean).
+                          omit on DM to keep output clean). Combined with interpretation
+                          when both are provided.
+        interpretation:   If provided, rendered as a muted footer on all surfaces:
+                          "_Interpreted as: {interpretation} · {elapsed}s_".
+                          Overrides the plain elapsed footer.
         pattern:          Optional ResponsePattern for surface validation. Raises ValueError
                           if the surface is incompatible with the pattern. Existing callers
                           that omit pattern= are unaffected.
@@ -421,9 +426,18 @@ def wrap_response(
         ]
         blocks.append({"type": "actions", "elements": elements})
 
-    # 4. Elapsed footer (ops surfaces; skip on DM)
-    # Ordering: content → facts → elapsed → actions → (CRITICAL trailing divider)
-    if elapsed_seconds is not None and surface not in (Surface.DM, Surface.EPHEMERAL):
+    # 4. Elapsed / interpretation footer
+    if interpretation is not None:
+        if elapsed_seconds is not None:
+            _e = elapsed_seconds
+            elapsed_suffix = f" · {_e}s" if _e < 60 else f" · {_e // 60}m {_e % 60}s"
+        else:
+            elapsed_suffix = ""
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"_Interpreted as: {interpretation}{elapsed_suffix}_"}],
+        })
+    elif elapsed_seconds is not None and surface not in (Surface.DM, Surface.EPHEMERAL):
         elapsed_str = (
             f"{elapsed_seconds}s" if elapsed_seconds < 60
             else f"{elapsed_seconds // 60}m {elapsed_seconds % 60}s"
