@@ -300,7 +300,7 @@ def _format_projection_autocheck_fire(
             lines.append(cmp_line.lstrip("\n"))
 
         if result.get("projected_low") and result.get("projected_high"):
-            lines.append(f"• Range:  ${result['projected_low']:,.0f} – ${result['projected_high']:,.0f}")
+            lines.append(f"• Range:  ${result['projected_low']:,.0f} - ${result['projected_high']:,.0f}")
 
         diag = result.get("diagnostic")
         if diag and diag != "on_track":

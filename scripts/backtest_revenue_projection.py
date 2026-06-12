@@ -48,7 +48,8 @@ def _project(curve: dict, today_rev: float, dow: int, hour: int) -> tuple[float 
     projected_high = today_rev / p25  (optimistic  — if we're at a low-share hour pace)
     Both are None when the fallback band is used (no p25/p75 available).
     """
-    band = curve["share_by_dow"].get(dow, {}).get(hour)
+    # Curve slot [h] = cumulative-through-hour-h; revenue_at_hour(h) = sum(0..h-1)
+    band = curve["share_by_dow"].get(dow, {}).get(hour - 1)
     source = "90d"
     if band is None or band["p50"] < 0.01:
         share = 0.70
@@ -56,7 +57,9 @@ def _project(curve: dict, today_rev: float, dow: int, hour: int) -> tuple[float 
         if share <= 0:
             return None, source, None, None
         projected = today_rev / float(share)
-        return projected, source, None, None
+        projected_low  = today_rev / 0.75
+        projected_high = today_rev / 0.65
+        return projected, source, projected_low, projected_high
     else:
         p50 = band["p50"]
         p25 = band["p25"]

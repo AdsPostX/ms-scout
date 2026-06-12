@@ -78,7 +78,7 @@ class ScoreboardRollup:
     revenue_eod_projection_cents: int = 0                         # linear EOD extrapolation; 0 = too early
     revenue_eod_projection_low_cents:  Optional[int] = None      # p25 band from historical distribution
     revenue_eod_projection_high_cents: Optional[int] = None      # p75 band from historical distribution
-    revenue_eod_diagnostic:            Optional[str] = None      # human-readable fallback note
+    revenue_eod_diagnostic:            Optional[str] = None      # one of: "efficiency", "traffic", "traffic_upside", "on_track", or None
     revenue_mtd_cents: int = 0                                    # month-to-date revenue in cents
     generated_at: datetime = field(default_factory=datetime.utcnow)
 

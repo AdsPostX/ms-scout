@@ -4916,6 +4916,7 @@ def get_revenue_today_projection() -> dict:
             "efficiency":     "⚠ Traffic normal, revenue soft — conversion efficiency issue (experimental)",
             "traffic":        "⚠ Both revenue and traffic below baseline — volume issue (experimental)",
             "traffic_upside": "↑ Traffic and revenue both running ahead of baseline (experimental)",
+            "on_track":       "✓ Revenue and traffic are tracking close to baseline (experimental)",
         }
         diag = result.get("diagnostic", "")
         diag_line = diag_labels.get(diag, "")

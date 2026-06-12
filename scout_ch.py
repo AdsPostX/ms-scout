@@ -648,6 +648,26 @@ GROUP BY ct_day, dow, ct_hour
             if 1 <= dow <= 7 and 0 <= hour <= 23:
                 sess_acc[dow][hour].append(float(cnt))
 
+        # Zero-fill: hours absent from query result had 0 traffic that day.
+        # Without this, _median() skips those hours, inflating baselines.
+        imp_seen: dict = {}
+        for (ct_day, dow, hour) in imp_day:
+            imp_seen.setdefault((ct_day, dow), set()).add(hour)
+        for (ct_day, dow), seen_hrs in imp_seen.items():
+            if 1 <= dow <= 7:
+                for h in range(24):
+                    if h not in seen_hrs:
+                        imp_acc[dow][h].append(0.0)
+
+        sess_seen: dict = {}
+        for (ct_day, dow, hour) in sess_day:
+            sess_seen.setdefault((ct_day, dow), set()).add(hour)
+        for (ct_day, dow), seen_hrs in sess_seen.items():
+            if 1 <= dow <= 7:
+                for h in range(24):
+                    if h not in seen_hrs:
+                        sess_acc[dow][h].append(0.0)
+
     except Exception as exc:
         log.warning("[CH] traffic baseline scan failed (non-fatal): %s", exc)
 
@@ -777,7 +797,13 @@ def project_today_revenue(ch) -> dict:
     sample = int(curve["sample_days"].get(dow, 0))
     base["sample_days"] = sample
 
-    band = curve["share_by_dow"].get(dow, {}).get(hour_ct)
+    # _revenue_at_hour fetches hours < hour_ct (i.e. 0..hour_ct-1).
+    # Curve slot [h] = cumulative-through-hour-h (inclusive), so the matching
+    # slot is hour_ct-1. Using hour_ct directly would compare incomplete-hour
+    # revenue against a curve that includes one extra hour, biasing projections low.
+    curve_hour = hour_ct - 1
+
+    band = curve["share_by_dow"].get(dow, {}).get(curve_hour)
     dow_median = float(curve["dow_median"].get(dow, 0) or 0)
     base["dow_median"] = dow_median if dow_median > 0 else None
 
@@ -829,10 +855,10 @@ def project_today_revenue(ch) -> dict:
     except Exception:
         traffic = None   # CH busy or table unavailable — degrade gracefully
 
-    t_band  = curve.get("traffic_by_dow", {}).get(dow, {}).get(hour_ct)
+    t_band  = curve.get("traffic_by_dow", {}).get(dow, {}).get(curve_hour)
     imp_baseline = t_band.get("impressions_p50", 0) if t_band else 0
 
-    if traffic and t_band and traffic["impressions"] > 0 and imp_baseline > 0:
+    if traffic and t_band and imp_baseline > 0:
         imp_dev = (traffic["impressions"] - imp_baseline) / imp_baseline
         dow_median_val = curve["dow_median"].get(dow)
         denom = dow_median_val or today_revenue or 1.0

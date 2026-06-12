@@ -215,8 +215,10 @@ class TestMissingDOWHour(unittest.TestCase):
         except KeyError as exc:
             self.fail(f"project_today_revenue raised KeyError for missing DOW/hour: {exc}")
 
-        # Should fall back gracefully — either ok with fallback or insufficient_history
-        self.assertIn(result["status"], ("ok", "insufficient_history", "too_early"))
+        # sample_days[3]=12 → not insufficient_history; band for dow=3 absent → fallback
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["curve_source"], "fallback_0.70")
+        self.assertEqual(result["projection_n"], 0)
 
 
 # ── T7 ────────────────────────────────────────────────────────────────────────
@@ -241,8 +243,9 @@ class TestDiagnosticEfficiency(unittest.TestCase):
         imp_baseline = 1000.0
         actual_impressions = 950  # within ±8% of baseline → traffic normal
 
+        # curve_hour = hour_ct - 1; frozen at 14:00 so band/traffic must be at slot 13
         curve = _make_curve(
-            dow=dow, hour=hour,
+            dow=dow, hour=hour - 1,
             p25=0.30, p50=0.40, p75=0.50,
             n=10, dow_median=1000.0,
             impressions_p50=imp_baseline,
@@ -285,8 +288,9 @@ class TestDiagnosticTraffic(unittest.TestCase):
         imp_baseline = 1000.0
         actual_impressions = 850   # 15% below baseline → traffic soft
 
+        # curve_hour = hour_ct - 1; frozen at 14:00 so band/traffic must be at slot 13
         curve = _make_curve(
-            dow=dow, hour=hour,
+            dow=dow, hour=hour - 1,
             p25=0.30, p50=0.40, p75=0.50,
             n=10, dow_median=1000.0,
             impressions_p50=imp_baseline,
