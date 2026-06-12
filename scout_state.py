@@ -639,7 +639,7 @@ def _route_channel(purpose: str, force: bool = False) -> str:
 
 # ── Loading messages (from scout_bot for handler use) ──────────────────────────────
 
-_LOADING_MSG = "Grindin'…"
+_LOADING_MSG = "Interpreting…"
 
 
 # ── Smart history truncation (from scout_bot for handler use) ────────

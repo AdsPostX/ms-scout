@@ -409,6 +409,23 @@ def _permalink_for(web: WebClient, channel: str, msg_ts: str) -> str:
     except Exception:
         return ""
 
+def _build_interpretation(ctx: dict) -> "str | None":
+    """Build a brief interpretation label from extracted_context for the response footer.
+
+    Returns e.g. "Coupons.com · last 30d" or None when there's nothing meaningful to show.
+    """
+    if not ctx:
+        return None
+    parts: list = []
+    if ctx.get("publisher"):
+        parts.append(str(ctx["publisher"]))
+    period = ctx.get("period")
+    if period:
+        _MAP = {"7d": "last 7d", "30d": "last 30d", "MTD": "MTD", "90d": "last 90d", "YTD": "YTD"}
+        parts.append(_MAP.get(str(period), str(period)))
+    return " · ".join(parts) if parts else None
+
+
 def _run_preflight_qa(  # replaces _check_url_async (removed — this is a strict superset)
     web: WebClient,
     channel: str,
@@ -3080,19 +3097,19 @@ def _handle_event_impl(req: SocketModeRequest):
             )
         else:
             response_text  = _sanitize_slack(response.text)[:3000]
-            # No elapsed-time footer in DMs — the reaction disappearing IS the signal
+            _dm_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
+            _dm_interp = _build_interpretation(_dm_ctx)
             _dm6_card = Card(Severity.INFO, "", body=response_text)
             _dm6_fallback, _dm6_blocks = wrap_response(
                 card=_dm6_card, surface=Surface.DM,
                 suggestions=list(suggestions),
                 feedback="reaction", query_hash=msg_ts,
                 elapsed_seconds=_elapsed,
+                interpretation=_dm_interp,
             )
-            _dm_period = (
-                (response.payload or {}).get("extracted_context", {}).get("period")
-                if response.payload else None
-            )
-            _dm6_blocks = [*_dm6_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_dm_period)]
+            if not _dm_interp:
+                _dm_period = _dm_ctx.get("period") if _dm_ctx else None
+                _dm6_blocks = [*_dm6_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_dm_period)]
             _post = web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
                 text=_dm6_fallback, blocks=_dm6_blocks,
@@ -3251,18 +3268,19 @@ def _handle_event_impl(req: SocketModeRequest):
     else:
         # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
         response_text  = _sanitize_slack(response.text)[:3000]
+        _ch_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
+        _ch_interp = _build_interpretation(_ch_ctx)
         _ch8_card = Card(Severity.INFO, "", body=response_text)
         _ch8_fallback, _ch8_blocks = wrap_response(
             card=_ch8_card, surface=Surface.CHANNEL_ROOT,
             suggestions=list(suggestions),
             feedback="reaction", query_hash=_placeholder_ts,
             elapsed_seconds=_elapsed,
+            interpretation=_ch_interp,
         )
-        _period = (
-            (response.payload or {}).get("extracted_context", {}).get("period")
-            if response.payload else None
-        )
-        _ch8_blocks = [*_ch8_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_period)]
+        if not _ch_interp:
+            _ch_period = _ch_ctx.get("period") if _ch_ctx else None
+            _ch8_blocks = [*_ch8_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_ch_period)]
         web.chat_update(
             channel=channel,
             ts=_placeholder_ts,
