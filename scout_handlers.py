@@ -1165,7 +1165,8 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
     _placeholder_ts_sg = placeholder["ts"]
-    _stage: list = [""]
+    _q_seed_sg = (query[:32] + "…") if len(query) > 32 else query
+    _stage: list = [f'"{_q_seed_sg}"']
     stop_rotating = _rotating_status(web, channel, _placeholder_ts_sg, stage_ref=_stage)
 
     # Build thread history (mirrors handle_event)
@@ -1658,7 +1659,8 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _LOADING_MSG}}],
         )
         _placeholder_ts_ah = placeholder["ts"]
-        _stage: list = [""]
+        _q_seed_ah = (query[:32] + "…") if len(query) > 32 else query
+        _stage: list = [f'"{_q_seed_ah}"']
         stop_rotating = _rotating_status(web, dm_channel, _placeholder_ts_ah, stage_ref=_stage)
 
         try:
@@ -3125,7 +3127,8 @@ def _handle_event_impl(req: SocketModeRequest):
         blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _msg_text}}],
     )
     _placeholder_ts = placeholder["ts"]
-    _stage: list = [""]
+    _q_seed = (query[:32] + "…") if len(query) > 32 else query
+    _stage: list = [f'"{_q_seed}"']
     stop_rotating = _rotating_status(web, channel, _placeholder_ts, stage_ref=_stage)
 
     try:
