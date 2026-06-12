@@ -1,37 +1,43 @@
-# Scout STATE
-
 ## Current Position
 
-Milestone: v0.10 Command Registry
-Phase: 10 of 10+ (command-registry) — Complete
-Plan: 10-01 shipped
-Status: UNIFY complete — PR ready to open
-Last activity: 2026-06-10 — All tasks complete, smoke tests green
+Milestone: audit-debt
+Phase: 9 of 9 (audit-debt) — In Progress
+Plan: 09-01 DONE (commit a1fb2cb)
+Status: 09-01 shipped; next plan TBD (network adapters or phase 02 consolidation)
+Last activity: 2026-06-09 — Applied 09-01 (_build_alert_body refactor)
 
 Progress:
-- Milestone: [██████████] 100%
-- Phase 10: [██████████] 100%
+- Phase 9: [██░░░░░░░░] 20%
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Complete]
+  ✓        ✓        ○     [09-01 done; PR open with prior commits, UNIFY = PR merge]
 ```
 
 ## Session Continuity
 
-Last session: 2026-06-10
-Stopped at: UNIFY complete
-Next action: Open PR for branch claude/youthful-jones-eb54e2
-Resume file: .paul/phases/10-command-registry/10-01-SUMMARY.md
+Last session: 2026-06-09
+Stopped at: 09-01 applied and committed
+Next action: Open PR for loving-boyd-491bae (3 commits: pulse dispatch, ptype_map, alert body)
+Then: plan 09-02 (network adapters or phase 02 consolidation)
+
+## Completed Phases
+
+| Phase | Name | Status | PRs |
+|---|---|---|---|
+| 01 | wrap-response-hierarchy | ✅ DONE | #223, #235 |
+| 06 | maint-hardening | ✅ DONE | #249 |
+| 07 | loading-ux | ✅ DONE | #248, #250 |
+| 08 | routing-refactor | ✅ DONE | #251, #252 |
 
 ## Decisions
 
-| # | Decision | Rationale |
+| Decision | Chosen | Reason |
 |---|---|---|
-| 1 | Alias-based matching (not LLM classifier) | Avoids latency; registry is small and known; LLM classifier overkill for <10 commands |
-| 2 | Programmatic formatter in `scout_agent.py` | Shared by both `ask()` canonical handler and `/scout-status` slash command — single source of truth |
-| 3 | Start with `status` only | Proves the pattern; `queue` and `help` follow same shape with zero routing changes |
-| 4 | Passthrough to `_classify_intent` on no-match | Zero regression for open queries |
+| State storage | Keep file-based | Redis deferred; persistent disk works |
+| Scope (phase 06) | Gate + startup log only | Don't over-engineer; close the two known gaps |
+| Routing approach (phase 08) | Remove `_ROUTE_KEYWORDS` + `pre_formatted`, keep `_classify_intent` | LLM handles intent better than keyword table; narrowing tool set is the right abstraction |
+| set_threshold regex | Keep | Structured command parsing, not intent routing |
