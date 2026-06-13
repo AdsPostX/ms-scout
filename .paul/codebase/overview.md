@@ -4,7 +4,7 @@ Last mapped: 2026-06-13
 
 ## What Scout Is
 
-Scout is a Slack-native AI analytics agent for MomentScience's operations team. It answers natural-language questions about campaigns, publishers, revenue, and offer performance by querying ClickHouse, then surfaces curated affiliate offers to the team via a weekly digest with approve/reject buttons. Approved offers flow through a Notion queue into the live platform.
+Scout is a Slack-native AI analytics agent for MomentScience's operations team. It answers natural-language questions about campaigns, publishers, revenue, and offer performance by querying ClickHouse, then surfaces curated affiliate offers to the team via a daily digest with approve/reject buttons. Approved offers flow through a Notion queue into the live platform.
 
 ## Two Services, One System
 

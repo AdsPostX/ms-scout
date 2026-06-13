@@ -10,7 +10,7 @@
 | `scout_agent.py` | 6,323 | **God module (known debt).** Core Claude agent: `ask()` / `ask_with_attachment()` agentic loop, all 20+ tool implementations, threshold management, benchmark caching, ClickHouse re-exports. |
 | `scout_handlers.py` | 3,352 | Slack event dispatch table: @mentions, button clicks, slash commands, modal submissions. Bridges Slack events → `ask()` → `wrap_response()` → Slack post. |
 | `scout_ui_kit.py` | 1,874 | **Pure UI module.** Block Kit builders: `Card`, `Severity`, `Surface`, `ResponsePattern`, `wrap_response()`. Zero Slack API calls, zero state. |
-| `scout_digest.py` | 1,749 | Weekly offer digest: score offers from `offers_latest.json`, rank, deduplicate, format Block Kit, post with approve/reject buttons. |
+| `scout_digest.py` | 1,749 | Daily offer digest (module header says "Weekly" — stale label): score offers from `offers_latest.json`, rank, deduplicate, format Block Kit, post with approve/reject buttons. |
 | `scout_notion.py` | ~1,100 | Notion queue integration: AI copy generation (Claude Haiku), write approved offers to Notion DB, batch enrichment loop. |
 | `scout_state.py` | ~860 | **Single I/O point** for `data/` directory. Atomic writes (`tmp → os.replace`). Thread-safe via `_PULSE_STATE_LOCK`, `_MAINTENANCE_LOCK`. |
 | `scout_ch.py` | ~1,050 | ClickHouse client management. `_get_ch_client()`, `BoundedSemaphore(4)` concurrency cap, `_LoggingCHClient` wrapper. Re-exports scout_core functions. |
@@ -167,7 +167,7 @@ scout_state.py  # NO imports from scout_agent
 
 | Daemon | Interval | Purpose |
 |--------|----------|---------|
-| `_digest_poster` | Daily 07:00 CT | Posts weekly offer digest |
+| `_digest_poster` | Daily 07:00 CT | Posts daily offer digest (7am CT, configurable via `digest_post_hour_ct`) |
 | `_launch_watchdog` | Daily 10:00 CT | Checks launched offers for first impressions |
 | `_performance_recap` | Daily | 7-day post-launch actual vs estimate comparison |
 | `_check_stale_queue` | Daily | Nudges queued offers with no impressions after 7d |

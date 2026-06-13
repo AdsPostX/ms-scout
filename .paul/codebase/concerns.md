@@ -177,6 +177,13 @@ Both cost tokens / time. Not wired to CI. No baseline storage for eval regressio
 | alert_registry Redis | smoke_test.py | same as App Home | 2026-07-18 |
 | MS platform campaign webhook | demand_feed_main.py | Vamsee delivers URL + key | 2026-06-21 |
 
+### 17. GIPHY_API_KEY in render.yaml is dead
+**File**: `render.yaml`
+
+`GIPHY_API_KEY` is declared as an env var in render.yaml but is not referenced anywhere in the Python codebase. Safe to remove from render.yaml to reduce credential surface.
+
+---
+
 ## Security Status: CLEAN
 
 - Subprocess (`pdftotext`): no `shell=True`, explicit arg list, timeout enforced ✅
