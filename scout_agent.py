@@ -143,48 +143,6 @@ def _set_force_monitor_ctx(web, ch_factory) -> None:
 
 SNAPSHOT_PATH = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
 
-# ── Data quality tier helper (delegated to ThresholdManager) ─────────────────
-
-def _data_quality_tier(days_of_data: int, sessions: int = 0) -> dict:
-    return _manager.data_quality_tier(days_of_data, sessions)
-
-
-# ── Entity overrides (delegated to ThresholdManager) ─────────────────────────
-
-def _load_entity_overrides() -> dict:
-    return _manager.entity_overrides()
-
-
-def _save_entity_overrides(overrides: dict) -> None:
-    return _manager.save_entity_overrides(overrides)
-
-
-def _get_corrections_context() -> str:
-    return _manager.corrections_context()
-
-
-def _merge_learned_benchmarks() -> None:
-    return _manager.merge_learned_benchmarks()
-
-
-# ── PR 19: tags-as-categories helper (delegated to ThresholdManager) ─────────
-
-def _extract_real_categories(tags_value) -> list[str]:
-    return _manager.extract_real_categories(tags_value)
-
-
-def _validate_schema_deps(ch) -> dict:
-    return _manager.validate_schema_deps(ch)
-
-
-def _load_performance_benchmarks() -> dict:
-    return _manager._load_benchmarks_file()
-
-
-def _get_benchmarks() -> dict:
-    return _manager.benchmarks()
-
-
 # Compiled once at module level — strips <<<SUGGESTIONS [...]  SUGGESTIONS>>> blocks from responses
 _SUGG_RE = re.compile(r'<<<SUGGESTIONS\s*(\[.*?\])\s*SUGGESTIONS>>>', re.DOTALL)
 
@@ -1357,14 +1315,6 @@ _CLICK_ID_PATTERNS = ("{click_id}", "{subid}", "subId", "clickid", "click_id", "
 # ── Demand Queue lifecycle tools ─────────────────────────────────────────────
 
 
-def _load_launched_offers_state() -> dict:
-    return _manager.load_launched_offers_state()
-
-
-def _load_pulse_state_local() -> dict:
-    return _manager.load_pulse_state()
-
-
 def get_scout_config() -> dict:
     """
     Return Scout's current active configuration (PR 17b).
@@ -1822,14 +1772,6 @@ _SET_RE_SHORT = re.compile(
 )
 
 
-def _coerce_threshold_value(raw: str):
-    return _manager.coerce_value(raw)
-
-
-def _split_dotted_key(dotted: str) -> tuple[str, str]:
-    return _manager._split_key(dotted)
-
-
 def _format_dict_response(title: str, data: dict) -> str:
     """Slack-friendly key-value dump for control-surface tool results.
 
@@ -1879,13 +1821,13 @@ def _route_deterministic(user_message: str, user_id: str, on_stage=None) -> Opti
     if m:
         dotted, raw_val, reason = m.group(1), m.group(2), m.group(3).strip()
         try:
-            section, key = _split_dotted_key(dotted)
+            section, key = _manager._split_key(dotted)
         except AmbiguousThresholdKey as exc:
             return AskResult(
                 text=f":warning: {exc}",
                 tools_called=(), duration_ms=0,
             )
-        value = _coerce_threshold_value(raw_val)
+        value = _manager.coerce_value(raw_val)
         result = set_threshold(section=section, key=key, value=value,
                                reason=reason, _caller_user_id=user_id)
         if result.get("ok"):
@@ -1912,7 +1854,7 @@ def _build_prefix_context(user_id: str, user_tz: str) -> str:
     Pure helper extracted from ask() so other entry points (e.g. attachment-bearing
     variants) can reuse identical context construction without duplicating logic.
     """
-    corrections_ctx = _get_corrections_context()
+    corrections_ctx = _manager.corrections_context()
     caller_ctx      = f"[Caller Slack user_id: {user_id}]\n" if user_id else ""
     # Inject current CT date/time so the model never guesses "today" from UTC.
     # CT is the data anchor (all ClickHouse data is America/Chicago). If the

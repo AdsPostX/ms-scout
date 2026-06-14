@@ -65,8 +65,8 @@ def test(name: str):
 @test("Entity overrides — file readable")
 def test_entity_overrides():
     try:
-        from scout_agent import _load_entity_overrides
-        overrides = _load_entity_overrides()
+        from scout_thresholds import _manager as _tm_sa
+        overrides = _tm_sa.entity_overrides()
         pubs = overrides.get("publishers", {})
         advs = overrides.get("advertisers", {})
         button_ok = "Button" in pubs
@@ -769,7 +769,8 @@ def test_supported_networks_trimmed():
 @test("_extract_real_categories filters internal-* prefix tags (case-insensitive)")
 def test_extract_categories_filters_internal():
     try:
-        from scout_agent import _extract_real_categories
+        from scout_thresholds import _manager as _tm_sa
+        _extract_real_categories = _tm_sa.extract_real_categories
         # JSON string input — production case
         result = _extract_real_categories(
             '["internal-network-impact","internal-email","rewards","technology"]'
@@ -790,7 +791,8 @@ def test_extract_categories_filters_internal():
 @test("_extract_real_categories handles missing/empty/null/invalid inputs")
 def test_extract_categories_edge_cases():
     try:
-        from scout_agent import _extract_real_categories
+        from scout_thresholds import _manager as _tm_sa
+        _extract_real_categories = _tm_sa.extract_real_categories
         cases = [
             (None,             [],  "None"),
             ("",               [],  "empty string"),
@@ -814,7 +816,8 @@ def test_extract_categories_edge_cases():
 @test("_extract_real_categories preserves tag order")
 def test_extract_categories_preserves_order():
     try:
-        from scout_agent import _extract_real_categories
+        from scout_thresholds import _manager as _tm_sa
+        _extract_real_categories = _tm_sa.extract_real_categories
         result = _extract_real_categories(
             '["technology","internal-x","rewards","pets","internal-y","financial"]'
         )
