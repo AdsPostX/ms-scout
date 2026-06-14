@@ -243,7 +243,7 @@ _HEADER_PLAIN_TEXT_MAX = 150
 # Strings that signal markdown-formatted body content — route through _text_to_blocks()
 # instead of a plain mrkdwn section. Checked at the START of wrap_response() body routing.
 # "- " and "• " handle bodies that START with a single bullet (no leading \n).
-_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ", "\n|")
+_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ", "\n|", "> ", "1. ")
 
 
 def _markdown_block(text: str) -> dict:
@@ -1121,7 +1121,7 @@ def _text_to_blocks(text: str) -> list:
 
     Structure:
     - '---' separators → divider blocks between sections
-    - Lines starting with '>' → mrkdwn context block
+    - Lines starting with '>' → rich_text_quote element
     - Bullet lines (•, -, *) → rich_text_list element
     - Triple-backtick fences → rich_text_preformatted element
     - Everything else → rich_text_section with typed inline elements
@@ -1169,7 +1169,6 @@ def _text_to_blocks(text: str) -> list:
         table_buf: list = []
         in_fence = False
         fence_buf: list = []
-        fence_lang: str = ""
 
         def _flush_table(table_buf: list, rt_elems: list) -> list:
             """Flush accumulated pipe-table rows into rt_elems. Returns empty list to reset table_buf."""
@@ -1233,13 +1232,9 @@ def _text_to_blocks(text: str) -> list:
                         "type": "rich_text_preformatted",
                         "elements": [{"type": "text", "text": code_text}],
                     }
-                    if fence_lang:
-                        pre_block["language"] = fence_lang
-                    fence_lang = ""
                     rt_elems.append(pre_block)
                 else:
                     in_fence = True
-                    fence_lang = raw_line[3:].strip()
                 continue
 
             if in_fence:

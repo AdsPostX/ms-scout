@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scout_ui_kit import _text_to_blocks, _parse_inline_elements
+from scout_ui_kit import _text_to_blocks, _parse_inline_elements, _MARKDOWN_SIGNALS
 
 
 class TestPipeTableFallback(unittest.TestCase):
@@ -120,13 +120,14 @@ class TestRichTextSpecGaps(unittest.TestCase):
         self.assertEqual(strike["text"], "deprecated")
 
     def test_fenced_code_block_with_language(self):
-        """Opening fence with language tag sets the language field on the preformatted block."""
+        """Language tag is parsed but not emitted — not in Slack's rich_text_preformatted schema."""
         text = "```python\nprint('hello')\n```"
         blocks = _text_to_blocks(text)
         rt = blocks[0]
         pre = next((el for el in rt["elements"] if el["type"] == "rich_text_preformatted"), None)
         self.assertIsNotNone(pre)
-        self.assertEqual(pre.get("language"), "python")
+        self.assertNotIn("language", pre, "language field not in Slack schema — must be omitted")
+        self.assertEqual(pre["elements"][0]["text"], "print('hello')")
 
     def test_fenced_code_block_without_language(self):
         """Opening fence without language tag omits the language field entirely."""
@@ -149,6 +150,18 @@ class TestRichTextSpecGaps(unittest.TestCase):
         )
         self.assertIsNotNone(ol, "No ordered list found")
         self.assertEqual(len(ol["elements"]), 3)
+
+
+class TestMarkdownSignalRouting(unittest.TestCase):
+    """_MARKDOWN_SIGNALS gates which Card bodies reach _text_to_blocks() when the flag is off."""
+
+    def test_blockquote_body_triggers_signal(self):
+        """> text must be in _MARKDOWN_SIGNALS so blockquote bodies reach _text_to_blocks()."""
+        self.assertTrue(any(s in "> This is quoted" for s in _MARKDOWN_SIGNALS))
+
+    def test_ordered_list_body_triggers_signal(self):
+        """1. text must be in _MARKDOWN_SIGNALS so ordered-list bodies reach _text_to_blocks()."""
+        self.assertTrue(any(s in "1. First item\n2. Second item" for s in _MARKDOWN_SIGNALS))
 
 
 if __name__ == "__main__":
