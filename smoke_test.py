@@ -4011,17 +4011,6 @@ def test_agent_plan_block_renders():
     return True, "_agent_plan_block renders steps with correct emoji and labels"
 
 
-@test("Agent blocks — annotate_reasoning_steps in TOOL_MAP")
-def test_annotate_reasoning_steps_in_tool_map():
-    from scout_agent import TOOL_MAP
-    if "annotate_reasoning_steps" not in TOOL_MAP:
-        return False, "annotate_reasoning_steps missing from TOOL_MAP"
-    fn = TOOL_MAP["annotate_reasoning_steps"]
-    result = fn(steps=[{"label": "x", "status": "pass", "finding": "y"}])
-    if result != "Steps recorded.":
-        return False, f"Unexpected return value: {result!r}"
-    return True, "annotate_reasoning_steps registered in TOOL_MAP and returns expected sentinel"
-
 
 @test("Agent blocks — _synthesize_agent_steps derives steps from tool call log")
 def test_synthesize_agent_steps():

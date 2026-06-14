@@ -712,10 +712,6 @@ from scout_tools_admin import (
     _QA_SUITE,
 )
 
-def annotate_reasoning_steps(steps: list) -> str:
-    """No-op handler — steps captured from block.input in _run_tool_loop."""
-    return "Steps recorded."
-
 
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
@@ -772,7 +768,6 @@ TOOL_MAP["list_thresholds"] = list_thresholds
 TOOL_MAP["get_threshold_history"] = get_threshold_history
 TOOL_MAP["set_threshold"] = set_threshold
 TOOL_MAP["force_run_monitor"] = force_run_monitor
-TOOL_MAP["annotate_reasoning_steps"] = annotate_reasoning_steps
 
 _TOOL_STEP_LABELS: dict[str, str] = {
     "get_revenue_summary": "Revenue check",
@@ -793,7 +788,6 @@ _TOOL_STEP_LABELS: dict[str, str] = {
 }
 
 _TOOL_SKIP_SYNTHESIS: frozenset[str] = frozenset({
-    "annotate_reasoning_steps",
     "force_run_monitor",
     "get_scout_config",
     "list_thresholds",
@@ -803,11 +797,7 @@ _TOOL_SKIP_SYNTHESIS: frozenset[str] = frozenset({
 
 
 def _synthesize_agent_steps(tool_call_log: list[tuple[str, any]]) -> list[dict]:
-    """Derive agent steps from raw tool call log when Claude did not self-annotate.
-
-    Guarantees the reasoning chain is visible for every data-querying response,
-    regardless of whether Claude chose to call annotate_reasoning_steps.
-    """
+    """Derive agent steps from raw tool call log — sole source of the reasoning chain."""
     steps = []
     for name, result in tool_call_log:
         if name in _TOOL_SKIP_SYNTHESIS:
@@ -1144,7 +1134,6 @@ def _run_tool_loop(
         _opportunity_offers = []
     if _all_tool_results is None:
         _all_tool_results = []
-    _agent_steps: list = []
     _tool_call_log: list[tuple[str, any]] = []
 
     # user_message is the RAW pre-prefix string — passed explicitly so the
@@ -1263,7 +1252,7 @@ def _run_tool_loop(
                         # even if Block Kit rendering fails
                         "fallback_text": _fallback_text,
                     },
-                    agent_steps=_agent_steps or _synthesize_agent_steps(_tool_call_log) or None,
+                    agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
                 )
 
             # Parse and strip <<<SUGGESTIONS [...]  SUGGESTIONS>>> block from text.
@@ -1291,7 +1280,7 @@ def _run_tool_loop(
                         "offers": _opportunity_offers,
                         "suggestions": suggestions,
                     },
-                    agent_steps=_agent_steps or _synthesize_agent_steps(_tool_call_log) or None,
+                    agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
                 )
 
             # General entity extraction — runs over all tool results from this turn.
@@ -1311,14 +1300,14 @@ def _run_tool_loop(
                             "extracted_context": extracted,
                             "suggestions": suggestions,
                         },
-                        agent_steps=_agent_steps or _synthesize_agent_steps(_tool_call_log) or None,
+                        agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
                     )
 
             return AskResult(
                 text=text or "(no response)",
                 tools_called=_tools_called,
                 duration_ms=_dur(),
-                agent_steps=_agent_steps or _synthesize_agent_steps(_tool_call_log) or None,
+                agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
             )
 
         # Process tool calls
@@ -1357,10 +1346,7 @@ def _run_tool_loop(
                 for i, _ in sorted(tool_blocks, key=lambda x: x[0]):
                     block, result = results_map[i]
                     _tools_called.append(block.name)
-                    if block.name == "annotate_reasoning_steps":
-                        _agent_steps.extend(block.input.get("steps", []))
-                    else:
-                        _tool_call_log.append((block.name, result))
+                    _tool_call_log.append((block.name, result))
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
                     if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
@@ -1377,11 +1363,8 @@ def _run_tool_loop(
                 # Interpreter shutting down — fall back to sequential
                 for i, block in tool_blocks:
                     _tools_called.append(block.name)
-                    if block.name == "annotate_reasoning_steps":
-                        _agent_steps.extend(block.input.get("steps", []))
                     result = _run_tool(block.name, block.input, user_id, permalink)
-                    if block.name != "annotate_reasoning_steps":
-                        _tool_call_log.append((block.name, result))
+                    _tool_call_log.append((block.name, result))
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
                     _all_tool_results.append(result)
@@ -1394,11 +1377,8 @@ def _run_tool_loop(
             # Single tool call — keep sequential path unchanged
             for i, block in tool_blocks:
                 _tools_called.append(block.name)
-                if block.name == "annotate_reasoning_steps":
-                    _agent_steps.extend(block.input.get("steps", []))
                 result = _run_tool(block.name, block.input, user_id, permalink)
-                if block.name != "annotate_reasoning_steps":
-                    _tool_call_log.append((block.name, result))
+                _tool_call_log.append((block.name, result))
                 if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                     _brief_results.append(result)  # collect all, use first for primary
                 if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
@@ -1419,9 +1399,9 @@ def _run_tool_loop(
                         text=block.text,
                         tools_called=_tools_called,
                         duration_ms=_dur(),
-                        agent_steps=_agent_steps or _synthesize_agent_steps(_tool_call_log) or None,
+                        agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
                     )
-            return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur(), agent_steps=_agent_steps or None)
+            return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur(), agent_steps=_synthesize_agent_steps(_tool_call_log) or None)
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
@@ -1436,7 +1416,7 @@ def _run_tool_loop(
         ),
         tools_called=_tools_called,
         duration_ms=_dur(),
-        agent_steps=_agent_steps or _synthesize_agent_steps(_tool_call_log) or None,
+        agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
     )
 
 
