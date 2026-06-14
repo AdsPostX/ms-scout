@@ -387,16 +387,18 @@ class TestKitLint(unittest.TestCase):
         """When SCOUT_MARKDOWN_BLOCKS=true, body uses native markdown block instead of rich_text."""
         import os
         import importlib
-        os.environ["SCOUT_MARKDOWN_BLOCKS"] = "true"
         import scout_ui_kit as kit
-        importlib.reload(kit)
-        card = kit.Card(severity=kit.Severity.INFO, headline="Test", body="## Heading\nSome text.")
-        _, blocks = kit.wrap_response(card=card, surface=kit.Surface.CHANNEL_ROOT, pattern=kit.ResponsePattern.ANSWER)
-        md_blocks = [b for b in blocks if b.get("type") == "markdown"]
-        self.assertEqual(len(md_blocks), 1)
-        self.assertIn("## Heading", md_blocks[0]["text"])
-        os.environ.pop("SCOUT_MARKDOWN_BLOCKS", None)
-        importlib.reload(kit)
+        try:
+            os.environ["SCOUT_MARKDOWN_BLOCKS"] = "true"
+            importlib.reload(kit)
+            card = kit.Card(severity=kit.Severity.INFO, headline="Test", body="## Heading\nSome text.")
+            _, blocks = kit.wrap_response(card=card, surface=kit.Surface.CHANNEL_ROOT, pattern=kit.ResponsePattern.ANSWER)
+            md_blocks = [b for b in blocks if b.get("type") == "markdown"]
+            self.assertEqual(len(md_blocks), 1)
+            self.assertIn("## Heading", md_blocks[0]["text"])
+        finally:
+            os.environ.pop("SCOUT_MARKDOWN_BLOCKS", None)
+            importlib.reload(kit)
 
 
 if __name__ == "__main__":

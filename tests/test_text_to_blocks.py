@@ -104,6 +104,14 @@ class TestRichTextSpecGaps(unittest.TestCase):
         self.assertIn("rich_text_quote", rt_types)
         self.assertNotIn("context", [b["type"] for b in blocks])
 
+    def test_multiline_blockquote_produces_single_quote_element(self):
+        """Consecutive > lines merge into one rich_text_quote, not separate elements."""
+        text = "> Line one\n> Line two"
+        blocks = _text_to_blocks(text)
+        rt = blocks[0]
+        quote_elements = [el for el in rt["elements"] if el["type"] == "rich_text_quote"]
+        self.assertEqual(len(quote_elements), 1, "Two consecutive > lines must produce ONE rich_text_quote")
+
     def test_strike_style_for_double_tilde(self):
         """~~text~~ produces a text element with style.strike = True."""
         elements = _parse_inline_elements("~~deprecated~~")
