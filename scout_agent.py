@@ -123,91 +123,7 @@ SUPPORTED_NETWORKS: tuple[str, ...] = (
 )
 
 
-# ── PR 17a: Scout thresholds — loaded once at module import ──────────────────
-# Edit config/scout_thresholds.json + redeploy on Render to change live values.
-# The @Scout config tool reads SCOUT_THRESHOLDS at runtime so the team can audit
-# what's currently active without reading source.
-_SCOUT_THRESHOLDS_FILE = pathlib.Path(__file__).parent / "config" / "scout_thresholds.json"
-
-_SCOUT_THRESHOLDS_FALLBACK: dict = {
-    "digest": {
-        "min_rpm_floor": 20,
-        "offers_per_network": 3,
-        "max_per_category": 2,
-        "max_per_payout_type": 2,
-    },
-    "signals": {
-        "fill_rate_min_sessions_7d": 2500,
-        "ghost_recency_hours": 48,
-        "velocity_down_threshold_pct": -25,
-        "velocity_up_threshold_pct": 20,
-        "cap_alert_pct": 85,
-    },
-    "health": {
-        "offer_staleness_hours": 30,
-        "heartbeat_interval_minutes": 30,
-        "heartbeat_warmup_seconds": 300,
-        "heartbeat_consecutive_threshold": 2,
-    },
-}
-
-
-def _load_base_thresholds() -> dict:
-    """Allowlist of valid `section.key` pairs: fallback ← config/scout_thresholds.json.
-
-    Excludes runtime overrides so write-validation cannot be tricked by a previously
-    persisted bad key in data/threshold_overrides.json.
-    """
-    try:
-        if not _SCOUT_THRESHOLDS_FILE.exists():
-            log.warning(f"[config] {_SCOUT_THRESHOLDS_FILE} missing — using fallback thresholds")
-            base = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
-        else:
-            loaded = json.loads(_SCOUT_THRESHOLDS_FILE.read_text())
-            loaded.pop("_doc", None)
-            base = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
-            for section, values in loaded.items():
-                if section in base and isinstance(values, dict):
-                    base[section].update(values)
-                else:
-                    base[section] = values
-    except Exception as e:
-        log.warning(f"[config] _load_base_thresholds() failed on config file, using fallback: {e}")
-        base = {k: dict(v) for k, v in _SCOUT_THRESHOLDS_FALLBACK.items()}
-    return base
-
-
-def _load_thresholds() -> dict:
-    """Load Scout thresholds: base schema ← data/threshold_overrides.json.
-
-    Runtime overrides from the `set_threshold` agent tool are layered last, so they
-    win over the git-tracked config. Override file shape:
-      {"signals": {"cap_alert_pct": {"value": 80, "set_by": "U123", "set_at": "...", "reason": "..."}}}
-    """
-    merged = _load_base_thresholds()
-
-    # Layer runtime overrides on top (lazy import — scout_state has no scout_agent dep)
-    try:
-        import scout_state
-        overrides = scout_state._load_threshold_overrides()
-        for section, keys in (overrides or {}).items():
-            if not isinstance(keys, dict):
-                continue
-            if section not in merged or not isinstance(merged[section], dict):
-                merged[section] = {}
-            for key, entry in keys.items():
-                if isinstance(entry, dict) and "value" in entry:
-                    merged[section][key] = entry["value"]
-    except Exception as e:
-        log.warning(f"[config] _load_thresholds() failed applying overrides: {e}")
-
-    return merged
-
-
-# Base schema (no overrides) — the source of truth for write-validation in
-# set_threshold. SCOUT_THRESHOLDS below is the merged read-view callers actually see.
-_BASE_THRESHOLDS: dict = _load_base_thresholds()
-SCOUT_THRESHOLDS: dict = _load_thresholds()
+from scout_thresholds import _manager, AmbiguousThresholdKey
 
 
 def _is_admin(user_id: str) -> bool:
@@ -238,368 +154,48 @@ def _set_force_monitor_ctx(web, ch_factory) -> None:
 
 
 SNAPSHOT_PATH = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
-_PULSE_STATE_PATH = pathlib.Path(__file__).parent / "data" / "pulse_state.json"
 
-# ── Performance benchmark cache (refreshed hourly) ───────────────────────────
-# Maps: category → {cvr_pct, rpm, sample_size}
-#        offer_impact_id → {cvr_pct, rpm, adv_name}
-_BENCHMARKS: dict = {}
-_BENCHMARKS_LOADED_AT: float = 0.0
-_BENCHMARKS_TTL = 3600  # 1 hour
-_BENCHMARKS_LOCK = threading.Lock()
-
-# ── Data quality tier helper ──────────────────────────────────────────────────
+# ── Data quality tier helper (delegated to ThresholdManager) ─────────────────
 
 def _data_quality_tier(days_of_data: int, sessions: int = 0) -> dict:
-    """
-    Compute confidence tier for a data window.
-    Used by tools to populate data_quality in return values.
-    Claude uses this to emit the CONFIDENCE LINE rule in responses.
-    """
-    if days_of_data >= 14 and sessions >= 1000:
-        tier, emoji = "strong", ":large_green_circle:"
-    elif days_of_data >= 7 and sessions >= 100:
-        tier, emoji = "directional", ":large_yellow_circle:"
-    else:
-        tier, emoji = "thin", ":red_circle:"
-    if sessions > 0:
-        note = f"{days_of_data} days · {sessions:,} sessions"
-    else:
-        note = f"{days_of_data} days"
-    return {"tier": tier, "emoji": emoji, "days_of_data": days_of_data, "sessions": sessions, "note": note}
+    return _manager.data_quality_tier(days_of_data, sessions)
 
 
-# ── Learnings injection ───────────────────────────────────────────────────────
-
-_LEARNINGS_PATH = pathlib.Path(__file__).parent / "data" / "learnings.json"
-_LEARNED_BENCHMARKS_PATH = pathlib.Path(__file__).parent / "data" / "learned_benchmarks.json"
-_TEAM_CORRECTIONS_PATH = pathlib.Path(__file__).parent / "config" / "team_corrections.json"
-_ENTITY_OVERRIDES_PATH = pathlib.Path(__file__).parent / "data" / "entity_overrides.json"
-
+# ── Entity overrides (delegated to ThresholdManager) ─────────────────────────
 
 def _load_entity_overrides() -> dict:
-    """Load publisher/advertiser knowledge store. Returns empty structure if missing or corrupt."""
-    try:
-        if _ENTITY_OVERRIDES_PATH.exists():
-            return json.loads(_ENTITY_OVERRIDES_PATH.read_text())
-    except Exception as e:
-        log.debug("_load_entity_overrides swallowed: %s", e)
-    return {"publishers": {}, "advertisers": {}}
+    return _manager.entity_overrides()
 
 
 def _save_entity_overrides(overrides: dict) -> None:
-    """Atomic write to entity_overrides.json using temp+rename (safe on Linux/Render)."""
-    _ENTITY_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _ENTITY_OVERRIDES_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(overrides, indent=2))
-    tmp.replace(_ENTITY_OVERRIDES_PATH)
+    return _manager.save_entity_overrides(overrides)
 
 
 def _get_corrections_context() -> str:
-    """
-    Load high-confidence corrections from two sources and return as a grounding
-    context string prepended to user queries in ask().
-
-    Sources (merged, static corrections listed first):
-    - config/team_corrections.json — static team knowledge, committed to git
-    - data/learnings.json — runtime corrections learned from feedback
-    Returns empty string if no corrections or files missing.
-    """
-    corrections: list = []
-    try:
-        # Static team corrections (git-tracked, always present after deploy)
-        if _TEAM_CORRECTIONS_PATH.exists():
-            data = json.loads(_TEAM_CORRECTIONS_PATH.read_text())
-            corrections += [c for c in data.get("corrections", []) if c.get("confidence") == "high"]
-    except Exception as e:
-        log.debug("_get_corrections_context team_corrections swallowed: %s", e)
-    try:
-        # Runtime corrections (accumulated from team feedback via @Scout learn)
-        if _LEARNINGS_PATH.exists():
-            data = json.loads(_LEARNINGS_PATH.read_text())
-            corrections += [c for c in data.get("corrections", []) if c.get("confidence") == "high"]
-    except Exception as e:
-        log.debug("_get_corrections_context learnings swallowed: %s", e)
-    # Entity overrides (publisher + advertiser notes recorded by the team via @Scout)
-    # Plan v3 §3.5: emit provenance (added_by + added date) inline so the LLM can
-    # cite "[learned from <user> on <date>]" when it surfaces an override fact.
-    try:
-        overrides = _load_entity_overrides()
-        for pub, data in overrides.get("publishers", {}).items():
-            prov = f" [learned from {data.get('added_by','?')} on {data.get('added','?')}]"
-            corrections.append({"confidence": "high",
-                                 "correction": f"Publisher {pub}: {data['note']}{prov}"})
-        for adv, data in overrides.get("advertisers", {}).items():
-            prov = f" [learned from {data.get('added_by','?')} on {data.get('added','?')}]"
-            corrections.append({"confidence": "high",
-                                 "correction": f"Advertiser {adv}: {data['note']}{prov}"})
-    except Exception as e:
-        log.debug("_get_corrections_context overrides swallowed: %s", e)
-    if not corrections:
-        return ""
-    lines = [f"- {c['correction']}" for c in corrections[-16:]]
-    return (
-        "TEAM CORRECTIONS (from prior feedback — treat these as ground truth):\n"
-        + "\n".join(lines)
-        + "\n\n"
-    )
+    return _manager.corrections_context()
 
 
 
 def _merge_learned_benchmarks() -> None:
-    """
-    Merge data/learned_benchmarks.json into _BENCHMARKS at startup.
-    Learned benchmarks have lower weight than ClickHouse actuals
-    but override category defaults. Called once after _load_performance_benchmarks().
-    """
-    global _BENCHMARKS
-    try:
-        if not _LEARNED_BENCHMARKS_PATH.exists():
-            return
-        lb = json.loads(_LEARNED_BENCHMARKS_PATH.read_text())
-        if not lb:
-            return
-        learned = _BENCHMARKS.setdefault("by_learned_actuals", {})
-        for key, entry in lb.items():
-            learned[key] = {
-                "avg_cvr_pct": 0.0,  # CVR not tracked in simple recap
-                "avg_rpm": entry.get("rpm_actual_avg", 0.0),
-                "sample_campaigns": entry.get("sample_count", 0),
-            }
-        log.info(f"Merged {len(lb)} learned benchmark entries into _BENCHMARKS")
-    except Exception as e:
-        log.warning(f"_merge_learned_benchmarks failed: {e}")
+    return _manager.merge_learned_benchmarks()
 
 
-# ── PR 19: tags-as-categories helper + schema-deps validation ────────────────
+# ── PR 19: tags-as-categories helper (delegated to ThresholdManager) ─────────
 
 def _extract_real_categories(tags_value) -> list[str]:
-    """
-    Parse the from_airbyte_campaigns.tags JSON array string and return the
-    real category tags (filter out `internal-*` system tags used for network
-    and channel metadata).
-
-    Pure function, no I/O. Used by tests and (where useful) by ad-hoc Python
-    consumers; the production scoring path does the same filter in SQL via
-    queries.performance_benchmarks_raw().
-
-    Examples:
-      '["internal-network-impact", "internal-email", "rewards", "technology"]'
-        → ['rewards', 'technology']
-      '["pets", "non-profit"]'        → ['pets', 'non-profit']
-      '[]' or None or '' or 'invalid' → []
-    """
-    if not tags_value:
-        return []
-    try:
-        parsed = json.loads(tags_value) if isinstance(tags_value, str) else tags_value
-    except (json.JSONDecodeError, TypeError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-    # Case-insensitive filter — production has both "internal-email" and "Internal-Email"
-    # variants from differently-typed platform entries.
-    return [t for t in parsed if isinstance(t, str) and not t.lower().startswith("internal-")]
-
-
-# Columns Scout depends on. (table, column, must_have_data).
-# must_have_data=True means the column must have at least 100 non-null rows;
-# below that threshold _validate_schema_deps fires loud at boot. Catches the
-# categories-NULL class of silent failure (PR 19 root cause).
-_SCHEMA_DEPS: list[tuple[str, str, bool]] = [
-    # from_airbyte_campaigns — driver of benchmarks + scoring
-    ("from_airbyte_campaigns",      "id",                    False),
-    ("from_airbyte_campaigns",      "adv_name",              True),
-    ("from_airbyte_campaigns",      "tags",                  True),   # PR 19: source of category data
-    ("from_airbyte_campaigns",      "internal_network_name", True),
-    ("from_airbyte_campaigns",      "deleted_at",            False),
-    ("from_airbyte_campaigns",      "categories",            False),  # known empty (use tags)
-    # Activity tables — driver of CVR/RPM
-    ("adpx_sdk_sessions",           "user_id",               True),
-    ("adpx_sdk_sessions",           "placement",             True),
-    ("adpx_impressions_details",    "campaign_id",           True),
-    ("adpx_impressions_details",    "pid",                   True),
-    ("adpx_conversionsdetails",     "campaign_id",           True),
-    ("adpx_conversionsdetails",     "revenue",               True),
-    ("adpx_conversionsdetails",     "click_hash",            True),
-    ("adpx_conversionsdetails",     "session_id",            True),
-    ("adpx_tracked_clicks",         "campaign_id",           True),
-    ("adpx_tracked_clicks",         "click_hash",            True),
-    ("adpx_tracked_clicks",         "session_id",            True),
-    # Publisher resolution
-    ("from_airbyte_users",          "id",                    True),
-    ("from_airbyte_users",          "organization",          True),
-    # CVR anomaly + expiration monitors (PR-C)
-    ("adpx_conversionsdetails",     "payout",                True),
-    ("from_airbyte_campaigns",      "end_date",              False),  # NULL for open-ended campaigns
-    ("from_airbyte_campaigns",      "status",                True),
-]
-
-_SCHEMA_DEPS_MIN_ROWS = 100  # threshold for must_have_data; below this fires alert
+    return _manager.extract_real_categories(tags_value)
 
 
 def _validate_schema_deps(ch) -> dict:
-    """
-    Boot-time check (PR 19): for each column Scout depends on, confirm it exists
-    in system.columns and (where flagged) has at least _SCHEMA_DEPS_MIN_ROWS non-null
-    rows. Returns {"ok": bool, "violations": [str], "warnings": [str], "checked": int}.
-
-    Does NOT block boot. Caller logs and posts to #scout-qa via _run_startup_smoke_test.
-    Catches the "Scout reads a column that's NULL/missing/renamed" class of silent
-    failure that bit us with categories (PR 19 root cause).
-    """
-    violations: list[str] = []
-    warnings: list[str] = []
-    try:
-        tables = sorted({t for t, _, _ in _SCHEMA_DEPS})
-        # Single batched query for all tables we care about
-        col_rows = ch.query(
-            "SELECT table, name FROM system.columns "
-            "WHERE database = 'default' AND table IN {tables: Array(String)}",
-            parameters={"tables": tables},
-        ).result_rows
-        live = {(t, c) for t, c in col_rows}
-        for table, col, must_have_data in _SCHEMA_DEPS:
-            if (table, col) not in live:
-                violations.append(f"{table}.{col} MISSING from system.columns")
-                continue
-            if must_have_data:
-                try:
-                    n = ch.query(
-                        f"SELECT countIf({col} IS NOT NULL) FROM default.{table}"
-                    ).result_rows[0][0]
-                except Exception as e:
-                    warnings.append(f"{table}.{col} count check failed: {e}")
-                    continue
-                if n < _SCHEMA_DEPS_MIN_ROWS:
-                    violations.append(
-                        f"{table}.{col} has only {n} non-null rows "
-                        f"(need ≥{_SCHEMA_DEPS_MIN_ROWS}). "
-                        f"Scout may silently fail to use this data."
-                    )
-    except Exception as e:
-        warnings.append(f"schema validation crashed: {e}")
-    return {
-        "ok": not violations,
-        "violations": violations,
-        "warnings": warnings,
-        "checked": len(_SCHEMA_DEPS),
-    }
+    return _manager.validate_schema_deps(ch)
 
 
 def _load_performance_benchmarks() -> dict:
-    """
-    Query ClickHouse for real CVR + RPM benchmarks grounded in actual MS conversion data.
-
-    Returns four lookup tiers — used in priority order by _scout_score():
-      1. by_offer_impact_id   — exact offer match (highest confidence)
-      2. by_adv_name          — same advertiser, different offer (high confidence)
-      3. by_category_payout   — (category, payout_type) combo (medium confidence)
-      4. by_payout_type       — payout type only across all offers (low confidence fallback)
-
-    Category and payout_type come directly from from_airbyte_campaigns — no keyword heuristics.
-    The old keyword-to-category mapping is removed; it missed ~40% of offers and could not be maintained.
-    """
-    try:
-        ch = _get_ch_client()
-
-        # SQL lives in queries.performance_benchmarks_raw() — any threshold or
-        # window change belongs there. Tuple columns:
-        # (id, adv_name, impact_id, category, impression_count, cvr_pct, rpm)
-        rows = _q.performance_benchmarks_raw(ch)
-
-        # Tier 1: exact offer (by Impact network ID)
-        by_offer: dict = {}
-        # Tier 2: advertiser-level (all offers from same adv_name)
-        by_adv: dict = {}
-        # Tier 3: category — real avg CVR across all offers in this category on MS
-        by_cat: dict = {}
-
-        for _id, adv_name, impact_id, category, impressions, cvr_pct, rpm in rows:
-            cvr = float(cvr_pct or 0)
-            rpm_val = float(rpm or 0)
-            imp = int(impressions or 0)
-            entry = {"adv_name": adv_name, "cvr_pct": cvr, "rpm": rpm_val, "impressions": imp,
-                     "category": category}
-
-            # Tier 1
-            if impact_id:
-                by_offer[impact_id] = entry
-
-            # Tier 2 — keep the highest-RPM offer per advertiser as representative.
-            # Highest RPM (not highest impressions) is the right benchmark: it reflects what
-            # a well-matched new offer from this advertiser could realistically achieve on MS.
-            adv_key = (adv_name or "").lower().strip()
-            if adv_key and (adv_key not in by_adv or rpm_val > by_adv[adv_key]["rpm"]):
-                by_adv[adv_key] = entry
-
-            # Tier 3 — accumulate by category for averaging
-            cat_key = (category or "").strip()
-            if cat_key:
-                if cat_key not in by_cat:
-                    by_cat[cat_key] = {"total_cvr": 0.0, "total_rpm": 0.0, "count": 0}
-                by_cat[cat_key]["total_cvr"] += cvr
-                by_cat[cat_key]["total_rpm"] += rpm_val
-                by_cat[cat_key]["count"] += 1
-
-        # Finalise averaged tier 3
-        category_benchmarks = {
-            cat: {
-                "avg_cvr_pct": round(v["total_cvr"] / v["count"], 4),
-                "avg_rpm":     round(v["total_rpm"] / v["count"], 2),
-                "sample_campaigns": v["count"],
-            }
-            for cat, v in by_cat.items() if v["count"] > 0
-        }
-
-        if not category_benchmarks:
-            log.warning(
-                f"Tier 3 benchmarks empty across {len(rows)} campaigns. "
-                "Expected ~25 categories from tags JSON parsing in "
-                "queries.performance_benchmarks_raw() — check the SQL CTE there. "
-                "Verified Apr 2026: data lives in `tags`, not `categories`."
-            )
-
-        # Tier 4: network-agnostic overall CVR baseline.
-        # Used when no offer/advertiser/category match exists — the case for every
-        # MaxBounty, FlexOffers, ShareASale, Rakuten, and Awin offer (MS has never run them).
-        # Low confidence (0.35) so they rank below real-data offers but still surface.
-        overall = _q.benchmark_overall_cvr(ch)
-        by_payout_type = {"_all": overall} if overall else {}
-        if overall:
-            log.info(
-                f"Tier 4 baseline: {overall['cvr_pct']:.4f}% CVR / "
-                f"${overall['rpm']:.2f} RPM across {overall['campaigns']} MS campaigns"
-            )
-
-        result = {
-            "by_offer_impact_id":    by_offer,
-            "by_adv_name":           by_adv,
-            "by_category_payout":    {},          # not available without payout_type column
-            "by_payout_type":        by_payout_type,
-            "by_category":           category_benchmarks,
-        }
-        log.info(
-            f"Benchmarks loaded: {len(by_offer)} offers, {len(by_adv)} advertisers, "
-            f"{len(category_benchmarks)} categories, "
-            f"{'Tier4 baseline active' if by_payout_type else 'Tier4 unavailable'}"
-        )
-        return result
-
-    except Exception as e:
-        log.warning(f"Could not load performance benchmarks from ClickHouse: {e}")
-        return {"by_offer_impact_id": {}, "by_adv_name": {}, "by_category_payout": {},
-                "by_payout_type": {}, "by_category": {}}  # empty — will use no-data path in _scout_score
+    return _manager._load_benchmarks_file()
 
 
 def _get_benchmarks() -> dict:
-    global _BENCHMARKS, _BENCHMARKS_LOADED_AT
-    with _BENCHMARKS_LOCK:
-        if not _BENCHMARKS or (time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL:
-            _BENCHMARKS = _load_performance_benchmarks()
-            _merge_learned_benchmarks()  # overlay actuals from 14-day recaps
-            _BENCHMARKS_LOADED_AT = time.time()
-        return copy.deepcopy(_BENCHMARKS)
+    return _manager.benchmarks()
 
 
 # Compiled once at module level — strips <<<SUGGESTIONS [...]  SUGGESTIONS>>> blocks from responses
@@ -2667,22 +2263,11 @@ _LAUNCHED_OFFERS_PATH = pathlib.Path(__file__).parent / "data" / "launched_offer
 
 
 def _load_launched_offers_state() -> dict:
-    try:
-        if _LAUNCHED_OFFERS_PATH.exists():
-            return json.loads(_LAUNCHED_OFFERS_PATH.read_text())
-    except Exception as e:
-        log.debug("_load_launched_offers_state swallowed: %s", e)
-    return {}
+    return _manager.load_launched_offers_state()
 
 
 def _load_pulse_state_local() -> dict:
-    """Read pulse_state.json directly. Scout-agent local copy — avoids importing scout_state."""
-    try:
-        if _PULSE_STATE_PATH.exists():
-            return json.loads(_PULSE_STATE_PATH.read_text())
-    except Exception as e:
-        log.debug("_load_pulse_state_local swallowed: %s", e)
-    return {}
+    return _manager.load_pulse_state()
 
 
 def get_pulse_summary() -> dict:
@@ -2787,7 +2372,7 @@ def get_scout_config() -> dict:
             log.debug("get_scout_config override metadata swallowed: %s", e)
 
         return {
-            "thresholds": SCOUT_THRESHOLDS,
+            "thresholds": _manager.load(),
             "supported_networks": list(SUPPORTED_NETWORKS),
             "active_networks_in_inventory": live_networks,
             "pulse": {
@@ -2795,14 +2380,14 @@ def get_scout_config() -> dict:
                 "schedule": "8am CT daily",
                 "opportunities_displayed": "Mondays only (computed daily)",
             },
-            "config_file": str(_SCOUT_THRESHOLDS_FILE.relative_to(pathlib.Path(__file__).parent)),
+            "config_file": str(_manager._thresholds_file.relative_to(pathlib.Path(__file__).parent)),
             "overridden_keys": overridden_keys,
             "last_override_at": last_override_at,
-            "data_quality": _data_quality_tier(days_of_data=999),  # config is static — N/A applies
+            "data_quality": _manager.data_quality_tier(days_of_data=999),
         }
     except Exception as e:
         log.warning(f"get_scout_config failed: {e}")
-        return {"error": str(e), "thresholds": _SCOUT_THRESHOLDS_FALLBACK}
+        return {"error": str(e), "thresholds": {}}
 
 
 # ── Threshold control surface (PR-B) ─────────────────────────────────────────
@@ -2838,9 +2423,9 @@ def list_thresholds() -> dict:
                 }
 
     return {
-        "thresholds": SCOUT_THRESHOLDS,
+        "thresholds": _manager.load(),
         "overridden": overridden,
-        "config_file": str(_SCOUT_THRESHOLDS_FILE.relative_to(pathlib.Path(__file__).parent)),
+        "config_file": str(_manager._thresholds_file.relative_to(pathlib.Path(__file__).parent)),
         "override_file": "data/threshold_overrides.json",
     }
 
@@ -2863,91 +2448,14 @@ def get_threshold_history(key: str = "", limit: int = 50) -> dict:
 
 def set_threshold(section: str = "", key: str = "", value=None, reason: str = "",
                   _caller_user_id: str = "") -> dict:
-    """Admin-only: write a runtime override for one threshold and reload SCOUT_THRESHOLDS.
-
-    Override persists in data/threshold_overrides.json and is layered on top of
-    config/scout_thresholds.json at every _load_thresholds() call. The append-only
-    changelog records the actor, prior value, new value, and reason.
-    """
-    global SCOUT_THRESHOLDS
+    """Admin-only: write a runtime override for one threshold and reload the cache."""
     if not _is_admin(_caller_user_id):
         return {"ok": False, "error": "not_admin",
                 "message": ":lock: Threshold changes are admin-only (set SCOUT_THRESHOLD_ADMINS)."}
-
-    section = (section or "").strip()
-    key = (key or "").strip()
-    if not section or not key:
-        return {"ok": False, "error": "missing_args",
-                "message": "section and key are required (e.g. section='signals', key='cap_alert_pct')."}
-    if value is None:
-        return {"ok": False, "error": "missing_value", "message": "value is required."}
-    if not reason or not reason.strip():
-        return {"ok": False, "error": "missing_reason",
-                "message": "reason is required so the changelog stays useful."}
-
-    # Reject unknown keys with closest-match suggestion. Validate against the
-    # BASE schema (fallback + config file), not the post-override merge — otherwise
-    # a previously persisted typo in data/threshold_overrides.json would mask
-    # itself by appearing "known."
-    known_section = _BASE_THRESHOLDS.get(section)
-    if not isinstance(known_section, dict):
-        sections = list(_BASE_THRESHOLDS.keys())
-        suggestions = difflib.get_close_matches(section, sections, n=1, cutoff=0.6)
-        hint = f" Did you mean `{suggestions[0]}`?" if suggestions else ""
-        return {"ok": False, "error": "unknown_section",
-                "message": f"Unknown section `{section}` (valid: {', '.join(sections)}).{hint}"}
-    if key not in known_section:
-        keys = list(known_section.keys())
-        suggestions = difflib.get_close_matches(key, keys, n=1, cutoff=0.6)
-        hint = f" Did you mean `{section}.{suggestions[0]}`?" if suggestions else ""
-        return {"ok": False, "error": "unknown_key",
-                "message": f"Unknown key `{section}.{key}`.{hint}"}
-
-    # Capture prior value (post-override merge — what callers actually saw)
-    prior = SCOUT_THRESHOLDS.get(section, {}).get(key) if isinstance(SCOUT_THRESHOLDS.get(section), dict) else None
-
-    try:
-        import scout_state
-        overrides = scout_state._load_threshold_overrides() or {}
-        if section not in overrides or not isinstance(overrides[section], dict):
-            overrides[section] = {}
-        ts = datetime.now(timezone.utc).isoformat()
-        overrides[section][key] = {
-            "value": value,
-            "set_by": _caller_user_id or "unknown",
-            "set_at": ts,
-            "reason": reason.strip(),
-        }
-        scout_state._save_threshold_overrides(overrides)
-
-        scout_state._append_threshold_changelog({
-            "ts": ts,
-            "key": f"{section}.{key}",
-            "section": section,
-            "name": key,
-            "prior": prior,
-            "value": value,
-            "set_by": _caller_user_id or "unknown",
-            "reason": reason.strip(),
-            "action": "set",
-        })
-
-        # Reload module-level SCOUT_THRESHOLDS so this process sees the change
-        SCOUT_THRESHOLDS = _load_thresholds()
-
-        return {
-            "ok": True,
-            "section": section,
-            "key": key,
-            "prior": prior,
-            "value": value,
-            "set_by": _caller_user_id,
-            "set_at": ts,
-            "reason": reason.strip(),
-        }
-    except Exception as e:
-        log.warning(f"set_threshold failed: {e}")
-        return {"ok": False, "error": "write_failed", "message": str(e)}
+    return _manager.set_threshold(
+        section=section, key=key, value=value, reason=reason,
+        _caller_user_id=_caller_user_id,
+    )
 
 
 def force_run_monitor(monitor: str = "", _caller_user_id: str = "") -> dict:
@@ -4123,14 +3631,14 @@ def get_scout_status() -> dict:
     # are stale, trigger a reload BEFORE reporting status. _get_benchmarks()
     # respects its TTL and will only hit CH if needed. This means status check
     # never reports "not loaded" except in real CH outage scenarios.
-    if not _BENCHMARKS_LOADED_AT or (_time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL:
+    if not _manager._benchmarks_loaded_at or (_time.time() - _manager._benchmarks_loaded_at) > _manager._benchmarks_ttl:
         try:
-            _get_benchmarks()  # populates _BENCHMARKS + _BENCHMARKS_LOADED_AT
+            _get_benchmarks()  # populates _manager cache
         except Exception as e:
             log.warning(f"[status] benchmark self-heal failed: {e}")
 
     # Benchmark freshness (post self-heal attempt)
-    age_secs = _time.time() - _BENCHMARKS_LOADED_AT if _BENCHMARKS_LOADED_AT else None
+    age_secs = _time.time() - _manager._benchmarks_loaded_at if _manager._benchmarks_loaded_at else None
     if age_secs is None:
         # Self-heal failed → real ClickHouse problem (heartbeat already alerts)
         status["benchmarks"] = "load failed (ClickHouse issue — heartbeat will alert)"
@@ -4142,7 +3650,7 @@ def get_scout_status() -> dict:
         status["benchmarks"] = f"{age_secs / 3600:.1f}h ago"
 
     # Benchmark coverage
-    bench = _BENCHMARKS or {}
+    bench = _manager._benchmarks_cache or {}
     status["benchmark_coverage"] = {
         "by_offer":    len(bench.get("by_offer_impact_id", {})),
         "by_advertiser": len(bench.get("by_adv_name", {})),
@@ -4991,7 +4499,7 @@ def get_expiring_campaigns(warning_days: int = None) -> dict:
     """
     try:
         ch = _get_ch_client()
-        t = SCOUT_THRESHOLDS.get("signals", {})
+        t = _manager.load().get("signals", {})
         window = int(warning_days if warning_days is not None else t.get("expiration_warning_days", 7))
         rows = _query_expiring_campaigns(ch, warning_days=window)
         if not rows:
@@ -5582,54 +5090,11 @@ _SET_RE_SHORT = re.compile(
 
 
 def _coerce_threshold_value(raw: str):
-    """Parse a stringified threshold value into bool/int/float, falling back to
-    the raw string if no numeric form matches. `"true"`/`"false"` are case-
-    insensitive; `.` anywhere in the input forces float interpretation."""
-    low = raw.lower()
-    if low == "true":
-        return True
-    if low == "false":
-        return False
-    if "." in raw:
-        try:
-            return float(raw)
-        except ValueError:
-            return raw
-    try:
-        return int(raw)
-    except ValueError:
-        return raw
-
-
-class AmbiguousThresholdKey(ValueError):
-    """Bare key matches more than one section — caller must disambiguate."""
-    def __init__(self, key: str, sections: list[str]):
-        self.key = key
-        self.sections = sections
-        super().__init__(
-            f"`{key}` exists in multiple sections ({', '.join(sections)}); "
-            f"qualify it as `<section>.{key}`."
-        )
+    return _manager.coerce_value(raw)
 
 
 def _split_dotted_key(dotted: str) -> tuple[str, str]:
-    """Split 'signals.cap_alert_pct' → ('signals', 'cap_alert_pct').
-
-    Bare keys are resolved by searching the base schema for a unique match
-    across sections. Raises AmbiguousThresholdKey if multiple sections own a
-    key with the same name. Falls back to ('signals', dotted) if no section
-    owns the key — `set_threshold` will then surface a proper unknown-key
-    error with a suggestion."""
-    if "." in dotted:
-        section, _, key = dotted.partition(".")
-        return section, key
-    owners = [sec for sec, body in _BASE_THRESHOLDS.items()
-              if isinstance(body, dict) and dotted in body]
-    if len(owners) == 1:
-        return owners[0], dotted
-    if len(owners) > 1:
-        raise AmbiguousThresholdKey(dotted, owners)
-    return "signals", dotted
+    return _manager._split_key(dotted)
 
 
 def _format_dict_response(title: str, data: dict) -> str:

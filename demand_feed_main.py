@@ -736,10 +736,10 @@ def _revenue_tracker_daemon() -> None:
                 _clear_revenue_alert_context,
             )
             from scout_core.job_runs import record_job_run
-            from scout_agent import SCOUT_THRESHOLDS as _ST
+            from scout_thresholds import _manager as _tm
 
             CT_TZ      = pytz.timezone("America/Chicago")
-            sig        = _ST.get("signals", {})
+            sig        = _tm.load().get("signals", {})
             check_hour = int(sig.get("revenue_tracker_check_hour_ct",
                              os.getenv("REVENUE_TRACKER_CHECK_HOUR_CT", "10")))
             hourly_enabled     = sig.get("revenue_tracker_hourly_enabled", True)
@@ -919,7 +919,7 @@ def _run_shadow_monitor(
     import pytz
     from datetime import datetime as _dt
     from scout_ch import _get_ch_client
-    from scout_agent import SCOUT_THRESHOLDS as _ST
+    from scout_thresholds import _manager as _tm
 
     while True:  # outer restart wrapper
         try:
@@ -937,10 +937,10 @@ def _run_shadow_monitor(
                         continue
 
                     # Per-monitor kill switch
-                    if not _ST.get("signals", {}).get(f"{config_key}_monitor_enabled", False):
+                    if not _tm.load().get("signals", {}).get(f"{config_key}_monitor_enabled", False):
                         continue
 
-                    check_hour = int(_ST.get("signals", {}).get(f"{config_key}_monitor_check_hour_ct", 9))
+                    check_hour = int(_tm.load().get("signals", {}).get(f"{config_key}_monitor_check_hour_ct", 9))
                     now_ct      = _dt.now(CT_TZ)
                     today_str   = now_ct.date().isoformat()
                     shadow_on   = os.getenv("SCOUT_HOURLY_SHADOW_ENABLED", "false").strip().lower() in ("1", "true", "yes")
@@ -1146,9 +1146,9 @@ def _cap_monitor_daemon() -> None:
         _load_cap_alert_context, _save_cap_alert_context,
     )
     from scout_bot import _pulse_signal_cap, _format_cap_alert
-    from scout_agent import SCOUT_THRESHOLDS as _ST
+    from scout_thresholds import _manager as _tm
 
-    sig = _ST.get("signals", {})
+    sig = _tm.load().get("signals", {})
     hourly_enabled = sig.get("cap_monitor_hourly_enabled", True)
 
     if hourly_enabled:

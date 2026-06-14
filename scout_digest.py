@@ -439,7 +439,8 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
 
     force=True bypasses approved/rejected state so test runs always surface real cards.
     """
-    from scout_agent import _scout_score, SCOUT_THRESHOLDS
+    from scout_agent import _scout_score
+    from scout_thresholds import _manager as _tm
 
     def _reject(reason: str) -> None:
         # Per-gate diagnostic: lets select_offers() answer "why is Impact 100% no_score?"
@@ -510,7 +511,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     # filters weak long-tail offers (e.g. $12 CPA meal kits, $15 trading platforms).
     # PR 18: read from config/scout_thresholds.json so the team can tune without
     # a code change. Falls back to 20.0 if config or key is missing.
-    _MIN_RPM = float(SCOUT_THRESHOLDS.get("digest", {}).get("min_rpm_floor", 20.0))
+    _MIN_RPM = float(_tm.load().get("digest", {}).get("min_rpm_floor", 20.0))
     if rpm < _MIN_RPM:
         return _reject("below_min_rpm")
 
@@ -1407,7 +1408,7 @@ def select_offers(
     ms_campaigns and benchmarks can be passed in to avoid redundant external calls.
     force=True bypasses the is_already_in_ms filter so testing always surfaces real offers.
     """
-    from scout_agent import _get_benchmarks, SCOUT_THRESHOLDS
+    from scout_thresholds import _manager as _tm
 
     state         = load_state()
     offers        = _load_offers()
@@ -1415,11 +1416,11 @@ def select_offers(
     if ms_campaigns is None:
         ms_campaigns = get_active_ms_campaigns()
     if benchmarks is None:
-        benchmarks = _get_benchmarks()
+        benchmarks = _tm.benchmarks()
 
     # PR 18: diversity caps now come from config/scout_thresholds.json so the team
     # can tune without a code change. Defaults match prior hardcoded behavior.
-    _digest_cfg = SCOUT_THRESHOLDS.get("digest", {})
+    _digest_cfg = _tm.load().get("digest", {})
     _max_per_category = int(_digest_cfg.get("max_per_category", 2))
     _max_per_payout_type = int(_digest_cfg.get("max_per_payout_type", 2))
 
@@ -1568,15 +1569,15 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
             "run_date":        str,    # e.g. "Jun 3"
         }
     """
-    from scout_agent import _get_benchmarks, SCOUT_THRESHOLDS
+    from scout_thresholds import _manager as _tm
 
     now = datetime.now()
     is_monday = now.weekday() == 0
 
     payout_cache = json.loads(PAYOUT_CACHE.read_text()) if PAYOUT_CACHE.exists() else {}
     ms_campaigns = get_active_ms_campaigns()
-    benchmarks   = _get_benchmarks()
-    _offers_per_network = int(SCOUT_THRESHOLDS.get("digest", {}).get("offers_per_network", 3))
+    benchmarks   = _tm.benchmarks()
+    _offers_per_network = int(_tm.load().get("digest", {}).get("offers_per_network", 3))
     offers_by_network, sel_meta = select_offers(
         n_per_network=_offers_per_network, ms_campaigns=ms_campaigns,
         benchmarks=benchmarks, force=is_force,

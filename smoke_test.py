@@ -588,13 +588,11 @@ def test_dedup_count_in_meta():
 @test("scout_thresholds_json_loads_and_populates_SCOUT_THRESHOLDS")
 def test_scout_thresholds_loaded():
     try:
-        import scout_agent
-        if not hasattr(scout_agent, "SCOUT_THRESHOLDS"):
-            return False, "SCOUT_THRESHOLDS missing"
-        # Check _BASE_THRESHOLDS (JSON file only, no runtime overrides) — SCOUT_THRESHOLDS
-        # includes any live set_threshold overrides from data/threshold_overrides.json, so
+        import scout_thresholds as _st
+        # Check _BASE_THRESHOLDS (JSON file only, no runtime overrides) — active thresholds
+        # include any live set_threshold overrides from data/threshold_overrides.json, so
         # asserting a hardcoded value there would break whenever an admin adjusts a threshold.
-        cfg = scout_agent._BASE_THRESHOLDS
+        cfg = _st._manager._load_base()
         for section in ("digest", "signals", "health"):
             if section not in cfg:
                 return False, f"section missing: {section}"
@@ -603,7 +601,7 @@ def test_scout_thresholds_loaded():
         if cfg["signals"]["fill_rate_min_sessions_7d"] != 2500:
             return False, f"signals.fill_rate_min_sessions_7d expected 2500, got {cfg['signals']['fill_rate_min_sessions_7d']}"
         # Confirm fallback path works
-        fallback = scout_agent._SCOUT_THRESHOLDS_FALLBACK
+        fallback = _st._SCOUT_THRESHOLDS_FALLBACK
         if "digest" not in fallback or "signals" not in fallback or "health" not in fallback:
             return False, "_SCOUT_THRESHOLDS_FALLBACK missing required sections"
         return True, f"loaded {len(cfg)} sections; min_rpm_floor={cfg['digest']['min_rpm_floor']}"
@@ -696,21 +694,23 @@ def test_score_offer_reads_config_floor():
         except Exception:
             pass
 
-        original = scout_agent.SCOUT_THRESHOLDS
+        import scout_thresholds as _st
+        original = _st._manager._thresholds_cache
         try:
+            base = _st._manager.load()
             # Floor = $5 → 25.0 RPM passes (returns a score)
-            scout_agent.SCOUT_THRESHOLDS = {**original, "digest": {**original["digest"], "min_rpm_floor": 5}}
+            _st._manager._thresholds_cache = {**base, "digest": {**base["digest"], "min_rpm_floor": 5}}
             low_floor = scout_digest.score_offer(offer, {}, {"approved": {}, "rejected": {}}, {}, force=True)
             if low_floor is None:
                 return False, f"floor=$5 should let 25.0 RPM through, got None"
 
             # Floor = $50 → 25.0 RPM filtered (returns None)
-            scout_agent.SCOUT_THRESHOLDS = {**original, "digest": {**original["digest"], "min_rpm_floor": 50}}
+            _st._manager._thresholds_cache = {**base, "digest": {**base["digest"], "min_rpm_floor": 50}}
             high_floor = scout_digest.score_offer(offer, {}, {"approved": {}, "rejected": {}}, {}, force=True)
             if high_floor is not None:
                 return False, f"floor=$50 should reject 25.0 RPM, got {high_floor}"
         finally:
-            scout_agent.SCOUT_THRESHOLDS = original
+            _st._manager._thresholds_cache = original
             if orig_scout_score is not None:
                 scout_agent._scout_score = orig_scout_score
 
@@ -830,7 +830,9 @@ def test_extract_categories_preserves_order():
 @test("_validate_schema_deps detects missing column")
 def test_schema_deps_missing_column():
     try:
-        from scout_agent import _validate_schema_deps, _SCHEMA_DEPS
+        from scout_thresholds import _SCHEMA_DEPS
+        from scout_thresholds import _manager as _tm_st
+        _validate_schema_deps = _tm_st.validate_schema_deps
         # Mock CH client: returns columns matching all _SCHEMA_DEPS EXCEPT one
         # (simulate a column that was renamed/dropped upstream)
         target = ("from_airbyte_campaigns", "tags", True)
@@ -861,7 +863,9 @@ def test_schema_deps_missing_column():
 @test("_validate_schema_deps detects empty must-have-data column")
 def test_schema_deps_empty_column():
     try:
-        from scout_agent import _validate_schema_deps, _SCHEMA_DEPS, _SCHEMA_DEPS_MIN_ROWS
+        from scout_thresholds import _SCHEMA_DEPS, _SCHEMA_DEPS_MIN_ROWS
+        from scout_thresholds import _manager as _tm_st
+        _validate_schema_deps = _tm_st.validate_schema_deps
 
         class _FakeRows:
             def __init__(self, rows): self.result_rows = rows
@@ -955,8 +959,8 @@ def test_signal_thresholds_from_config():
     """
     try:
         import scout_bot
-        import scout_agent
-        sig = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+        import scout_thresholds as _st
+        sig = _st._manager.load().get("signals", {})
         checks = [
             ("_FILL_RATE_MIN_SESSIONS_7D",   scout_bot._FILL_RATE_MIN_SESSIONS_7D,   int(sig.get("fill_rate_min_sessions_7d", 5000))),
             ("_GHOST_RECENCY_HOURS",          scout_bot._GHOST_RECENCY_HOURS,          int(sig.get("ghost_recency_hours", 48))),
@@ -1001,6 +1005,7 @@ def test_ghost_recency_propagation():
     """
     try:
         import scout_agent
+        import scout_thresholds as _st
         import queries as _queries
         calls = []
         original = _queries.ghost_campaigns
@@ -1008,15 +1013,20 @@ def test_ghost_recency_propagation():
             calls.append(recency_hours)
             return []
         _queries.ghost_campaigns = _spy
+        orig_cache = _st._manager._thresholds_cache
         try:
-            original_val = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("ghost_recency_hours", 48)
+            base = _st._manager.load()
+            original_val = base.get("signals", {}).get("ghost_recency_hours", 48)
             scout_agent._query_ghost_campaigns(None)
             if not calls:
                 return False, "queries.ghost_campaigns was never called"
             if calls[0] != original_val:
                 return False, f"called with recency_hours={calls[0]}, expected {original_val}"
             # Monkey-patch config and verify propagation
-            scout_agent.SCOUT_THRESHOLDS.setdefault("signals", {})["ghost_recency_hours"] = 72
+            import copy
+            patched = copy.deepcopy(base)
+            patched.setdefault("signals", {})["ghost_recency_hours"] = 72
+            _st._manager._thresholds_cache = patched
             calls.clear()
             scout_agent._query_ghost_campaigns(None)
             if not calls or calls[0] != 72:
@@ -1024,7 +1034,7 @@ def test_ghost_recency_propagation():
             return True, f"config value propagated correctly (default={original_val}, patched=72)"
         finally:
             _queries.ghost_campaigns = original
-            scout_agent.SCOUT_THRESHOLDS.setdefault("signals", {})["ghost_recency_hours"] = original_val
+            _st._manager._thresholds_cache = orig_cache
     except Exception as e:
         return False, str(e)
 
@@ -1056,8 +1066,8 @@ def test_revenue_tracker_daemon_function_exists():
     # REVENUE_TRACKER_ENABLED=false and never ran in production).  The
     # threshold config keys must still be present because the force-run path
     # (@Scout force revenue) reads them at call time.
-    import scout_agent
-    thresholds = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+    import scout_thresholds as _st
+    thresholds = _st._manager.load().get("signals", {})
     if "revenue_tracker_check_hour_ct" not in thresholds:
         return False, "revenue_tracker_check_hour_ct missing from signals config"
     if "revenue_tracker_publisher_min_delta" not in thresholds:
@@ -1111,8 +1121,8 @@ def test_projection_autocheck_monitor_registered():
     if routed != scout_bot._SCOUT_HQ_CHANNEL:
         return False, f"_route_channel('qa') under SCOUT_ENV=production returned {routed!r}, expected _SCOUT_HQ_CHANNEL"
 
-    import scout_agent
-    sig = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+    import scout_thresholds as _st
+    sig = _st._manager.load().get("signals", {})
     required_keys = [
         "projection_autocheck_monitor_enabled",
         "projection_autocheck_window_start_ct",
@@ -2325,15 +2335,17 @@ def test_cvr_anomaly_wrapper_uses_config_thresholds():
         captured["min_impressions_7d"] = min_impressions_7d
         return []
 
-    original_thresholds = scout_agent.SCOUT_THRESHOLDS
+    import scout_thresholds as _st
+    original_cache = _st._manager._thresholds_cache
     original_q = scout_ch._q
     try:
         import types
         fake_q = types.SimpleNamespace(cvr_anomaly=_fake_cvr_anomaly)
         scout_ch._q = fake_q
-        scout_agent.SCOUT_THRESHOLDS = {
-            **original_thresholds,
-            "signals": {**original_thresholds.get("signals", {}),
+        base = _st._manager.load()
+        _st._manager._thresholds_cache = {
+            **base,
+            "signals": {**base.get("signals", {}),
                         "cvr_anomaly_drop_pct": 99.0,
                         "cvr_anomaly_min_payout": 999.0,
                         "cvr_anomaly_min_impressions_7d": 12345},
@@ -2346,7 +2358,7 @@ def test_cvr_anomaly_wrapper_uses_config_thresholds():
         if captured.get("min_impressions_7d") != 12345:
             return False, f"min_impressions_7d not read from config: got {captured.get('min_impressions_7d')}"
     finally:
-        scout_agent.SCOUT_THRESHOLDS = original_thresholds
+        _st._manager._thresholds_cache = original_cache
         scout_ch._q = original_q
     return True, "cvr_anomaly wrapper passes config thresholds through to query ✓"
 
@@ -2362,21 +2374,23 @@ def test_expiration_wrapper_uses_config_thresholds():
         captured["warning_days"] = warning_days
         return []
 
-    original_thresholds = scout_agent.SCOUT_THRESHOLDS
+    import scout_thresholds as _st
+    original_cache = _st._manager._thresholds_cache
     original_q = scout_ch._q
     try:
         import types
         fake_q = types.SimpleNamespace(expiring_campaigns=_fake_expiring)
         scout_ch._q = fake_q
-        scout_agent.SCOUT_THRESHOLDS = {
-            **original_thresholds,
-            "signals": {**original_thresholds.get("signals", {}), "expiration_warning_days": 42},
+        base = _st._manager.load()
+        _st._manager._thresholds_cache = {
+            **base,
+            "signals": {**base.get("signals", {}), "expiration_warning_days": 42},
         }
         scout_ch._query_expiring_campaigns(None)
         if captured.get("warning_days") != 42:
             return False, f"warning_days not read from config: got {captured.get('warning_days')}"
     finally:
-        scout_agent.SCOUT_THRESHOLDS = original_thresholds
+        _st._manager._thresholds_cache = original_cache
         scout_ch._q = original_q
     return True, "expiration wrapper passes config warning_days through to query ✓"
 
@@ -2396,7 +2410,8 @@ def test_revenue_trend_wrappers_use_config_thresholds():
         captured["adv_min_periods"] = min_periods
         return []
 
-    original_thresholds = scout_agent.SCOUT_THRESHOLDS
+    import scout_thresholds as _st
+    original_cache = _st._manager._thresholds_cache
     original_q = scout_ch._q
     try:
         import types
@@ -2405,9 +2420,10 @@ def test_revenue_trend_wrappers_use_config_thresholds():
             advertiser_revenue_trends=_fake_adv_trends,
         )
         scout_ch._q = fake_q
-        scout_agent.SCOUT_THRESHOLDS = {
-            **original_thresholds,
-            "signals": {**original_thresholds.get("signals", {}), "revenue_trend_min_periods": 99},
+        base = _st._manager.load()
+        _st._manager._thresholds_cache = {
+            **base,
+            "signals": {**base.get("signals", {}), "revenue_trend_min_periods": 99},
         }
         scout_ch._query_publisher_revenue_trends(None)
         scout_ch._query_advertiser_revenue_trends(None)
@@ -2416,7 +2432,7 @@ def test_revenue_trend_wrappers_use_config_thresholds():
         if captured.get("adv_min_periods") != 99:
             return False, f"advertiser wrapper min_periods not from config: {captured.get('adv_min_periods')}"
     finally:
-        scout_agent.SCOUT_THRESHOLDS = original_thresholds
+        _st._manager._thresholds_cache = original_cache
         scout_ch._q = original_q
     return True, "both revenue trend wrappers pass config min_periods through to query ✓"
 
@@ -2426,10 +2442,11 @@ def test_threshold_override_layers():
     """A runtime override should win over config/scout_thresholds.json.
 
     Exercises the full three-layer merge: fallback → config → overrides.
-    set_threshold() must reload module-level SCOUT_THRESHOLDS so subsequent
+    set_threshold() must invalidate the ThresholdManager cache so subsequent
     reads see the new value without a restart.
     """
     import scout_agent, scout_state
+    import scout_thresholds as _st
 
     overrides_path = scout_state._THRESHOLD_OVERRIDES_FILE
     changelog_path = scout_state._THRESHOLD_CHANGELOG_FILE
@@ -2437,12 +2454,12 @@ def test_threshold_override_layers():
     backup_c = changelog_path.read_bytes() if changelog_path.exists() else None
 
     try:
-        # Clean slate
+        # Clean slate — clear files and invalidate cache so load() re-reads from disk
         if overrides_path.exists(): overrides_path.unlink()
         if changelog_path.exists(): changelog_path.unlink()
-        scout_agent.SCOUT_THRESHOLDS = scout_agent._load_thresholds()
+        _st._manager._thresholds_cache = None
 
-        baseline = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        baseline = _st._manager.load().get("signals", {}).get("cap_alert_pct")
         if baseline is None:
             return False, "Expected signals.cap_alert_pct in config — got None"
 
@@ -2461,7 +2478,7 @@ def test_threshold_override_layers():
         if not result.get("ok"):
             return False, f"set_threshold failed: {result}"
 
-        live = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        live = _st._manager.load().get("signals", {}).get("cap_alert_pct")
         if live != target:
             return False, f"In-process reload failed: expected {target}, got {live}"
 
@@ -2472,31 +2489,32 @@ def test_threshold_override_layers():
         if backup_c is not None: changelog_path.write_bytes(backup_c)
         elif changelog_path.exists(): changelog_path.unlink()
         try:
-            import scout_agent as _sa
-            _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
+            import scout_thresholds as _st2
+            _st2._manager._thresholds_cache = None
         except Exception as e:
-            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
+            print(f"Warning: failed to restore ThresholdManager cache: {e}")
 
 
 @test("set_threshold_denies_non_admin_callers")
 def test_set_threshold_admin_gate():
-    """Non-admin callers must be rejected; SCOUT_THRESHOLDS must not change."""
+    """Non-admin callers must be rejected; thresholds must not change."""
     import scout_agent
+    import scout_thresholds as _st
 
     admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
     os.environ["SCOUT_THRESHOLD_ADMINS"] = "UADMIN_ONLY"
     try:
-        before = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        before = _st._manager.load().get("signals", {}).get("cap_alert_pct")
         result = scout_agent.set_threshold(
             section="signals", key="cap_alert_pct", value=999,
             reason="should be denied", _caller_user_id="UNOBODY",
         )
         if result.get("ok") or result.get("error") != "not_admin":
             return False, f"Expected denial (ok=False, error=not_admin), got {result}"
-        after = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        after = _st._manager.load().get("signals", {}).get("cap_alert_pct")
         if before != after:
             return False, f"Denied call still mutated value: {before} → {after}"
-        return True, "Non-admin caller denied; SCOUT_THRESHOLDS unchanged ✓"
+        return True, "Non-admin caller denied; thresholds unchanged ✓"
     finally:
         if admins: os.environ["SCOUT_THRESHOLD_ADMINS"] = admins
         else: os.environ.pop("SCOUT_THRESHOLD_ADMINS", None)
@@ -2506,6 +2524,7 @@ def test_set_threshold_admin_gate():
 def test_set_threshold_writes_changelog():
     """Every successful set_threshold must append a JSONL line with actor + prior + new + reason."""
     import scout_agent, scout_state
+    import scout_thresholds as _st
 
     overrides_path = scout_state._THRESHOLD_OVERRIDES_FILE
     changelog_path = scout_state._THRESHOLD_CHANGELOG_FILE
@@ -2515,7 +2534,7 @@ def test_set_threshold_writes_changelog():
     try:
         if overrides_path.exists(): overrides_path.unlink()
         if changelog_path.exists(): changelog_path.unlink()
-        scout_agent.SCOUT_THRESHOLDS = scout_agent._load_thresholds()
+        _st._manager._thresholds_cache = None  # force reload from clean files
 
         admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
         os.environ["SCOUT_THRESHOLD_ADMINS"] = "UCHANGELOG"
@@ -2549,10 +2568,10 @@ def test_set_threshold_writes_changelog():
         if backup_c is not None: changelog_path.write_bytes(backup_c)
         elif changelog_path.exists(): changelog_path.unlink()
         try:
-            import scout_agent as _sa
-            _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
+            import scout_thresholds as _st2
+            _st2._manager._thresholds_cache = None
         except Exception as e:
-            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
+            print(f"Warning: failed to reset ThresholdManager cache: {e}")
 
 
 @test("force_run_monitor_returns_not_initialized_when_context_missing")
@@ -2613,6 +2632,7 @@ def test_threshold_tools_registered():
 def test_get_scout_config_shows_overrides():
     """get_scout_config must surface override metadata so the team can see active overrides."""
     import scout_agent, scout_state
+    import scout_thresholds as _st
 
     overrides_path = scout_state._THRESHOLD_OVERRIDES_FILE
     changelog_path = scout_state._THRESHOLD_CHANGELOG_FILE
@@ -2621,7 +2641,7 @@ def test_get_scout_config_shows_overrides():
     try:
         if overrides_path.exists(): overrides_path.unlink()
         if changelog_path.exists(): changelog_path.unlink()
-        scout_agent.SCOUT_THRESHOLDS = scout_agent._load_thresholds()
+        _st._manager._thresholds_cache = None  # force reload from clean files
 
         admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
         os.environ["SCOUT_THRESHOLD_ADMINS"] = "UCFG"
@@ -2648,10 +2668,10 @@ def test_get_scout_config_shows_overrides():
         if backup_c is not None: changelog_path.write_bytes(backup_c)
         elif changelog_path.exists(): changelog_path.unlink()
         try:
-            import scout_agent as _sa
-            _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
+            import scout_thresholds as _st2
+            _st2._manager._thresholds_cache = None
         except Exception as e:
-            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
+            print(f"Warning: failed to reset ThresholdManager cache: {e}")
 
 
 @test("cvr_expiration_revenue_force_commands_registered_in_main")
