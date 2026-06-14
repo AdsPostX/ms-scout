@@ -29,10 +29,9 @@ def _make_ch_mock(today_rows, avg_rows):
 def _run(today_rows, avg_rows, overrides=None):
     """Helper: patch dependencies and call get_revenue_today()."""
     import scout_agent
-    overrides = overrides or {"publishers": {}, "advertisers": {}}
+    import scout_tools_revenue
     mock_ch = _make_ch_mock(today_rows, avg_rows)
-    with unittest.mock.patch.object(scout_agent, "_get_ch_client", return_value=mock_ch), \
-         unittest.mock.patch.object(scout_agent, "_load_entity_overrides", return_value=overrides):
+    with unittest.mock.patch.object(scout_tools_revenue, "_get_ch_client", return_value=mock_ch):
         return scout_agent.get_revenue_today()
 
 
