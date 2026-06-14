@@ -3131,7 +3131,7 @@ def test_fleet_health_v2_schema():
     if missing:
         return False, f"v2 parameters missing: {missing}"
 
-    with patch("queries.publisher_fleet_health_stats", return_value=[]):
+    with patch("queries_publisher.publisher_fleet_health_stats", return_value=[]):
         result = get_publisher_fleet_health_data(ch=None)
 
     required_keys = {"as_of", "window_days", "total_publishers", "total_gap", "act_now", "watch", "healthy_top5", "platform_alarm", "insufficient_history"}

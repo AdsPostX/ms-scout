@@ -1032,12 +1032,9 @@ def get_publisher_fleet_health_data(
         act_now, watch, healthy_top5, platform_alarm, insufficient_history
     }
     """
-    import sys
     from datetime import timezone, datetime
 
-    # Look up through the module to allow mocking via `patch('queries.publisher_fleet_health_stats')`.
-    _fleet_stats_fn = getattr(sys.modules.get("queries", sys.modules[__name__]), "publisher_fleet_health_stats")
-    stats = _fleet_stats_fn(
+    stats = publisher_fleet_health_stats(
         ch,
         days=days,
         min_windows=min_windows,
