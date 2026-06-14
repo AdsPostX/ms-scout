@@ -312,7 +312,10 @@ def _build_footer_block(
     if interpretation is not None:
         elapsed_suffix = ""
         if elapsed_seconds is not None:
-            elapsed_suffix = f" · {elapsed_seconds}s" if elapsed_seconds < 60 else f" · {elapsed_seconds // 60}m {elapsed_seconds % 60}s"
+            elapsed_suffix = (
+                f" · {elapsed_seconds}s" if elapsed_seconds < 60
+                else f" · {elapsed_seconds // 60}m {elapsed_seconds % 60}s"
+            )
         return [{
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"_Interpreted as: {interpretation}{elapsed_suffix}_"}],
