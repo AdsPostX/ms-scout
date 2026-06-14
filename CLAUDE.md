@@ -6,7 +6,7 @@ Extends `~/.claude/CLAUDE.md`. Scout-specific only.
 
 In order, no skipping:
 
-1. `python3 smoke_test.py` — green or stop. "It worked last time" is not a baseline.
+1. `python3 smoke_test.py` — green or stop. "It worked last time" is not a baseline. Known baseline: 136/137 pass — the threshold-history keyword test is intentionally deferred until the intent routing refactor ships. If you see 136/137, that's clean.
 2. Read what you're touching:
    - `scout_system.md` — Claude's system prompt and reasoning scope
    - `scout_agent.py:5198` (TOOL_MAP) + `:5415` (runtime additions) — what routes where
@@ -49,14 +49,14 @@ Define the output shape (column names, types, row grain) before writing SQL. If 
 
 **Before patching a bug:**
 Classify the layer first:
-- Scout query layer (`queries_*.py`, `scout_agent.py`) — bad reasoning or wrong tool selection
-- ClickHouse data layer (`scout_ch.py`, `queries_*.py`) — wrong SQL, bad join, stale schema
+- Scout query layer (`queries_*.py` logic, `scout_agent.py`) — bad reasoning or wrong tool selection
+- ClickHouse data layer (`scout_ch.py`, `queries_*.py` SQL) — wrong SQL, bad join, stale schema
 - Feed/scraper layer (`offer_scraper.py`, `demand_feed_main.py`) — upstream data missing or malformed
 
 Wrong-layer patches waste time. Name the layer before writing any code.
 
 **Before adding a new monitor signal — touch exactly these 5:**
-1. Signal function in `scout_bot.py` or `demand_feed_main.py`
+1. Signal function in `scout_bot.py` (default) or `demand_feed_main.py` (if demand-feed-native)
 2. `scout_handlers.py:_FORCE_MONITOR_FNS` — register for force-run + slash command
 3. `alert_registry.py` — dedup key, kill switch, schedule
 4. Slack app manifest at api.slack.com/apps — add the `/scout-*` slash command
