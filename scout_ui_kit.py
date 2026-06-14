@@ -302,7 +302,7 @@ def _build_facts_blocks(facts: list[tuple[str, str]]) -> list[dict]:
 def _build_footer_block(
     interpretation: str | None = None,
     elapsed_seconds: int | None = None,
-    surface: "Surface | None" = None,
+    surface: Surface | None = None,
 ) -> list[dict]:
     """Return a 0-or-1-element list containing the elapsed/interpretation context block.
 
@@ -312,8 +312,7 @@ def _build_footer_block(
     if interpretation is not None:
         elapsed_suffix = ""
         if elapsed_seconds is not None:
-            _e = elapsed_seconds
-            elapsed_suffix = f" · {_e}s" if _e < 60 else f" · {_e // 60}m {_e % 60}s"
+            elapsed_suffix = f" · {elapsed_seconds}s" if elapsed_seconds < 60 else f" · {elapsed_seconds // 60}m {elapsed_seconds % 60}s"
         return [{
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"_Interpreted as: {interpretation}{elapsed_suffix}_"}],
