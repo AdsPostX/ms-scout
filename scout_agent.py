@@ -7,6 +7,7 @@ Performance benchmarks: queried from ClickHouse at startup, cached in memory.
 
 from __future__ import annotations
 
+import copy
 import difflib
 import json
 import logging
@@ -245,6 +246,7 @@ _PULSE_STATE_PATH = pathlib.Path(__file__).parent / "data" / "pulse_state.json"
 _BENCHMARKS: dict = {}
 _BENCHMARKS_LOADED_AT: float = 0.0
 _BENCHMARKS_TTL = 3600  # 1 hour
+_BENCHMARKS_LOCK = threading.Lock()
 
 # ── Data quality tier helper ──────────────────────────────────────────────────
 
@@ -592,11 +594,12 @@ def _load_performance_benchmarks() -> dict:
 
 def _get_benchmarks() -> dict:
     global _BENCHMARKS, _BENCHMARKS_LOADED_AT
-    if not _BENCHMARKS or (time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL:
-        _BENCHMARKS = _load_performance_benchmarks()
-        _merge_learned_benchmarks()  # overlay actuals from 14-day recaps
-        _BENCHMARKS_LOADED_AT = time.time()
-    return _BENCHMARKS
+    with _BENCHMARKS_LOCK:
+        if not _BENCHMARKS or (time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL:
+            _BENCHMARKS = _load_performance_benchmarks()
+            _merge_learned_benchmarks()  # overlay actuals from 14-day recaps
+            _BENCHMARKS_LOADED_AT = time.time()
+        return copy.deepcopy(_BENCHMARKS)
 
 
 # Compiled once at module level — strips <<<SUGGESTIONS [...]  SUGGESTIONS>>> blocks from responses
