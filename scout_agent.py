@@ -94,6 +94,7 @@ class AskResult:
     tools_called: tuple = ()
     duration_ms: int = 0
     payload: Optional[Mapping] = None
+    agent_steps: Optional[list] = None  # raw step dicts from annotate_reasoning_steps
 
     def __post_init__(self) -> None:
         # Defense-in-depth: callers may pass a list; coerce to tuple so handlers
@@ -1715,6 +1716,45 @@ TOOLS = [
                 },
             },
             "required": ["monitor"],
+        },
+    },
+    {
+        "name": "annotate_reasoning_steps",
+        "description": (
+            "Declare the reasoning steps you took to answer this question. "
+            "Call this BEFORE your final answer when you ran 2 or more signal checks "
+            "(revenue, cap, velocity, ghost, fill, CVR, publisher health, etc.). "
+            "Steps appear as a visible reasoning chain in Slack — be terse and factual. "
+            "Do NOT call for single-source lookups or simple data retrieval."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "description": "Ordered list of checks performed, in the order you ran them",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {
+                                "type": "string",
+                                "description": "Check name, ≤60 chars (e.g. 'Cap signal check')",
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pass", "fail", "warn", "skip"],
+                                "description": "pass=normal; fail=threshold breached or data missing; warn=borderline; skip=not applicable",
+                            },
+                            "finding": {
+                                "type": "string",
+                                "description": "One-line data point (e.g. 'CapitalOne at 87% — within 90% threshold')",
+                            },
+                        },
+                        "required": ["label", "status", "finding"],
+                    },
+                }
+            },
+            "required": ["steps"],
         },
     },
 ]
@@ -5195,6 +5235,12 @@ def get_advertiser_revenue_trends(days: int = 7) -> dict:
 
 # ── Tool dispatch ─────────────────────────────────────────────────────────────
 
+
+def annotate_reasoning_steps(steps: list) -> str:
+    """No-op handler — steps captured from block.input in _run_tool_loop."""
+    return "Steps recorded."
+
+
 TOOL_MAP = {
     "search_offers": search_offers,
     "get_top_opportunities": get_top_opportunities,
@@ -5233,6 +5279,7 @@ TOOL_MAP = {
     "get_publisher_revenue_trends": get_publisher_revenue_trends,
     "get_advertiser_revenue_trends": get_advertiser_revenue_trends,
     "get_publisher_fleet_health": get_publisher_fleet_health,
+    "annotate_reasoning_steps": annotate_reasoning_steps,
     "get_scout_config": None,   # registered below after function definition
     "run_self_qa": None,  # registered below after function definition
 }
@@ -5785,6 +5832,7 @@ def _run_tool_loop(
         _opportunity_offers = []
     if _all_tool_results is None:
         _all_tool_results = []
+    _agent_steps: list = []
 
     # user_message is the RAW pre-prefix string — passed explicitly so the
     # MAX_ROUNDS warning log line matches pre-refactor behavior (logging the
@@ -5902,6 +5950,7 @@ def _run_tool_loop(
                         # even if Block Kit rendering fails
                         "fallback_text": _fallback_text,
                     },
+                    agent_steps=_agent_steps or None,
                 )
 
             # Parse and strip <<<SUGGESTIONS [...]  SUGGESTIONS>>> block from text.
@@ -5923,6 +5972,7 @@ def _run_tool_loop(
                     text=text or "",
                     tools_called=_tools_called,
                     duration_ms=_dur(),
+                    agent_steps=_agent_steps or None,
                     payload={
                         "type": "opportunities",
                         "text": text or "",
@@ -5948,12 +5998,14 @@ def _run_tool_loop(
                             "extracted_context": extracted,
                             "suggestions": suggestions,
                         },
+                        agent_steps=_agent_steps or None,
                     )
 
             return AskResult(
                 text=text or "(no response)",
                 tools_called=_tools_called,
                 duration_ms=_dur(),
+                agent_steps=_agent_steps or None,
             )
 
         # Process tool calls
@@ -5998,6 +6050,8 @@ def _run_tool_loop(
                         _opportunity_offers.extend(result)
                     if block.name == "get_offers_for_publisher" and isinstance(result, dict) and result.get("offers") and not _opportunity_offers:
                         _opportunity_offers.extend(result["offers"])
+                    if block.name == "annotate_reasoning_steps":
+                        _agent_steps.extend(block.input.get("steps", []))
                     _all_tool_results.append(result)
                     tool_results.append({
                         "type": "tool_result",
@@ -6011,6 +6065,8 @@ def _run_tool_loop(
                     result = _run_tool(block.name, block.input, user_id, permalink)
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
+                    if block.name == "annotate_reasoning_steps":
+                        _agent_steps.extend(block.input.get("steps", []))
                     _all_tool_results.append(result)
                     tool_results.append({
                         "type": "tool_result",
@@ -6028,6 +6084,8 @@ def _run_tool_loop(
                     _opportunity_offers.extend(result)
                 if block.name == "get_offers_for_publisher" and isinstance(result, dict) and result.get("offers") and not _opportunity_offers:
                     _opportunity_offers.extend(result["offers"])
+                if block.name == "annotate_reasoning_steps":
+                    _agent_steps.extend(block.input.get("steps", []))
                 _all_tool_results.append(result)  # accumulate all for entity extraction
                 tool_results.append({
                     "type": "tool_result",
@@ -6042,8 +6100,9 @@ def _run_tool_loop(
                         text=block.text,
                         tools_called=_tools_called,
                         duration_ms=_dur(),
+                        agent_steps=_agent_steps or None,
                     )
-            return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur())
+            return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur(), agent_steps=_agent_steps or None)
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
@@ -6058,6 +6117,7 @@ def _run_tool_loop(
         ),
         tools_called=_tools_called,
         duration_ms=_dur(),
+        agent_steps=_agent_steps or None,
     )
 
 

@@ -3945,6 +3945,60 @@ def test_slash_mention_format_parity():
     return True, "Formatter is deterministic and contains expected fields"
 
 
+@test("Agent blocks — AgentStep dataclass validates status")
+def test_agent_step_dataclass():
+    import os
+    os.environ.setdefault("SCOUT_AGENT_BLOCKS", "1")
+    from scout_ui_kit import AgentStep
+    s = AgentStep(label="Cap check", status="pass", finding="87% of cap")
+    if s.label != "Cap check":
+        return False, "label mismatch"
+    if s.status != "pass":
+        return False, "status mismatch"
+    try:
+        AgentStep(label="x", status="invalid", finding="y")  # type: ignore[arg-type]
+        return False, "Expected TypeError for invalid status"
+    except TypeError:
+        pass
+    return True, "AgentStep dataclass validates status values"
+
+
+@test("Agent blocks — _agent_plan_block renders section block")
+def test_agent_plan_block_renders():
+    import os
+    os.environ.setdefault("SCOUT_AGENT_BLOCKS", "1")
+    from scout_ui_kit import AgentStep, _agent_plan_block
+    steps = [
+        AgentStep(label="Revenue check", status="pass", finding="$12K MTD"),
+        AgentStep(label="Cap signal", status="warn", finding="88% of cap"),
+    ]
+    blocks = _agent_plan_block(steps)
+    if not blocks:
+        return False, "_agent_plan_block returned empty list"
+    if blocks[0].get("type") != "section":
+        return False, f"Expected section block, got {blocks[0].get('type')!r}"
+    text = blocks[0]["text"]["text"]
+    if "Revenue check" not in text:
+        return False, "Step label missing from block text"
+    if "✅" not in text:
+        return False, "Pass emoji missing"
+    if "⚠️" not in text:
+        return False, "Warn emoji missing"
+    return True, "_agent_plan_block renders steps with correct emoji and labels"
+
+
+@test("Agent blocks — annotate_reasoning_steps in TOOL_MAP")
+def test_annotate_reasoning_steps_in_tool_map():
+    from scout_agent import TOOL_MAP
+    if "annotate_reasoning_steps" not in TOOL_MAP:
+        return False, "annotate_reasoning_steps missing from TOOL_MAP"
+    fn = TOOL_MAP["annotate_reasoning_steps"]
+    result = fn(steps=[{"label": "x", "status": "pass", "finding": "y"}])
+    if result != "Steps recorded.":
+        return False, f"Unexpected return value: {result!r}"
+    return True, "annotate_reasoning_steps registered in TOOL_MAP and returns expected sentinel"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
