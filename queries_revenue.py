@@ -621,11 +621,11 @@ def benchmark_overall_cvr(ch) -> dict:
                 GROUP BY campaign_id
             )
             SELECT
-                count(DISTINCT c.id)                                              AS campaigns,
-                round(sum(conv.conversions) / sum(imp.impressions) * 100, 4)     AS cvr_pct,
-                round(sum(conv.revenue)     / sum(imp.impressions) * 1000, 2)    AS rpm
+                count(DISTINCT c.id)                                                         AS campaigns,
+                round(sum(coalesce(conv.conversions, 0)) / nullIf(sum(imp.impressions), 0) * 100, 4)   AS cvr_pct,
+                round(sum(coalesce(conv.revenue, 0))     / nullIf(sum(imp.impressions), 0) * 1000, 2)  AS rpm
             FROM from_airbyte_campaigns c
-            JOIN conv ON toInt64(c.id) = toInt64(conv.campaign_id)
+            LEFT JOIN conv ON toInt64(c.id) = toInt64(conv.campaign_id)
             JOIN imp  ON toInt64(c.id) = toInt64(imp.campaign_id)
             WHERE c.deleted_at IS NULL
               AND imp.impressions > 500
@@ -753,6 +753,10 @@ def advertiser_revenue_trends(ch, days: int = 7, min_periods: int = 4) -> list[d
         delta_pct (float), trend ("up" | "down" | "flat"), conversions_actual (int)
     Raises on ClickHouse error — callers must catch.
     """
+    if days <= 0:
+        raise ValueError(f"days must be a positive integer, got {days!r}")
+    if min_periods <= 0:
+        raise ValueError(f"min_periods must be a positive integer, got {min_periods!r}")
     _campaign_join = "JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id"
     rows = ch.query(
         _revenue_trend_sql(
