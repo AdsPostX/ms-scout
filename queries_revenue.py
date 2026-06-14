@@ -622,8 +622,8 @@ def benchmark_overall_cvr(ch) -> dict:
             )
             SELECT
                 count(DISTINCT c.id)                                                         AS campaigns,
-                round(sum(coalesce(conv.conversions, 0)) / sum(imp.impressions) * 100, 4)   AS cvr_pct,
-                round(sum(coalesce(conv.revenue, 0))     / sum(imp.impressions) * 1000, 2)  AS rpm
+                round(sum(coalesce(conv.conversions, 0)) / nullIf(sum(imp.impressions), 0) * 100, 4)   AS cvr_pct,
+                round(sum(coalesce(conv.revenue, 0))     / nullIf(sum(imp.impressions), 0) * 1000, 2)  AS rpm
             FROM from_airbyte_campaigns c
             LEFT JOIN conv ON toInt64(c.id) = toInt64(conv.campaign_id)
             JOIN imp  ON toInt64(c.id) = toInt64(imp.campaign_id)
