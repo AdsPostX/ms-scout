@@ -4023,6 +4023,34 @@ def test_annotate_reasoning_steps_in_tool_map():
     return True, "annotate_reasoning_steps registered in TOOL_MAP and returns expected sentinel"
 
 
+@test("Agent blocks — _synthesize_agent_steps derives steps from tool call log")
+def test_synthesize_agent_steps():
+    from scout_agent import _synthesize_agent_steps, _TOOL_SKIP_SYNTHESIS
+    # Normal tool call produces a step
+    log = [("get_revenue_summary", {"revenue": 847000, "period": "MTD"})]
+    steps = _synthesize_agent_steps(log)
+    if len(steps) != 1:
+        return False, f"Expected 1 step, got {len(steps)}"
+    step = steps[0]
+    if step["label"] != "Revenue check":
+        return False, f"Wrong label: {step['label']!r}"
+    if step["status"] != "pass":
+        return False, f"Wrong status for non-empty result: {step['status']!r}"
+    # Skipped tools produce no steps
+    skip_log = [(name, {}) for name in _TOOL_SKIP_SYNTHESIS]
+    if _synthesize_agent_steps(skip_log):
+        return False, "Skipped tools should produce no steps"
+    # Error result → fail status
+    err_log = [("get_cap_status", "Error: ClickHouse timeout")]
+    err_steps = _synthesize_agent_steps(err_log)
+    if err_steps[0]["status"] != "fail":
+        return False, f"Error result should yield fail status, got {err_steps[0]['status']!r}"
+    # Empty log → empty list (falsy, so agent_steps stays None)
+    if _synthesize_agent_steps([]):
+        return False, "Empty log should return empty list"
+    return True, "_synthesize_agent_steps produces correct steps from tool call log"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
