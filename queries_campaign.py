@@ -61,7 +61,7 @@ click_agg AS (
     PREWHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(7)})
     WHERE created_at >= {_ch_date_filter(7)}
     GROUP BY campaign_id
-    HAVING clicks_7d > 100
+    HAVING clicks_7d > 100  -- pre-filter; actual 200-click requirement in final HAVING
 ),
 rev_agg AS (
     SELECT campaign_id,
