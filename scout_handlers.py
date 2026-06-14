@@ -40,6 +40,7 @@ from scout_ui_kit import (
     _build_help_blocks,
     _build_home_view, _build_queue_card, _is_help_query,
     _build_advertiser_rpm_context_blocks,
+    AgentStep,
 )
 from scout_state import (
     _store_brief, _get_brief, _delete_brief,
@@ -3161,12 +3162,18 @@ def _handle_event_impl(req: SocketModeRequest):
             _dm_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
             _dm_interp = _build_interpretation(_dm_ctx)
             _dm6_card = Card(Severity.INFO, "", body=response_text)
+            _dm_agent_steps = [
+                AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
+                for s in (response.agent_steps or [])
+                if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
+            ] or None
             _dm6_fallback, _dm6_blocks = wrap_response(
                 card=_dm6_card, surface=Surface.DM,
                 suggestions=list(suggestions),
                 feedback="reaction", query_hash=msg_ts,
                 elapsed_seconds=_elapsed,
                 interpretation=_dm_interp,
+                agent_steps=_dm_agent_steps,
             )
             if not _dm_interp:
                 _dm_period = _dm_ctx.get("period") if _dm_ctx else None
@@ -3333,12 +3340,18 @@ def _handle_event_impl(req: SocketModeRequest):
         _ch_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
         _ch_interp = _build_interpretation(_ch_ctx)
         _ch8_card = Card(Severity.INFO, "", body=response_text)
+        _ch_agent_steps = [
+            AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
+            for s in (response.agent_steps or [])
+            if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
+        ] or None
         _ch8_fallback, _ch8_blocks = wrap_response(
             card=_ch8_card, surface=Surface.CHANNEL_ROOT,
             suggestions=list(suggestions),
             feedback="reaction", query_hash=_placeholder_ts,
             elapsed_seconds=_elapsed,
             interpretation=_ch_interp,
+            agent_steps=_ch_agent_steps,
         )
         if not _ch_interp:
             _ch_period = _ch_ctx.get("period") if _ch_ctx else None

@@ -52,6 +52,7 @@ from typing import Literal, Optional
 # ---------------------------------------------------------------------------
 _KIT_ENABLED: bool = os.getenv("SCOUT_KIT_ENABLED", "true").lower() == "true"
 _MARKDOWN_BLOCKS_ENABLED: bool = os.getenv("SCOUT_MARKDOWN_BLOCKS", "").lower() in {"1", "true", "yes"}
+_AGENT_BLOCKS_ENABLED: bool = os.getenv("SCOUT_AGENT_BLOCKS", "").lower() in {"1", "true", "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +251,43 @@ def _markdown_block(text: str) -> dict:
     return {"type": "markdown", "text": text}
 
 
+# ---------------------------------------------------------------------------
+# AgentStep + _agent_plan_block — reasoning chain surface (SCOUT_AGENT_BLOCKS)
+# ---------------------------------------------------------------------------
+_STATUS_EMOJI: dict[str, str] = {"pass": "✅", "fail": "❌", "warn": "⚠️", "skip": "⏭️"}
+
+
+_VALID_STATUSES = frozenset({"pass", "fail", "warn", "skip"})
+
+
+@dataclass(frozen=True)
+class AgentStep:
+    """One step in Scout's reasoning chain. Rendered via _agent_plan_block()."""
+    label: str                                      # ≤60 chars, e.g. "Cap signal check"
+    status: Literal["pass", "fail", "warn", "skip"]
+    finding: str                                    # one-line data point
+
+    def __post_init__(self) -> None:
+        if self.status not in _VALID_STATUSES:
+            raise TypeError(f"AgentStep.status must be one of {sorted(_VALID_STATUSES)!r}, got {self.status!r}")
+
+
+def _agent_plan_block(steps: list["AgentStep"]) -> list[dict]:
+    """Render agent reasoning steps as a mrkdwn section block.
+
+    Uses section+mrkdwn rather than a native 'plan' block type because
+    Block Kit Builder does not expose 'plan' as a publicly available block type
+    (it requires Slack Agents SDK partner access, not standard block kit).
+    """
+    if not steps:
+        return []
+    lines = [
+        f"{_STATUS_EMOJI.get(s.status, '•')} *{s.label}* — {s.finding}"
+        for s in steps
+    ]
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+
+
 def _escape_md_code(text: str) -> str:
     """Convert fenced code blocks to inline code and escape underscores in spans.
 
@@ -350,6 +388,7 @@ def wrap_response(
     elapsed_seconds: Optional[int] = None,
     interpretation: Optional[str] = None,
     pattern: "ResponsePattern | None" = None,
+    agent_steps: "list[AgentStep] | None" = None,
 ) -> tuple[str, list[dict]]:
     """Single entry-point for every ask() reply surface.
 
@@ -420,6 +459,10 @@ def wrap_response(
         # 3b. INFO on visible surfaces: single-line visual anchor
         header_text = f"{card.severity.emoji}  *{headline}*"
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
+
+    # Agent plan block — reasoning steps between headline and body (flag-gated)
+    if agent_steps and _AGENT_BLOCKS_ENABLED:
+        blocks.extend(_agent_plan_block(agent_steps))
 
     if card.body:
         if _MARKDOWN_BLOCKS_ENABLED:

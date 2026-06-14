@@ -855,4 +855,43 @@ TOOLS = [
             "required": ["monitor"],
         },
     },
+    {
+        "name": "annotate_reasoning_steps",
+        "description": (
+            "Declare the reasoning steps you took to answer this question. "
+            "Call this BEFORE your final answer when you ran 2 or more signal checks "
+            "(revenue, cap, velocity, ghost, fill, CVR, publisher health, etc.). "
+            "Steps appear as a visible reasoning chain in Slack — be terse and factual. "
+            "Do NOT call for single-source lookups or simple data retrieval."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "description": "Ordered list of checks performed, in the order you ran them",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {
+                                "type": "string",
+                                "description": "Check name, ≤60 chars",
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pass", "fail", "warn", "skip"],
+                                "description": "pass=normal, fail=threshold breached or data missing, warn=borderline, skip=not applicable",
+                            },
+                            "finding": {
+                                "type": "string",
+                                "description": "One-line data point, e.g. 'CapitalOne at 87% — within 90% threshold'",
+                            },
+                        },
+                        "required": ["label", "status", "finding"],
+                    },
+                },
+            },
+            "required": ["steps"],
+        },
+    },
 ]
