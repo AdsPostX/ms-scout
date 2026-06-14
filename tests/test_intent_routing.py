@@ -15,12 +15,14 @@ from scout_agent import (  # noqa: E402
     AmbiguousThresholdKey,
     AskResult,
     _classify_intent,
-    _coerce_threshold_value,
     _route_deterministic,
-    _split_dotted_key,
     _THREAD_INTENTS,
     set_threshold,
 )
+from scout_thresholds import _manager as _tm  # noqa: E402
+
+_coerce_threshold_value = _tm.coerce_value
+_split_dotted_key = _tm._split_key
 
 
 class TestDeterministicRouterFallthrough(unittest.TestCase):
@@ -167,7 +169,7 @@ class TestBareKeyResolution(unittest.TestCase):
             "signals": {"shared_key": 1},
             "digest":  {"shared_key": 2},
         }
-        with unittest.mock.patch.object(scout_agent, "_BASE_THRESHOLDS", fake_base):
+        with unittest.mock.patch.object(_tm, "_load_base", return_value=fake_base):
             with self.assertRaises(AmbiguousThresholdKey) as ctx:
                 _split_dotted_key("shared_key")
         self.assertIn("signals", str(ctx.exception))
@@ -189,7 +191,7 @@ class TestAmbiguousKeyInRouter(unittest.TestCase):
             "digest":  {"shared_key": 2},
         }
         with unittest.mock.patch.dict(os.environ, {"SCOUT_THRESHOLD_ADMINS": "U_admin"}):
-            with unittest.mock.patch.object(scout_agent, "_BASE_THRESHOLDS", fake_base):
+            with unittest.mock.patch.object(_tm, "_load_base", return_value=fake_base):
                 r = _route_deterministic(
                     "set shared_key to 5 because test", user_id="U_admin"
                 )
@@ -216,8 +218,8 @@ class TestBaseSchemaValidation(unittest.TestCase):
             "signals": {"cap_alert_pct": 90},
         }
         with unittest.mock.patch.dict(os.environ, {"SCOUT_THRESHOLD_ADMINS": "U_admin"}):
-            with unittest.mock.patch.object(scout_agent, "SCOUT_THRESHOLDS", polluted_merged):
-                with unittest.mock.patch.object(scout_agent, "_BASE_THRESHOLDS", clean_base):
+            with unittest.mock.patch.object(_tm, "_thresholds_cache", polluted_merged):
+                with unittest.mock.patch.object(_tm, "_load_base", return_value=clean_base):
                     r = set_threshold(section="signals", key="typo_key", value=1,
                                       reason="should reject", _caller_user_id="U_admin")
         self.assertFalse(r["ok"])

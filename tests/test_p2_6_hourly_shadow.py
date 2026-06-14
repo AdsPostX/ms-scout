@@ -81,6 +81,8 @@ except ImportError:
     _slack_sdk_web.WebClient = MagicMock
     sys.modules["slack_sdk.web"] = _slack_sdk_web
 
+from scout_thresholds import _manager as _tm  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # T1: _run_shadow_monitor is importable and callable
@@ -461,7 +463,7 @@ class TestMarkFiringCalledOnPost(unittest.TestCase):
                 raise StopIteration("one cycle done")
 
         with patch.dict("os.environ", {"SCOUT_HOURLY_SHADOW_ENABLED": "true"}, clear=False), \
-             patch("scout_agent.SCOUT_THRESHOLDS", fake_thresholds), \
+             patch.object(_tm, "_thresholds_cache", fake_thresholds), \
              patch("demand_feed_main.alert_registry.mark_firing",
                    side_effect=lambda name, ctx: fired.append((name, ctx))), \
              patch("demand_feed_main.alert_registry.mark_cleared", MagicMock()), \
@@ -537,7 +539,7 @@ class TestMarkClearedCalledOnNoAnomaly(unittest.TestCase):
                 raise StopIteration("one cycle done")
 
         with patch.dict("os.environ", {"SCOUT_HOURLY_SHADOW_ENABLED": "true"}, clear=False), \
-             patch("scout_agent.SCOUT_THRESHOLDS", fake_thresholds), \
+             patch.object(_tm, "_thresholds_cache", fake_thresholds), \
              patch("demand_feed_main.alert_registry.mark_cleared",
                    side_effect=lambda name: cleared.append(name)), \
              patch("demand_feed_main.alert_registry.mark_firing", MagicMock()), \

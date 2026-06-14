@@ -10,6 +10,7 @@ import threading
 import time
 
 import queries as _q
+from scout_thresholds import _manager as _tm
 
 log = logging.getLogger(__name__)
 
@@ -132,8 +133,7 @@ def _query_ghost_campaigns(ch, as_of_date: str | None = None) -> list:
     as_of_date: optional ISO date string (e.g. '2026-01-15') for backtest replay.
     When provided, today() in the underlying SQL is substituted with toDate(as_of_date).
     """
-    from scout_agent import SCOUT_THRESHOLDS  # lazy — avoids circular import
-    recency_hours = int(SCOUT_THRESHOLDS.get("signals", {}).get("ghost_recency_hours", 48))
+    recency_hours = int(_tm.load().get("signals", {}).get("ghost_recency_hours", 48))
     return _q.ghost_campaigns(ch, recency_hours=recency_hours, as_of_date=as_of_date)
 
 
@@ -153,9 +153,8 @@ def _query_revenue_baseline(ch) -> dict | None:
     Returns None if no anomaly or insufficient history.
     Raises on ClickHouse error — callers must catch.
     """
-    from scout_agent import SCOUT_THRESHOLDS  # lazy — avoids circular import
-    tolerance = float(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
-    min_days  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_min_sample_days", 4))
+    tolerance = float(_tm.load().get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
+    min_days  = int(_tm.load().get("signals", {}).get("revenue_baseline_min_sample_days", 4))
 
     sql = """
 WITH history AS (
@@ -239,9 +238,8 @@ def _query_intraday_revenue_total(ch) -> dict | None:
     Returns None if no anomaly or insufficient history.
     Raises on ClickHouse error — callers must catch.
     """
-    from scout_agent import SCOUT_THRESHOLDS  # lazy — avoids circular import
-    tolerance = float(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
-    min_days  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_min_sample_days", 4))
+    tolerance = float(_tm.load().get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
+    min_days  = int(_tm.load().get("signals", {}).get("revenue_baseline_min_sample_days", 4))
 
     sql = """
 WITH today_rev AS (
@@ -330,11 +328,10 @@ def _query_intraday_revenue_by_publisher(ch, total_result: dict) -> list[dict]:
     Note on publisher key mismatch: impressions use `pid` (string), sessions/conversions
     use `user_id` (numeric). We query them separately and align via mv_adpx_users.
     """
-    from scout_agent import SCOUT_THRESHOLDS  # lazy — avoids circular import
-    min_days        = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_min_sample_days", 4))
-    min_delta       = float(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_publisher_min_delta", 500))
-    ghost_min_impr  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_ghost_min_impressions", 100))
-    cvr_min_impr    = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_cvr_min_impressions", 500))
+    min_days        = int(_tm.load().get("signals", {}).get("revenue_baseline_min_sample_days", 4))
+    min_delta       = float(_tm.load().get("signals", {}).get("revenue_tracker_publisher_min_delta", 500))
+    ghost_min_impr  = int(_tm.load().get("signals", {}).get("revenue_tracker_ghost_min_impressions", 100))
+    cvr_min_impr    = int(_tm.load().get("signals", {}).get("revenue_tracker_cvr_min_impressions", 500))
 
     # ── Query 1: today's per-publisher revenue + conversions via user_id ──────
     revenue_sql = """
@@ -963,8 +960,7 @@ def _query_cvr_anomaly(
     min_impressions_7d: int = None,
 ) -> list[dict]:
     """Thin wrapper — reads thresholds from config; per-call overrides take precedence."""
-    from scout_agent import SCOUT_THRESHOLDS
-    t = SCOUT_THRESHOLDS.get("signals", {})
+    t = _tm.load().get("signals", {})
     return _q.cvr_anomaly(
         ch,
         drop_pct=float(drop_pct if drop_pct is not None else t.get("cvr_anomaly_drop_pct", 30)),
@@ -975,8 +971,7 @@ def _query_cvr_anomaly(
 
 def _query_expiring_campaigns(ch, warning_days: int = None) -> list[dict]:
     """Thin wrapper — reads warning_days from config; per-call override takes precedence."""
-    from scout_agent import SCOUT_THRESHOLDS
-    t = SCOUT_THRESHOLDS.get("signals", {})
+    t = _tm.load().get("signals", {})
     return _q.expiring_campaigns(
         ch,
         warning_days=int(warning_days if warning_days is not None else t.get("expiration_warning_days", 7)),
@@ -985,8 +980,7 @@ def _query_expiring_campaigns(ch, warning_days: int = None) -> list[dict]:
 
 def _query_publisher_revenue_trends(ch, days: int = 7) -> list[dict]:
     """Thin wrapper — reads min_periods from config and delegates to queries.publisher_revenue_trends()."""
-    from scout_agent import SCOUT_THRESHOLDS
-    t = SCOUT_THRESHOLDS.get("signals", {})
+    t = _tm.load().get("signals", {})
     return _q.publisher_revenue_trends(
         ch,
         days=days,
@@ -996,8 +990,7 @@ def _query_publisher_revenue_trends(ch, days: int = 7) -> list[dict]:
 
 def _query_advertiser_revenue_trends(ch, days: int = 7) -> list[dict]:
     """Thin wrapper — reads min_periods from config and delegates to queries.advertiser_revenue_trends()."""
-    from scout_agent import SCOUT_THRESHOLDS
-    t = SCOUT_THRESHOLDS.get("signals", {})
+    t = _tm.load().get("signals", {})
     return _q.advertiser_revenue_trends(
         ch,
         days=days,

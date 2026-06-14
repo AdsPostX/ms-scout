@@ -26,13 +26,12 @@ def _make_ch_mock(today_rows, avg_rows):
     return mock_ch
 
 
-def _run(today_rows, avg_rows, overrides=None):
+def _run(today_rows, avg_rows):
     """Helper: patch dependencies and call get_revenue_today()."""
     import scout_agent
-    overrides = overrides or {"publishers": {}, "advertisers": {}}
+    import scout_tools_revenue
     mock_ch = _make_ch_mock(today_rows, avg_rows)
-    with unittest.mock.patch.object(scout_agent, "_get_ch_client", return_value=mock_ch), \
-         unittest.mock.patch.object(scout_agent, "_load_entity_overrides", return_value=overrides):
+    with unittest.mock.patch.object(scout_tools_revenue, "_get_ch_client", return_value=mock_ch):
         return scout_agent.get_revenue_today()
 
 
@@ -89,19 +88,9 @@ class TestRevenueToday(unittest.TestCase):
 
     def test_no_override_lines_in_output(self):
         """entity_overrides notes must NOT appear in get_revenue_today output — revenue is pure numbers."""
-        overrides = {
-            "publishers": {
-                "TuitionHero": {
-                    "note": "invalid conversions",
-                    "added_by": "scout-agent",
-                }
-            },
-            "advertisers": {},
-        }
         result = _run(
             today_rows=[(1, "AT&T", 5000.0, 100)],
             avg_rows=[(1, 6000.0)],
-            overrides=overrides,
         )
         formatted = result["formatted"]
         self.assertNotIn("⚠️", formatted)
@@ -116,13 +105,7 @@ class TestRevenueToday(unittest.TestCase):
 
     def test_empty_state_no_override_lines(self):
         """Zero revenue today — only the early-morning message, no ⚠️ override lines."""
-        overrides = {
-            "publishers": {
-                "TuitionHero": {"note": "invalid conversions", "added_by": "scout-agent"}
-            },
-            "advertisers": {},
-        }
-        result = _run(today_rows=[], avg_rows=[], overrides=overrides)
+        result = _run(today_rows=[], avg_rows=[])
         formatted = result["formatted"]
         self.assertIn("No revenue data", formatted)
         self.assertNotIn("⚠️", formatted)
