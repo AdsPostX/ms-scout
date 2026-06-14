@@ -14,6 +14,19 @@ In order, no skipping:
    - `alert_registry.py` — dedup, kill switches, per-monitor schedules (monitors only)
 3. `/mem-search scout` — check what was already decided before re-deciding it.
 
+## Operating Mode
+
+**Product sense before engineering sense.** Before writing any handler, query, or signal: does this change the answer for the user in Slack? If not, don't build it. If the existing pattern handles 80% of the case, extend — don't add new infrastructure. The bar for new code is "users get better information," not "the code is cleaner."
+
+**Parallelize by default.** Scout sessions often have independent sub-questions. Don't serialize what can fan out:
+- Multiple independent ClickHouse questions → parallel queries, synthesize in main thread
+- Auditing across `queries_*.py` → `Explore` subagent, keep main context lean
+- Multi-signal investigation → one subagent per signal, main thread synthesizes
+
+Never parallelize: single bug root cause (shared investigation = one thread), two agents touching the same handler, ClickHouse tuning (shared schema context).
+
+**Main thread = orchestrator.** Dispatch, synthesize, write. Don't redo what subagents already found. Subagents read; main thread decides and commits.
+
 ## Architecture
 
 Two services. Don't cross the boundary.
