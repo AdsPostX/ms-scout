@@ -299,6 +299,37 @@ def _build_facts_blocks(facts: list[tuple[str, str]]) -> list[dict]:
     return blocks
 
 
+def _build_footer_block(
+    interpretation: str | None = None,
+    elapsed_seconds: int | None = None,
+    surface: "Surface | None" = None,
+) -> list[dict]:
+    """Return a 0-or-1-element list containing the elapsed/interpretation context block.
+
+    Centralises the footer logic so wrap_response() stays readable and any future
+    caller (e.g. _build_home_scoreboard_blocks) can reuse the same format.
+    """
+    if interpretation is not None:
+        elapsed_suffix = ""
+        if elapsed_seconds is not None:
+            _e = elapsed_seconds
+            elapsed_suffix = f" · {_e}s" if _e < 60 else f" · {_e // 60}m {_e % 60}s"
+        return [{
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"_Interpreted as: {interpretation}{elapsed_suffix}_"}],
+        }]
+    if elapsed_seconds is not None and surface not in (Surface.DM, Surface.EPHEMERAL):
+        elapsed_str = (
+            f"{elapsed_seconds}s" if elapsed_seconds < 60
+            else f"{elapsed_seconds // 60}m {elapsed_seconds % 60}s"
+        )
+        return [{
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"_⏱ {elapsed_str}_"}],
+        }]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # wrap_response — single mobile-tuned chokepoint for all ask() exits
 # ---------------------------------------------------------------------------
@@ -427,25 +458,7 @@ def wrap_response(
         blocks.append({"type": "actions", "elements": elements})
 
     # 4. Elapsed / interpretation footer
-    if interpretation is not None:
-        if elapsed_seconds is not None:
-            _e = elapsed_seconds
-            elapsed_suffix = f" · {_e}s" if _e < 60 else f" · {_e // 60}m {_e % 60}s"
-        else:
-            elapsed_suffix = ""
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"_Interpreted as: {interpretation}{elapsed_suffix}_"}],
-        })
-    elif elapsed_seconds is not None and surface not in (Surface.DM, Surface.EPHEMERAL):
-        elapsed_str = (
-            f"{elapsed_seconds}s" if elapsed_seconds < 60
-            else f"{elapsed_seconds // 60}m {elapsed_seconds % 60}s"
-        )
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"_⏱ {elapsed_str}_"}],
-        })
+    blocks.extend(_build_footer_block(interpretation=interpretation, elapsed_seconds=elapsed_seconds, surface=surface))
 
     # 5. Card-level extra actions (e.g. drill-down CTAs from Card.actions)
     # Intentionally not subject to MAX_ACTIONS: these are specific CTAs the caller
