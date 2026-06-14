@@ -26,6 +26,7 @@ from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 from slack_sdk.web import WebClient
 
 from scout_agent import ask
+from scout_thresholds import _manager as _tm
 from scout_notion import (
     _copy_coalescer_loop,
     _notion_watcher_loop,
@@ -165,8 +166,7 @@ _LAST_HEALTH_STATUS: dict | None = None  # last status seen by the heartbeat (us
 def _load_health_cfg() -> dict:
     """Load the health section of scout_thresholds.json. Returns {} on any error."""
     try:
-        from scout_agent import SCOUT_THRESHOLDS
-        return SCOUT_THRESHOLDS.get("health", {})
+        return _tm.load().get("health", {})
     except Exception as e:
         log.warning(f"[health] could not load thresholds, using fallback defaults: {e}")
         return {}
@@ -181,8 +181,7 @@ _OFFER_STALENESS_HOURS          = int(_HEALTH_CFG.get("offer_staleness_hours", 3
 def _load_signal_cfg() -> dict:
     """Load the signals section of scout_thresholds.json. Returns {} on any error."""
     try:
-        from scout_agent import SCOUT_THRESHOLDS
-        return SCOUT_THRESHOLDS.get("signals", {})
+        return _tm.load().get("signals", {})
     except Exception as e:
         log.warning(f"[signals] could not load thresholds, using fallback defaults: {e}")
         return {}
@@ -565,7 +564,6 @@ def _digest_poster(web) -> None:
     import time as _time
     import pytz
     from datetime import datetime as _dt
-    from scout_agent import SCOUT_THRESHOLDS
     from scout_state import _load_digest_post_state, _save_digest_post_date
 
     while True:
@@ -577,9 +575,9 @@ def _digest_poster(web) -> None:
                     # Re-read both knobs each tick so live config changes apply
                     # without a crash/restart (matches digest_daemon_enabled).
                     check_hour = int(
-                        SCOUT_THRESHOLDS.get("signals", {}).get("digest_post_hour_ct", 7)
+                        _tm.load().get("signals", {}).get("digest_post_hour_ct", 7)
                     )
-                    if not SCOUT_THRESHOLDS.get("signals", {}).get(
+                    if not _tm.load().get("signals", {}).get(
                         "digest_daemon_enabled", False
                     ):
                         _time.sleep(300)
@@ -1522,9 +1520,8 @@ def _check_singleton() -> None:
 
 def _seed_entity_overrides() -> None:
     """Ensure Button fill-rate exclusion exists in data/entity_overrides.json on first deploy."""
-    from scout_agent import _load_entity_overrides, _save_entity_overrides
     import datetime as _dt
-    overrides = _load_entity_overrides()
+    overrides = _tm.entity_overrides()
     pubs = overrides.setdefault("publishers", {})
     if "Button" not in pubs:
         pubs["Button"] = {
@@ -1537,7 +1534,7 @@ def _seed_entity_overrides() -> None:
             "added": _dt.date.today().isoformat(),
             "added_by": "seed",
         }
-        _save_entity_overrides(overrides)
+        _tm.save_entity_overrides(overrides)
         log.info("[startup] seeded Button exclusion into data/entity_overrides.json")
 
 
@@ -1618,9 +1615,9 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         # has at least 100 non-null rows. Catches the categories-NULL class of
         # silent failure that bit us when Scout was reading a column with no data.
         try:
-            from scout_agent import _validate_schema_deps, _get_ch_client as _gcc
+            from scout_agent import _get_ch_client as _gcc
             ch = _gcc()
-            schema_result = _validate_schema_deps(ch)
+            schema_result = _tm.validate_schema_deps(ch)
             if schema_result["ok"]:
                 log.info(
                     f"[smoke] schema deps OK — {schema_result['checked']} columns validated"
@@ -1652,9 +1649,8 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         # not loaded" → the LLM recommended `@Scout refresh offers` → user had
         # to run a 2-minute scrape to fix a 2-second cache warmup. Stop that.
         try:
-            from scout_agent import _get_benchmarks
             t0 = time.time()
-            bm = _get_benchmarks()
+            bm = _tm.benchmarks()
             n_cats = len(bm.get("by_category", {})) if bm else 0
             n_advs = len(bm.get("by_adv_name", {})) if bm else 0
             log.info(
@@ -1882,12 +1878,11 @@ def _benchmarks_warmer() -> None:
     actual ClickHouse outage scenarios (which the heartbeat already alerts on).
     """
     import time as _time
-    from scout_agent import _get_benchmarks
     _time.sleep(60)  # let boot-time warm finish first
     while True:
         try:
             t0 = _time.time()
-            bm = _get_benchmarks()
+            bm = _tm.benchmarks()
             n_cats = len(bm.get("by_category", {})) if bm else 0
             log.debug(
                 f"[benchmarks-warmer] refreshed in {_time.time()-t0:.1f}s — {n_cats} categories"

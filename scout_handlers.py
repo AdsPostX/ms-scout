@@ -26,6 +26,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web import WebClient
 
 from scout_agent import ask
+from scout_thresholds import _manager as _tm
 from scout_attachments import detect_sheets_url, extract_sheets_url, extract_file
 from scout_notion import (
     _generate_offer_copy, _write_to_notion_queue, _update_notion_status,
@@ -461,8 +462,7 @@ def _run_preflight_qa(  # replaces _check_url_async (removed — this is a stric
 
         # 2. Advertiser history on MS platform
         try:
-            from scout_agent import _get_benchmarks
-            benchmarks = _get_benchmarks()
+            benchmarks = _tm.benchmarks()
             adv_key = (brief_data.get("advertiser") or "").lower().strip()
             by_adv = benchmarks.get("by_adv_name", {})
             if adv_key and adv_key in by_adv:
