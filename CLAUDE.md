@@ -83,6 +83,16 @@ Does the existing layer solve 80% of this? If yes, extend it. If no, name what i
 **When the elegant solution hits a constraint:**
 Ship the simpler path. Name the constraint inline. Don't block the fix waiting for elegance.
 
+**Before merging any PR (Vamsee Lens):**
+Vamsee Gomatam (AdsPostX CTO) will review significant backend work. Run this check before closing a PAUL APPLY phase:
+1. **No invisible accumulators** — if a list is built up silently inside a loop, it must be returned as a value or passed as a collector, not captured as a closure side effect.
+2. **No no-op handlers with side-channel capture** — if a TOOL_MAP function returns a placeholder string while real capture happens elsewhere in the loop, document the contract explicitly in the docstring or restructure.
+3. **No repeated inline comprehensions** — if the same filter/transform pattern appears ≥2 times across handlers, extract to a named pure function (`_coerce_X(raw)`) before shipping.
+4. **Config objects, not scattered env reads** — feature flags should be gathered into a named constant block or config dataclass at module top; not scattered inline `os.getenv()` calls throughout the code.
+5. **Validate at construction** — dataclasses use `__post_init__`, flags validate at startup. If the flag is on but required config is missing, warn or raise.
+
+If any check fails: fix inline (≤5 min) or name the constraint and file the debt explicitly.
+
 ## Extension Points
 
 | Adding...              | Touch these files                                                                    |
