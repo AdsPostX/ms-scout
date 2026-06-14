@@ -324,6 +324,12 @@ def supply_gap_opportunities(ch, pub_id: int) -> list[dict]:
             WHERE created_at >= {_ch_date_filter(30)}
               AND toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(30)})
             GROUP BY campaign_id
+        ),
+        pc_dedup AS (
+            SELECT campaign_id, user_id
+            FROM from_airbyte_publisher_campaigns
+            WHERE is_active = true AND deleted_at IS NULL
+            GROUP BY campaign_id, user_id
         )
         SELECT
             c.adv_name,
@@ -332,12 +338,11 @@ def supply_gap_opportunities(ch, pub_id: int) -> list[dict]:
             coalesce(sum(ca.revenue_30d), 0) AS revenue_30d,
             round(coalesce(sum(ca.revenue_30d), 0) /
                   nullIf(sum(ia.impressions_30d), 0) * 1000, 2) AS rpm
-        FROM from_airbyte_publisher_campaigns pc
+        FROM pc_dedup pc
         JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = c.id
         LEFT JOIN imp_agg ia ON ia.campaign_id = toUInt64(pc.campaign_id)
         LEFT JOIN conv_agg ca ON ca.campaign_id = toUInt64(pc.campaign_id)
-        WHERE pc.is_active = true
-          AND pc.deleted_at IS NULL AND c.deleted_at IS NULL
+        WHERE c.deleted_at IS NULL
           AND pc.user_id != {{pub_id: Int64}}
         GROUP BY c.adv_name
         HAVING revenue_30d > 0 AND pub_count >= 2
@@ -569,10 +574,11 @@ def publisher_health_ad_metrics(
     sql += """
     ) s ON s.session_id = i.session_id
     LEFT JOIN (
-        SELECT session_id, id, campaign_id, revenue, payout
+        SELECT session_id, id, campaign_id, any(revenue) AS revenue, any(payout) AS payout
         FROM adpx_conversionsdetails
         PREWHERE user_id = {pid: UInt64}
             AND toYYYYMM(created_at) >= {extended_partition: UInt32}
+        GROUP BY session_id, id, campaign_id
     ) cd ON cd.session_id = i.session_id AND cd.campaign_id = i.campaign_id
     GROUP BY s.placement
     """
@@ -698,21 +704,25 @@ def low_fill_publishers(ch, placements: list[str]) -> list[dict]:
         imps_agg AS (
             SELECT
                 toInt64(pid) AS publisher_id,
+                placement,
                 count(DISTINCT session_id) AS sessions_with_imps
             FROM adpx_impressions_details
             PREWHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(30)})
             WHERE created_at >= {_ch_date_filter(30)}
-            GROUP BY pid
+              AND placement IN {{placements: Array(String)}}
+            GROUP BY pid, placement
         ),
         rev_agg AS (
             SELECT
                 toInt64(user_id) AS publisher_id,
+                placement,
                 coalesce(sum(toFloat64OrNull(revenue)), 0) AS revenue_30d,
                 count(DISTINCT session_id) AS converting_sessions
             FROM adpx_conversionsdetails
             PREWHERE toYYYYMM(created_at) >= toYYYYMM({_ch_date_filter(30)})
             WHERE created_at >= {_ch_date_filter(30)}
-            GROUP BY user_id
+              AND placement IN {{placements: Array(String)}}
+            GROUP BY user_id, placement
         )
         SELECT
             s.publisher_id,
@@ -724,8 +734,8 @@ def low_fill_publishers(ch, placements: list[str]) -> list[dict]:
             s.sessions_30d - coalesce(i.sessions_with_imps, 0)                    AS missed_sessions,
             coalesce(r.revenue_30d, 0)                                             AS revenue_30d
         FROM sessions_agg s
-        LEFT JOIN imps_agg i ON i.publisher_id = s.publisher_id
-        LEFT JOIN rev_agg r  ON r.publisher_id = s.publisher_id
+        LEFT JOIN imps_agg i ON i.publisher_id = s.publisher_id AND i.placement = s.placement
+        LEFT JOIN rev_agg r  ON r.publisher_id = s.publisher_id AND r.placement = s.placement
         -- mv_adpx_users is a lightweight MV (id, organization, is_test, parent_id only)
         LEFT JOIN mv_adpx_users u ON toUInt64(s.publisher_id) = u.id
         WHERE coalesce(i.sessions_with_imps, 0) * 100.0 / s.sessions_30d < 15
