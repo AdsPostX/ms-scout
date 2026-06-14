@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 import logging
+import re
+
+
+def _validate_as_of_date(as_of_date: str) -> None:
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', as_of_date):
+        raise ValueError(f"as_of_date must be YYYY-MM-DD, got: {as_of_date!r}")
 
 
 # ===========================================================================
@@ -62,6 +68,8 @@ def fill_rate_publishers(
         except Exception:
             placements = []
 
+    if as_of_date:
+        _validate_as_of_date(as_of_date)
     date_expr = f"toDate('{as_of_date}')" if as_of_date else "today()"
 
     try:
@@ -163,6 +171,8 @@ def velocity_alerts(
           pct_delta (float), direction ("up"|"down"),
           advertisers (list[dict]) — top advertisers from Phase 2 attribution enrichment.
     """
+    if as_of_date:
+        _validate_as_of_date(as_of_date)
     date_expr = f"toDate('{as_of_date}')" if as_of_date else "today()"
     pub_filter = f"AND toInt64(user_id) = {int(publisher_id)}" if publisher_id else ""
 
@@ -292,6 +302,8 @@ def cap_alert_campaigns(
     import json as _json
     import datetime as _dt
 
+    if as_of_date:
+        _validate_as_of_date(as_of_date)
     date_expr = f"toDate('{as_of_date}')" if as_of_date else "today()"
     adv_filter = f"AND c.id = {int(advertiser_id)}" if advertiser_id else ""
 

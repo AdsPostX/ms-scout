@@ -1,7 +1,14 @@
 """ClickHouse queries — campaign entry, status, ghost detection, expiring campaigns."""
 from __future__ import annotations
 
+import re
+
 from queries_revenue import _ch_date_filter
+
+
+def _validate_as_of_date(as_of_date: str) -> None:
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', as_of_date):
+        raise ValueError(f"as_of_date must be YYYY-MM-DD, got: {as_of_date!r}")
 
 
 # ===========================================================================
@@ -97,6 +104,7 @@ ORDER BY impressions_7d DESC
 LIMIT 25
 """
     if as_of_date:
+        _validate_as_of_date(as_of_date)
         _ref = f"toDate('{as_of_date}')"
         sql = sql.replace("today()", _ref)
     rows = ch.query(sql, parameters={"recency_hours": recency_hours}).result_rows
