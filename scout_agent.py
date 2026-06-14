@@ -7,6 +7,7 @@ Performance benchmarks: queried from ClickHouse at startup, cached in memory.
 
 from __future__ import annotations
 
+import copy
 import difflib
 import json
 import logging
@@ -598,7 +599,7 @@ def _get_benchmarks() -> dict:
             _BENCHMARKS = _load_performance_benchmarks()
             _merge_learned_benchmarks()  # overlay actuals from 14-day recaps
             _BENCHMARKS_LOADED_AT = time.time()
-        return _BENCHMARKS.copy()
+        return copy.deepcopy(_BENCHMARKS)
 
 
 # Compiled once at module level — strips <<<SUGGESTIONS [...]  SUGGESTIONS>>> blocks from responses
