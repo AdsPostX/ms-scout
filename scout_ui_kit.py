@@ -51,6 +51,7 @@ from typing import Literal, Optional
 # Kill switch — import from here, never re-read the env var elsewhere
 # ---------------------------------------------------------------------------
 _KIT_ENABLED: bool = os.getenv("SCOUT_KIT_ENABLED", "true").lower() == "true"
+_MARKDOWN_BLOCKS_ENABLED: bool = os.getenv("SCOUT_MARKDOWN_BLOCKS", "").lower() in {"1", "true", "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +243,11 @@ _HEADER_PLAIN_TEXT_MAX = 150
 # Strings that signal markdown-formatted body content — route through _text_to_blocks()
 # instead of a plain mrkdwn section. Checked at the START of wrap_response() body routing.
 # "- " and "• " handle bodies that START with a single bullet (no leading \n).
-_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ", "\n|")
+_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ", "\n|", "> ", "1. ")
+
+
+def _markdown_block(text: str) -> dict:
+    return {"type": "markdown", "text": text}
 
 
 def _escape_md_code(text: str) -> str:
@@ -417,7 +422,9 @@ def wrap_response(
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
 
     if card.body:
-        if any(sig in card.body for sig in _MARKDOWN_SIGNALS):
+        if _MARKDOWN_BLOCKS_ENABLED:
+            blocks.append(_markdown_block(card.body))
+        elif any(sig in card.body for sig in _MARKDOWN_SIGNALS):
             blocks.extend(_text_to_blocks(card.body))
         else:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _escape_md_code(card.body)}})
@@ -599,10 +606,11 @@ _INLINE_RE = re.compile(
     r'|\*(?P<bold_s>[^*\n]+?)\*'
     r'|_(?P<italic>[^_\n]+?)_'
     r'|`(?P<code>[^`\n]+?)`'
+    r'|~~(?P<strike>[^~\n]+)~~'
     r'|:(?P<emoji>[a-z0-9_\-+]+?):'
     r'|<(?P<url>[^|>]+)\|(?P<url_text>[^>]*)>'
     r'|<@(?P<user>[A-Z0-9]+)>'
-    r'|(?P<plain>[^*_`:<\n]+|\n|[*_`:<])'
+    r'|(?P<plain>[^*_`~:<\n]+|\n|[*_`~:<])'
 )
 
 # Pipe table fallback: requires ≥2 columns to avoid false-positives on single-pipe lines.
@@ -1089,6 +1097,8 @@ def _parse_inline_elements(text: str) -> list:
             elements.append({"type": "text", "text": m.group("italic"), "style": {"italic": True}})
         elif m.group("code") is not None:
             elements.append({"type": "text", "text": m.group("code"), "style": {"code": True}})
+        elif m.group("strike") is not None:
+            elements.append({"type": "text", "text": m.group("strike"), "style": {"strike": True}})
         elif m.group("emoji") is not None:
             name = _EMOJI_ALIASES.get(m.group("emoji"), m.group("emoji"))
             elements.append({"type": "emoji", "name": name})
@@ -1111,15 +1121,16 @@ def _text_to_blocks(text: str) -> list:
 
     Structure:
     - '---' separators → divider blocks between sections
-    - Lines starting with '>' → mrkdwn context block
+    - Lines starting with '>' → rich_text_quote element
     - Bullet lines (•, -, *) → rich_text_list element
     - Triple-backtick fences → rich_text_preformatted element
     - Everything else → rich_text_section with typed inline elements
 
     Falls back to a single mrkdwn section block on any parse failure.
     """
-    _BULLET_RE = re.compile(r'^[•\-\*]\s+')
-    _FENCE_RE  = re.compile(r'^```')
+    _BULLET_RE  = re.compile(r'^[•\-\*]\s+')
+    _FENCE_RE   = re.compile(r'^```')
+    _ORDERED_RE = re.compile(r'^(\d+)\.\s+(.+)')
 
     def _flush_section(line_buf: list) -> "list | None":
         joined = "\n".join(line_buf).strip()
@@ -1128,12 +1139,12 @@ def _text_to_blocks(text: str) -> list:
         inline = _parse_inline_elements(joined)
         return {"type": "rich_text_section", "elements": inline}
 
-    def _flush_list(items: list) -> "dict | None":
+    def _flush_list(items: list, style: str = "bullet") -> "dict | None":
         if not items:
             return None
         return {
             "type": "rich_text_list",
-            "style": "bullet",
+            "style": style,
             "indent": 0,
             "elements": [
                 {"type": "rich_text_section", "elements": _parse_inline_elements(item)}
@@ -1141,11 +1152,20 @@ def _text_to_blocks(text: str) -> list:
             ],
         }
 
-    def _part_to_rt_elements(part: str) -> "tuple[list, list]":
+    def _flush_quote(items: list) -> "dict | None":
+        if not items:
+            return None
+        return {
+            "type": "rich_text_quote",
+            "elements": _parse_inline_elements("\n".join(items)),
+        }
+
+    def _part_to_rt_elements(part: str) -> list:
         rt_elems: list = []
-        ctx_lines: list = []
         line_buf: list = []
         list_buf: list = []
+        ordered_buf: list = []
+        quote_buf: list = []
         table_buf: list = []
         in_fence = False
         fence_buf: list = []
@@ -1188,6 +1208,16 @@ def _text_to_blocks(text: str) -> list:
                     in_fence = False
                     code_text = "\n".join(fence_buf)
                     fence_buf = []
+                    if quote_buf:
+                        el = _flush_quote(quote_buf)
+                        quote_buf = []
+                        if el:
+                            rt_elems.append(el)
+                    if ordered_buf:
+                        el = _flush_list(ordered_buf, style="ordered")
+                        ordered_buf = []
+                        if el:
+                            rt_elems.append(el)
                     if list_buf:
                         el = _flush_list(list_buf)
                         list_buf = []
@@ -1198,10 +1228,11 @@ def _text_to_blocks(text: str) -> list:
                         line_buf = []
                         if el:
                             rt_elems.append(el)
-                    rt_elems.append({
+                    pre_block: dict = {
                         "type": "rich_text_preformatted",
                         "elements": [{"type": "text", "text": code_text}],
-                    })
+                    }
+                    rt_elems.append(pre_block)
                 else:
                     in_fence = True
                 continue
@@ -1211,7 +1242,22 @@ def _text_to_blocks(text: str) -> list:
                 continue
 
             if raw_line.startswith('>'):
-                ctx_lines.append(raw_line[1:].strip())
+                if ordered_buf:
+                    el = _flush_list(ordered_buf, style="ordered")
+                    ordered_buf = []
+                    if el:
+                        rt_elems.append(el)
+                if list_buf:
+                    el = _flush_list(list_buf)
+                    list_buf = []
+                    if el:
+                        rt_elems.append(el)
+                if line_buf:
+                    el = _flush_section(line_buf)
+                    line_buf = []
+                    if el:
+                        rt_elems.append(el)
+                quote_buf.append(raw_line[1:].strip())
                 continue
 
             stripped = raw_line.strip()
@@ -1233,12 +1279,53 @@ def _text_to_blocks(text: str) -> list:
                     line_buf = []
                     if el:
                         rt_elems.append(el)
+                if quote_buf:
+                    el = _flush_quote(quote_buf)
+                    quote_buf = []
+                    if el:
+                        rt_elems.append(el)
+                if ordered_buf:
+                    el = _flush_list(ordered_buf, style="ordered")
+                    ordered_buf = []
+                    if el:
+                        rt_elems.append(el)
                 list_buf.append(item_text)
+                continue
+
+            _ordered_m = _ORDERED_RE.match(stripped)
+            if _ordered_m:
+                item_text = _ordered_m.group(2)
+                if line_buf:
+                    el = _flush_section(line_buf)
+                    line_buf = []
+                    if el:
+                        rt_elems.append(el)
+                if list_buf:
+                    el = _flush_list(list_buf)
+                    list_buf = []
+                    if el:
+                        rt_elems.append(el)
+                if quote_buf:
+                    el = _flush_quote(quote_buf)
+                    quote_buf = []
+                    if el:
+                        rt_elems.append(el)
+                ordered_buf.append(item_text)
                 continue
 
             if list_buf:
                 el = _flush_list(list_buf)
                 list_buf = []
+                if el:
+                    rt_elems.append(el)
+            if ordered_buf:
+                el = _flush_list(ordered_buf, style="ordered")
+                ordered_buf = []
+                if el:
+                    rt_elems.append(el)
+            if quote_buf:
+                el = _flush_quote(quote_buf)
+                quote_buf = []
                 if el:
                     rt_elems.append(el)
 
@@ -1258,12 +1345,20 @@ def _text_to_blocks(text: str) -> list:
             el = _flush_list(list_buf)
             if el:
                 rt_elems.append(el)
+        if ordered_buf:
+            el = _flush_list(ordered_buf, style="ordered")
+            if el:
+                rt_elems.append(el)
+        if quote_buf:
+            el = _flush_quote(quote_buf)
+            if el:
+                rt_elems.append(el)
         if line_buf:
             el = _flush_section(line_buf)
             if el:
                 rt_elems.append(el)
 
-        return rt_elems, ctx_lines
+        return rt_elems
 
     _SOLO_HEADER_RE_LOCAL = re.compile(r'^\*[^*]{15,}\*\s*$')
 
@@ -1295,16 +1390,10 @@ def _text_to_blocks(text: str) -> list:
                     blocks.append({"type": "divider"})
                 continue
 
-            rt_elems, ctx_lines = _part_to_rt_elements(part)
+            rt_elems = _part_to_rt_elements(part)
 
             if rt_elems:
                 blocks.append({"type": "rich_text", "elements": rt_elems})
-            if ctx_lines:
-                ctx_text = " · ".join(ctx_lines)
-                blocks.append({
-                    "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": ctx_text}],
-                })
             if i < len(parts) - 1:
                 blocks.append({"type": "divider"})
 
