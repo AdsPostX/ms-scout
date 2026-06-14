@@ -209,31 +209,34 @@ def velocity_alerts(
         if rev_30d <= 0:
             continue
         rev_7d_ann = (float(rev_7d) / 7) * 30
-        pct_delta = (rev_7d_ann - float(rev_30d)) / float(rev_30d) * 100
-        if down_threshold_pct < pct_delta < up_threshold_pct:
+        # Bug A fix: keep raw unrounded value for threshold check; only round in dict.
+        pct_delta_raw = (rev_7d_ann - float(rev_30d)) / float(rev_30d) * 100
+        if down_threshold_pct < pct_delta_raw < up_threshold_pct:
             continue  # within normal range — skip
-        direction = "up" if pct_delta > 0 else "down"
+        direction = "up" if pct_delta_raw > 0 else "down"
         candidates.append(
             {
                 "publisher_id": int(pub_id),
                 "publisher_name": pub_name or str(pub_id),
                 "rev_30d": round(float(rev_30d), 2),
                 "rev_7d": round(float(rev_7d), 2),
-                "pct_delta": round(pct_delta, 1),
+                "pct_delta": round(pct_delta_raw, 1),
+                "_pct_delta_raw": pct_delta_raw,
                 "direction": direction,
                 "advertisers": [],
             }
         )
 
-    # Top 5 by absolute delta magnitude.
-    candidates.sort(key=lambda x: abs(x["pct_delta"]), reverse=True)
+    # Top 5 by absolute delta magnitude (use raw value so sort is not affected by rounding).
+    candidates.sort(key=lambda x: abs(x["_pct_delta_raw"]), reverse=True)
     candidates = candidates[:5]
     if not candidates:
         return []
 
     # Phase 2 — advertiser attribution enrichment for the top candidates.
     # Filter to candidates with |pct_delta| >= 100 (meaningful enough to warrant attribution).
-    enrich_ids = [c["publisher_id"] for c in candidates if abs(c["pct_delta"]) >= 100]
+    # Use raw unrounded value so 99.96 does not cross the threshold after rounding to 100.0.
+    enrich_ids = [c["publisher_id"] for c in candidates if abs(c["_pct_delta_raw"]) >= 100]
     if enrich_ids:
         pub_id_csv = ", ".join(str(pid) for pid in enrich_ids)
         try:
@@ -269,6 +272,10 @@ def velocity_alerts(
         except Exception as e:
             logging.getLogger(__name__).warning(f"velocity_alerts phase-2 advertiser enrichment failed: {e}")
 
+    # Strip internal helper key before returning.
+    for c in candidates:
+        c.pop("_pct_delta_raw", None)
+
     return candidates
 
 
@@ -276,7 +283,7 @@ def cap_alert_campaigns(
     ch,
     as_of_date=None,
     cap_alert_pct: float = 85.0,
-    advertiser_id=None,
+    campaign_id=None,
 ) -> list[dict]:
     """Canonical cap-alert query. One function, signal path (and future NL path).
 
@@ -292,7 +299,7 @@ def cap_alert_campaigns(
         ch:             ClickHouse client.
         as_of_date:     "YYYY-MM-DD" or None → uses today() in ClickHouse.
         cap_alert_pct:  Alert threshold as a percentage (default 85.0).
-        advertiser_id:  Optional int — narrow to a single advertiser campaign ID.
+        campaign_id:    Optional int — narrow to a single campaign by its ID.
 
     Returns:
         List of dicts, each with keys:
@@ -304,8 +311,12 @@ def cap_alert_campaigns(
 
     if as_of_date:
         _validate_as_of_date(as_of_date)
-    date_expr = f"toDate('{as_of_date}')" if as_of_date else "today()"
-    adv_filter = f"AND c.id = {int(advertiser_id)}" if advertiser_id else ""
+    # Bug C fix: compute effective date once in Python before the SQL call so that
+    # SQL date filtering and Python day-math always use the same calendar date.
+    today = _dt.date.fromisoformat(as_of_date) if as_of_date else _dt.date.today()
+    date_expr = f"toDate('{today.isoformat()}')"
+    # Bug B fix: parameter renamed from advertiser_id to campaign_id — c.id is campaign ID.
+    adv_filter = f"AND c.id = {int(campaign_id)}" if campaign_id else ""
 
     try:
         rows = ch.query(
@@ -333,13 +344,12 @@ def cap_alert_campaigns(
         logging.getLogger(__name__).warning(f"cap_alert_campaigns failed: {e}")
         return []
 
-    today = _dt.date.fromisoformat(as_of_date) if as_of_date else _dt.date.today()
     days_in_month = (today.replace(day=28) + _dt.timedelta(days=4)).replace(day=1) - _dt.timedelta(days=1)
     days_remaining = (days_in_month - today).days + 1
 
     results = []
     for row in rows:
-        campaign_id, adv_name, cap_cfg, revenue_mtd = row
+        cid, adv_name, cap_cfg, revenue_mtd = row
         try:
             cfg = _json.loads(cap_cfg)
             month_cfg = cfg.get("month") or cfg.get("monthly") or {}
@@ -358,7 +368,7 @@ def cap_alert_campaigns(
         results.append(
             {
                 "adv_name": adv_name,
-                "campaign_id": int(campaign_id),
+                "campaign_id": int(cid),
                 "monthly_cap": round(mb, 2),
                 "revenue_mtd": round(float(revenue_mtd), 2),
                 "cap_pct": round(cap_pct * 100, 1),
