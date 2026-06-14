@@ -333,5 +333,56 @@ class TestKitLint(unittest.TestCase):
                              f"Block count {len(blocks)} exceeds MONITOR_ALARM budget")
 
 
+    def test_footer_elapsed_under_60s(self):
+        """elapsed_seconds < 60 renders as Ns."""
+        from scout_ui_kit import Surface, _build_footer_block
+        blocks = _build_footer_block(elapsed_seconds=42, surface=Surface.CHANNEL_ROOT)
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("42s", blocks[0]["elements"][0]["text"])
+
+    def test_footer_elapsed_over_60s(self):
+        """elapsed_seconds >= 60 renders as XmYs."""
+        from scout_ui_kit import Surface, _build_footer_block
+        blocks = _build_footer_block(elapsed_seconds=95, surface=Surface.CHANNEL_ROOT)
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("1m 35s", blocks[0]["elements"][0]["text"])
+
+    def test_footer_suppressed_on_dm(self):
+        """Elapsed-only footer is suppressed on DM surface."""
+        from scout_ui_kit import Surface, _build_footer_block
+        blocks = _build_footer_block(elapsed_seconds=10, surface=Surface.DM)
+        self.assertEqual(blocks, [])
+
+    def test_footer_suppressed_on_ephemeral(self):
+        """Elapsed-only footer is suppressed on EPHEMERAL surface."""
+        from scout_ui_kit import Surface, _build_footer_block
+        blocks = _build_footer_block(elapsed_seconds=10, surface=Surface.EPHEMERAL)
+        self.assertEqual(blocks, [])
+
+    def test_footer_interpretation_with_elapsed(self):
+        """interpretation + elapsed_seconds combines into one context block."""
+        from scout_ui_kit import Surface, _build_footer_block
+        blocks = _build_footer_block(
+            interpretation="fill rate for Acme", elapsed_seconds=30, surface=Surface.CHANNEL_ROOT
+        )
+        self.assertEqual(len(blocks), 1)
+        text = blocks[0]["elements"][0]["text"]
+        self.assertIn("Interpreted as: fill rate for Acme", text)
+        self.assertIn("30s", text)
+
+    def test_footer_interpretation_suppresses_elapsed_only_path(self):
+        """When interpretation is set, the elapsed-only branch is never reached."""
+        from scout_ui_kit import Surface, _build_footer_block
+        # interpretation present on DM — should still emit (interpretation path ignores surface)
+        blocks = _build_footer_block(interpretation="revenue query", surface=Surface.DM)
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("Interpreted as: revenue query", blocks[0]["elements"][0]["text"])
+
+    def test_footer_empty_when_no_args(self):
+        """No args → empty list."""
+        from scout_ui_kit import _build_footer_block
+        self.assertEqual(_build_footer_block(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
