@@ -203,40 +203,41 @@ def velocity_alerts(
         logging.getLogger(__name__).warning(f"velocity_alerts phase-1 failed: {e}")
         return []
 
-    candidates = []
+    # Collect as (raw_delta, result_dict) pairs so raw value never enters the public dict.
+    pairs: list[tuple[float, dict]] = []
     for row in rows:
         pub_id, pub_name, rev_30d, rev_7d = row
         if rev_30d <= 0:
             continue
         rev_7d_ann = (float(rev_7d) / 7) * 30
-        # Bug A fix: keep raw unrounded value for threshold check; only round in dict.
         pct_delta_raw = (rev_7d_ann - float(rev_30d)) / float(rev_30d) * 100
         if down_threshold_pct < pct_delta_raw < up_threshold_pct:
             continue  # within normal range — skip
         direction = "up" if pct_delta_raw > 0 else "down"
-        candidates.append(
+        pairs.append((
+            pct_delta_raw,
             {
                 "publisher_id": int(pub_id),
                 "publisher_name": pub_name or str(pub_id),
                 "rev_30d": round(float(rev_30d), 2),
                 "rev_7d": round(float(rev_7d), 2),
                 "pct_delta": round(pct_delta_raw, 1),
-                "_pct_delta_raw": pct_delta_raw,
                 "direction": direction,
                 "advertisers": [],
-            }
-        )
+            },
+        ))
 
-    # Top 5 by absolute delta magnitude (use raw value so sort is not affected by rounding).
-    candidates.sort(key=lambda x: abs(x["_pct_delta_raw"]), reverse=True)
-    candidates = candidates[:5]
-    if not candidates:
+    # Top 5 by absolute delta magnitude (raw so sort is not affected by rounding).
+    pairs.sort(key=lambda x: abs(x[0]), reverse=True)
+    pairs = pairs[:5]
+    if not pairs:
         return []
 
+    candidates = [p for _, p in pairs]
+
     # Phase 2 — advertiser attribution enrichment for the top candidates.
-    # Filter to candidates with |pct_delta| >= 100 (meaningful enough to warrant attribution).
-    # Use raw unrounded value so 99.96 does not cross the threshold after rounding to 100.0.
-    enrich_ids = [c["publisher_id"] for c in candidates if abs(c["_pct_delta_raw"]) >= 100]
+    # Gate on raw unrounded value so 99.96 does not cross the >=100 threshold after rounding.
+    enrich_ids = [p[1]["publisher_id"] for p in pairs if abs(p[0]) >= 100]
     if enrich_ids:
         pub_id_csv = ", ".join(str(pid) for pid in enrich_ids)
         try:
@@ -271,10 +272,6 @@ def velocity_alerts(
                 c["advertisers"] = adv_by_pub.get(c["publisher_id"], [])[:5]
         except Exception as e:
             logging.getLogger(__name__).warning(f"velocity_alerts phase-2 advertiser enrichment failed: {e}")
-
-    # Strip internal helper key before returning.
-    for c in candidates:
-        c.pop("_pct_delta_raw", None)
 
     return candidates
 
