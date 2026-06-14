@@ -51,6 +51,7 @@ from typing import Literal, Optional
 # Kill switch — import from here, never re-read the env var elsewhere
 # ---------------------------------------------------------------------------
 _KIT_ENABLED: bool = os.getenv("SCOUT_KIT_ENABLED", "true").lower() == "true"
+_MARKDOWN_BLOCKS_ENABLED: bool = os.getenv("SCOUT_MARKDOWN_BLOCKS", "").lower() in {"1", "true", "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +246,10 @@ _HEADER_PLAIN_TEXT_MAX = 150
 _MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ", "\n|")
 
 
+def _markdown_block(text: str) -> dict:
+    return {"type": "markdown", "text": text}
+
+
 def _escape_md_code(text: str) -> str:
     """Convert fenced code blocks to inline code and escape underscores in spans.
 
@@ -417,7 +422,9 @@ def wrap_response(
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
 
     if card.body:
-        if any(sig in card.body for sig in _MARKDOWN_SIGNALS):
+        if _MARKDOWN_BLOCKS_ENABLED:
+            blocks.append(_markdown_block(card.body))
+        elif any(sig in card.body for sig in _MARKDOWN_SIGNALS):
             blocks.extend(_text_to_blocks(card.body))
         else:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _escape_md_code(card.body)}})
@@ -599,10 +606,11 @@ _INLINE_RE = re.compile(
     r'|\*(?P<bold_s>[^*\n]+?)\*'
     r'|_(?P<italic>[^_\n]+?)_'
     r'|`(?P<code>[^`\n]+?)`'
+    r'|~~(?P<strike>[^~\n]+)~~'
     r'|:(?P<emoji>[a-z0-9_\-+]+?):'
     r'|<(?P<url>[^|>]+)\|(?P<url_text>[^>]*)>'
     r'|<@(?P<user>[A-Z0-9]+)>'
-    r'|(?P<plain>[^*_`:<\n]+|\n|[*_`:<])'
+    r'|(?P<plain>[^*_`~:<\n]+|\n|[*_`~:<])'
 )
 
 # Pipe table fallback: requires ≥2 columns to avoid false-positives on single-pipe lines.
@@ -1089,6 +1097,8 @@ def _parse_inline_elements(text: str) -> list:
             elements.append({"type": "text", "text": m.group("italic"), "style": {"italic": True}})
         elif m.group("code") is not None:
             elements.append({"type": "text", "text": m.group("code"), "style": {"code": True}})
+        elif m.group("strike") is not None:
+            elements.append({"type": "text", "text": m.group("strike"), "style": {"strike": True}})
         elif m.group("emoji") is not None:
             name = _EMOJI_ALIASES.get(m.group("emoji"), m.group("emoji"))
             elements.append({"type": "emoji", "name": name})
@@ -1118,8 +1128,9 @@ def _text_to_blocks(text: str) -> list:
 
     Falls back to a single mrkdwn section block on any parse failure.
     """
-    _BULLET_RE = re.compile(r'^[•\-\*]\s+')
-    _FENCE_RE  = re.compile(r'^```')
+    _BULLET_RE  = re.compile(r'^[•\-\*]\s+')
+    _FENCE_RE   = re.compile(r'^```')
+    _ORDERED_RE = re.compile(r'^(\d+)\.\s+(.+)')
 
     def _flush_section(line_buf: list) -> "list | None":
         joined = "\n".join(line_buf).strip()
@@ -1128,12 +1139,12 @@ def _text_to_blocks(text: str) -> list:
         inline = _parse_inline_elements(joined)
         return {"type": "rich_text_section", "elements": inline}
 
-    def _flush_list(items: list) -> "dict | None":
+    def _flush_list(items: list, style: str = "bullet") -> "dict | None":
         if not items:
             return None
         return {
             "type": "rich_text_list",
-            "style": "bullet",
+            "style": style,
             "indent": 0,
             "elements": [
                 {"type": "rich_text_section", "elements": _parse_inline_elements(item)}
@@ -1146,9 +1157,11 @@ def _text_to_blocks(text: str) -> list:
         ctx_lines: list = []
         line_buf: list = []
         list_buf: list = []
+        ordered_buf: list = []
         table_buf: list = []
         in_fence = False
         fence_buf: list = []
+        fence_lang: str = ""
 
         def _flush_table(table_buf: list, rt_elems: list) -> list:
             """Flush accumulated pipe-table rows into rt_elems. Returns empty list to reset table_buf."""
@@ -1188,6 +1201,11 @@ def _text_to_blocks(text: str) -> list:
                     in_fence = False
                     code_text = "\n".join(fence_buf)
                     fence_buf = []
+                    if ordered_buf:
+                        el = _flush_list(ordered_buf, style="ordered")
+                        ordered_buf = []
+                        if el:
+                            rt_elems.append(el)
                     if list_buf:
                         el = _flush_list(list_buf)
                         list_buf = []
@@ -1198,12 +1216,17 @@ def _text_to_blocks(text: str) -> list:
                         line_buf = []
                         if el:
                             rt_elems.append(el)
-                    rt_elems.append({
+                    pre_block: dict = {
                         "type": "rich_text_preformatted",
                         "elements": [{"type": "text", "text": code_text}],
-                    })
+                    }
+                    if fence_lang:
+                        pre_block["language"] = fence_lang
+                    fence_lang = ""
+                    rt_elems.append(pre_block)
                 else:
                     in_fence = True
+                    fence_lang = raw_line[3:].strip()
                 continue
 
             if in_fence:
@@ -1211,7 +1234,26 @@ def _text_to_blocks(text: str) -> list:
                 continue
 
             if raw_line.startswith('>'):
-                ctx_lines.append(raw_line[1:].strip())
+                if ordered_buf:
+                    el = _flush_list(ordered_buf, style="ordered")
+                    ordered_buf = []
+                    if el:
+                        rt_elems.append(el)
+                if list_buf:
+                    el = _flush_list(list_buf)
+                    list_buf = []
+                    if el:
+                        rt_elems.append(el)
+                if line_buf:
+                    el = _flush_section(line_buf)
+                    line_buf = []
+                    if el:
+                        rt_elems.append(el)
+                quote_text = raw_line[1:].strip()
+                rt_elems.append({
+                    "type": "rich_text_quote",
+                    "elements": _parse_inline_elements(quote_text),
+                })
                 continue
 
             stripped = raw_line.strip()
@@ -1233,12 +1275,38 @@ def _text_to_blocks(text: str) -> list:
                     line_buf = []
                     if el:
                         rt_elems.append(el)
+                if ordered_buf:
+                    el = _flush_list(ordered_buf, style="ordered")
+                    ordered_buf = []
+                    if el:
+                        rt_elems.append(el)
                 list_buf.append(item_text)
+                continue
+
+            _ordered_m = _ORDERED_RE.match(stripped)
+            if _ordered_m:
+                item_text = _ordered_m.group(2)
+                if line_buf:
+                    el = _flush_section(line_buf)
+                    line_buf = []
+                    if el:
+                        rt_elems.append(el)
+                if list_buf:
+                    el = _flush_list(list_buf)
+                    list_buf = []
+                    if el:
+                        rt_elems.append(el)
+                ordered_buf.append(item_text)
                 continue
 
             if list_buf:
                 el = _flush_list(list_buf)
                 list_buf = []
+                if el:
+                    rt_elems.append(el)
+            if ordered_buf:
+                el = _flush_list(ordered_buf, style="ordered")
+                ordered_buf = []
                 if el:
                     rt_elems.append(el)
 
@@ -1256,6 +1324,10 @@ def _text_to_blocks(text: str) -> list:
             _flush_table(table_buf, rt_elems)
         if list_buf:
             el = _flush_list(list_buf)
+            if el:
+                rt_elems.append(el)
+        if ordered_buf:
+            el = _flush_list(ordered_buf, style="ordered")
             if el:
                 rt_elems.append(el)
         if line_buf:
