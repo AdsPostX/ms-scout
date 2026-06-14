@@ -5975,7 +5975,7 @@ def _run_tool_loop(
             # Multiple tool calls — run in parallel, then reassemble in original order
             # Falls back to sequential if executor is unavailable (e.g. during shutdown)
             try:
-                with ThreadPoolExecutor(max_workers=len(tool_blocks)) as executor:
+                with ThreadPoolExecutor(max_workers=min(len(tool_blocks), 8)) as executor:
                     futures = {
                         executor.submit(_run_tool, block.name, block.input, user_id, permalink): (i, block)
                         for i, block in tool_blocks
