@@ -4015,8 +4015,8 @@ def test_agent_plan_block_renders():
 @test("Agent blocks — _synthesize_agent_steps derives steps from tool call log")
 def test_synthesize_agent_steps():
     from scout_agent import _synthesize_agent_steps, _TOOL_SKIP_SYNTHESIS
-    # Normal tool call produces a step
-    log = [("get_revenue_summary", {"revenue": 847000, "period": "MTD"})]
+    # Normal tool call produces a step with correct label
+    log = [("get_revenue_today", {"formatted": "$14K today, 71% of daily avg.", "pubs": []})]
     steps = _synthesize_agent_steps(log)
     if len(steps) != 1:
         return False, f"Expected 1 step, got {len(steps)}"
@@ -4025,12 +4025,15 @@ def test_synthesize_agent_steps():
         return False, f"Wrong label: {step['label']!r}"
     if step["status"] != "pass":
         return False, f"Wrong status for non-empty result: {step['status']!r}"
+    # formatted key is used as finding (first line, ≤80 chars)
+    if step["finding"] != "$14K today, 71% of daily avg.":
+        return False, f"Expected formatted finding, got {step['finding']!r}"
     # Skipped tools produce no steps
     skip_log = [(name, {}) for name in _TOOL_SKIP_SYNTHESIS]
     if _synthesize_agent_steps(skip_log):
         return False, "Skipped tools should produce no steps"
     # Error result → fail status
-    err_log = [("get_cap_status", "Error: ClickHouse timeout")]
+    err_log = [("get_ghost_campaigns", "Error: ClickHouse timeout")]
     err_steps = _synthesize_agent_steps(err_log)
     if err_steps[0]["status"] != "fail":
         return False, f"Error result should yield fail status, got {err_steps[0]['status']!r}"

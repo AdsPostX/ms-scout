@@ -770,21 +770,43 @@ TOOL_MAP["set_threshold"] = set_threshold
 TOOL_MAP["force_run_monitor"] = force_run_monitor
 
 _TOOL_STEP_LABELS: dict[str, str] = {
-    "get_revenue_summary": "Revenue check",
-    "get_revenue_breakdown": "Revenue breakdown",
-    "get_cap_status": "Cap status",
-    "get_velocity": "Velocity check",
-    "get_ghost_offers": "Ghost (zero-conv)",
-    "get_fill_rate": "Fill rate",
+    # Revenue
+    "get_revenue_today": "Revenue check",
+    "get_revenue_today_projection": "Revenue projection",
+    "get_advertiser_revenue_projection": "Advertiser projection",
+    "get_advertiser_revenue_trends": "Advertiser trends",
+    "get_publisher_revenue_trends": "Publisher trends",
+    "get_top_revenue_opportunities": "Revenue opportunities",
+    # Signals
+    "get_ghost_campaigns": "Ghost (zero-conv)",
+    "get_low_fill_publishers": "Fill rate",
+    "get_exposure_rate_anomalies": "Exposure anomalies",
+    "get_publisher_fleet_health": "Fleet health",
+    # Publisher
     "get_publisher_health": "Publisher health",
-    "get_cvr_breakdown": "CVR breakdown",
-    "get_campaign_entry": "Campaign entry",
-    "get_top_opportunities": "Opportunity scan",
+    "get_publisher_competitive_landscape": "Competitive landscape",
     "get_offers_for_publisher": "Publisher offers",
-    "get_offer_details": "Offer details",
-    "get_benchmark": "Benchmark",
+    "get_perkswall_engagement": "Perkswall engagement",
+    # Campaigns / demand
+    "get_campaign_status": "Campaign status",
+    "get_ghost_campaigns": "Ghost campaigns",
+    "get_expiring_campaigns": "Expiring campaigns",
+    "get_top_opportunities": "Opportunity scan",
+    "get_supply_demand_gaps": "Supply/demand gaps",
+    "get_fallback_candidates": "Fallback candidates",
+    "get_demand_queue_status": "Demand queue",
+    "get_queue_status": "Queue status",
+    # Offers
+    "search_offers": "Offer search",
+    "get_running_offers": "Running offers",
+    "get_offer_stats": "Offer stats",
+    "get_category_performance": "Category performance",
+    # Ops / admin
     "draft_campaign_brief": "Campaign brief",
     "get_usage_report": "Usage report",
+    "get_pulse_summary": "Pulse summary",
+    "get_scout_status": "Scout status",
+    "get_pipeline_health": "Pipeline health",
 }
 
 _TOOL_SKIP_SYNTHESIS: frozenset[str] = frozenset({
@@ -811,12 +833,25 @@ def _synthesize_agent_steps(tool_call_log: list[tuple[str, any]]) -> list[dict]:
             status = "warn"
         else:
             status = "pass"
-        if isinstance(result, list):
-            finding = f"{len(result)} record{'s' if len(result) != 1 else ''}"
+        if isinstance(result, dict) and "formatted" in result:
+            raw = str(result["formatted"])
+            finding = next((ln.strip() for ln in raw.splitlines() if ln.strip()), raw)[:80]
+        elif isinstance(result, list):
+            finding = f"{len(result)} result{'s' if len(result) != 1 else ''}"
         elif isinstance(result, dict):
-            finding = json.dumps(result, default=str)[:80]
+            finding = next(
+                (f"{k}: {v}" for k, v in result.items() if k not in {"error", "err", "raw"}),
+                "—"
+            )[:80]
         else:
-            finding = str(result)[:80]
+            # For formatted strings, skip pure title lines (e.g. "*Report Title*") —
+            # they repeat the label. Use the first content line instead.
+            lines = [ln.strip() for ln in str(result).splitlines() if ln.strip()]
+            content = next(
+                (ln for ln in lines if not (ln.startswith("*") and ln.endswith("*") and "·" not in ln and "%" not in ln and "$" not in ln and not any(c.isdigit() for c in ln))),
+                lines[0] if lines else str(result)
+            )
+            finding = content[:80]
         steps.append({"label": label, "status": status, "finding": finding})
     return steps
 
