@@ -48,9 +48,8 @@ from enum import Enum
 from typing import Literal, Optional
 
 # ---------------------------------------------------------------------------
-# Kill switch — import from here, never re-read the env var elsewhere
+# Feature flags — import from here, never re-read env vars elsewhere
 # ---------------------------------------------------------------------------
-_KIT_ENABLED: bool = os.getenv("SCOUT_KIT_ENABLED", "true").lower() == "true"
 _MARKDOWN_BLOCKS_ENABLED: bool = os.getenv("SCOUT_MARKDOWN_BLOCKS", "").lower() in {"1", "true", "yes"}
 _AGENT_BLOCKS_ENABLED: bool = os.getenv("SCOUT_AGENT_BLOCKS", "").lower() in {"1", "true", "yes"}
 
@@ -209,7 +208,9 @@ def enforce(
 
 
 # ---------------------------------------------------------------------------
-# MAX_ACTIONS — per-surface button budget (mobile-first defaults)
+# MAX_ACTIONS — per-surface suggestion button budget (mobile-first defaults)
+# _MAX_CARD_ACTIONS — hard cap on Card.actions CTAs (separate from suggestion budget;
+#                     these are data-specific CTAs, not follow-up query prompts)
 # ---------------------------------------------------------------------------
 MAX_ACTIONS: dict[Surface, int] = {
     Surface.CHANNEL_ROOT: 2,
@@ -220,6 +221,7 @@ MAX_ACTIONS: dict[Surface, int] = {
     Surface.EPHEMERAL: 1,
     Surface.MODAL: 0,
 }
+_MAX_CARD_ACTIONS: int = 25
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +378,69 @@ def _build_footer_block(
 
 
 # ---------------------------------------------------------------------------
+# Private renderers — called only by wrap_response; data-in, blocks-out.
+# ---------------------------------------------------------------------------
+
+def _render_headline(card: "Card", surface: Surface) -> list[dict]:
+    """Return headline block(s) for a Card.
+
+    Non-INFO: native header block + divider (bold everywhere, renders on mobile).
+    INFO on CHANNEL_ROOT/DM: section visual anchor.
+    INFO on other surfaces (EPHEMERAL, THREAD, MONITOR_ALARM): no headline block.
+    """
+    headline = card.headline
+    if not headline:
+        return []
+    if headline.isupper() and len(headline) > 3:
+        headline = headline.title()
+    if card.severity is not Severity.INFO:
+        raw_header = f"{card.severity.emoji} {headline}"
+        if len(raw_header) > _HEADER_PLAIN_TEXT_MAX:
+            raw_header = raw_header[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": raw_header, "emoji": True}},
+            {"type": "divider"},
+        ]
+    if surface in (Surface.CHANNEL_ROOT, Surface.DM):
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": f"{card.severity.emoji}  *{headline}*"}}]
+    return []
+
+
+def _render_body(card: "Card") -> list[dict]:
+    """Return body block(s) for a Card, routing through markdown parser as needed."""
+    if not card.body:
+        return []
+    if _MARKDOWN_BLOCKS_ENABLED:
+        return [_markdown_block(card.body)]
+    if any(sig in card.body for sig in _MARKDOWN_SIGNALS):
+        return _text_to_blocks(card.body)
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": _escape_md_code(card.body)}}]
+
+
+def _render_feedback_row(feedback: str, query_hash: str | None) -> list[dict]:
+    """Return the 👎 Off / ✏️ Correct actions block, or [] if suppressed."""
+    if feedback != "button" or not query_hash:
+        return []
+    return [{
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
+                "action_id": "scout_feedback_bad",
+                "value": query_hash,
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "✏️ Correct this", "emoji": True},
+                "action_id": "scout_feedback_correct",
+                "value": query_hash,
+            },
+        ],
+    }]
+
+
+# ---------------------------------------------------------------------------
 # wrap_response — single mobile-tuned chokepoint for all ask() exits
 # ---------------------------------------------------------------------------
 def wrap_response(
@@ -394,28 +459,29 @@ def wrap_response(
 
     Composition order (earlier items are protected from enforce() truncation):
         headline → body → facts → feedback → suggestions → elapsed/interpretation →
-        actions → POSITIVE context footer → CRITICAL trailing divider → enforce()
+        card.actions → POSITIVE footer → CRITICAL divider → enforce()
+
+    Two button mechanisms — use the right one:
+        suggestions:  Follow-up query strings rendered as "what to ask next" buttons.
+                      Capped at MAX_ACTIONS[surface]. These prompt further queries.
+        Card.actions: Data-specific CTAs the handler attaches to a Card (e.g. "View in
+                      ClickHouse", "Open in Notion"). Not subject to MAX_ACTIONS; capped
+                      at _MAX_CARD_ACTIONS. enforce() is the final backstop.
 
     Args:
         card:             Card to render (severity + headline + optional body/facts/actions).
-        surface:          Target Slack surface — drives budget and button caps.
-        suggestions:      Follow-up query strings. Capped at MAX_ACTIONS[surface].
-                          Pass [] or None to emit zero actions blocks.
-        feedback:         "reaction" — no button row, caller should seed 👎 reaction.
-                          "button"   — include 👎 Off + ✏️ Correct this actions block.
-                                       NOTE: requires query_hash; silently omitted if None.
+        surface:          Target Slack surface — drives block budget and button caps.
+        suggestions:      Follow-up query strings. Pass [] or None to emit no suggestion row.
+        feedback:         "reaction" — seed 👎 reaction after posting (no button row).
+                          "button"   — include 👎 Off + ✏️ Correct actions block.
+                                       Requires query_hash; silently omitted if None.
                           "none"     — omit feedback entirely.
-        query_hash:       Message ts / hash used as button value for feedback routing.
-                          Required when feedback="button"; pass None to suppress buttons.
-        elapsed_seconds:  If provided, appended as a context footer (ops surfaces only;
-                          omit on DM to keep output clean). Combined with interpretation
-                          when both are provided.
-        interpretation:   If provided, rendered as a muted footer on all surfaces:
-                          "_Interpreted as: {interpretation} · {elapsed}s_".
-                          Overrides the plain elapsed footer.
+        query_hash:       Message ts / hash for feedback button routing.
+        elapsed_seconds:  Appended as a context footer (omitted on DM/EPHEMERAL).
+        interpretation:   "_Interpreted as: {interpretation} · {elapsed}s_" footer.
+                          Takes precedence over plain elapsed footer.
         pattern:          Optional ResponsePattern for surface validation. Raises ValueError
-                          if the surface is incompatible with the pattern. Existing callers
-                          that omit pattern= are unaffected.
+                          on mismatch. Callers that omit pattern= are unaffected.
 
     Returns:
         (fallback_text, blocks) — fallback is always non-empty (mobile push previews).
@@ -434,71 +500,18 @@ def wrap_response(
     suggestions = suggestions or []
     max_btn = MAX_ACTIONS.get(surface, 2)
 
-    # 1. Headline + body from Card
     blocks: list[dict] = []
-
-    # 3d. Title-case enforcement: if headline is ALL CAPS (> 3 chars), convert to title case.
-    headline = card.headline
-    if headline and headline.isupper() and len(headline) > 3:
-        headline = headline.title()
-
-    # Non-INFO severity: native header block (always bold in Slack, renders on mobile)
-    # followed by divider. The section-based headline is suppressed to avoid duplication.
-    # INFO on CHANNEL_ROOT/DM: section-based visual anchor (3b).
-    # INFO on other surfaces (EPHEMERAL, THREAD, MONITOR_ALARM): no headline block.
-    if headline and card.severity is not Severity.INFO:
-        raw_header = f"{card.severity.emoji} {headline}"
-        if len(raw_header) > _HEADER_PLAIN_TEXT_MAX:
-            raw_header = raw_header[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
-        blocks.append({
-            "type": "header",
-            "text": {"type": "plain_text", "text": raw_header, "emoji": True},
-        })
-        blocks.append({"type": "divider"})
-    elif headline and surface in (Surface.CHANNEL_ROOT, Surface.DM):
-        # 3b. INFO on visible surfaces: single-line visual anchor
-        header_text = f"{card.severity.emoji}  *{headline}*"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
-
-    # Agent plan block — reasoning steps between headline and body (flag-gated)
+    blocks.extend(_render_headline(card, surface))
     if agent_steps and _AGENT_BLOCKS_ENABLED:
         blocks.extend(_agent_plan_block(agent_steps))
-
-    if card.body:
-        if _MARKDOWN_BLOCKS_ENABLED:
-            blocks.append(_markdown_block(card.body))
-        elif any(sig in card.body for sig in _MARKDOWN_SIGNALS):
-            blocks.extend(_text_to_blocks(card.body))
-        else:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _escape_md_code(card.body)}})
-
+    blocks.extend(_render_body(card))
     if card.facts:
         blocks.extend(_build_facts_blocks(card.facts))
+    blocks.extend(_render_feedback_row(feedback, query_hash))
 
-    # 2. Feedback row (protected — placed before suggestions so enforce() keeps it)
-    if feedback == "button" and query_hash:
-        blocks.append({
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
-                    "action_id": "scout_feedback_bad",
-                    "value": query_hash,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "✏️ Correct this", "emoji": True},
-                    "action_id": "scout_feedback_correct",
-                    "value": query_hash,
-                },
-            ],
-        })
-
-    # 3. Suggestion buttons — capped at MAX_ACTIONS[surface]; omit block entirely if empty
     capped = [s for s in suggestions[:max_btn] if isinstance(s, str) and s.strip()]
     if capped:
-        elements = [
+        blocks.append({"type": "actions", "elements": [
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": _fit(s), "emoji": False},
@@ -506,19 +519,15 @@ def wrap_response(
                 "action_id": f"scout_suggestion_{i}",
             }
             for i, s in enumerate(capped)
-        ]
-        blocks.append({"type": "actions", "elements": elements})
+        ]})
 
-    # 4. Elapsed / interpretation footer
-    blocks.extend(_build_footer_block(interpretation=interpretation, elapsed_seconds=elapsed_seconds, surface=surface))
+    blocks.extend(_build_footer_block(
+        interpretation=interpretation, elapsed_seconds=elapsed_seconds, surface=surface,
+    ))
 
-    # 5. Card-level extra actions (e.g. drill-down CTAs from Card.actions)
-    # Intentionally not subject to MAX_ACTIONS: these are specific CTAs the caller
-    # attached to the Card (e.g. "View in ClickHouse"), not open-ended suggestions.
-    # Budget enforcement via enforce() is the final backstop.
     if card.actions:
         elements = []
-        for label, action_id, value, style in card.actions[:25]:
+        for label, action_id, value, style in card.actions[:_MAX_CARD_ACTIONS]:
             btn: dict = {
                 "type": "button",
                 "text": {"type": "plain_text", "text": label},
@@ -530,28 +539,24 @@ def wrap_response(
             elements.append(btn)
         blocks.append({"type": "actions", "elements": elements})
 
-    # 3c. POSITIVE with non-empty body: append "Scout confirmed" context footer
     if card.severity is Severity.POSITIVE and card.body:
         blocks.append({
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": "✓  Scout confirmed"}],
         })
 
-    # 3a. CRITICAL on message-feed surfaces: trailing divider bookend (iOS visibility fix).
-    # Excluded from MONITOR_ALARM (budget=6, dedicated ops channel — header+divider at top
-    # already anchors the alert; trailing divider would be first truncated by enforce()).
+    # Trailing divider bookend for CRITICAL on message-feed surfaces (iOS visibility fix).
+    # Excluded from MONITOR_ALARM — header+divider at top already anchors it, and the
+    # trailing divider would be first truncated by enforce() on a 6-block budget.
     if card.severity is Severity.CRITICAL and surface in (
         Surface.CHANNEL_ROOT, Surface.DM, Surface.THREAD
     ):
         blocks.append({"type": "divider"})
 
-    # 6. Budget enforcement — always last
     blocks = enforce(blocks, surface)
 
-    # Fallback text for push previews — always non-empty; strip markdown for clean preview
     _raw_fallback = card.headline or card.body or f"{card.severity.emoji} Scout update"
     fallback = _raw_fallback[:200].strip() or f"{card.severity.emoji} Scout update"
-
     return fallback, blocks
 
 

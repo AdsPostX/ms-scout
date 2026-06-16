@@ -31,7 +31,7 @@ from scout_notion import (
     _copy_coalescer_loop,
     _notion_watcher_loop,
 )
-from scout_ui_kit import Card, ResponsePattern, Severity, Surface, enforce, wrap_response, context_block, _KIT_ENABLED
+from scout_ui_kit import Card, ResponsePattern, Severity, Surface, enforce, wrap_response, context_block
 from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_state import (
     _DATA_DIR,
