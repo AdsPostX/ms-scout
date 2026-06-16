@@ -269,6 +269,15 @@ _MESSAGE_SURFACES = frozenset({
 # ---------------------------------------------------------------------------
 _STATUS_EMOJI: dict[str, str] = {"pass": "✅", "fail": "❌", "warn": "⚠️", "skip": "⏭️"}
 
+# Maps Scout AgentStep.status to Slack plan block task status.
+# pass/warn/fail all map to "complete" — emoji in the title preserves visual state.
+_STATUS_TO_PLAN: dict[str, str] = {
+    "pass": "complete",
+    "warn": "complete",
+    "fail": "complete",
+    "skip": "pending",
+}
+
 
 _VALID_STATUSES = frozenset({"pass", "fail", "warn", "skip"})
 
@@ -293,12 +302,6 @@ def _agent_plan_block(steps: list["AgentStep"]) -> list[dict]:
     """
     if not steps:
         return []
-    _STATUS_TO_PLAN: dict[str, str] = {
-        "pass": "complete",
-        "warn": "complete",
-        "fail": "complete",
-        "skip": "pending",
-    }
     tasks = []
     for i, step in enumerate(steps):
         task: dict = {
@@ -382,6 +385,78 @@ def _build_footer_block(
 
 
 # ---------------------------------------------------------------------------
+# Modal / card / carousel helpers — used by scout_handlers.py
+# ---------------------------------------------------------------------------
+
+def _build_modal_view(
+    blocks: list[dict],
+    title: str,
+    callback_id: str,
+    submit_label: str | None = None,
+    close_label: str = "Close",
+) -> dict:
+    """Return a Slack modal view dict ready for views_open/update/push.
+
+    callback_id is required — Slack silently rejects action-containing modals
+    without it, and view_submission handlers key on it.
+
+    submit_label: when set, adds a Submit button (enables view_submission events).
+    When None, the modal is close-only (informational modal pattern).
+    """
+    if not callback_id:
+        raise ValueError("_build_modal_view: callback_id is required")
+    view: dict = {
+        "type": "modal",
+        "callback_id": callback_id,
+        "title": {"type": "plain_text", "text": title[:24], "emoji": False},
+        "close": {"type": "plain_text", "text": close_label, "emoji": False},
+        "blocks": blocks,
+    }
+    if submit_label:
+        view["submit"] = {"type": "plain_text", "text": submit_label[:24], "emoji": False}
+    return view
+
+
+def _slack_card_block(
+    title: str,
+    body: str = "",
+    subtitle: str = "",
+    block_id: str = "",
+) -> dict:
+    """Return a native Slack card block.
+
+    Use for rich single-item presentations (demand queue entries, campaign cards).
+    For a list of cards, wrap in _carousel_block().
+    block_id must be unique within a message when used in a carousel.
+    """
+    card: dict = {
+        "type": "card",
+        "title": {"type": "plain_text", "text": title},
+    }
+    if subtitle:
+        card["subtitle"] = {"type": "plain_text", "text": subtitle}
+    if body:
+        card["body"] = {"type": "mrkdwn", "text": body}
+    if block_id:
+        card["block_id"] = block_id
+    return card
+
+
+def _carousel_block(cards: list[dict]) -> list[dict]:
+    """Wrap a list of card blocks in a Slack carousel.
+
+    Each card must have a unique block_id. Returns [] for empty input.
+    Slack carousels require ≥2 cards to render the navigation arrows —
+    a single card is returned unwrapped.
+    """
+    if not cards:
+        return []
+    if len(cards) == 1:
+        return [cards[0]]
+    return [{"type": "carousel", "elements": cards}]
+
+
+# ---------------------------------------------------------------------------
 # Private renderers — called only by wrap_response; data-in, blocks-out.
 # ---------------------------------------------------------------------------
 
@@ -410,6 +485,20 @@ def _render_headline(card: "Card", surface: Surface) -> list[dict]:
     return []
 
 
+def _render_subheader(text: str, level: int = 2) -> dict:
+    """Return a header block with the given hierarchy level (1–4).
+
+    Level 1 is the page title (use _render_headline for that).
+    Level 2 is the default section header. Capped to [1, 4] per spec.
+    """
+    clamped = max(1, min(4, level))
+    return {
+        "type": "header",
+        "text": {"type": "plain_text", "text": text[:150], "emoji": False},
+        "level": clamped,
+    }
+
+
 def _render_body(card: "Card", surface: Surface) -> list[dict]:
     """Return body block(s) for a Card.
 
@@ -425,29 +514,6 @@ def _render_body(card: "Card", surface: Surface) -> list[dict]:
     return [{"type": "section", "text": {"type": "mrkdwn", "text": card.body}}]
 
 
-def _render_feedback_row(feedback: str, query_hash: str | None) -> list[dict]:
-    """Return the 👎 Off / ✏️ Correct actions block, or [] if suppressed."""
-    if feedback != "button" or not query_hash:
-        return []
-    return [{
-        "type": "actions",
-        "elements": [
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
-                "action_id": "scout_feedback_bad",
-                "value": query_hash,
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "✏️ Correct this", "emoji": True},
-                "action_id": "scout_feedback_correct",
-                "value": query_hash,
-            },
-        ],
-    }]
-
-
 # ---------------------------------------------------------------------------
 # wrap_response — single mobile-tuned chokepoint for all ask() exits
 # ---------------------------------------------------------------------------
@@ -456,8 +522,6 @@ def wrap_response(
     card: "Card",
     surface: Surface,
     suggestions: Optional[list[str]] = None,
-    feedback: Literal["reaction", "button", "none"] = "reaction",
-    query_hash: Optional[str] = None,
     elapsed_seconds: Optional[int] = None,
     interpretation: Optional[str] = None,
     pattern: "ResponsePattern | None" = None,
@@ -466,7 +530,7 @@ def wrap_response(
     """Single entry-point for every ask() reply surface.
 
     Composition order (earlier items are protected from enforce() truncation):
-        headline → body → facts → feedback → suggestions → elapsed/interpretation →
+        headline → body → facts → suggestions → elapsed/interpretation →
         card.actions → POSITIVE footer → CRITICAL divider → enforce()
 
     Two button mechanisms — use the right one:
@@ -480,11 +544,6 @@ def wrap_response(
         card:             Card to render (severity + headline + optional body/facts/actions).
         surface:          Target Slack surface — drives block budget and button caps.
         suggestions:      Follow-up query strings. Pass [] or None to emit no suggestion row.
-        feedback:         "reaction" — seed 👎 reaction after posting (no button row).
-                          "button"   — include 👎 Off + ✏️ Correct actions block.
-                                       Requires query_hash; silently omitted if None.
-                          "none"     — omit feedback entirely.
-        query_hash:       Message ts / hash for feedback button routing.
         elapsed_seconds:  Appended as a context footer (omitted on DM/EPHEMERAL).
         interpretation:   "_Interpreted as: {interpretation} · {elapsed}s_" footer.
                           Takes precedence over plain elapsed footer.
@@ -515,7 +574,6 @@ def wrap_response(
     blocks.extend(_render_body(card, surface))
     if card.facts:
         blocks.extend(_build_facts_blocks(card.facts))
-    blocks.extend(_render_feedback_row(feedback, query_hash))
 
     capped = [s for s in suggestions[:max_btn] if isinstance(s, str) and s.strip()]
     if capped:
@@ -580,7 +638,7 @@ def context_block(
 
     Typical usage — append after wrap_response blocks::
 
-        _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, feedback="none")
+        _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
         meta = context_block(queried_at="just now", period="7d")
         web.chat_postMessage(channel=channel, text="...", blocks=[*blocks, meta])
 
@@ -685,7 +743,6 @@ def _build_alert_block(severity: str, title: str, body: str = "") -> list[dict]:
     _fallback, blocks = wrap_response(
         card=Card(severity=kit_sev, headline=title, body=body),
         surface=Surface.EPHEMERAL,
-        feedback="none",
     )
     return blocks
 
@@ -1007,6 +1064,12 @@ def _build_brief_queue_button(
             "style":     "primary",
             "action_id": "scout_brief_queue",
             "value":     btn_val,
+            "confirm": {
+                "title":   {"type": "plain_text", "text": "Add to queue?"},
+                "text":    {"type": "plain_text", "text": "This will add the campaign to the demand queue for review."},
+                "confirm": {"type": "plain_text", "text": "Add"},
+                "deny":    {"type": "plain_text", "text": "Cancel"},
+            },
         }],
     }]
 
@@ -1602,7 +1665,6 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
         })
 
     blocks.append({"type": "divider"})
-    blocks = enforce(blocks, Surface.HOME)
     return blocks
 
 
@@ -1691,4 +1753,5 @@ def _build_home_view(queue_items: "list[dict] | None" = None,
         }],
     })
 
+    blocks = enforce(blocks, Surface.HOME)
     return {"type": "home", "blocks": blocks}

@@ -541,7 +541,7 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
     headline = "Revenue alert — today is tracking soft"
     body = "\n".join(items)
     card = Card(severity=Severity.CRITICAL, headline=headline, body=body)
-    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM)
     return f"🔴 {headline}", blocks
 
 
@@ -677,7 +677,6 @@ def _build_alert_response(severity: Severity, headline: str, body: str) -> tuple
     _, blocks = wrap_response(
         card=card,
         surface=Surface.MONITOR_ALARM,
-        feedback="none",
         pattern=ResponsePattern.ALERT,
     )
     return f"🟠 {headline}", blocks

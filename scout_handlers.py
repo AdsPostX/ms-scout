@@ -46,7 +46,6 @@ from scout_state import (
     _store_brief, _get_brief, _delete_brief,
     _merge_thread_context, _get_thread_context,
     _load_launched_offers, _save_launched_offers,
-    _load_learnings, _save_learnings,
     _log_usage,
     _DATA_DIR,
     _strip_mention, _sanitize_slack, _slack_thread_url,
@@ -233,9 +232,6 @@ _TIMEOUT_FALLBACK_TEXT = (
 )
 
 
-# ── Part 3.6 — 👍/👎 feedback loop ──────────────────────────────────────────
-_FEEDBACK_LOG = _DATA_DIR / "feedback_log.jsonl"
-
 # ── Part 9 — Smart 👎 handler: clarification detection ───────────────────────
 _CLARIFICATION_PHRASES: tuple = (
     "can you confirm",
@@ -278,123 +274,6 @@ def _get_user_tz(web: WebClient, user_id: str) -> str:
         return info.get("user", {}).get("tz", "") or ""
     except Exception:
         return ""
-
-
-def _already_retried(msg_ts: str) -> bool:
-    """True if this message already triggered a down_retry — prevents infinite retry loop.
-
-    Checks both message_ts (original question) and retry_message_ts (the retry
-    reply) so that 👎-ing the retry itself doesn't spawn a second retry loop.
-    """
-    if not _FEEDBACK_LOG.exists():
-        return False
-    try:
-        with _FEEDBACK_LOG.open() as fh:
-            for line in fh:
-                try:
-                    row = json.loads(line)
-                    if row.get("rating") != "down_retry":
-                        continue
-                    if row.get("message_ts") == msg_ts or row.get("retry_message_ts") == msg_ts:
-                        return True
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        pass
-    return False
-
-
-
-def _feedback_log_row(row: dict) -> None:
-    """Append one row to feedback_log.jsonl. Best-effort, never raises."""
-    try:
-        _FEEDBACK_LOG.parent.mkdir(parents=True, exist_ok=True)
-        from datetime import datetime, timezone
-        row.setdefault("ts", datetime.now(timezone.utc).isoformat())
-        with _FEEDBACK_LOG.open("a") as fh:
-            fh.write(json.dumps(row) + "\n")
-    except Exception as e:
-        log.warning(f"[feedback] log write failed: {e}")
-
-
-
-def _retry_with_hint(web: WebClient, channel: str, msg_ts: str,
-                     rater_id: str, hint_kind: str) -> bool:
-    """Re-run ask() on the thread's original question with a steering hint.
-
-    Posts the retry in-thread. Idempotent per msg_ts via _already_retried.
-    hint_kind:
-      'clarification' — model asked for clarification; force a direct answer
-      'retry'         — generic 👎; nudge toward a different angle
-    Returns True if a retry was posted, False if gated or fetch failed.
-    """
-    if _already_retried(msg_ts):
-        return False
-    try:
-        replies = web.conversations_replies(channel=channel, ts=msg_ts, limit=1).get("messages", [{}])
-        scout_msg = replies[0] if replies else {}
-        if not scout_msg.get("bot_id"):
-            return False
-        answer_text = scout_msg.get("text", "")[:1000]
-        parent_ts = scout_msg.get("thread_ts") or ""
-        question_text = ""
-        if parent_ts:
-            try:
-                # Walk all thread messages to find the last non-bot message
-                # that precedes msg_ts — this is what the user actually asked,
-                # not necessarily the thread-root opening message.
-                thread_msgs = web.conversations_replies(
-                    channel=channel, ts=parent_ts, limit=50
-                ).get("messages", [])
-                for m in reversed(thread_msgs):
-                    if m.get("ts", "") >= msg_ts:
-                        continue  # skip the Scout reply itself and anything after
-                    if not m.get("bot_id") and m.get("text", "").strip():
-                        question_text = m["text"][:500]
-                        break
-            except Exception:
-                pass
-        if not question_text:
-            return False
-
-        if hint_kind == "clarification":
-            hint = (
-                "\n\n[Retry: answer directly using your best interpretation. "
-                "Do not ask for clarification.]"
-            )
-        else:
-            hint = (
-                "\n\n[Retry: previous answer was marked off. "
-                "Try a different angle — don't repeat the same reasoning.]"
-            )
-
-        retry_msg = question_text.strip() + hint
-        retry_result = ask(retry_msg, user_id=rater_id)
-        retry_text = (
-            retry_result.text
-            if hasattr(retry_result, "text")
-            else str(retry_result)
-        )
-        reply = web.chat_postMessage(
-            channel=channel,
-            thread_ts=parent_ts or msg_ts,
-            text=retry_text,
-            unfurl_links=False,
-        )
-        retry_ts = reply.get("ts", "")
-        _feedback_log_row({
-            "user":             rater_id,
-            "message_ts":       msg_ts,
-            "retry_message_ts": retry_ts,
-            "channel":          channel,
-            "question":         question_text,
-            "answer":           answer_text,
-            "rating":           "down_retry",
-        })
-        return True
-    except Exception as e:
-        log.warning(f"[feedback] retry failed: {e}")
-        return False
 
 
 def _permalink_for(web: WebClient, channel: str, msg_ts: str) -> str:
@@ -1268,7 +1147,6 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         _sg_fallback, _sg_blocks = wrap_response(
             card=_sg_card, surface=Surface.THREAD,
             suggestions=list(response.payload.get("suggestions", [])),
-            feedback="reaction", query_hash=_placeholder_ts_sg,
             elapsed_seconds=_elapsed,
         )
         _sg_final = [*_sg_blocks[:1], *offer_cards, *_sg_blocks[1:]] if offer_cards else _sg_blocks
@@ -1312,7 +1190,6 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     _sg2_fallback, _sg2_blocks = wrap_response(
         card=_sg2_card, surface=Surface.THREAD,
         suggestions=list(sugg),
-        feedback="reaction", query_hash=_placeholder_ts_sg,
         elapsed_seconds=_elapsed,
     )
     _sg2_period = (
@@ -1398,87 +1275,6 @@ def _dispatch_pulse_dig_in(action: dict, payload: dict, web: WebClient) -> None:
     pub = action.get("value", "").strip()
     _run_pulse_action(f"dig into {pub}", ctx["channel"], ctx["user_id"], ctx["message_ts"], web)
 
-
-def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
-    """
-    Handle 👍 / 👎 / ✏️ feedback buttons on Scout responses.
-    Stores to data/learnings.json for future prompt injection.
-    """
-    import uuid as _uuid
-    from datetime import datetime as _dt, timezone as _tz
-
-    action_id   = action.get("action_id", "")
-    query_hash  = action.get("value", "")
-    ctx         = _extract_interaction_context(payload)
-    user_id     = ctx["user_id"]
-    channel     = ctx["channel"]
-    message     = payload.get("message", {})
-    thread_ts   = message.get("thread_ts") or message.get("ts", "")
-    msg_ts      = message.get("ts", "")
-
-    learnings = _load_learnings()
-    now_str   = _dt.now(_tz.utc).isoformat()
-
-    if action_id == "scout_feedback_good":
-        learnings.setdefault("positive_signals", []).append({
-            "id":         str(_uuid.uuid4())[:8],
-            "created_at": now_str,
-            "query_hash": query_hash,
-            "user":       user_id,
-        })
-        _save_learnings(learnings)
-        # Acknowledge with an ephemeral message (visible only to the clicker)
-        try:
-            web.chat_postEphemeral(
-                channel=channel, user=user_id, thread_ts=thread_ts,
-                text=":white_check_mark: Got it — noted as accurate.",
-            )
-        except Exception:
-            pass
-
-    elif action_id == "scout_feedback_bad":
-        learnings.setdefault("negative_signals", []).append({
-            "id":         str(_uuid.uuid4())[:8],
-            "created_at": now_str,
-            "query_hash": query_hash,
-            "user":       user_id,
-        })
-        _save_learnings(learnings)
-        # Fire a retry on the underlying message so the button does real work,
-        # not just record the vote. Match the reaction-handler behavior.
-        fired = _retry_with_hint(web, channel, msg_ts, user_id, "retry")
-        if not fired:
-            try:
-                web.chat_postEphemeral(
-                    channel=channel, user=user_id, thread_ts=thread_ts,
-                    text=("_Still off? Hit ✏️ *Correct this* or run "
-                          "`@Scout remember <correct fact>`._"),
-                )
-            except Exception:
-                pass
-
-    elif action_id == "scout_feedback_correct":
-        # Store a pending correction keyed by msg_ts — _handle_event will capture the follow-up reply
-        corr_id = str(_uuid.uuid4())[:8]
-        learnings.setdefault("pending_corrections", {})[msg_ts] = {
-            "id":          corr_id,
-            "created_at":  now_str,
-            "query_hash":  query_hash,
-            "correction_by": user_id,
-            "channel":     channel,
-            "thread_ts":   thread_ts,
-            "msg_ts":      msg_ts,
-        }
-        _save_learnings(learnings)
-        try:
-            web.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=f"<@{user_id}> What's the correct answer? Reply here and I'll remember it. :memo:",
-            )
-        except Exception:
-            pass
-
-    log.info(f"Feedback recorded: {action_id} query={query_hash} user={user_id}")
 
 def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id: str = ""):
     """
@@ -1588,7 +1384,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 _stop_heartbeat()
                 response_text = (response.text or "")[:3000]
                 card = Card(severity=Severity.INFO, headline="", body=response_text)
-                _, blocks = wrap_response(card=card, surface=Surface.MODAL, feedback="none")
+                _, blocks = wrap_response(card=card, surface=Surface.MODAL)
                 web.views_update(
                     view_id=v_id,
                     view={
@@ -1677,7 +1473,6 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             _ah3_fallback, _ah3_blocks = wrap_response(
                 card=_ah3_card, surface=Surface.DM,
                 suggestions=list(response.payload.get("suggestions", [])),
-                feedback="reaction", query_hash=_placeholder_ts_ah,
                 elapsed_seconds=_elapsed,
             )
             _ah3_final = [*_ah3_blocks[:1], *offer_cards, *_ah3_blocks[1:]] if offer_cards else _ah3_blocks
@@ -1697,7 +1492,6 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             _ah4_fallback, _ah4_blocks = wrap_response(
                 card=_ah4_card, surface=Surface.DM,
                 suggestions=list(suggestions) if isinstance(suggestions, list) else [],
-                feedback="reaction", query_hash=_placeholder_ts_ah,
                 elapsed_seconds=_elapsed,
             )
             web.chat_update(
@@ -1774,9 +1568,6 @@ _BLOCK_ACTION_DISPATCH: dict = {
     "scout_reject":            _handle_reject,
     "scout_brief_queue":       _handle_brief_queue,
     "home_alert_drill":        _dispatch_home_alert_drill,
-    "scout_feedback_good":     _handle_feedback,
-    "scout_feedback_bad":      _handle_feedback,
-    "scout_feedback_correct":  _handle_feedback,
     "pulse_ghost_brief":       _dispatch_pulse_static,
     "pulse_fill_rate_brief":   _dispatch_pulse_static,
     "pulse_top_opps":          _dispatch_pulse_top_opps,
@@ -2413,73 +2204,6 @@ def _handle_event_impl(req: SocketModeRequest):
                 log.warning(f"[delete] failed to delete {item.get('ts')}: {e}")
         return
 
-    # ── 👍 / 👎 reaction → feedback signal ───────────────────────────────────
-    # Trust signal from Part 3.6. Scout pre-seeds +1/-1 on its own replies so
-    # they show up as visible affordances; user clicks increment the count.
-    # We log the user's rating and (for 👎) drop a threaded "remember" hint.
-    if event.get("type") == "reaction_added" and event.get("reaction") in ("+1", "-1"):
-        rater_id = event.get("user", "")
-        emoji_name = event.get("reaction", "")
-        if _is_under_maintenance(rater_id):
-            from scout_state import log_maintenance_attempt
-            log_maintenance_attempt(rater_id, emoji_name[:80])
-            return
-        # Scout no longer seeds 👍/👎 on its own messages, so the
-        # "ignore Scout's own seed reactions" branch is gone.
-        item = event.get("item", {})
-        if item.get("type") != "message":
-            return
-        ch_id  = item.get("channel", "")
-        msg_ts = item.get("ts", "")
-        try:
-            # reactions.get fetches the exact reacted-to message by ts, whether
-            # it's a channel root or a thread reply — conversations_replies only
-            # works with the thread root ts and silently misses replies.
-            react_resp = web.reactions_get(channel=ch_id, timestamp=msg_ts, full=True)
-            scout_msg  = react_resp.get("message", {})
-            if not scout_msg.get("bot_id"):
-                return  # only count reactions on Scout's own messages
-            answer_text = scout_msg.get("text", "")[:1000]
-            # Fetch the question (thread parent) when we're in a thread
-            question_text = ""
-            parent_ts = scout_msg.get("thread_ts") or ""
-            if parent_ts and parent_ts != msg_ts:
-                try:
-                    parent = web.conversations_replies(channel=ch_id, ts=parent_ts, limit=1).get("messages", [{}])[0]
-                    if not parent.get("bot_id"):
-                        question_text = parent.get("text", "")[:500]
-                except Exception:
-                    pass
-            rating = "up" if event["reaction"] == "+1" else "down"
-            _feedback_log_row({
-                "user":       rater_id,
-                "message_ts": msg_ts,
-                "channel":    ch_id,
-                "question":   question_text,
-                "answer":     answer_text,
-                "rating":     rating,
-            })
-            if rating == "down":
-                # Always retry on 👎 — gated only by _already_retried.
-                # Clarification responses get a direct-answer hint; everything
-                # else gets a "different angle" hint.
-                hint_kind = "clarification" if _is_clarification_response(answer_text) else "retry"
-                fired = _retry_with_hint(web, ch_id, msg_ts, rater_id, hint_kind)
-                if not fired:
-                    # Already retried, or no question text — point at the
-                    # correction affordance instead so the loop stays visible.
-                    try:
-                        web.chat_postEphemeral(
-                            channel=ch_id, user=rater_id, thread_ts=parent_ts or msg_ts,
-                            text=("_Still off? Hit ✏️ *Correct this* or run "
-                                  "`@Scout remember <correct fact>`._"),
-                        )
-                    except Exception as e:
-                        log.warning(f"[feedback] correction pointer failed: {e}")
-        except Exception as e:
-            log.warning(f"[feedback] reaction handler failed: {e}")
-        return
-
     is_mention = event.get("type") == "app_mention"
     is_dm      = event.get("type") == "message" and event.get("channel_type") == "im"
 
@@ -2519,36 +2243,6 @@ def _handle_event_impl(req: SocketModeRequest):
             web.chat_postEphemeral(channel=channel, user=user_id,
                 text=f":wrench: Scout is offline for maintenance.\n\nYour message: \"{query[:200]}\"")
         return
-
-    # ── Correction capture — if this thread has a pending correction, store it ─
-    learnings_state = _load_learnings()
-    pending_corrs   = learnings_state.get("pending_corrections", {})
-    if pending_corrs:
-        # Check if any pending correction belongs to this thread
-        matched_key = None
-        for key, corr in pending_corrs.items():
-            if corr.get("thread_ts") == thread_ts:
-                matched_key = key
-                break
-        if matched_key:
-            corr = pending_corrs.pop(matched_key)
-            import uuid as _uuid
-            learnings_state.setdefault("corrections", []).append({
-                "id":            corr.get("id", str(_uuid.uuid4())[:8]),
-                "created_at":    corr.get("created_at", ""),
-                "query_hash":    corr.get("query_hash", ""),
-                "correction":    query,
-                "corrected_by":  user_id_event,
-                "confidence":    "high",
-            })
-            learnings_state["pending_corrections"] = pending_corrs
-            _save_learnings(learnings_state)
-            web.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=":white_check_mark: Got it — I'll remember that.",
-            )
-            log.info(f"Correction captured for query_hash={corr.get('query_hash')}: {query[:80]!r}")
-            return  # don't process this as a normal query
 
     lower = query.lower()
 
@@ -3148,7 +2842,6 @@ def _handle_event_impl(req: SocketModeRequest):
             _dm5_fallback, _dm5_blocks = wrap_response(
                 card=_dm5_card, surface=Surface.DM,
                 suggestions=list(response.payload.get("suggestions", [])),
-                feedback="reaction", query_hash=msg_ts,
                 elapsed_seconds=_elapsed,
             )
             _dm5_final = [*_dm5_blocks[:1], *offer_cards, *_dm5_blocks[1:]] if offer_cards else _dm5_blocks
@@ -3170,7 +2863,6 @@ def _handle_event_impl(req: SocketModeRequest):
             _dm6_fallback, _dm6_blocks = wrap_response(
                 card=_dm6_card, surface=Surface.DM,
                 suggestions=list(suggestions),
-                feedback="reaction", query_hash=msg_ts,
                 elapsed_seconds=_elapsed,
                 interpretation=_dm_interp,
                 agent_steps=_dm_agent_steps,
@@ -3323,7 +3015,6 @@ def _handle_event_impl(req: SocketModeRequest):
         _ch7_fallback, _ch7_blocks = wrap_response(
             card=_ch7_card, surface=Surface.CHANNEL_ROOT,
             suggestions=list(response.payload.get("suggestions", [])),
-            feedback="reaction", query_hash=_placeholder_ts,
             elapsed_seconds=_elapsed,
         )
         _ch7_final = [*_ch7_blocks[:1], *offer_cards, *_ch7_blocks[1:]] if offer_cards else _ch7_blocks
@@ -3348,7 +3039,6 @@ def _handle_event_impl(req: SocketModeRequest):
         _ch8_fallback, _ch8_blocks = wrap_response(
             card=_ch8_card, surface=Surface.CHANNEL_ROOT,
             suggestions=list(suggestions),
-            feedback="reaction", query_hash=_placeholder_ts,
             elapsed_seconds=_elapsed,
             interpretation=_ch_interp,
             agent_steps=_ch_agent_steps,
