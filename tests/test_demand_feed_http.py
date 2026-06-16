@@ -269,8 +269,10 @@ class TestLoadOffers(unittest.TestCase):
         fake_response.__enter__ = lambda s: s
         fake_response.__exit__ = MagicMock(return_value=False)
 
-        with patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
-            result = scout_tools_offers._load_offers()
+        # _DEMAND_FEED_URL is captured at module import — patch the constant directly
+        with patch.object(scout_tools_offers, "_DEMAND_FEED_URL", fake_url):
+            with patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+                result = scout_tools_offers._load_offers()
 
         # urlopen must have been called with the correct URL
         mock_urlopen.assert_called_once()

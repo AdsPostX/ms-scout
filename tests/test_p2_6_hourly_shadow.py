@@ -383,7 +383,9 @@ class TestForceRunMonitorPassesChannelString(unittest.TestCase):
         _sa._FORCE_MONITOR_CTX["ch_factory"] = lambda: MagicMock()
 
         try:
-            with patch.dict(os.environ,
+            # _SCOUT_SHADOW_CHANNEL is captured at module import — patch the constant directly
+            with patch.object(_sa, "_SCOUT_SHADOW_CHANNEL", "#scout-qa-test"), \
+                 patch.dict(os.environ,
                             {"SCOUT_SHADOW_CHANNEL": "#scout-qa-test",
                              "SCOUT_THRESHOLD_ADMINS": "U_TEST_ADMIN"}):
                 result = _sa.force_run_monitor("_test_ch_check",
