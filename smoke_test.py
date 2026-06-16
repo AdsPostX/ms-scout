@@ -4245,6 +4245,19 @@ def test_build_home_view_no_duplicate_header():
     return True, f"_build_home_view: scoreboard header appears exactly once ({len(blocks)} total blocks)"
 
 
+@test("Phase 4 — _build_maintenance_home_view returns valid home view")
+def test_build_maintenance_home_view():
+    """_build_maintenance_home_view returns a valid home view with maintenance message."""
+    from scout_ui_kit import _build_maintenance_home_view
+    view = _build_maintenance_home_view()
+    assert view["type"] == "home", f"Expected type=home, got {view['type']}"
+    blocks = view["blocks"]
+    assert len(blocks) >= 1, "Expected at least one block"
+    text = blocks[0].get("text", {}).get("text", "")
+    assert "maintenance" in text.lower(), f"Expected maintenance text, got: {text!r}"
+    return True, "_build_maintenance_home_view: returns home view with maintenance block"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

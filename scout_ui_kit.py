@@ -1755,3 +1755,12 @@ def _build_home_view(queue_items: "list[dict] | None" = None,
 
     blocks = enforce(blocks, Surface.HOME)
     return {"type": "home", "blocks": blocks}
+
+
+def _build_maintenance_home_view() -> dict:
+    blocks = enforce(
+        [{"type": "section", "text": {"type": "mrkdwn",
+            "text": ":wrench: Scout is offline for maintenance."}}],
+        Surface.HOME,
+    )
+    return {"type": "home", "blocks": blocks}

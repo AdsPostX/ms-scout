@@ -41,6 +41,8 @@ from scout_ui_kit import (
     _build_home_view, _build_queue_card, _is_help_query,
     _build_advertiser_rpm_context_blocks,
     _build_modal_view,
+    _build_maintenance_home_view,
+    _render_subheader,
     AgentStep,
 )
 from scout_state import (
@@ -1595,11 +1597,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
                 text=":wrench: Scout is offline for maintenance.")
         else:
             try:
-                web.views_publish(user_id=user_id, view={
-                    "type": "home",
-                    "blocks": [{"type": "section", "text": {"type": "mrkdwn",
-                        "text": ":wrench: Scout is offline for maintenance."}}]
-                })
+                web.views_publish(user_id=user_id, view=_build_maintenance_home_view())
             except Exception as e:
                 log.warning("[maintenance] views_publish failed for %s: %s", user_id, e)
         return
@@ -1904,8 +1902,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
 
         elif command == "/scout-help":
             help_blocks = [
-                {"type": "header", "text": {"type": "plain_text",
-                    "text": "Scout — quick reference", "emoji": False}},
+                _render_subheader("Scout — quick reference", level=1),
                 {"type": "section", "text": {"type": "mrkdwn", "text":
                     "*Talk to Scout in any channel or thread*\n"
                     "Mention `@Scout` followed by your question in plain English. "
@@ -2139,11 +2136,7 @@ def _handle_event_impl(req: SocketModeRequest):
             if _is_under_maintenance(user_id):
                 from scout_state import log_maintenance_attempt
                 log_maintenance_attempt(user_id, "[home]")
-                web.views_publish(user_id=user_id, view={
-                    "type": "home",
-                    "blocks": [{"type": "section", "text": {"type": "mrkdwn",
-                        "text": ":wrench: Scout is offline for maintenance."}}]
-                })
+                web.views_publish(user_id=user_id, view=_build_maintenance_home_view())
                 return
             # Best-effort scoreboard rollup. Each source is independently
             # try/excepted — a CH failure should not prevent the activation
@@ -2469,7 +2462,7 @@ def _handle_event_impl(req: SocketModeRequest):
                     channel=channel, thread_ts=thread_ts,
                     text=f":test_tube: Scout Self-QA — {len(_QA_SUITE)} questions, live results",
                     blocks=[
-                        {"type": "header", "text": {"type": "plain_text", "text": "Scout Self-QA"}},
+                        _render_subheader("Scout Self-QA", level=1),
                         {"type": "section", "text": {"type": "mrkdwn", "text": "Testing every major intent. Pass = responded + expected content present.\nPosting each result as it completes…"}},
                         {"type": "divider"},
                     ],
