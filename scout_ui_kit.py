@@ -224,14 +224,6 @@ MAX_ACTIONS: dict[Surface, int] = {
 _MAX_CARD_ACTIONS: int = 25
 
 
-# ---------------------------------------------------------------------------
-# _escape_md_code — strip fenced code blocks (mobile horizontal-scroll) and
-#                   protect underscores inside backtick spans from italic.
-# ---------------------------------------------------------------------------
-_CODE_SPAN_RE = re.compile(r"`([^`]+)`")
-_FENCED_BLOCK_RE = re.compile(r"```[a-z]*\n?(.*?)```", re.DOTALL)
-
-
 def _fit(s: str, max_len: int = 25) -> str:
     """Truncate a button label to max_len, breaking on a word boundary."""
     if len(s) <= max_len:
@@ -243,14 +235,33 @@ def _fit(s: str, max_len: int = 25) -> str:
 # Slack header block plain_text limit per Block Kit spec.
 _HEADER_PLAIN_TEXT_MAX = 150
 
-# Strings that signal markdown-formatted body content — route through _text_to_blocks()
-# instead of a plain mrkdwn section. Checked at the START of wrap_response() body routing.
-# "- " and "• " handle bodies that START with a single bullet (no leading \n).
-_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ", "\n|", "> ", "1. ")
 
 
 def _markdown_block(text: str) -> dict:
     return {"type": "markdown", "text": text}
+
+
+def _rich_text_code(code: str, language: str = "") -> dict:
+    """Return a rich_text block wrapping preformatted code.
+
+    Use instead of fenced code blocks — avoids horizontal scroll on iOS
+    (Scout mobile rule 2). language hint (e.g. "sql", "python") enables
+    syntax highlighting where Slack supports it.
+    """
+    preformatted: dict = {
+        "type": "rich_text_preformatted",
+        "elements": [{"type": "text", "text": code}],
+    }
+    if language:
+        preformatted["language"] = language
+    return {"type": "rich_text", "elements": [preformatted]}
+
+
+# Surfaces where the native markdown block is valid per Block Kit spec.
+# HOME, MODAL, and EPHEMERAL do not support the markdown block type.
+_MESSAGE_SURFACES = frozenset({
+    Surface.CHANNEL_ROOT, Surface.THREAD, Surface.DM, Surface.MONITOR_ALARM
+})
 
 
 # ---------------------------------------------------------------------------
@@ -275,45 +286,38 @@ class AgentStep:
 
 
 def _agent_plan_block(steps: list["AgentStep"]) -> list[dict]:
-    """Render agent reasoning steps as a mrkdwn section block.
+    """Render agent reasoning steps as a native Slack plan block.
 
-    Uses section+mrkdwn rather than a native 'plan' block type because
-    Block Kit Builder does not expose 'plan' as a publicly available block type
-    (it requires Slack Agents SDK partner access, not standard block kit).
+    Status mapping: pass/warn/fail → complete (emoji in title preserves visual state),
+    skip → pending (step was never attempted).
     """
     if not steps:
         return []
-    lines = [
-        f"{_STATUS_EMOJI.get(s.status, '•')} *{s.label}* — {s.finding}"
-        for s in steps
-    ]
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+    _STATUS_TO_PLAN: dict[str, str] = {
+        "pass": "complete",
+        "warn": "complete",
+        "fail": "complete",
+        "skip": "pending",
+    }
+    tasks = []
+    for i, step in enumerate(steps):
+        task: dict = {
+            "task_id": f"step_{i}",
+            "title": f"{_STATUS_EMOJI.get(step.status, '•')} {step.label}",
+            "status": _STATUS_TO_PLAN.get(step.status, "complete"),
+        }
+        if step.finding:
+            task["details"] = {
+                "type": "rich_text",
+                "elements": [{
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": step.finding}],
+                }],
+            }
+        tasks.append(task)
+    return [{"type": "plan", "plan_id": "scout_reasoning", "title": "Scout Reasoning", "tasks": tasks}]
 
 
-def _escape_md_code(text: str) -> str:
-    """Convert fenced code blocks to inline code and escape underscores in spans.
-
-    1. Triple-backtick fenced blocks cause horizontal scroll on mobile (Slack rule 2).
-       They are collapsed to a single inline ``code`` span containing just the first
-       non-blank line of the block, so context is preserved without the scroll trap.
-
-    2. Slack's mrkdwn parser treats _word_ as italic even inside inline code spans.
-       Underscores inside backtick spans are escaped so that ``cap_alert_pct``
-       renders as literal text rather than ``cap<em>alert</em>pct``.
-    """
-    # Step 1: replace fenced blocks with inline code (first non-blank content line)
-    def _collapse_fenced(m: re.Match) -> str:
-        inner = m.group(1).strip()
-        first_line = next((ln for ln in inner.splitlines() if ln.strip()), inner)
-        return f"`{first_line.strip()}`"
-
-    text = _FENCED_BLOCK_RE.sub(_collapse_fenced, text)
-
-    # Step 2: escape underscores inside remaining inline code spans
-    def _escape_underscores(m: re.Match) -> str:
-        return "`" + m.group(1).replace("_", r"\_") + "`"
-
-    return _CODE_SPAN_RE.sub(_escape_underscores, text)
 
 
 def _build_facts_blocks(facts: list[tuple[str, str]]) -> list[dict]:
@@ -406,15 +410,19 @@ def _render_headline(card: "Card", surface: Surface) -> list[dict]:
     return []
 
 
-def _render_body(card: "Card") -> list[dict]:
-    """Return body block(s) for a Card, routing through markdown parser as needed."""
+def _render_body(card: "Card", surface: Surface) -> list[dict]:
+    """Return body block(s) for a Card.
+
+    Message surfaces (CHANNEL_ROOT, THREAD, DM, MONITOR_ALARM): native markdown block
+    when flag is on; otherwise plain mrkdwn section.
+    Non-message surfaces (HOME, MODAL, EPHEMERAL): mrkdwn section only — markdown
+    block is not valid on those surfaces per Block Kit spec.
+    """
     if not card.body:
         return []
-    if _MARKDOWN_BLOCKS_ENABLED:
+    if _MARKDOWN_BLOCKS_ENABLED and surface in _MESSAGE_SURFACES:
         return [_markdown_block(card.body)]
-    if any(sig in card.body for sig in _MARKDOWN_SIGNALS):
-        return _text_to_blocks(card.body)
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": _escape_md_code(card.body)}}]
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": card.body}}]
 
 
 def _render_feedback_row(feedback: str, query_hash: str | None) -> list[dict]:
@@ -504,7 +512,7 @@ def wrap_response(
     blocks.extend(_render_headline(card, surface))
     if agent_steps and _AGENT_BLOCKS_ENABLED:
         blocks.extend(_agent_plan_block(agent_steps))
-    blocks.extend(_render_body(card))
+    blocks.extend(_render_body(card, surface))
     if card.facts:
         blocks.extend(_build_facts_blocks(card.facts))
     blocks.extend(_render_feedback_row(feedback, query_hash))
@@ -644,28 +652,6 @@ _HELP_TRIGGERS = {
     "show me what you can do", "options",
 }
 
-_EMOJI_ALIASES: dict[str, str] = {
-    "yellow_circle": "large_yellow_circle",
-}
-
-# Tokenizer for inline elements within a single text line.
-_INLINE_RE = re.compile(
-    r'\*\*(?P<bold_d>[^*]+?)\*\*'
-    r'|\*(?P<bold_s>[^*\n]+?)\*'
-    r'|_(?P<italic>[^_\n]+?)_'
-    r'|`(?P<code>[^`\n]+?)`'
-    r'|~~(?P<strike>[^~\n]+)~~'
-    r'|:(?P<emoji>[a-z0-9_\-+]+?):'
-    r'|<(?P<url>[^|>]+)\|(?P<url_text>[^>]*)>'
-    r'|<@(?P<user>[A-Z0-9]+)>'
-    r'|(?P<plain>[^*_`~:<\n]+|\n|[*_`~:<])'
-)
-
-# Pipe table fallback: requires ≥2 columns to avoid false-positives on single-pipe lines.
-_TABLE_ROW_RE = re.compile(r'^\|(.+\|){2,}\s*$')
-_TABLE_SEP_RE = re.compile(r'^\|[-:\s|]+\|?\s*$')
-
-_SOLO_HEADER_RE = re.compile(r'^\*[^*]{15,}\*\s*')
 
 
 # ---------------------------------------------------------------------------
@@ -1130,325 +1116,7 @@ def _is_help_query(query: str) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Inline element parser + text-to-blocks converter
-# ---------------------------------------------------------------------------
-def _parse_inline_elements(text: str) -> list:
-    """Convert a plain-text line into Slack rich_text inline element objects."""
-    elements = []
-    for m in _INLINE_RE.finditer(text):
-        if m.group("bold_d") is not None:
-            elements.append({"type": "text", "text": m.group("bold_d"), "style": {"bold": True}})
-        elif m.group("bold_s") is not None:
-            elements.append({"type": "text", "text": m.group("bold_s"), "style": {"bold": True}})
-        elif m.group("italic") is not None:
-            elements.append({"type": "text", "text": m.group("italic"), "style": {"italic": True}})
-        elif m.group("code") is not None:
-            elements.append({"type": "text", "text": m.group("code"), "style": {"code": True}})
-        elif m.group("strike") is not None:
-            elements.append({"type": "text", "text": m.group("strike"), "style": {"strike": True}})
-        elif m.group("emoji") is not None:
-            name = _EMOJI_ALIASES.get(m.group("emoji"), m.group("emoji"))
-            elements.append({"type": "emoji", "name": name})
-        elif m.group("url") is not None:
-            elements.append({"type": "link", "url": m.group("url"), "text": m.group("url_text")})
-        elif m.group("user") is not None:
-            elements.append({"type": "user", "user_id": m.group("user")})
-        elif m.group("plain") is not None:
-            t = m.group("plain")
-            if elements and elements[-1].get("type") == "text" and "style" not in elements[-1]:
-                elements[-1]["text"] += t
-            else:
-                elements.append({"type": "text", "text": t})
-    return elements or [{"type": "text", "text": text}]
 
-
-def _text_to_blocks(text: str) -> list:
-    """
-    Convert Claude's markdown response text into Block Kit blocks using native rich_text.
-
-    Structure:
-    - '---' separators → divider blocks between sections
-    - Lines starting with '>' → rich_text_quote element
-    - Bullet lines (•, -, *) → rich_text_list element
-    - Triple-backtick fences → rich_text_preformatted element
-    - Everything else → rich_text_section with typed inline elements
-
-    Falls back to a single mrkdwn section block on any parse failure.
-    """
-    _BULLET_RE  = re.compile(r'^[•\-\*]\s+')
-    _FENCE_RE   = re.compile(r'^```')
-    _ORDERED_RE = re.compile(r'^(\d+)\.\s+(.+)')
-
-    def _flush_section(line_buf: list) -> "list | None":
-        joined = "\n".join(line_buf).strip()
-        if not joined:
-            return None
-        inline = _parse_inline_elements(joined)
-        return {"type": "rich_text_section", "elements": inline}
-
-    def _flush_list(items: list, style: str = "bullet") -> "dict | None":
-        if not items:
-            return None
-        return {
-            "type": "rich_text_list",
-            "style": style,
-            "indent": 0,
-            "elements": [
-                {"type": "rich_text_section", "elements": _parse_inline_elements(item)}
-                for item in items
-            ],
-        }
-
-    def _flush_quote(items: list) -> "dict | None":
-        if not items:
-            return None
-        return {
-            "type": "rich_text_quote",
-            "elements": _parse_inline_elements("\n".join(items)),
-        }
-
-    def _part_to_rt_elements(part: str) -> list:
-        rt_elems: list = []
-        line_buf: list = []
-        list_buf: list = []
-        ordered_buf: list = []
-        quote_buf: list = []
-        table_buf: list = []
-        in_fence = False
-        fence_buf: list = []
-
-        def _flush_table(table_buf: list, rt_elems: list) -> list:
-            """Flush accumulated pipe-table rows into rt_elems. Returns empty list to reset table_buf."""
-            if not table_buf:
-                return []
-            col_count = len(table_buf[0].strip('|').split('|'))  # do NOT filter empty — sparse cols count
-            if col_count <= 3:
-                # Mobile-safe: emit each row as a rich_text_section
-                for row in table_buf:
-                    cells = [c.strip() for c in row.strip('|').split('|')]
-                    if len(cells) >= 2:
-                        rt_elems.append({
-                            "type": "rich_text_section",
-                            "elements": [
-                                {"type": "text", "text": cells[0], "style": {"bold": True}},
-                                {"type": "text", "text": "  " + "  ".join(cells[1:])},
-                            ],
-                        })
-            else:
-                # Wide table — keep preformatted + add mobile warning
-                table_text = '\n'.join(table_buf)
-                rt_elems.append({
-                    "type": "rich_text_preformatted",
-                    "elements": [{"type": "text", "text": table_text}],
-                })
-                rt_elems.append({
-                    "type": "rich_text_section",
-                    "elements": [{"type": "text",
-                                  "text": "⚠ Table may scroll horizontally on mobile",
-                                  "style": {"italic": True}}],
-                })
-            return []
-
-        for raw_line in part.split('\n'):
-            if _FENCE_RE.match(raw_line):
-                if in_fence:
-                    in_fence = False
-                    code_text = "\n".join(fence_buf)
-                    fence_buf = []
-                    if quote_buf:
-                        el = _flush_quote(quote_buf)
-                        quote_buf = []
-                        if el:
-                            rt_elems.append(el)
-                    if ordered_buf:
-                        el = _flush_list(ordered_buf, style="ordered")
-                        ordered_buf = []
-                        if el:
-                            rt_elems.append(el)
-                    if list_buf:
-                        el = _flush_list(list_buf)
-                        list_buf = []
-                        if el:
-                            rt_elems.append(el)
-                    if line_buf:
-                        el = _flush_section(line_buf)
-                        line_buf = []
-                        if el:
-                            rt_elems.append(el)
-                    pre_block: dict = {
-                        "type": "rich_text_preformatted",
-                        "elements": [{"type": "text", "text": code_text}],
-                    }
-                    rt_elems.append(pre_block)
-                else:
-                    in_fence = True
-                continue
-
-            if in_fence:
-                fence_buf.append(raw_line)
-                continue
-
-            if raw_line.startswith('>'):
-                if ordered_buf:
-                    el = _flush_list(ordered_buf, style="ordered")
-                    ordered_buf = []
-                    if el:
-                        rt_elems.append(el)
-                if list_buf:
-                    el = _flush_list(list_buf)
-                    list_buf = []
-                    if el:
-                        rt_elems.append(el)
-                if line_buf:
-                    el = _flush_section(line_buf)
-                    line_buf = []
-                    if el:
-                        rt_elems.append(el)
-                quote_buf.append(raw_line[1:].strip())
-                continue
-
-            stripped = raw_line.strip()
-
-            if _TABLE_ROW_RE.match(stripped):
-                if _TABLE_SEP_RE.match(stripped):
-                    continue
-                table_buf.append(stripped)
-                continue
-
-            if table_buf:
-                log.debug("[text_to_blocks] pipe table flush: %d rows", len(table_buf))
-                table_buf = _flush_table(table_buf, rt_elems)
-
-            if _BULLET_RE.match(stripped):
-                item_text = _BULLET_RE.sub('', stripped)
-                if line_buf:
-                    el = _flush_section(line_buf)
-                    line_buf = []
-                    if el:
-                        rt_elems.append(el)
-                if quote_buf:
-                    el = _flush_quote(quote_buf)
-                    quote_buf = []
-                    if el:
-                        rt_elems.append(el)
-                if ordered_buf:
-                    el = _flush_list(ordered_buf, style="ordered")
-                    ordered_buf = []
-                    if el:
-                        rt_elems.append(el)
-                list_buf.append(item_text)
-                continue
-
-            _ordered_m = _ORDERED_RE.match(stripped)
-            if _ordered_m:
-                item_text = _ordered_m.group(2)
-                if line_buf:
-                    el = _flush_section(line_buf)
-                    line_buf = []
-                    if el:
-                        rt_elems.append(el)
-                if list_buf:
-                    el = _flush_list(list_buf)
-                    list_buf = []
-                    if el:
-                        rt_elems.append(el)
-                if quote_buf:
-                    el = _flush_quote(quote_buf)
-                    quote_buf = []
-                    if el:
-                        rt_elems.append(el)
-                ordered_buf.append(item_text)
-                continue
-
-            if list_buf:
-                el = _flush_list(list_buf)
-                list_buf = []
-                if el:
-                    rt_elems.append(el)
-            if ordered_buf:
-                el = _flush_list(ordered_buf, style="ordered")
-                ordered_buf = []
-                if el:
-                    rt_elems.append(el)
-            if quote_buf:
-                el = _flush_quote(quote_buf)
-                quote_buf = []
-                if el:
-                    rt_elems.append(el)
-
-            if not stripped:
-                if line_buf:
-                    el = _flush_section(line_buf)
-                    line_buf = []
-                    if el:
-                        rt_elems.append(el)
-            else:
-                line_buf.append(stripped)
-
-        if table_buf:
-            log.debug("[text_to_blocks] pipe table flush (end): %d rows", len(table_buf))
-            _flush_table(table_buf, rt_elems)
-        if list_buf:
-            el = _flush_list(list_buf)
-            if el:
-                rt_elems.append(el)
-        if ordered_buf:
-            el = _flush_list(ordered_buf, style="ordered")
-            if el:
-                rt_elems.append(el)
-        if quote_buf:
-            el = _flush_quote(quote_buf)
-            if el:
-                rt_elems.append(el)
-        if line_buf:
-            el = _flush_section(line_buf)
-            if el:
-                rt_elems.append(el)
-
-        return rt_elems
-
-    _SOLO_HEADER_RE_LOCAL = re.compile(r'^\*[^*]{15,}\*\s*$')
-
-    def _inject_section_dividers(raw: str) -> str:
-        lines = raw.strip().split('\n')
-        out: list[str] = []
-        saw_content = False
-        for line in lines:
-            stripped = line.strip()
-            if (
-                _SOLO_HEADER_RE_LOCAL.match(stripped)
-                and saw_content
-                and (not out or out[-1].strip() not in ('---', ''))
-            ):
-                out.append('---')
-            out.append(line)
-            if stripped and not stripped.startswith('>') and stripped != '---':
-                saw_content = True
-        return '\n'.join(out)
-
-    try:
-        parts = re.split(r'\n+\s*---\s*\n+', _inject_section_dividers(text.strip()))
-        blocks: list = []
-
-        for i, part in enumerate(parts):
-            part = part.strip()
-            if not part:
-                if i < len(parts) - 1:
-                    blocks.append({"type": "divider"})
-                continue
-
-            rt_elems = _part_to_rt_elements(part)
-
-            if rt_elems:
-                blocks.append({"type": "rich_text", "elements": rt_elems})
-            if i < len(parts) - 1:
-                blocks.append({"type": "divider"})
-
-        return blocks or [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
-
-    except Exception:
-        return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
 # ---------------------------------------------------------------------------

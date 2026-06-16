@@ -3987,7 +3987,7 @@ def test_agent_step_dataclass():
     return True, "AgentStep dataclass validates status values"
 
 
-@test("Agent blocks — _agent_plan_block renders section block")
+@test("Agent blocks — _agent_plan_block renders native plan block")
 def test_agent_plan_block_renders():
     import os
     os.environ.setdefault("SCOUT_AGENT_BLOCKS", "1")
@@ -3995,20 +3995,30 @@ def test_agent_plan_block_renders():
     steps = [
         AgentStep(label="Revenue check", status="pass", finding="$12K MTD"),
         AgentStep(label="Cap signal", status="warn", finding="88% of cap"),
+        AgentStep(label="Ghost check", status="skip", finding="no conversions"),
     ]
     blocks = _agent_plan_block(steps)
     if not blocks:
         return False, "_agent_plan_block returned empty list"
-    if blocks[0].get("type") != "section":
-        return False, f"Expected section block, got {blocks[0].get('type')!r}"
-    text = blocks[0]["text"]["text"]
-    if "Revenue check" not in text:
-        return False, "Step label missing from block text"
-    if "✅" not in text:
-        return False, "Pass emoji missing"
-    if "⚠️" not in text:
-        return False, "Warn emoji missing"
-    return True, "_agent_plan_block renders steps with correct emoji and labels"
+    b = blocks[0]
+    if b.get("type") != "plan":
+        return False, f"Expected plan block, got {b.get('type')!r}"
+    if b.get("plan_id") != "scout_reasoning":
+        return False, f"Expected plan_id='scout_reasoning', got {b.get('plan_id')!r}"
+    tasks = b.get("tasks", [])
+    if len(tasks) != 3:
+        return False, f"Expected 3 tasks, got {len(tasks)}"
+    if "Revenue check" not in tasks[0]["title"]:
+        return False, "Step label missing from task title"
+    if "✅" not in tasks[0]["title"]:
+        return False, "Pass emoji missing from title"
+    if tasks[0]["status"] != "complete":
+        return False, f"pass should map to complete, got {tasks[0]['status']!r}"
+    if tasks[2]["status"] != "pending":
+        return False, f"skip should map to pending, got {tasks[2]['status']!r}"
+    if tasks[0].get("details", {}).get("type") != "rich_text":
+        return False, "finding should be in rich_text details block"
+    return True, "_agent_plan_block renders native plan block with correct structure"
 
 
 
