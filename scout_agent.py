@@ -60,6 +60,14 @@ _set_geo_normalizer(_normalize_geo)
 
 log = logging.getLogger("scout_agent")
 
+# ── Environment config — read once at import, warn if required vars absent ────
+_ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
+_PULSE_ENABLED        = os.getenv("PULSE_ENABLED", "true").lower() == "true"
+_SCOUT_SHADOW_CHANNEL = os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa")
+
+if not _ANTHROPIC_API_KEY:
+    log.warning("[scout_agent] ANTHROPIC_API_KEY not set — Scout cannot respond to any queries")
+
 
 # ── Part 4 (plan v3): typed boundary contract for ask() ──────────────────────
 # Replaces the old Union[str, dict] return shape that left tools_called gated on
@@ -518,7 +526,7 @@ def get_scout_config() -> dict:
             "supported_networks": list(SUPPORTED_NETWORKS),
             "active_networks_in_inventory": live_networks,
             "pulse": {
-                "enabled": os.getenv("PULSE_ENABLED", "true").lower() == "true",
+                "enabled": _PULSE_ENABLED,
                 "schedule": "8am CT daily",
                 "opportunities_displayed": "Mondays only (computed daily)",
             },
@@ -628,9 +636,9 @@ def force_run_monitor(monitor: str = "", _caller_user_id: str = "") -> dict:
         if fn is None:
             return {"ok": False, "error": "not_registered",
                     "message": f"Monitor '{name}' not registered (scout_bot startup may have skipped it)."}
-        fn(web, os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa"), "")
+        fn(web, _SCOUT_SHADOW_CHANNEL, "")
         return {"ok": True, "monitor": name, "by_user_id": _caller_user_id,
-                "message": f"Force-ran {name} monitor — results posted to {os.getenv('SCOUT_SHADOW_CHANNEL', '#scout-qa')}."}
+                "message": f"Force-ran {name} monitor — results posted to {_SCOUT_SHADOW_CHANNEL}."}
     except Exception as e:
         log.warning(f"force_run_monitor({name}) failed: {e}")
         return {"ok": False, "error": "execution_failed", "message": str(e)}

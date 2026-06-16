@@ -36,12 +36,6 @@ def _fmt_rev(amount: float | None) -> str:
     return f"${amount:,.0f}"
 
 
-# ── Data quality tier helper (delegated to ThresholdManager) ─────────────────
-
-def _data_quality_tier(days_of_data: int, sessions: int = 0) -> dict:
-    return _manager.data_quality_tier(days_of_data, sessions)
-
-
 # ── Revenue tool functions ────────────────────────────────────────────────────
 
 def get_pulse_summary() -> dict:
@@ -305,7 +299,7 @@ def get_advertiser_revenue_projection(
         "cap_warnings":              cap_warnings,
         "end_date_warnings":         end_date_warnings,
         "methodology":               "30-day avg daily revenue × days in month. Cap applied where monthly_cap_total < uncapped projection.",
-        "data_quality":              _data_quality_tier(30, total_sessions_30d),
+        "data_quality":              _manager.data_quality_tier(30, total_sessions_30d),
     }
 
     # Build formatted Slack output for LLM synthesis

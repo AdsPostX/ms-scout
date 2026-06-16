@@ -15,6 +15,20 @@ from scout_thresholds import _manager
 
 log = logging.getLogger("scout_agent")
 
+# ── Environment config — read once at import, warn if required vars absent ────
+_ADMIN_UID       = os.getenv("SCOUT_ADMIN_USER_ID", "")
+_RAKUTEN_TOKEN   = os.getenv("RAKUTEN_API_TOKEN", "")
+_AWIN_PUB_ID     = os.getenv("AWIN_PUBLISHER_ID", "")
+_AWIN_API_KEY    = os.getenv("AWIN_API_KEY", "")
+_DEMAND_FEED_URL = os.getenv("DEMAND_FEED_URL", "")
+
+if not _ADMIN_UID:
+    log.warning("[scout_tools_admin] SCOUT_ADMIN_USER_ID not set — usage reports locked for all users")
+if not _RAKUTEN_TOKEN:
+    log.warning("[scout_tools_admin] RAKUTEN_API_TOKEN not set — Rakuten excluded from scraper inventory")
+if not (_AWIN_PUB_ID and _AWIN_API_KEY):
+    log.warning("[scout_tools_admin] AWIN_PUBLISHER_ID/AWIN_API_KEY not set — Awin excluded from scraper inventory")
+
 # ── Module-level constants used only by these functions ───────────────────────
 
 SNAPSHOT_PATH = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
@@ -53,7 +67,7 @@ def _load_offers() -> list:
     import urllib.parse
     import urllib.request
 
-    url = os.getenv("DEMAND_FEED_URL")
+    url = _DEMAND_FEED_URL
     if url:
         endpoint = f"{url.rstrip('/')}/offers"
         _p = urllib.parse.urlparse(endpoint)
@@ -400,11 +414,10 @@ def get_scout_status() -> dict:
         status["offers_age"] = "no snapshot — run @Scout refresh offers"
 
     # Unconfigured networks (creds absent → scraper silently skips them)
-    import os as _os
     _missing_nets = []
-    if not _os.getenv("RAKUTEN_API_TOKEN"):
+    if not _RAKUTEN_TOKEN:
         _missing_nets.append("rakuten")
-    if not (_os.getenv("AWIN_PUBLISHER_ID") and _os.getenv("AWIN_API_KEY")):
+    if not (_AWIN_PUB_ID and _AWIN_API_KEY):
         _missing_nets.append("awin")
     if _missing_nets:
         status["unconfigured_networks"] = _missing_nets
@@ -464,12 +477,11 @@ def get_usage_report(requesting_user_id: str = "") -> str:
     Return Scout usage statistics. Admin-only (SCOUT_ADMIN_USER_ID env var).
     Shows: queries per period, top users, most-used tools, avg response time.
     """
-    import os, pathlib, json as _json
+    import pathlib, json as _json
     from collections import Counter
     from datetime import datetime, timezone, timedelta
 
-    admin_uid = os.getenv("SCOUT_ADMIN_USER_ID", "")
-    if not admin_uid or requesting_user_id != admin_uid:
+    if not _ADMIN_UID or requesting_user_id != _ADMIN_UID:
         return ":lock: Usage reports are admin-only."
 
     log_path = pathlib.Path(__file__).parent / "data" / "usage_log.jsonl"
@@ -515,11 +527,10 @@ def export_usage_log(days: int = 30, limit: int = 200,
     eyeball whether Scout's tool routing is matching user intent. Admin-only.
     Returns a Slack-formatted block: one line per query, newest last.
     """
-    import os, pathlib, json as _json
+    import pathlib, json as _json
     from datetime import datetime, timedelta
 
-    admin_uid = os.getenv("SCOUT_ADMIN_USER_ID", "")
-    if not admin_uid or requesting_user_id != admin_uid:
+    if not _ADMIN_UID or requesting_user_id != _ADMIN_UID:
         return ":lock: Usage export is admin-only."
 
     log_path = pathlib.Path(__file__).parent / "data" / "usage_log.jsonl"

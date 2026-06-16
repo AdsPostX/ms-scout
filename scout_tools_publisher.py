@@ -20,7 +20,7 @@ from scout_ch import (
 )
 from scout_thresholds import _manager
 from scout_types import FormattedOffer  # noqa: F401
-from scout_tools_offers import _get_risk_flag, _scout_score, _load_offers, _format_offers
+from scout_tools_offers import _get_risk_flag, _scout_score, _load_offers, _format_offers, _fuzzy_adv_match
 
 log = logging.getLogger("scout_agent")
 
@@ -43,12 +43,22 @@ _POST_TX_PLACEMENTS = (
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-def _data_quality_tier(days_of_data: int, sessions: int = 0) -> dict:
-    return _manager.data_quality_tier(days_of_data, sessions)
-
-
 def _load_performance_benchmarks() -> dict:
     return _manager._load_benchmarks_file()
+
+
+def _resolve_best_publisher(ch, pub_results: list, days: int = 7) -> dict:
+    """Pick the publisher with the most recent impression volume when multiple names match.
+
+    Without this, accounts with the same name return in arbitrary order and the
+    wrong (inactive) account gets picked — e.g. TextNow 2527 vs 1952.
+    """
+    if len(pub_results) == 1:
+        return pub_results[0]
+    candidate_pids = [str(r["id"]) for r in pub_results]
+    vol_map = _q.publisher_impression_volume(ch, candidate_pids, days=days)
+    best_pid_str = max(candidate_pids, key=lambda p: vol_map.get(p, 0))
+    return next((r for r in pub_results if str(r["id"]) == best_pid_str), pub_results[0])
 
 
 # ── Extracted publisher tool functions ────────────────────────────────────────
@@ -250,16 +260,7 @@ def get_publisher_health(
             pub_results = _q.publisher_lookup_by_name(ch, publisher_name)
             if not pub_results:
                 return {"error": f"No publisher found matching '{publisher_name}'"}
-            # Disambiguate: pick the candidate with the most recent sessions.
-            # Without this, accounts with the same name return in arbitrary order and
-            # the wrong (inactive) account gets picked — e.g. TextNow 2527 vs 1952.
-            if len(pub_results) > 1:
-                candidate_pids = [str(r["id"]) for r in pub_results]
-                vol_map = _q.publisher_impression_volume(ch, candidate_pids, days=7)
-                best_pid_str = max(candidate_pids, key=lambda p: vol_map.get(p, 0))
-                best = next((r for r in pub_results if str(r["id"]) == best_pid_str), pub_results[0])
-            else:
-                best = pub_results[0]
+            best = _resolve_best_publisher(ch, pub_results)
             pid = int(best["id"])
             pub_name = best["organization"]
         elif pid is not None:
@@ -404,7 +405,7 @@ def get_publisher_health(
             "by_placement":          by_placement,
             "os_split":              os_split,
             "top_placements_note":   top_placement_note,
-            "data_quality":          _data_quality_tier(days, total_sessions),
+            "data_quality":          _manager.data_quality_tier(days, total_sessions),
         }
     except Exception as e:
         log.exception("get_publisher_health failed")
@@ -429,14 +430,7 @@ def get_perkswall_engagement(
             pub_results = _q.publisher_lookup_by_name(ch, publisher_name)
             if not pub_results:
                 return {"error": f"No publisher found matching '{publisher_name}'"}
-            # Disambiguate: pick the candidate with the most recent sessions.
-            if len(pub_results) > 1:
-                candidate_pids = [str(r["id"]) for r in pub_results]
-                vol_map = _q.publisher_impression_volume(ch, candidate_pids, days=7)
-                best_pid_str = max(candidate_pids, key=lambda p: vol_map.get(p, 0))
-                best = next((r for r in pub_results if str(r["id"]) == best_pid_str), pub_results[0])
-            else:
-                best = pub_results[0]
+            best = _resolve_best_publisher(ch, pub_results)
             pid = int(best["id"])
             pub_name = best["organization"]
         elif pid is not None:
@@ -632,8 +626,7 @@ def get_offers_for_publisher(publisher_name: str) -> dict:  # returns dict since
 
     # Filter to net-new advertisers (not already provisioned for this publisher)
     def _is_new(offer: dict) -> bool:
-        adv = (offer.get("advertiser") or "").lower()
-        return not any(adv in ex or ex in adv for ex in existing_adv)
+        return not _fuzzy_adv_match((offer.get("advertiser") or "").lower(), existing_adv)
 
     candidates = [o for o in active if _is_new(o)]
 
