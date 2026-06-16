@@ -4053,6 +4053,198 @@ def test_synthesize_agent_steps():
     return True, "_synthesize_agent_steps produces correct steps from tool call log"
 
 
+@test("Phase 3A — _build_modal_view returns correct structure")
+def test_build_modal_view_structure():
+    """_build_modal_view returns a valid modal dict with required Slack modal keys."""
+    from scout_ui_kit import _build_modal_view
+
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "Hello"}}]
+    view = _build_modal_view(blocks, title="My Modal", callback_id="test_modal")
+    assert view["type"] == "modal", f"Expected type=modal, got {view['type']!r}"
+    assert view["callback_id"] == "test_modal", "callback_id mismatch"
+    assert view["title"]["type"] == "plain_text", "title must be plain_text"
+    assert view["close"]["type"] == "plain_text", "close must be plain_text"
+    assert view["blocks"] == blocks, "blocks mismatch"
+    # Default close label
+    assert view["close"]["text"] == "Close", f"Default close label wrong: {view['close']['text']!r}"
+    # No submit key when submit_label is None
+    assert "submit" not in view, "submit key must be absent when submit_label=None"
+    return True, "_build_modal_view: required keys present, no submit key when omitted"
+
+
+@test("Phase 3A — _build_modal_view title truncated to 24 chars")
+def test_build_modal_view_title_truncation():
+    """_build_modal_view truncates title and submit_label to 24 characters."""
+    from scout_ui_kit import _build_modal_view
+
+    long_title = "A" * 40
+    view = _build_modal_view([], title=long_title, callback_id="trunc_test")
+    assert len(view["title"]["text"]) <= 24, f"Title not truncated: {len(view['title']['text'])} chars"
+    return True, "_build_modal_view: title truncated to 24 chars"
+
+
+@test("Phase 3A — _build_modal_view adds submit key when submit_label provided")
+def test_build_modal_view_with_submit():
+    """When submit_label is given, _build_modal_view includes a submit plain_text element."""
+    from scout_ui_kit import _build_modal_view
+
+    view = _build_modal_view([], title="Confirm", callback_id="confirm_modal",
+                             submit_label="Save", close_label="Cancel")
+    assert "submit" in view, "submit key must be present when submit_label is provided"
+    assert view["submit"]["type"] == "plain_text", "submit must be plain_text"
+    assert view["submit"]["text"] == "Save", f"submit text wrong: {view['submit']['text']!r}"
+    assert view["close"]["text"] == "Cancel", f"close label wrong: {view['close']['text']!r}"
+    return True, "_build_modal_view: submit key present with correct label"
+
+
+@test("Phase 3A — _build_modal_view raises ValueError for empty callback_id")
+def test_build_modal_view_empty_callback_id():
+    """_build_modal_view raises ValueError when callback_id is empty string."""
+    from scout_ui_kit import _build_modal_view
+
+    try:
+        _build_modal_view([], title="X", callback_id="")
+        return False, "Expected ValueError for empty callback_id"
+    except ValueError:
+        pass
+    return True, "_build_modal_view: ValueError raised for empty callback_id"
+
+
+@test("Phase 3A — _slack_card_block returns correct structure")
+def test_slack_card_block_structure():
+    """_slack_card_block returns a dict with type=card and title plain_text."""
+    from scout_ui_kit import _slack_card_block
+
+    # Minimal card — title only
+    card = _slack_card_block("My Title")
+    assert card["type"] == "card", f"Expected type=card, got {card['type']!r}"
+    assert card["title"]["type"] == "plain_text", "title must be plain_text"
+    assert card["title"]["text"] == "My Title", f"title text wrong: {card['title']['text']!r}"
+    # Optional fields absent when not provided
+    assert "subtitle" not in card, "subtitle must be absent when not provided"
+    assert "body" not in card, "body must be absent when not provided"
+    assert "block_id" not in card, "block_id must be absent when not provided"
+    return True, "_slack_card_block: minimal card has correct shape, optional keys absent"
+
+
+@test("Phase 3A — _slack_card_block optional fields present when provided")
+def test_slack_card_block_optional_fields():
+    """subtitle, body, and block_id appear only when non-empty."""
+    from scout_ui_kit import _slack_card_block
+
+    card = _slack_card_block("Title", body="*Bold*", subtitle="Sub", block_id="card_1")
+    assert card["subtitle"]["type"] == "plain_text", "subtitle must be plain_text"
+    assert card["subtitle"]["text"] == "Sub", f"subtitle text wrong: {card['subtitle']['text']!r}"
+    assert card["body"]["type"] == "mrkdwn", "body must be mrkdwn"
+    assert card["body"]["text"] == "*Bold*", f"body text wrong: {card['body']['text']!r}"
+    assert card["block_id"] == "card_1", f"block_id wrong: {card['block_id']!r}"
+    return True, "_slack_card_block: subtitle/body/block_id present when provided"
+
+
+@test("Phase 3A — _carousel_block empty list returns []")
+def test_carousel_block_empty():
+    """_carousel_block returns empty list for empty input."""
+    from scout_ui_kit import _carousel_block
+
+    result = _carousel_block([])
+    assert result == [], f"Expected [], got {result!r}"
+    return True, "_carousel_block: empty input → []"
+
+
+@test("Phase 3A — _carousel_block single card returned unwrapped")
+def test_carousel_block_single():
+    """_carousel_block returns [card] for a single-card list (no carousel wrapper)."""
+    from scout_ui_kit import _carousel_block
+
+    card = {"type": "card", "title": {"type": "plain_text", "text": "Solo"}}
+    result = _carousel_block([card])
+    assert len(result) == 1, f"Expected 1 item, got {len(result)}"
+    assert result[0] is card, "Single card must be returned as-is (no wrapper)"
+    assert result[0].get("type") == "card", "Unwrapped card must keep type=card"
+    return True, "_carousel_block: single card returned unwrapped"
+
+
+@test("Phase 3A — _carousel_block multiple cards wrapped in carousel")
+def test_carousel_block_multiple():
+    """_carousel_block wraps 2+ cards in a type=carousel dict."""
+    from scout_ui_kit import _carousel_block
+
+    cards = [
+        {"type": "card", "block_id": "c1", "title": {"type": "plain_text", "text": "A"}},
+        {"type": "card", "block_id": "c2", "title": {"type": "plain_text", "text": "B"}},
+        {"type": "card", "block_id": "c3", "title": {"type": "plain_text", "text": "C"}},
+    ]
+    result = _carousel_block(cards)
+    assert len(result) == 1, f"Expected 1 carousel block, got {len(result)}"
+    assert result[0]["type"] == "carousel", f"Expected type=carousel, got {result[0]['type']!r}"
+    assert result[0]["elements"] == cards, "carousel elements must equal the input cards"
+    return True, "_carousel_block: 3 cards wrapped in carousel with correct elements"
+
+
+@test("Phase 3A — _render_subheader returns correct structure and level")
+def test_render_subheader_structure():
+    """_render_subheader returns a header dict with level defaulting to 2."""
+    from scout_ui_kit import _render_subheader
+
+    block = _render_subheader("Section Header")
+    assert block["type"] == "header", f"Expected type=header, got {block['type']!r}"
+    assert block["text"]["type"] == "plain_text", "text must be plain_text"
+    assert block["text"]["text"] == "Section Header", f"text wrong: {block['text']['text']!r}"
+    assert block["level"] == 2, f"Default level should be 2, got {block['level']}"
+    return True, "_render_subheader: correct type, text, and default level=2"
+
+
+@test("Phase 3A — _render_subheader level clamped to [1, 4]")
+def test_render_subheader_level_clamping():
+    """_render_subheader clamps level below 1 to 1 and above 4 to 4."""
+    from scout_ui_kit import _render_subheader
+
+    # Below minimum
+    b0 = _render_subheader("Title", level=0)
+    assert b0["level"] == 1, f"level=0 should clamp to 1, got {b0['level']}"
+
+    b_neg = _render_subheader("Title", level=-5)
+    assert b_neg["level"] == 1, f"level=-5 should clamp to 1, got {b_neg['level']}"
+
+    # Above maximum
+    b5 = _render_subheader("Title", level=5)
+    assert b5["level"] == 4, f"level=5 should clamp to 4, got {b5['level']}"
+
+    b_big = _render_subheader("Title", level=99)
+    assert b_big["level"] == 4, f"level=99 should clamp to 4, got {b_big['level']}"
+
+    # Valid boundary values
+    assert _render_subheader("T", level=1)["level"] == 1, "level=1 should stay 1"
+    assert _render_subheader("T", level=4)["level"] == 4, "level=4 should stay 4"
+
+    return True, "_render_subheader: level clamped — 0→1, -5→1, 5→4, 99→4, boundaries intact"
+
+
+@test("Phase 3A — _build_home_view scoreboard header appears exactly once")
+def test_build_home_view_no_duplicate_header():
+    """_build_home_view with a rollup must produce exactly one header block (double-enforce fix)."""
+    import types
+    from scout_ui_kit import _build_home_view
+
+    # Minimal stub with the fields _build_home_scoreboard_blocks reads
+    rollup = types.SimpleNamespace(
+        revenue_today_cents=150000,
+        revenue_yesterday_same_time_cents=120000,
+        revenue_7d_avg_cents=130000,
+        revenue_eod_projection_cents=0,
+        revenue_7d_series=[],
+        generated_at=None,
+        revenue_mtd_cents=0,
+    )
+    view = _build_home_view(rollup=rollup, alerts=None)
+    blocks = view["blocks"]
+    header_blocks = [b for b in blocks if b.get("type") == "header"]
+    assert len(header_blocks) == 1, (
+        f"Expected exactly 1 header block, got {len(header_blocks)}: {header_blocks}"
+    )
+    return True, f"_build_home_view: scoreboard header appears exactly once ({len(blocks)} total blocks)"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

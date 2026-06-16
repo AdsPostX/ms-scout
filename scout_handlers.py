@@ -40,6 +40,7 @@ from scout_ui_kit import (
     _build_help_blocks,
     _build_home_view, _build_queue_card, _is_help_query,
     _build_advertiser_rpm_context_blocks,
+    _build_modal_view,
     AgentStep,
 )
 from scout_state import (
@@ -1291,15 +1292,14 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
         try:
             open_resp = web.views_open(
                 trigger_id=trigger_id,
-                view={
-                    "type": "modal",
-                    "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                    "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                    "blocks": [{
+                view=_build_modal_view(
+                    blocks=[{
                         "type": "section",
                         "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{_LOADING_MSG}"},
                     }],
-                },
+                    title="Scout",
+                    callback_id="home_try_query",
+                ),
             )
             assert open_resp.get("ok"), f"views_open failed: {open_resp.get('error')}"
             view_id = open_resp["view"]["id"]
@@ -1341,15 +1341,14 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     try:
                         web.views_update(
                             view_id=v_id,
-                            view={
-                                "type": "modal",
-                                "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                                "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                                "blocks": [
+                            view=_build_modal_view(
+                                blocks=[
                                     {"type": "section", "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{step}"}},
                                     {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {elapsed_str}_"}]},
                                 ],
-                            },
+                                title="Scout",
+                                callback_id="home_try_query",
+                            ),
                         )
                     except Exception:
                         pass  # best-effort — never crash the modal over a heartbeat
@@ -1370,12 +1369,11 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     _stop_heartbeat()
                     web.views_update(
                         view_id=v_id,
-                        view={
-                            "type": "modal",
-                            "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                            "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
-                        },
+                        view=_build_modal_view(
+                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                            title="Scout",
+                            callback_id="home_try_query",
+                        ),
                     )
                     return
                 _elapsed = int(time.monotonic() - _t0)
@@ -1387,12 +1385,11 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 _, blocks = wrap_response(card=card, surface=Surface.MODAL)
                 web.views_update(
                     view_id=v_id,
-                    view={
-                        "type": "modal",
-                        "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                        "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                        "blocks": blocks,
-                    },
+                    view=_build_modal_view(
+                        blocks=blocks,
+                        title="Scout",
+                        callback_id="home_try_query",
+                    ),
                 )
                 log.info("home_try_query modal: ran %r for %s in %ss", query[:50], user_id, _elapsed)
             except Exception:
@@ -1401,12 +1398,11 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 try:
                     web.views_update(
                         view_id=v_id,
-                        view={
-                            "type": "modal",
-                            "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                            "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"Something went wrong — try `@Scout {query}` directly in any channel."}}],
-                        },
+                        view=_build_modal_view(
+                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"Something went wrong — try `@Scout {query}` directly in any channel."}}],
+                            title="Scout",
+                            callback_id="home_try_query",
+                        ),
                     )
                 except Exception:
                     log.exception("_handle_home_try_query: error modal update also failed for %s", user_id)
@@ -1544,12 +1540,11 @@ def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
     try:
         web.views_open(
             trigger_id=trigger_id,
-            view={
-                "type": "modal",
-                "title": {"type": "plain_text", "text": "Firing Alerts", "emoji": False},
-                "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                "blocks": blocks,
-            },
+            view=_build_modal_view(
+                blocks=blocks,
+                title="Firing Alerts",
+                callback_id="home_alert_drill",
+            ),
         )
     except Exception:
         log.exception("_handle_home_alert_drill: views_open failed")
