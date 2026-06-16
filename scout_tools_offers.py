@@ -22,6 +22,14 @@ from scout_images import (
 
 log = logging.getLogger("scout_agent")
 
+# ── Environment config — read once at import, warn if required vars absent ────
+_DEMAND_FEED_URL = os.getenv("DEMAND_FEED_URL", "")
+_NOTION_TOKEN    = os.getenv("NOTION_TOKEN", "")
+_NOTION_DB_ID    = os.getenv("NOTION_QUEUE_DB_ID", "")
+
+if not _NOTION_TOKEN or not _NOTION_DB_ID:
+    log.warning("[scout_tools_offers] NOTION_TOKEN/NOTION_QUEUE_DB_ID not set — pipeline health unavailable")
+
 SNAPSHOT_PATH = pathlib.Path(__file__).parent / "data" / "offers_latest.json"
 
 SUPPORTED_NETWORKS: tuple[str, ...] = (
@@ -54,6 +62,11 @@ _TRACKING_DOMAINS = {
 }
 
 _CLICK_ID_PATTERNS = ("{click_id}", "{subid}", "subId", "clickid", "click_id", "aff_id")
+
+
+def _fuzzy_adv_match(name: str, existing: set) -> bool:
+    """True if `name` fuzzy-matches any entry in `existing` (substring in either direction)."""
+    return any(name == ex or name in ex or ex in name for ex in existing)
 
 
 # ── Scout Score ───────────────────────────────────────────────────────────────
@@ -177,8 +190,7 @@ def get_supply_demand_gaps(
         # Fuzzy match: suppress if existing adv name is a substring of the candidate
         # or vice versa — catches "Disney+" suppressing "Disney+ and Hulu" variants.
         def _already_provisioned(adv_name: str) -> bool:
-            a = adv_name.lower()
-            return any(a == ex or a in ex or ex in a for ex in existing)
+            return _fuzzy_adv_match(adv_name.lower(), existing)
 
         gaps         = [d for d in gap_data if not _already_provisioned(d["adv_name"])]
         daily_sessions = sessions_30d / 30 if sessions_30d else 0
@@ -252,7 +264,7 @@ def _load_offers() -> list:
     Logs source + offer count so the P1.2 cutover is verifiable from Render
     logs without grepping for stale-file timestamps.
     """
-    url = os.getenv("DEMAND_FEED_URL")
+    url = _DEMAND_FEED_URL
     if url:
         endpoint = f"{url.rstrip('/')}/offers"
         # Strip userinfo/query/fragment before logging — endpoint may contain
@@ -834,11 +846,11 @@ def get_pipeline_health() -> str:
     how many are stale (>7 days without a Live/Done status), and the oldest pending.
     Reads from the Notion Scout Demand Queue database.
     """
-    import os, requests as _req, json as _json
+    import requests as _req, json as _json
     from datetime import datetime, timezone, timedelta
 
-    notion_token = os.getenv("NOTION_TOKEN")
-    db_id = os.getenv("NOTION_QUEUE_DB_ID")
+    notion_token = _NOTION_TOKEN
+    db_id = _NOTION_DB_ID
     if not notion_token or not db_id:
         return (":warning: Pipeline health unavailable — `NOTION_QUEUE_DB_ID` not configured. "
                 "Add it to Render env vars.")
