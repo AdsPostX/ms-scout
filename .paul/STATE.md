@@ -1,28 +1,29 @@
 ## Current Position
 
 Milestone: block-kit-visual-upgrade + alert-interactivity
-Phase: 11 of 12 (block-kit-visual-upgrade) — 11-02 PLAN created
-Plan: 11-02-PLAN.md ready for APPLY (agent blocks + annotate_reasoning_steps tool)
-Status: PLAN created. Awaiting approval then APPLY.
-Last activity: 2026-06-14 — 11-02-PLAN.md written; 3 tasks + 1 checkpoint; SCOUT_AGENT_BLOCKS flag + AgentStep + _agent_plan_block() + annotate_reasoning_steps tool
+Phase: 12 of 12 (alert-interactivity) — not started
+Plan: Not started
+Status: Ready to plan Phase 12
+Last activity: 2026-06-16 — Phase 11 complete (2/2 plans), UNIFY ✓, transitioned to Phase 12
 
 Progress:
-- Phase 11: [████░░░░░░] 33% (11-01 done; 11-02 PLAN ready; 11-02 APPLY next)
+- Phase 11: [██████████] 100% ✅ DONE
+- Phase 12: [░░░░░░░░░░] 0% (alert-interactivity — not started)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ○        ○     [11-02 PLAN created, awaiting APPLY]
+  ✓        ✓        ✓     [Phase 11 complete — ready for Phase 12 PLAN]
 ```
 
 ## Session Continuity
 
-Last session: 2026-06-14
-Stopped at: 11-02 PLAN written. PAUL plan-phase workflow complete.
-Next action: Approve plan → run /paul:apply .paul/phases/11-block-kit-visual-upgrade/11-02-PLAN.md
-Resume file: .paul/phases/11-block-kit-visual-upgrade/11-02-PLAN.md
+Last session: 2026-06-16
+Stopped at: Phase 11 complete. Both plans done, all tests green (290 pytest + 155 smoke), UNIFY closed.
+Next action: /paul:plan for Phase 12 (alert-interactivity — acknowledge + snooze on MONITOR_ALARM, publisher drill modal)
+Resume file: .paul/phases/11-block-kit-visual-upgrade/11-02-SUMMARY.md
 
 ## Prior Context
 
@@ -31,12 +32,13 @@ Phase 10 (command-registry) ✅ DONE.
 
 ## Phase 12 Note
 
-Phase 12 (alert-interactivity) added to ROADMAP on 2026-06-13 after JTBD lens analysis revealed
-the entire Phase 11 roadmap is visual upgrades but zero loop-closure. Key insight: the feedback
-button handler in scout_handlers.py already demonstrates the block_actions plumbing — acknowledge
-and snooze are the same pattern. Scope: acknowledge button + snooze 4h on MONITOR_ALARM, publisher
-drill modal (gated on ClickHouse p95 latency). Phase 12 is independent of Phase 11; can start after
-11-01 ships or run concurrently once the handler architecture is stable.
+Phase 12 (alert-interactivity): acknowledge + snooze on MONITOR_ALARM, publisher drill modal (gated on ClickHouse p95 latency).
+
+**Updated starting point (Phase 11-02 changed this):** The feedback if-chain in scout_handlers.py
+is fully deleted — no _FEEDBACK_LOG, no _build_feedback_buttons, no _handle_feedback. Phase 12
+starts with a cleaner handler dispatch than the original note assumed. The `_ACTION_HANDLERS` dict
+pattern is still the right architecture, but there is NO pre-existing if-chain to refactor first —
+write it fresh. `_build_modal_view` is available for acknowledge/snooze modals.
 
 ## Completed Phases
 
@@ -48,6 +50,7 @@ drill modal (gated on ClickHouse p95 latency). Phase 12 is independent of Phase 
 | 08 | routing-refactor | ✅ DONE | #251, #252 |
 | 10 | command-registry | ✅ DONE | — |
 | 11-01 | block-kit-visual-upgrade (markdown block + spec gaps) | ✅ DONE | #285 |
+| 11-02 | block-kit-visual-upgrade (parser removal + helpers + feedback removal) | ✅ DONE | #290 |
 
 ## Decisions
 
@@ -61,5 +64,6 @@ drill modal (gated on ClickHouse p95 latency). Phase 12 is independent of Phase 
 | Agent blocks | Feature-flagged SCOUT_AGENT_BLOCKS | Standard public Block Kit blocks (confirmed Block Kit Builder); feature-flag for rollout control only |
 | Interactivity scope (Phase 12) | Acknowledge + snooze + drill modal only | Closes read→act loop; highest JTBD value. Feedback buttons already exist; plumbing proven. Drill modal gated on ClickHouse p95 latency. |
 | Drill modal approach | Async pre-fetch OR loading modal pattern | trigger_id expires in 3s; ClickHouse query can't block the acknowledgment. Decide in 12-01-PLAN.md. |
-| block_actions dispatch architecture (Phase 12) | `_ACTION_HANDLERS` dict in `scout_handlers.py` | Replaces current if-chain; borrowed from Vamsee's redis_listener.ts entity router. Pre-work: refactor existing feedback routing before adding Phase 12 handlers. |
-| `_text_to_blocks()` long-term fate | Keep as fallback; evaluate deletion after 30 days in prod | When SCOUT_MARKDOWN_BLOCKS=true has been stable in production for 30 days, evaluate removing the custom parser. Not a Phase 11 decision. |
+| block_actions dispatch architecture (Phase 12) | `_ACTION_HANDLERS` dict in `scout_handlers.py` | Write fresh — feedback routing already deleted in Phase 11-02; no pre-existing if-chain to refactor |
+| `_text_to_blocks()` fate | Deleted in Phase 11-02 | 322-line parser removed; native markdown block is the production path |
+| Feedback system fate | Removed entirely in Phase 11-02 | _FEEDBACK_LOG, _build_feedback_buttons, _handle_feedback all deleted; no migration |
