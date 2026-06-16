@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 # Standard library
+import calendar
 import datetime as _dt_mod
+import json
 import logging
 import re
+from datetime import date
 
 # Third-party
 from zoneinfo import ZoneInfo
@@ -34,6 +37,42 @@ def _fmt_rev(amount: float | None) -> str:
         rounded = round(amount / 100) * 100
         return f"${rounded:,.0f}"
     return f"${amount:,.0f}"
+
+
+def _fmt_rev_short(v: float) -> str:
+    """Compact $XK / $X format for inline table cells (no rounding to nearest $100)."""
+    v = float(v)
+    return f"${v / 1000:.0f}K" if v >= 1000 else f"${v:.0f}"
+
+
+def _process_cap_rows(
+    cap_rows: list,
+    month_end: date,
+) -> tuple[list[str], list[str], float | None]:
+    """Return (cap_warnings, end_date_warnings, monthly_cap_total) from raw CH rows."""
+    cap_warnings: list[str] = []
+    end_date_warnings: list[str] = []
+    monthly_cap_total: float | None = None
+
+    for row in cap_rows:
+        cid, _adv, end_dt, cap_cfg = row
+        if end_dt and end_dt < month_end:
+            end_date_warnings.append(
+                f"Campaign {cid} ends {end_dt} — won't run full month"
+            )
+        if cap_cfg:
+            try:
+                cfg = json.loads(cap_cfg) if isinstance(cap_cfg, str) else cap_cfg
+                mb = (cfg.get("month") or {}).get("budget")
+                if mb and float(mb) > 0:
+                    cap_warnings.append(
+                        f"Campaign {cid}: ${float(mb):,.0f} monthly budget cap"
+                    )
+                    monthly_cap_total = (monthly_cap_total or 0) + float(mb)
+            except Exception as exc:
+                log.debug("_process_cap_rows swallowed: %s", exc)
+
+    return cap_warnings, end_date_warnings, monthly_cap_total
 
 
 # ── Revenue tool functions ────────────────────────────────────────────────────
@@ -112,10 +151,6 @@ def get_advertiser_revenue_projection(
       - Monthly budget caps from capping_config JSON
     Returns projected totals, publisher breakdown, cap warnings, end-date warnings.
     """
-    import calendar as _cal
-    import json as _json
-    from datetime import date
-
     ch = _get_ch_client()
     today = date.today()
 
@@ -125,24 +160,23 @@ def get_advertiser_revenue_projection(
         target_month_num, target_year = 1, today.year + 1
 
     if month:
-        import re as _re
-        m = _re.search(r'(\d{4})[/-](\d{1,2})', month)
+        m = re.search(r'(\d{4})[/-](\d{1,2})', month)
         if m:
             target_year, target_month_num = int(m.group(1)), int(m.group(2))
         else:
-            month_map = {n.lower(): i for i, n in enumerate(_cal.month_name) if n}
+            month_map = {n.lower(): i for i, n in enumerate(calendar.month_name) if n}
             for name, num in month_map.items():
                 if name in month.lower():
                     target_month_num = num
-                    yr = _re.search(r'\d{4}', month)
+                    yr = re.search(r'\d{4}', month)
                     if yr:
                         target_year = int(yr.group())
                     break
 
-    days_in_month = _cal.monthrange(target_year, target_month_num)[1]
+    days_in_month = calendar.monthrange(target_year, target_month_num)[1]
     month_start   = date(target_year, target_month_num, 1)
     month_end     = date(target_year, target_month_num, days_in_month)
-    month_label   = f"{_cal.month_name[target_month_num]} {target_year}"
+    month_label   = f"{calendar.month_name[target_month_num]} {target_year}"
 
     # ── Steps 1 + 2 run in parallel — both depend only on advertiser_name ───────
     # Step 1: 30-day baseline — impressions + revenue per publisher
@@ -224,27 +258,9 @@ def get_advertiser_revenue_projection(
         }
 
     # ── Process cap/end-date results ──────────────────────────────────────────
-    cap_warnings       = []
-    end_date_warnings  = []
-    monthly_cap_total  = None
-
-    for row in cap_rows:
-        cid, adv, end_dt, cap_cfg = row
-        if end_dt and end_dt < month_end:
-            end_date_warnings.append(
-                f"Campaign {cid} ends {end_dt} — won't run full month"
-            )
-        if cap_cfg:
-            try:
-                cfg = _json.loads(cap_cfg) if isinstance(cap_cfg, str) else cap_cfg
-                mb = (cfg.get("month") or {}).get("budget")
-                if mb and float(mb) > 0:
-                    cap_warnings.append(
-                        f"Campaign {cid}: ${float(mb):,.0f} monthly budget cap"
-                    )
-                    monthly_cap_total = (monthly_cap_total or 0) + float(mb)
-            except Exception as e:
-                log.debug("_fetch_cap_data swallowed: %s", e)
+    cap_warnings, end_date_warnings, monthly_cap_total = _process_cap_rows(
+        cap_rows, month_end
+    )
 
     # ── Step 3: Projection ────────────────────────────────────────────────────
     total_revenue_30d     = sum(r[4] for r in baseline_rows)
@@ -374,8 +390,8 @@ def get_top_revenue_opportunities() -> str:
         pub_count = row["adv_pub_count"]
         sessions  = row["sessions_30d"]
         sessions_str = f"{int(sessions) / 1_000_000:.1f}M" if sessions >= 1_000_000 else f"{int(sessions) / 1000:.0f}K"
-        adv_rev_str  = f"${float(adv_rev) / 1000:.0f}K" if float(adv_rev) >= 1000 else f"${float(adv_rev):.0f}"
-        est_rev_str  = f"${float(est_rev) / 1000:.0f}K" if float(est_rev) >= 1000 else f"${float(est_rev):.0f}"
+        adv_rev_str  = _fmt_rev_short(adv_rev)
+        est_rev_str  = _fmt_rev_short(est_rev)
         lines.append(
             f"• Add *{adv_name}* → *{pub_name or f'Pub #{pub_id}'}*\n"
             f"  {adv_name} earns {adv_rev_str}/30d across {pub_count} publishers · est. *{est_rev_str}/mo* if added\n"
@@ -409,8 +425,6 @@ def get_revenue_today() -> dict:
     Revenue rounding:
         ≥ $10K → $XK (nearest $100)   ≥ $1K → $X,X00 (nearest $100)   < $1K → exact
     """
-    import datetime as _dt_mod
-
     def _signal(today_rev: float, avg_rev: float) -> str:
         if avg_rev <= 0:
             return "🟢"
