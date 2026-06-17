@@ -5,6 +5,12 @@ These are type hints only — no runtime enforcement. They exist to surface
 field drift at the type-checker level and document the expected shape of
 the dicts that flow between modules.
 
+All classes use `total=False` (all fields optional). This is intentional:
+Scout dicts are assembled incrementally (scraper → formatter → handler) and
+no single stage owns every field. Callers must guard against missing fields
+at use-site (`.get()` / explicit `None` checks) — not at construction.
+Runtime validation lives in Card.__post_init__ (scout_ui_kit.py), not here.
+
 Import with:
     from scout_types import Offer, Brief, FormattedOffer, PulseSignal
 
