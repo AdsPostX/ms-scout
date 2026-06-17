@@ -165,6 +165,26 @@ class Card:
     facts: list[tuple[str, str]] = field(default_factory=list)
     actions: list[tuple[str, str, str, str]] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.severity, Severity):
+            raise TypeError(
+                f"Card.severity must be Severity, got {type(self.severity).__name__!r}"
+            )
+        if len(self.headline) > 150:
+            raise ValueError(
+                f"Card.headline exceeds 150 chars ({len(self.headline)})"
+            )
+        for i, f in enumerate(self.facts):
+            if not isinstance(f, tuple) or len(f) != 2:
+                raise TypeError(
+                    f"Card.facts[{i}] must be a 2-tuple (label, value)"
+                )
+        for i, a in enumerate(self.actions):
+            if not isinstance(a, tuple) or len(a) != 4:
+                raise TypeError(
+                    f"Card.actions[{i}] must be a 4-tuple (label, action_id, value, style)"
+                )
+
 
 
 # ---------------------------------------------------------------------------

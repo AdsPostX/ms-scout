@@ -1149,7 +1149,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
         _sg_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
         _sg_fallback, _sg_blocks = wrap_response(
-            card=_sg_card, surface=Surface.THREAD,
+            card=_sg_card, surface=Surface.THREAD, pattern=ResponsePattern.ANSWER,
             suggestions=list(response.payload.get("suggestions", [])),
             elapsed_seconds=_elapsed,
         )
@@ -1192,7 +1192,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     response_text = response_text[:3000]  # cap for Slack text= limit
     _sg2_card = Card(Severity.INFO, "", body=response_text)
     _sg2_fallback, _sg2_blocks = wrap_response(
-        card=_sg2_card, surface=Surface.THREAD,
+        card=_sg2_card, surface=Surface.THREAD, pattern=ResponsePattern.ANSWER,
         suggestions=list(sugg),
         elapsed_seconds=_elapsed,
     )
@@ -1385,7 +1385,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 _stop_heartbeat()
                 response_text = (response.text or "")[:3000]
                 card = Card(severity=Severity.INFO, headline="", body=response_text)
-                _, blocks = wrap_response(card=card, surface=Surface.MODAL)
+                _, blocks = wrap_response(card=card, surface=Surface.MODAL)  # MODAL has no ResponsePattern — pattern= intentionally omitted
                 web.views_update(
                     view_id=v_id,
                     view=_build_modal_view(
@@ -1470,7 +1470,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
             _ah3_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
             _ah3_fallback, _ah3_blocks = wrap_response(
-                card=_ah3_card, surface=Surface.DM,
+                card=_ah3_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(response.payload.get("suggestions", [])),
                 elapsed_seconds=_elapsed,
             )
@@ -1489,7 +1489,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             response_text = response_text[:3000]  # cap for Slack text= limit
             _ah4_card = Card(Severity.INFO, "", body=response_text)
             _ah4_fallback, _ah4_blocks = wrap_response(
-                card=_ah4_card, surface=Surface.DM,
+                card=_ah4_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(suggestions) if isinstance(suggestions, list) else [],
                 elapsed_seconds=_elapsed,
             )
@@ -3061,7 +3061,7 @@ def _handle_event_impl(req: SocketModeRequest):
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
             _dm5_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
             _dm5_fallback, _dm5_blocks = wrap_response(
-                card=_dm5_card, surface=Surface.DM,
+                card=_dm5_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(response.payload.get("suggestions", [])),
                 elapsed_seconds=_elapsed,
             )
@@ -3082,7 +3082,7 @@ def _handle_event_impl(req: SocketModeRequest):
                 if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
             ] or None
             _dm6_fallback, _dm6_blocks = wrap_response(
-                card=_dm6_card, surface=Surface.DM,
+                card=_dm6_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(suggestions),
                 elapsed_seconds=_elapsed,
                 interpretation=_dm_interp,
@@ -3243,7 +3243,7 @@ def _handle_event_impl(req: SocketModeRequest):
         offer_cards = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
         _ch7_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
         _ch7_fallback, _ch7_blocks = wrap_response(
-            card=_ch7_card, surface=Surface.CHANNEL_ROOT,
+            card=_ch7_card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER,
             suggestions=list(response.payload.get("suggestions", [])),
             elapsed_seconds=_elapsed,
         )
@@ -3267,7 +3267,7 @@ def _handle_event_impl(req: SocketModeRequest):
             if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
         ] or None
         _ch8_fallback, _ch8_blocks = wrap_response(
-            card=_ch8_card, surface=Surface.CHANNEL_ROOT,
+            card=_ch8_card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER,
             suggestions=list(suggestions),
             elapsed_seconds=_elapsed,
             interpretation=_ch_interp,
