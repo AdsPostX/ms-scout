@@ -64,7 +64,7 @@ completed: 2026-06-16T09:45:00Z
 |--------|-------|
 | Duration | ~3h |
 | Commits | 7 |
-| Files modified | 10 |
+| Files modified | 8 |
 | Net lines removed | ~460 |
 | Tests after | 290 pytest + 155 smoke (all pass) |
 

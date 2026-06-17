@@ -546,7 +546,7 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
             ("✓ Acknowledge", "scout_acknowledge", alert_name, "primary"),
             ("Snooze ▾", "scout_snooze_open", alert_name, ""),
         ]
-    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM)
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, pattern=ResponsePattern.ALERT)
     return f"🔴 {headline}", blocks
 
 

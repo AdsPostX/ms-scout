@@ -46,8 +46,8 @@ Phase 10 (command-registry) ✅ DONE.
 Phase 12 (alert-interactivity): acknowledge + snooze on MONITOR_ALARM, publisher drill modal.
 p95 gate resolved — loading modal pattern makes ClickHouse latency irrelevant.
 
-**Starting point (Phase 11-02 changed this):** feedback if-chain deleted — no _FEEDBACK_LOG,
-no _build_feedback_buttons, no _handle_feedback. Write fresh. `_BLOCK_ACTION_DISPATCH` is
+**Starting point (Phase 11-02 changed this):** feedback if-chain deleted — no `_FEEDBACK_LOG`,
+no `_build_feedback_buttons`, no `_handle_feedback`. Write fresh. `_BLOCK_ACTION_DISPATCH` is
 the correct target (confirmed at scout_handlers.py:1563). `_build_modal_view` available.
 
 **Reactions are in scout_handlers.py, NOT scout_bot.py** — current: `thinking_face` in DM
@@ -83,4 +83,4 @@ path at L2745/L2791. Channel path: no reaction currently. Both changed in PR 12-
 | Drill modal approach | Loading modal pattern | trigger_id expires in 3s; views_open immediately with spinner, daemon thread runs CH query, views_update when done. Decided in 12-04-PLAN.md. |
 | block_actions dispatch architecture (Phase 12) | `_ACTION_HANDLERS` dict in `scout_handlers.py` | Write fresh — feedback routing already deleted in Phase 11-02; no pre-existing if-chain to refactor |
 | `_text_to_blocks()` fate | Deleted in Phase 11-02 | 322-line parser removed; native markdown block is the production path |
-| Feedback system fate | Removed entirely in Phase 11-02 | _FEEDBACK_LOG, _build_feedback_buttons, _handle_feedback all deleted; no migration |
+| Feedback system fate | Removed entirely in Phase 11-02 | `_FEEDBACK_LOG`, `_build_feedback_buttons`, `_handle_feedback` all deleted; no migration |

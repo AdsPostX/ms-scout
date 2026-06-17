@@ -409,7 +409,7 @@ def _build_modal_view(
         "type": "modal",
         "callback_id": callback_id,
         "title": {"type": "plain_text", "text": title[:24], "emoji": False},
-        "close": {"type": "plain_text", "text": close_label, "emoji": False},
+        "close": {"type": "plain_text", "text": close_label[:24], "emoji": False},
         "blocks": blocks,
     }
     if submit_label:
@@ -431,12 +431,12 @@ def _slack_card_block(
     """
     card: dict = {
         "type": "card",
-        "title": {"type": "plain_text", "text": title},
+        "title": {"type": "plain_text", "text": title[:150]},
     }
     if subtitle:
-        card["subtitle"] = {"type": "plain_text", "text": subtitle}
+        card["subtitle"] = {"type": "plain_text", "text": subtitle[:150]}
     if body:
-        card["body"] = {"type": "mrkdwn", "text": body}
+        card["body"] = {"type": "mrkdwn", "text": body[:200]}
     if block_id:
         card["block_id"] = block_id
     return card
@@ -453,7 +453,7 @@ def _carousel_block(cards: list[dict]) -> list[dict]:
         return []
     if len(cards) == 1:
         return [cards[0]]
-    return [{"type": "carousel", "elements": cards}]
+    return [{"type": "carousel", "elements": cards[:10]}]
 
 
 # ---------------------------------------------------------------------------
@@ -569,13 +569,13 @@ def wrap_response(
 
     blocks: list[dict] = []
     blocks.extend(_render_headline(card, surface))
-    if agent_steps and _AGENT_BLOCKS_ENABLED:
+    if agent_steps and _AGENT_BLOCKS_ENABLED and surface in _MESSAGE_SURFACES:
         blocks.extend(_agent_plan_block(agent_steps))
     blocks.extend(_render_body(card, surface))
     if card.facts:
         blocks.extend(_build_facts_blocks(card.facts))
 
-    capped = [s for s in suggestions[:max_btn] if isinstance(s, str) and s.strip()]
+    capped = [s.strip() for s in suggestions if isinstance(s, str) and s.strip()][:max_btn]
     if capped:
         blocks.append({"type": "actions", "elements": [
             {
