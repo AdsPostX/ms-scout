@@ -163,26 +163,19 @@ These have caused bugs — never do:
 - Never `shell=True` anywhere.
 - Never call `web.chat_postMessage` with hand-built blocks. Always go through `wrap_response()`.
 
-## Karpathy Lens (run before building or debugging anything)
+## Karpathy Lens — Scout application
 
-Andrej Karpathy's engineering discipline applied to Scout. Run this before writing a handler, query, or fix — not after.
+Principles live in global `~/.claude/CLAUDE.md`. Scout-specific checks:
 
-1. **Data bugs first** — before touching any handler or query, suspect the data. Run the raw ClickHouse query in the MCP console. Is the row grain right? Are there nulls, dupes, unexpected zeros? Most Scout bugs are data bugs, not code bugs.
-2. **Inspect before abstracting** — don't write a new query function until you've run the raw SQL and read the actual rows. If you can't describe the output shape (column names, types, row grain) from memory, you're not ready to write code.
-3. **Empirical before theoretical** — don't reason about whether a signal function returns the right data. Call it: `python3 -c "from scout_agent import _get_ch_client; from scout_bot import _pulse_signal_cap; print(_pulse_signal_cap(_get_ch_client()))"`. Look at what comes back.
-4. **Babysit the first fire** — after any monitor or formatter change, watch the actual Slack card post in #bot-qa. Smoke test green ≠ card looks right. The card is the product.
-5. **Smallest representation first** — if a zero appears where data should be, don't add error handling. Add a `print()` at the boundary and find out why it's zero. Instrumentation before abstraction.
+- **Data first**: run the raw query in the ClickHouse MCP console before touching any handler or query file. Row grain wrong → fix SQL, not handler.
+- **Empirical**: call the signal directly — `python3 -c "from scout_agent import _get_ch_client; from scout_bot import _pulse_signal_cap; print(_pulse_signal_cap(_get_ch_client()))"` — look at what comes back before writing a formatter.
+- **Babysit**: after any monitor or formatter change, watch the actual card post in `#bot-qa`. Smoke test green ≠ card looks right.
+- **Zero debugging**: if a zero appears where data should be, `print()` at the ClickHouse boundary first. Don't add error handling until you know why it's zero.
 
-If a Karpathy check reveals a data problem: fix the data layer, don't paper over it in the handler.
+## Vamsee Lens — Scout application
 
-## Vamsee Lens (run before closing any significant PR)
+Principles live in global `~/.claude/CLAUDE.md`. Scout-specific watch items:
 
-Vamsee Gomatam (AdsPostX CTO) reviews significant backend work. Check before closing a PAUL APPLY phase:
-
-1. **No invisible accumulators** — if a list is built up silently inside a loop, it must be returned as a value or passed as a collector, not captured as a closure side effect.
-2. **No no-op handlers with side-channel capture** — if a TOOL_MAP function returns a placeholder string while real capture happens elsewhere in the loop, document the contract explicitly in the docstring or restructure.
-3. **No repeated inline comprehensions** — if the same filter/transform pattern appears ≥2 times across handlers, extract to a named pure function (`_coerce_X(raw)`) before shipping.
-4. **Config objects, not scattered env reads** — feature flags gathered into a named constant block or config dataclass at module top; not scattered inline `os.getenv()` calls throughout the code.
-5. **Validate at construction** — dataclasses use `__post_init__`, flags validate at startup. If the flag is on but required config is missing, warn or raise.
-
-If any check fails: fix inline (≤5 min) or name the constraint and file the debt explicitly.
+- **TOOL_MAP side-channel** (pattern #2): any function in `TOOL_MAP` that returns a placeholder string while capture happens inside the `ask()` loop — document the contract in the docstring or restructure.
+- **Scattered env reads** (pattern #4): `os.getenv()` calls outside `scout_thresholds.json` or the config block at module top — consolidate before shipping.
+- **`__post_init__` validation** (pattern #5): new dataclasses in `scout_types.py` validate required fields at construction, not silently at use.
