@@ -119,6 +119,25 @@ Registered at api.slack.com/apps — each must be added to the Slack app manifes
 
 All `/scout-cap/vel/ghost/fill` commands route to `_FORCE_MONITOR_FNS` — same path as `@Scout force <signal>`. Requires the demand-feed service running with monitors initialized.
 
+## Block Action Dispatch
+
+Interactive button clicks route through `_BLOCK_ACTION_DISPATCH` in `scout_handlers.py`. Adding a new button requires a new entry here — and a smoke test.
+
+| Action ID | Handler | When triggered |
+|---|---|---|
+| `scout_acknowledge` | `_handle_acknowledge` | Acknowledge button on ALERT card |
+| `scout_snooze_open` | `_handle_snooze_open` | Snooze button on ALERT card — opens modal |
+| `scout_drill_publisher` | `_handle_drill_publisher` | Drill modal on publisher revenue card |
+| `scout_approve` | `_handle_approve` | Approve action |
+| `scout_reject` | `_handle_reject` | Reject action |
+| `scout_brief_queue` | `_handle_brief_queue` | Brief queue action |
+| `home_alert_drill` | `_dispatch_home_alert_drill` | App Home alert drill |
+| `pulse_ghost_brief` | `_dispatch_pulse_static` | Ghost signal brief |
+| `pulse_fill_rate_brief` | `_dispatch_pulse_static` | Fill rate brief |
+| `pulse_top_opps` | `_dispatch_pulse_top_opps` | Top opportunities |
+| `pulse_scout_offers` | `_dispatch_pulse_scout_offers` | Scout offers pulse |
+| `pulse_dig_in` | `_dispatch_pulse_dig_in` | Dig in action |
+
 ## Engineering Gates
 
 **Before adding a new monitor signal — touch exactly these 5:**
