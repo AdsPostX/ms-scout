@@ -4357,6 +4357,59 @@ def test_drill_loading_modal():
     return True, "drill modals: all three pure, correct shapes"
 
 
+@test("Phase 12 — acknowledge+snooze buttons rendered on alert cards")
+def test_alert_card_buttons():
+    from scout_bot import _format_cap_alert, _format_velocity_down_alert, _format_ghost_alert
+    from scout_bot import _format_fill_alert, _format_cvr_alert, _format_expiration_alert
+    from scout_bot import _format_revenue_alert
+
+    def _has_ack_snooze(blocks: list, alert_name: str) -> bool:
+        for b in blocks:
+            if b.get("type") == "actions":
+                ids = {e.get("action_id") for e in b.get("elements", [])}
+                vals = {e.get("value") for e in b.get("elements", [])}
+                if "scout_acknowledge" in ids and "scout_snooze_open" in ids and alert_name in vals:
+                    return True
+        return False
+
+    # cap
+    cap_rows = [{"adv_name": "Acme", "cap_pct": 90, "revenue_mtd": 9000, "monthly_cap": 10000,
+                 "days_to_cap": 1, "days_remaining": 3}]
+    _, cap_blocks = _format_cap_alert(cap_rows, alert_name="cap-monitor")
+    assert _has_ack_snooze(cap_blocks, "cap-monitor"), "cap: missing ack/snooze buttons"
+
+    # velocity_down
+    vel_rows = [{"publisher_name": "Pub1", "direction": "down", "revenue_30d": 30000,
+                 "revenue_7d_ann": 20000, "pct_delta": -33}]
+    _, vel_blocks = _format_velocity_down_alert(vel_rows, alert_name="velocity-down-monitor")
+    assert _has_ack_snooze(vel_blocks, "velocity-down-monitor"), "velocity: missing ack/snooze buttons"
+
+    # ghost
+    ghost_rows = [{"adv_name": "Acme", "impressions_7d": 5000, "impressions_2d": 1000}]
+    _, ghost_blocks = _format_ghost_alert(ghost_rows, alert_name="ghost-monitor")
+    assert _has_ack_snooze(ghost_blocks, "ghost-monitor"), "ghost: missing ack/snooze buttons"
+
+    # fill
+    fill_rows = [{"publisher_name": "Pub1", "fill_rate_pct": 5, "missed_sessions": 100, "sessions_7d": 105}]
+    _, fill_blocks = _format_fill_alert(fill_rows, alert_name="fill-monitor")
+    assert _has_ack_snooze(fill_blocks, "fill-monitor"), "fill: missing ack/snooze buttons"
+
+    # revenue_tracker
+    total = {"pct_of_expected": 60, "today_revenue": 6000, "projected_full_day": 8000,
+             "dow_median": 10000, "weekday": "Mon", "sample_days": 4}
+    _, rev_blocks = _format_revenue_alert(total, [], alert_name="revenue_tracker")
+    assert _has_ack_snooze(rev_blocks, "revenue_tracker"), "revenue: missing ack/snooze buttons"
+
+    # no alert_name → no buttons (backward-compat)
+    _, no_btn_blocks = _format_cap_alert(cap_rows)
+    for b in no_btn_blocks:
+        if b.get("type") == "actions":
+            ids = {e.get("action_id") for e in b.get("elements", [])}
+            assert "scout_acknowledge" not in ids, "cap: unexpected ack button without alert_name"
+
+    return True, "ack/snooze buttons present on all 5 alert card types; absent without alert_name"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

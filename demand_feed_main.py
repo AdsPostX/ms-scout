@@ -865,7 +865,7 @@ def _revenue_tracker_daemon() -> None:
                         publishers = []
                         _phase2_error = str(e)[:400]
 
-                    fallback, blocks = _format_revenue_alert(total, publishers)
+                    fallback, blocks = _format_revenue_alert(total, publishers, alert_name="revenue_tracker")
 
                     # UC-1: check snooze state before posting
                     _should_post = True
@@ -1021,7 +1021,7 @@ def _run_shadow_monitor(
                         log.info(f"{tag} no anomalies — staying silent.")
                         continue
 
-                    fallback, blocks = format_fn(results)
+                    fallback, blocks = format_fn(results, alert_name=monitor_name)
                     if not fallback:
                         from scout_core.job_runs import record_job_run
                         record_job_run(monitor_name, status="success", duration_ms=duration_ms)

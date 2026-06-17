@@ -467,7 +467,7 @@ def _pulse_signal_fill_rate(ch, as_of_date: str | None = None) -> list:
     )
 
 
-def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None) -> tuple[str, list[dict]]:
+def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None, alert_name: str = "") -> tuple[str, list[dict]]:
     """
     Format the proactive revenue alert message.
 
@@ -541,6 +541,11 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
     headline = "Revenue alert — today is tracking soft"
     body = "\n".join(items)
     card = Card(severity=Severity.CRITICAL, headline=headline, body=body)
+    if alert_name:
+        card.actions = [
+            ("✓ Acknowledge", "scout_acknowledge", alert_name, "primary"),
+            ("Snooze ▾", "scout_snooze_open", alert_name, ""),
+        ]
     _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM)
     return f"🔴 {headline}", blocks
 
@@ -666,7 +671,7 @@ def _digest_poster(web) -> None:
 # Alert only when there's something to act on — no "all signals nominal" digests.
 
 
-def _build_alert_response(severity: Severity, headline: str, body: str) -> tuple[str, list]:
+def _build_alert_response(severity: Severity, headline: str, body: str, alert_name: str = "") -> tuple[str, list]:
     """Shared boilerplate for all monitor alert formatters.
 
     Builds a Card, calls wrap_response on MONITOR_ALARM with the ALERT pattern,
@@ -674,6 +679,11 @@ def _build_alert_response(severity: Severity, headline: str, body: str) -> tuple
     headline/body construction stays in each formatter.
     """
     card = Card(severity=severity, headline=headline, body=body)
+    if alert_name:
+        card.actions = [
+            ("✓ Acknowledge", "scout_acknowledge", alert_name, "primary"),
+            ("Snooze ▾", "scout_snooze_open", alert_name, ""),
+        ]
     _, blocks = wrap_response(
         card=card,
         surface=Surface.MONITOR_ALARM,
@@ -689,7 +699,7 @@ def _build_alert_body(items: list[str], action_footer: str = "") -> str:
     return body or action_footer
 
 
-def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_cap_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for advertisers nearing monthly cap.
 
     Each item shows: pct of cap, MTD revenue / cap, dollar headroom at risk,
@@ -717,10 +727,10 @@ def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Cap alert — advertisers approaching monthly budget"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Contact advertiser or lower bid floor before cap hits"))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Contact advertiser or lower bid floor before cap hits"), alert_name=alert_name)
 
 
-def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_velocity_down_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for publishers with declining revenue velocity.
 
     Frames the drop in monthly-run-rate terms (what the publisher is on pace to miss)
@@ -751,10 +761,10 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
         items.append(line)
 
     headline = "Revenue velocity — publishers tracking down"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Check publisher fill rate and CPM floor"))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Check publisher fill rate and CPM floor"), alert_name=alert_name)
 
 
-def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_ghost_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for campaigns with impressions but no revenue.
 
     Shows traffic volume in recency-first order (48h impressions first) so the reader
@@ -773,10 +783,10 @@ def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Ghost campaigns — impressions without revenue"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Check tracking pixel / confirm creative is live"))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Check tracking pixel / confirm creative is live"), alert_name=alert_name)
 
 
-def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_fill_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for publishers with low fill rate.
 
     Anchors the fill rate against the 15% threshold so the gap is visible,
@@ -797,10 +807,10 @@ def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Low fill rate — publishers with significant unfilled sessions"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Review floor price or supply source health"))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Review floor price or supply source health"), alert_name=alert_name)
 
 
-def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_cvr_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for publisher-campaign CVR drops."""
     items = []
     for r in rows[:6]:
@@ -817,10 +827,10 @@ def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "CVR anomalies — significant conversion rate drops since yesterday"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items), alert_name=alert_name)
 
 
-def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_expiration_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for campaigns expiring soon."""
     items = []
     for r in rows[:8]:
@@ -836,7 +846,7 @@ def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Expiring campaigns — active campaigns ending within the alert window"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items), alert_name=alert_name)
 
 
 def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
