@@ -864,3 +864,63 @@ def earnings_breakdown(
         "partner_cost": round(partner_cost, 4),
         "earnings": round(earnings, 4),
     }
+
+
+def get_publisher_drill_summary(pub_id: str) -> dict:
+    # Output shape: {pub_id, pub_name, rev_7d, conv_7d, rev_yesterday,
+    #                conv_yesterday, top_offer, as_of}
+    # Table: adpx_conversionsdetails — user_id column = publisher ID (UInt64)
+    from scout_ch import _get_ch_client
+
+    sql = """
+SELECT
+    toDate(cv.created_at)                           AS day,
+    coalesce(any(u.organization), '')               AS pub_name,
+    coalesce(any(c.adv_name), '')                   AS adv_name,
+    round(sum(toFloat64OrNull(cv.revenue)), 4)      AS rev,
+    count()                                         AS convs
+FROM adpx_conversionsdetails cv
+LEFT JOIN mv_adpx_users u ON u.id = toInt64(cv.user_id)
+LEFT JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
+WHERE cv.user_id = {pub_id: UInt64}
+  AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 7 DAY)
+  AND cv.created_at >= today() - INTERVAL 7 DAY
+GROUP BY day, adv_name
+ORDER BY day DESC
+""".strip()
+
+    ch = _get_ch_client()
+    rows = ch.query(sql, parameters={"pub_id": int(pub_id)}).result_rows
+
+    rev_7d = 0.0
+    conv_7d = 0
+    rev_yesterday = 0.0
+    conv_yesterday = 0
+    pub_name = str(pub_id)
+    adv_rev: dict[str, float] = {}
+    yesterday = date.today() - timedelta(days=1)
+
+    for row in rows:
+        day, p_name, adv_name, rev, convs = row
+        if p_name:
+            pub_name = p_name
+        rev_7d += float(rev or 0)
+        conv_7d += int(convs or 0)
+        if isinstance(day, date) and day == yesterday:
+            rev_yesterday += float(rev or 0)
+            conv_yesterday += int(convs or 0)
+        if adv_name:
+            adv_rev[adv_name] = adv_rev.get(adv_name, 0.0) + float(rev or 0)
+
+    top_offer = max(adv_rev, key=lambda k: adv_rev[k]) if adv_rev else None
+
+    return {
+        "pub_id": str(pub_id),
+        "pub_name": pub_name,
+        "rev_7d": round(rev_7d, 4),
+        "conv_7d": conv_7d,
+        "rev_yesterday": round(rev_yesterday, 4),
+        "conv_yesterday": conv_yesterday,
+        "top_offer": top_offer,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }

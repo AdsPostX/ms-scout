@@ -50,11 +50,14 @@ class TestAgentPlanBlock(unittest.TestCase):
         steps = [AgentStep(label="Revenue check", status="pass", finding="$12K MTD")]
         blocks = _agent_plan_block(steps)
         self.assertEqual(len(blocks), 1)
-        self.assertEqual(blocks[0]["type"], "section")
-        text = blocks[0]["text"]["text"]
-        self.assertIn("Revenue check", text)
-        self.assertIn("$12K MTD", text)
-        self.assertIn("✅", text)
+        self.assertEqual(blocks[0]["type"], "plan")
+        tasks = blocks[0]["tasks"]
+        self.assertEqual(len(tasks), 1)
+        self.assertIn("Revenue check", tasks[0]["title"])
+        self.assertIn("✅", tasks[0]["title"])
+        # finding goes into details rich_text
+        detail_text = tasks[0]["details"]["elements"][0]["elements"][0]["text"]
+        self.assertIn("$12K MTD", detail_text)
 
     def test_status_emoji_mapping(self):
         steps = [
@@ -64,11 +67,12 @@ class TestAgentPlanBlock(unittest.TestCase):
             AgentStep(label="D", status="skip", finding="n/a"),
         ]
         blocks = _agent_plan_block(steps)
-        text = blocks[0]["text"]["text"]
-        self.assertIn("✅", text)
-        self.assertIn("❌", text)
-        self.assertIn("⚠️", text)
-        self.assertIn("⏭️", text)
+        self.assertEqual(blocks[0]["type"], "plan")
+        titles = [t["title"] for t in blocks[0]["tasks"]]
+        self.assertTrue(any("✅" in t for t in titles))
+        self.assertTrue(any("❌" in t for t in titles))
+        self.assertTrue(any("⚠️" in t for t in titles))
+        self.assertTrue(any("⏭️" in t for t in titles))
 
     def test_multiple_steps_one_block(self):
         steps = [
@@ -91,13 +95,10 @@ class TestWrapResponseAgentSteps(unittest.TestCase):
             pattern=ResponsePattern.ANSWER,
             agent_steps=steps,
         )
-        # At least one block should contain the step label
-        texts = [
-            b.get("text", {}).get("text", "")
-            for b in blocks
-            if b.get("type") == "section"
-        ]
-        self.assertTrue(any("Cap check" in t for t in texts))
+        plan_blocks = [b for b in blocks if b.get("type") == "plan"]
+        self.assertTrue(plan_blocks, "Expected a plan block when agent_steps provided")
+        titles = [t["title"] for t in plan_blocks[0]["tasks"]]
+        self.assertTrue(any("Cap check" in t for t in titles))
 
     def test_no_steps_no_plan_block(self):
         card = self._make_card()
@@ -122,13 +123,10 @@ class TestWrapResponseAgentSteps(unittest.TestCase):
             pattern=ResponsePattern.ANSWER,
             agent_steps=steps,
         )
-        texts = [
-            b.get("text", {}).get("text", "")
-            for b in blocks
-            if b.get("type") == "section"
-        ]
-        # Steps render on all non-ephemeral surfaces when flag is on
-        self.assertTrue(any("Cap check" in t for t in texts))
+        plan_blocks = [b for b in blocks if b.get("type") == "plan"]
+        self.assertTrue(plan_blocks, "Expected a plan block on THREAD surface")
+        titles = [t["title"] for t in plan_blocks[0]["tasks"]]
+        self.assertTrue(any("Cap check" in t for t in titles))
 
 
 class TestAskResultAgentSteps(unittest.TestCase):

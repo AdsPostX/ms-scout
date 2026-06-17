@@ -27,6 +27,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 _REDIS_KEY = "scout:alert_registry"
+_POST_STATE_REDIS_KEY = "scout:alert_post_state"
 
 # Lazy-init, cached after first call. None = use in-memory fallback.
 _redis_client = None
@@ -36,6 +37,8 @@ _redis_init_lock = threading.Lock()  # guards the lazy-init critical section
 # In-memory fallback (used when Upstash env vars are not set).
 _LOCK = threading.Lock()
 _STATE: dict[str, AlertState] = {}
+_POST_LOCK = threading.Lock()
+_POST_STATE: dict[str, AlertPostState] = {}
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,18 @@ class AlertState:
     status: str  # "firing" | "cleared"
     context: dict[str, Any] = field(default_factory=dict)
     last_change: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class AlertPostState:
+    alert_name: str
+    message_ts: str           # Slack ts for chat_update
+    channel: str
+    fired_at: str             # ISO8601
+    snooze_until: str | None = None   # ISO8601 or None
+    snoozed_by: str | None = None     # Slack user ID
+    acknowledged_by: str | None = None
+    acknowledged_at: str | None = None
 
 
 def _get_redis():
@@ -189,6 +204,141 @@ def current_state(window_days: int = 7) -> list[AlertState]:
         return []
     snapshot.sort(key=lambda s: s.last_change, reverse=True)
     return snapshot
+
+
+# Never-raise contract: all 5 functions below are best-effort.
+# They catch all exceptions internally and never propagate to callers.
+# Callers (demand_feed_main, scout_handlers) must not guard against exceptions from these.
+#
+# Cross-process visibility: _POST_STATE (in-memory dict) works only within a single
+# process. Local dev uses the in-memory path. Production must set UPSTASH_REDIS_URL
+# so the Redis path is active — otherwise snooze/ack state will not persist across
+# demand-feed restarts or be visible to the scout-bot process.
+
+def set_post_state(
+    alert_name: str,
+    message_ts: str,
+    channel: str,
+    fired_at: str,
+) -> None:
+    """Record where an alert was posted so acknowledge/snooze can call chat_update."""
+    if not alert_name or not message_ts:
+        return
+    try:
+        r = _get_redis()
+        entry = AlertPostState(
+            alert_name=alert_name,
+            message_ts=message_ts,
+            channel=channel,
+            fired_at=fired_at,
+        )
+        if r is not None:
+            r.hset(_POST_STATE_REDIS_KEY, alert_name, json.dumps({
+                "message_ts": message_ts, "channel": channel, "fired_at": fired_at,
+                "snooze_until": None, "snoozed_by": None,
+                "acknowledged_by": None, "acknowledged_at": None,
+            }))
+        else:
+            with _POST_LOCK:
+                _POST_STATE[alert_name] = entry
+    except Exception:
+        log.exception("alert_registry.set_post_state failed (alert=%s)", alert_name)
+
+
+def get_post_state(alert_name: str) -> AlertPostState | None:
+    """Return the post state for alert_name, or None if not found. Never raises."""
+    try:
+        r = _get_redis()
+        if r is not None:
+            raw = r.hget(_POST_STATE_REDIS_KEY, alert_name)
+            if not raw:
+                return None
+            d = json.loads(raw)
+            return AlertPostState(
+                alert_name=alert_name,
+                message_ts=d["message_ts"],
+                channel=d["channel"],
+                fired_at=d["fired_at"],
+                snooze_until=d.get("snooze_until"),
+                snoozed_by=d.get("snoozed_by"),
+                acknowledged_by=d.get("acknowledged_by"),
+                acknowledged_at=d.get("acknowledged_at"),
+            )
+        else:
+            with _POST_LOCK:
+                return _POST_STATE.get(alert_name)
+    except Exception:
+        log.exception("alert_registry.get_post_state failed (alert=%s)", alert_name)
+        return None
+
+
+def snooze_alert(alert_name: str, until_ts: str, by_user: str) -> None:
+    """Mark alert snoozed until until_ts by by_user. Writes into existing post state."""
+    if not alert_name:
+        return
+    try:
+        r = _get_redis()
+        if r is not None:
+            raw = r.hget(_POST_STATE_REDIS_KEY, alert_name)
+            d = json.loads(raw) if raw else {}
+            d.update({"snooze_until": until_ts, "snoozed_by": by_user})
+            r.hset(_POST_STATE_REDIS_KEY, alert_name, json.dumps(d))
+        else:
+            with _POST_LOCK:
+                existing = _POST_STATE.get(alert_name)
+                if existing:
+                    from dataclasses import replace as _dc_replace
+                    _POST_STATE[alert_name] = _dc_replace(
+                        existing, snooze_until=until_ts, snoozed_by=by_user
+                    )
+    except Exception:
+        log.exception("alert_registry.snooze_alert failed (alert=%s)", alert_name)
+
+
+def clear_snooze(alert_name: str) -> None:
+    """Remove snooze state for alert_name."""
+    if not alert_name:
+        return
+    try:
+        r = _get_redis()
+        if r is not None:
+            raw = r.hget(_POST_STATE_REDIS_KEY, alert_name)
+            d = json.loads(raw) if raw else {}
+            d.update({"snooze_until": None, "snoozed_by": None})
+            r.hset(_POST_STATE_REDIS_KEY, alert_name, json.dumps(d))
+        else:
+            with _POST_LOCK:
+                existing = _POST_STATE.get(alert_name)
+                if existing:
+                    from dataclasses import replace as _dc_replace
+                    _POST_STATE[alert_name] = _dc_replace(
+                        existing, snooze_until=None, snoozed_by=None
+                    )
+    except Exception:
+        log.exception("alert_registry.clear_snooze failed (alert=%s)", alert_name)
+
+
+def acknowledge_alert(alert_name: str, by_user: str, at_ts: str) -> None:
+    """Mark alert acknowledged by by_user at at_ts."""
+    if not alert_name:
+        return
+    try:
+        r = _get_redis()
+        if r is not None:
+            raw = r.hget(_POST_STATE_REDIS_KEY, alert_name)
+            d = json.loads(raw) if raw else {}
+            d.update({"acknowledged_by": by_user, "acknowledged_at": at_ts})
+            r.hset(_POST_STATE_REDIS_KEY, alert_name, json.dumps(d))
+        else:
+            with _POST_LOCK:
+                existing = _POST_STATE.get(alert_name)
+                if existing:
+                    from dataclasses import replace as _dc_replace
+                    _POST_STATE[alert_name] = _dc_replace(
+                        existing, acknowledged_by=by_user, acknowledged_at=at_ts
+                    )
+    except Exception:
+        log.exception("alert_registry.acknowledge_alert failed (alert=%s)", alert_name)
 
 
 # Restore registry state from pulse_state.json on module load (deploy-survivability).

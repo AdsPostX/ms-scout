@@ -54,6 +54,11 @@ _CH_MAX_CONCURRENT = _env_int("CH_MAX_CONCURRENT", 4, minimum=1)
 _CH_ACQUIRE_TIMEOUT_S = _env_float("CH_ACQUIRE_TIMEOUT_S", 10.0, minimum=0.1)
 _CH_QUERY_SEMAPHORE = threading.BoundedSemaphore(_CH_MAX_CONCURRENT)
 
+# Revenue deviation threshold used by the intraday diagnostic classifier.
+# A projected or actual revenue deviation beyond this fraction triggers
+# a "traffic" or "efficiency" diagnostic label.
+_REVENUE_DEVIATION_THRESHOLD = 0.08
+
 
 class CHBusyError(RuntimeError):
     """Raised when the CH concurrency cap is saturated past the acquire timeout.
@@ -724,6 +729,42 @@ WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate({date_str:Strin
     return {"impressions": imps, "sessions": sess}
 
 
+def _classify_revenue_diagnostic(
+    traffic: dict | None,
+    t_band: dict | None,
+    today_revenue: float,
+    p50: float,
+    dow_median_val,
+    threshold: float = _REVENUE_DEVIATION_THRESHOLD,
+) -> str | None:
+    """Classify intraday revenue deviation as a named diagnostic label.
+
+    Returns one of: "traffic", "efficiency", "traffic_upside", "on_track", or None
+    (when traffic data or baseline is unavailable).
+    """
+    if not (traffic and t_band):
+        return None
+
+    imp_baseline = t_band.get("impressions_p50", 0)
+    if imp_baseline <= 0:
+        return None
+
+    if traffic["impressions"] == 0:
+        return "traffic"
+
+    imp_dev = (traffic["impressions"] - imp_baseline) / imp_baseline
+    denom = dow_median_val or today_revenue or 1.0
+    rev_dev = (today_revenue / denom - p50) / p50
+
+    if rev_dev < -threshold and abs(imp_dev) < threshold:
+        return "efficiency"
+    if rev_dev < -threshold and imp_dev < -threshold:
+        return "traffic"
+    if rev_dev > threshold and imp_dev > threshold:
+        return "traffic_upside"
+    return "on_track"
+
+
 def project_today_revenue(ch) -> dict:
     """Project today's full-day platform revenue from the intraday total and a
     90-day hour-of-day cumulative-share curve. Purely additive — daemon code
@@ -838,9 +879,6 @@ def project_today_revenue(ch) -> dict:
         base["pct_of_expected"] = round(100.0 * projected_full_day / dow_median, 1)
 
     # ── Diagnostic classification ─────────────────────────────────────────────
-    DEVIATION_THRESHOLD = 0.08
-
-    diagnostic = None
     traffic_impressions_today = 0
     traffic_sessions_today    = 0
 
@@ -851,32 +889,10 @@ def project_today_revenue(ch) -> dict:
     except Exception:
         traffic = None   # CH busy or table unavailable — degrade gracefully
 
-    t_band  = curve.get("traffic_by_dow", {}).get(dow, {}).get(curve_hour)
-    imp_baseline = t_band.get("impressions_p50", 0) if t_band else 0
-
-    if traffic and t_band:
-        if imp_baseline <= 0:
-            # No historical baseline — cannot compute imp_dev; skip classification.
-            pass
-        elif traffic["impressions"] == 0:
-            # Hard traffic outage: zero impressions against a positive baseline.
-            # imp_dev would be -1.0 (100% below baseline) — classify directly
-            # rather than falling through to diagnostic=None.
-            diagnostic = "traffic"
-        else:
-            imp_dev = (traffic["impressions"] - imp_baseline) / imp_baseline
-            dow_median_val = curve["dow_median"].get(dow)
-            denom = dow_median_val or today_revenue or 1.0
-            rev_dev = (today_revenue / denom - p50) / p50
-
-            if rev_dev < -DEVIATION_THRESHOLD and abs(imp_dev) < DEVIATION_THRESHOLD:
-                diagnostic = "efficiency"
-            elif rev_dev < -DEVIATION_THRESHOLD and imp_dev < -DEVIATION_THRESHOLD:
-                diagnostic = "traffic"
-            elif rev_dev > DEVIATION_THRESHOLD and imp_dev > DEVIATION_THRESHOLD:
-                diagnostic = "traffic_upside"
-            else:
-                diagnostic = "on_track"
+    t_band = curve.get("traffic_by_dow", {}).get(dow, {}).get(curve_hour)
+    diagnostic = _classify_revenue_diagnostic(
+        traffic, t_band, today_revenue, p50, curve["dow_median"].get(dow)
+    )
 
     base["diagnostic"]                = diagnostic
     base["traffic_impressions_today"] = traffic_impressions_today
