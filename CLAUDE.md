@@ -6,7 +6,7 @@ Extends `~/.claude/CLAUDE.md`. Scout-specific only.
 
 In order, no skipping:
 
-1. `python3 smoke_test.py` — green or stop. "It worked last time" is not a baseline. Known baseline: 136/137 pass — the threshold-history keyword test is intentionally deferred until the intent routing refactor ships. If you see 136/137, that's clean.
+1. `python3 smoke_test.py` — green or stop. "It worked last time" is not a baseline. Known baseline: 164/164 pass.
 2. Read what you're touching:
    - `scout_system.md` — Claude's system prompt and reasoning scope
    - `scout_agent.py:5198` (TOOL_MAP) + `:5415` (runtime additions) — what routes where
@@ -103,6 +103,7 @@ If any check fails: fix inline (≤5 min) or name the constraint and file the de
 | New attachment format  | `scout_attachments.py:_EXTRACTORS` + extractor fn + `smoke_test.py`                |
 | New Slack pattern      | `scout_ui_kit.py` + pattern table below                                             |
 | New ClickHouse query   | New fn in `queries_*.py` — define output shape first                                |
+| New block action       | Handler fn + `scout_handlers.py:_BLOCK_ACTION_DISPATCH` + `smoke_test.py`          |
 
 ## Verified = Done
 
@@ -125,7 +126,7 @@ ScoutKit (`scout_ui_kit.py`) is the only place that builds Slack blocks. Match p
 
 | Pattern   | Surface                           | Severity        | Buttons | When                   |
 |-----------|-----------------------------------|-----------------|---------|------------------------|
-| `ALERT`   | `MONITOR_ALARM`                   | WARN / CRITICAL | 0       | monitor alarm fires    |
+| `ALERT`   | `MONITOR_ALARM`                   | WARN / CRITICAL | ≤2      | monitor alarm fires    |
 | `ANSWER`  | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO            | ≤3      | ask() reply            |
 | `STATUS`  | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO / WARN     | ≤3      | `@Scout status`        |
 | `CONFIRM` | `EPHEMERAL`                       | POSITIVE        | 0       | action acknowledged    |
