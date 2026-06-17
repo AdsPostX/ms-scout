@@ -144,6 +144,18 @@ These have caused bugs — never do:
 - Never `shell=True` anywhere.
 - Never call `web.chat_postMessage` with hand-built blocks. Always go through `wrap_response()`.
 
+## Karpathy Lens (run before building or debugging anything)
+
+Andrej Karpathy's engineering discipline applied to Scout. Run this before writing a handler, query, or fix — not after.
+
+1. **Data bugs first** — before touching any handler or query, suspect the data. Run the raw ClickHouse query in the MCP console. Is the row grain right? Are there nulls, dupes, unexpected zeros? Most Scout bugs are data bugs, not code bugs.
+2. **Inspect before abstracting** — don't write a new query function until you've run the raw SQL and read the actual rows. If you can't describe the output shape (column names, types, row grain) from memory, you're not ready to write code.
+3. **Empirical before theoretical** — don't reason about whether a signal function returns the right data. Call it: `python3 -c "from scout_agent import _get_ch_client; from scout_bot import _pulse_signal_cap; print(_pulse_signal_cap(_get_ch_client()))"`. Look at what comes back.
+4. **Babysit the first fire** — after any monitor or formatter change, watch the actual Slack card post in #bot-qa. Smoke test green ≠ card looks right. The card is the product.
+5. **Smallest representation first** — if a zero appears where data should be, don't add error handling. Add a `print()` at the boundary and find out why it's zero. Instrumentation before abstraction.
+
+If a Karpathy check reveals a data problem: fix the data layer, don't paper over it in the handler.
+
 ## Vamsee Lens (run before closing any significant PR)
 
 Vamsee Gomatam (AdsPostX CTO) reviews significant backend work. Check before closing a PAUL APPLY phase:
