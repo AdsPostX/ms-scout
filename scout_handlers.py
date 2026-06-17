@@ -18,6 +18,7 @@ import re
 import threading
 import time
 from dataclasses import replace as _dc_replace
+from datetime import datetime, timezone
 
 from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 from slack_sdk.socket_mode import SocketModeClient
@@ -1552,6 +1553,192 @@ def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
         log.exception("_handle_home_alert_drill: views_open failed")
 
 
+# ── Alert acknowledge / snooze handlers ───────────────────────────────────────
+
+_SNOOZE_DURATIONS: dict[str, int] = {
+    "1h":  3600,
+    "4h":  14400,
+    "24h": 86400,
+    "48h": 172800,
+}
+
+
+def _handle_acknowledge(action: dict, payload: dict, web: WebClient) -> None:
+    """Acknowledge a MONITOR_ALARM alert in-place via chat_update."""
+    import alert_registry
+    ctx = _extract_interaction_context(payload)
+    channel = ctx["channel"]
+    user_id = ctx["user_id"]
+    alert_name = action.get("value", "")
+
+    ps = alert_registry.get_post_state(alert_name)
+    if ps is None:
+        web.chat_postEphemeral(channel=channel, user=user_id,
+            text=":warning: Alert state lost — can't update card. Check alerts directly.")
+        return
+
+    if ps.acknowledged_by:
+        web.chat_postEphemeral(channel=channel, user=user_id,
+            text=f":white_check_mark: Already acknowledged by <@{ps.acknowledged_by}>.")
+        return
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    alert_registry.acknowledge_alert(alert_name, user_id, now_iso)
+    now_display = datetime.now(timezone.utc).strftime("%-I:%M%p").lower()
+
+    from scout_ui_kit import _alert_status_chip_blocks
+    chip_blocks = _alert_status_chip_blocks(
+        status="acknowledged",
+        actor_id=user_id,
+        display_time=now_display,
+    )
+    try:
+        resp = web.chat_update(
+            channel=ps.channel,
+            ts=ps.message_ts,
+            text=f"✓ Acknowledged by <@{user_id}>",
+            blocks=chip_blocks,
+        )
+        if not resp.get("ok", False):
+            raise ValueError(f"chat_update returned ok=false: {resp.get('error', 'unknown')}")
+    except Exception as e:
+        log.warning("[acknowledge] chat_update failed: %s — posting ephemeral fallback", e)
+        try:
+            web.chat_postEphemeral(channel=channel, user=user_id,
+                text=":white_check_mark: Acknowledged, but couldn't update the alert card.")
+        except Exception:
+            pass
+
+
+def _handle_snooze_open(action: dict, payload: dict, web: WebClient) -> None:
+    """Open the snooze duration-picker modal."""
+    import alert_registry
+    ctx = _extract_interaction_context(payload)
+    channel = ctx["channel"]
+    user_id = ctx["user_id"]
+    trigger_id = payload.get("trigger_id", "")
+    alert_name = action.get("value", "")
+
+    ps = alert_registry.get_post_state(alert_name)
+    if ps is None:
+        web.chat_postEphemeral(channel=channel, user=user_id,
+            text=":warning: Alert state lost — can't snooze. Check alerts directly.")
+        return
+
+    private_metadata = json.dumps({
+        "alert_name": alert_name,
+        "message_ts": ps.message_ts,
+        "channel": ps.channel,
+    })
+
+    modal = {
+        "type": "modal",
+        "callback_id": "scout_snooze_submit",
+        "private_metadata": private_metadata,
+        "title": {"type": "plain_text", "text": "Snooze Alert"},
+        "submit": {"type": "plain_text", "text": "Snooze"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [{
+            "type": "input",
+            "block_id": "snooze_duration",
+            "label": {"type": "plain_text", "text": "Snooze for"},
+            "element": {
+                "type": "static_select",
+                "action_id": "snooze_duration_select",
+                "placeholder": {"type": "plain_text", "text": "Select duration"},
+                "options": [
+                    {"text": {"type": "plain_text", "text": "1 hour"},   "value": "1h"},
+                    {"text": {"type": "plain_text", "text": "4 hours"},  "value": "4h"},
+                    {"text": {"type": "plain_text", "text": "24 hours"}, "value": "24h"},
+                    {"text": {"type": "plain_text", "text": "48 hours"}, "value": "48h"},
+                ],
+            },
+        }],
+    }
+    try:
+        web.views_open(trigger_id=trigger_id, view=modal)
+    except Exception as e:
+        log.warning("[snooze_open] views_open failed: %s", e)
+
+
+def _handle_snooze_submit(payload: dict, web: WebClient) -> None:
+    """Process snooze modal submission."""
+    import alert_registry
+    view = payload.get("view", {})
+    meta = json.loads(view.get("private_metadata", "{}"))
+    alert_name = meta.get("alert_name", "")
+    message_ts = meta.get("message_ts", "")
+    channel = meta.get("channel", "")
+    user_id = payload.get("user", {}).get("id", "")
+
+    values = view.get("state", {}).get("values", {})
+    duration_str = (values.get("snooze_duration", {})
+                           .get("snooze_duration_select", {})
+                           .get("selected_option", {})
+                           .get("value", "1h"))
+
+    seconds = _SNOOZE_DURATIONS.get(duration_str, 3600)
+    now = datetime.now(timezone.utc)
+    snooze_until = datetime.fromtimestamp(now.timestamp() + seconds, tz=timezone.utc)
+    snooze_until_iso = snooze_until.isoformat()
+
+    alert_registry.snooze_alert(alert_name, snooze_until_iso, user_id)
+
+    display_until = snooze_until.strftime("%-I:%M%p").lower()
+    from scout_ui_kit import _alert_status_chip_blocks
+    chip_blocks = _alert_status_chip_blocks(
+        status="snoozed",
+        actor_id=user_id,
+        display_time=display_until,
+    )
+    try:
+        web.chat_update(
+            channel=channel,
+            ts=message_ts,
+            text=f"⏸ Snoozed by <@{user_id}> until {display_until}",
+            blocks=chip_blocks,
+        )
+    except Exception as e:
+        log.warning("[snooze_submit] chat_update failed: %s", e)
+
+
+def _extract_view_submission_context(payload: dict) -> dict:
+    """Extract channel + user_id from a view_submission payload.
+
+    view_submission carries context in view.private_metadata, NOT in
+    container.channel_id (which doesn't exist on view payloads).
+    """
+    user_id = payload.get("user", {}).get("id", "")
+    view = payload.get("view", {})
+    try:
+        meta = json.loads(view.get("private_metadata", "{}"))
+        channel = meta.get("channel", "")
+    except Exception:
+        channel = ""
+    return {"user_id": user_id, "channel": channel}
+
+
+def _handle_view_submission(req: SocketModeRequest, web: WebClient) -> None:
+    """Route view_submission payloads by view.callback_id."""
+    payload = req.payload
+    callback_id = payload.get("view", {}).get("callback_id", "")
+    handler = _VIEW_SUBMISSION_DISPATCH.get(callback_id)
+    if handler is None:
+        log.debug("[view_submission] no handler for callback_id=%r", callback_id)
+        return
+    try:
+        handler(payload, web)
+    except Exception:
+        log.exception("[view_submission] handler %r raised", callback_id)
+
+
+# Display-only modals push content only — no submission callback.
+# Only action modals with Submit buttons register here.
+_VIEW_SUBMISSION_DISPATCH: dict = {
+    "scout_snooze_submit": _handle_snooze_submit,
+}
+
+
 # ── Block-action dispatch table ───────────────────────────────────────────────
 # Maps exact action_id strings to handler callables with signature
 # (action, payload, web). Prefix-matched action_ids (scout_suggestion*,
@@ -1559,6 +1746,45 @@ def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
 # before this table is consulted.
 #
 # All referenced functions are defined above this point.
+
+
+def _handle_drill_publisher(action: dict, payload: dict, web: WebClient) -> None:
+    """Open loading modal, then async-fetch pub drill summary and update modal."""
+    import threading as _threading
+    ctx = _extract_interaction_context(payload)
+    channel = ctx["channel"]
+    trigger_id = payload.get("trigger_id", "")
+    pub_id = action.get("value", "")
+
+    if not trigger_id:
+        log.warning("[drill_publisher] no trigger_id in payload")
+        return
+
+    from scout_ui_kit import _drill_loading_modal, _drill_data_modal, _drill_error_modal
+
+    try:
+        open_resp = web.views_open(trigger_id=trigger_id, view=_drill_loading_modal())
+        view_id = open_resp["view"]["id"]
+    except Exception as e:
+        log.warning("[drill_publisher] views_open failed: %s", e)
+        return
+
+    def _fetch_and_update():
+        try:
+            from queries_revenue import get_publisher_drill_summary
+            summary = get_publisher_drill_summary(pub_id)
+            updated_view = _drill_data_modal(summary)
+        except Exception as e:
+            log.warning("[drill_publisher] query failed for %s: %s", pub_id, e)
+            updated_view = _drill_error_modal()
+        try:
+            web.views_update(view_id=view_id, view=updated_view)
+        except Exception as e:
+            log.warning("[drill_publisher] views_update failed: %s", e)
+
+    t = _threading.Thread(target=_fetch_and_update, daemon=True)
+    t.start()
+
 
 _BLOCK_ACTION_DISPATCH: dict = {
     "scout_approve":           _handle_approve,
@@ -1570,6 +1796,9 @@ _BLOCK_ACTION_DISPATCH: dict = {
     "pulse_top_opps":          _dispatch_pulse_top_opps,
     "pulse_scout_offers":      _dispatch_pulse_scout_offers,
     "pulse_dig_in":            _dispatch_pulse_dig_in,
+    "scout_acknowledge":       _handle_acknowledge,
+    "scout_snooze_open":       _handle_snooze_open,
+    "scout_drill_publisher":   _handle_drill_publisher,
 }
 
 
@@ -2112,8 +2341,12 @@ def _handle_event_impl(req: SocketModeRequest):
     from scout_slack_safe import guard_web_client
     guard_web_client(web)
 
-    # ── Button clicks ─────────────────────────────────────────────────────────
+    # ── Button clicks + modal submissions ────────────────────────────────────
     if req.type == "interactive":
+        # view_submission must be intercepted before _handle_block_action which drops it
+        if req.payload.get("type") == "view_submission":
+            _handle_view_submission(req, web)
+            return
         _handle_block_action(req, web)
         return
 
@@ -2742,7 +2975,7 @@ def _handle_event_impl(req: SocketModeRequest):
         # Add 🤔 reaction to the user's message — the "I saw it, thinking" signal.
         # Appears on their message specifically, not as a bot post. Disappears when ready.
         try:
-            web.reactions_add(channel=channel, timestamp=msg_ts, name="thinking_face")
+            web.reactions_add(channel=channel, timestamp=msg_ts, name="eyes")
         except Exception:
             pass  # reactions:write scope may not be set yet — degrade gracefully
 
@@ -2788,7 +3021,7 @@ def _handle_event_impl(req: SocketModeRequest):
             # Single point of cleanup: always remove the 🤔 — even on error
             # — so it doesn't hang on the user's message.
             try:
-                web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
+                web.reactions_remove(channel=channel, timestamp=msg_ts, name="eyes")
             except Exception:
                 pass
 
@@ -2866,6 +3099,11 @@ def _handle_event_impl(req: SocketModeRequest):
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
 
+    try:
+        web.reactions_add(channel=channel, timestamp=msg_ts, name="eyes")
+    except Exception:
+        pass
+
     _q_preview = (query[:80] + "…") if len(query) > 80 else query
     _msg_text = f"_{_q_preview}_"
     placeholder = web.chat_postMessage(
@@ -2919,6 +3157,10 @@ def _handle_event_impl(req: SocketModeRequest):
     finally:
         # Idempotent cleanup — stop_rotating() is safe to call multiple times.
         stop_rotating()
+        try:
+            web.reactions_remove(channel=channel, timestamp=msg_ts, name="eyes")
+        except Exception:
+            pass
 
     # ── Route response: brief (Block Kit) vs text_with_context vs plain text ────
     # Track the active thread per channel so top-level follow-ups retain context

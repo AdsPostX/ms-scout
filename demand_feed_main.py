@@ -866,14 +866,42 @@ def _revenue_tracker_daemon() -> None:
                         _phase2_error = str(e)[:400]
 
                     fallback, blocks = _format_revenue_alert(total, publishers)
-                    web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
 
-                    if not hourly_enabled:
-                        _save_revenue_alert_date(today_str)
-                    else:
-                        _save_revenue_alert_slot(slot)
-                        _save_revenue_alert_context(curr_pct)
-                        alert_registry.mark_firing("revenue_tracker", {"slot": slot, "pct_of_expected": curr_pct})
+                    # UC-1: check snooze state before posting
+                    _should_post = True
+                    try:
+                        _ps = alert_registry.get_post_state("revenue_tracker")
+                        if _ps and _ps.snooze_until:
+                            _snooze_dt = datetime.fromisoformat(_ps.snooze_until)
+                            if _snooze_dt > datetime.now(timezone.utc):
+                                _should_post = False
+                                log.info("demand_feed: [revenue_tracker] suppressed — active snooze until %s", _ps.snooze_until)
+                            elif _ps.snoozed_by:
+                                from scout_ui_kit import _refire_context_block
+                                blocks = [_refire_context_block(_ps.snoozed_by, _ps.snooze_until)] + list(blocks)
+                                alert_registry.clear_snooze("revenue_tracker")
+                    except Exception:
+                        pass  # snooze check is best-effort — never block the alert post
+
+                    if _should_post:
+                        _post_resp = web.chat_postMessage(channel=channel, text=fallback, blocks=blocks)
+
+                        if not hourly_enabled:
+                            _save_revenue_alert_date(today_str)
+                        else:
+                            _save_revenue_alert_slot(slot)
+                            _save_revenue_alert_context(curr_pct)
+                            alert_registry.mark_firing("revenue_tracker", {"slot": slot, "pct_of_expected": curr_pct})
+                            try:
+                                if _post_resp and _post_resp.get("ok"):
+                                    alert_registry.set_post_state(
+                                        "revenue_tracker",
+                                        _post_resp["ts"],
+                                        channel,
+                                        datetime.now(timezone.utc).isoformat(),
+                                    )
+                            except Exception:
+                                log.warning("demand_feed: set_post_state failed for revenue_tracker")
 
                     duration_ms = int((_time.monotonic() - _t0) * 1000)
                     log.info(
@@ -1012,7 +1040,27 @@ def _run_shadow_monitor(
 
                     from slack_sdk.web import WebClient as _WC
                     web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
-                    web.chat_postMessage(channel=target_channel, text=fallback, blocks=blocks)
+                    # UC-1: check snooze state before posting (prod only — shadow ticks always post)
+                    _should_post = True
+                    if not is_shadow_tick:
+                        try:
+                            _ps = alert_registry.get_post_state(monitor_name)
+                            if _ps and _ps.snooze_until:
+                                _snooze_dt = datetime.fromisoformat(_ps.snooze_until)
+                                if _snooze_dt > datetime.now(timezone.utc):
+                                    _should_post = False
+                                    log.info("demand_feed: [%s] suppressed — active snooze until %s", monitor_name, _ps.snooze_until)
+                                elif _ps.snoozed_by:
+                                    from scout_ui_kit import _refire_context_block
+                                    blocks = [_refire_context_block(_ps.snoozed_by, _ps.snooze_until)] + list(blocks)
+                                    alert_registry.clear_snooze(monitor_name)
+                        except Exception:
+                            pass  # snooze check is best-effort — never block the alert post
+
+                    if _should_post:
+                        _post_resp = web.chat_postMessage(channel=target_channel, text=fallback, blocks=blocks)
+                    else:
+                        _post_resp = None
 
                     from scout_core.job_runs import record_job_run
                     record_job_run(monitor_name, status="success", duration_ms=duration_ms)
@@ -1020,8 +1068,18 @@ def _run_shadow_monitor(
                     if is_shadow_tick:
                         last_shadow_slot = shadow_slot
                         log.info(f"{tag} shadow-posted {shadow_slot} ({len(results)} items) → {target_channel}.")
-                    else:
+                    elif _should_post:
                         alert_registry.mark_firing(monitor_name, {"results_count": len(results), "channel": target_channel})
+                        try:
+                            if _post_resp and _post_resp.get("ok"):
+                                alert_registry.set_post_state(
+                                    monitor_name,
+                                    _post_resp["ts"],
+                                    target_channel,
+                                    datetime.now(timezone.utc).isoformat(),
+                                )
+                        except Exception:
+                            log.warning("demand_feed: set_post_state failed for %s", monitor_name)
                         _PROD_FIRED[monitor_name] = today_str
                         save_state_fn(today_str)
                         log.info(f"{tag} posted alert for {today_str} ({len(results)} items).")

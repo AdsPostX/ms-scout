@@ -4258,6 +4258,105 @@ def test_build_maintenance_home_view():
     return True, "_build_maintenance_home_view: returns home view with maintenance block"
 
 
+@test("Phase 12 — ScoutResponse importable with correct validation")
+def test_scout_response_importable():
+    from scout_response import ScoutResponse, Metric, Item
+    r = ScoutResponse(
+        status="warn", subject_type="publisher",
+        subject_id="pub-1", headline="Test", projection_n=6
+    )
+    assert r.confidence == "high", f"Expected high, got {r.confidence}"
+    try:
+        ScoutResponse(status="bad", subject_type="publisher",
+                     subject_id=None, headline="x")
+        return False, "Should have raised ValueError for bad status"
+    except ValueError:
+        pass
+    return True, "ScoutResponse: import clean, validation fires, confidence derived correctly"
+
+
+@test("Phase 12 — alert_registry post-state functions present")
+def test_alert_registry_post_state_functions():
+    import alert_registry as ar
+    for fn_name in ("set_post_state", "get_post_state", "snooze_alert",
+                    "clear_snooze", "acknowledge_alert"):
+        assert callable(getattr(ar, fn_name, None)), f"Missing: {fn_name}"
+    return True, "alert_registry: all 5 post-state functions present"
+
+
+@test("Phase 12 — scout_handlers uses eyes reaction (not thinking_face)")
+def test_scout_handlers_eyes_reaction():
+    import ast, pathlib
+    src = pathlib.Path("scout_handlers.py").read_text()
+    assert "thinking_face" not in src, "thinking_face still present in scout_handlers.py"
+    assert src.count('"eyes"') >= 4, "expected ≥4 'eyes' reaction references in scout_handlers.py"
+    return True, "scout_handlers: eyes reaction wired, thinking_face removed"
+
+
+@test("Phase 12 — demand_feed_main wires set_post_state after mark_firing")
+def test_demand_feed_set_post_state_wired():
+    import pathlib
+    src = pathlib.Path("demand_feed_main.py").read_text()
+    assert "set_post_state" in src, "set_post_state not found in demand_feed_main.py"
+    assert src.count("set_post_state") >= 2, "expected set_post_state at both mark_firing sites"
+    return True, "demand_feed_main: set_post_state wired at both alert post sites"
+
+
+@test("Phase 12 — scout_acknowledge in _BLOCK_ACTION_DISPATCH")
+def test_acknowledge_in_dispatch():
+    import pathlib
+    src = pathlib.Path("scout_handlers.py").read_text()
+    assert '"scout_acknowledge"' in src, "scout_acknowledge not in dispatch table"
+    assert "_handle_acknowledge" in src, "_handle_acknowledge not defined"
+    return True, "scout_handlers: scout_acknowledge wired in _BLOCK_ACTION_DISPATCH"
+
+
+@test("Phase 12 — scout_snooze_open in _BLOCK_ACTION_DISPATCH")
+def test_snooze_in_dispatch():
+    import pathlib
+    src = pathlib.Path("scout_handlers.py").read_text()
+    assert '"scout_snooze_open"' in src, "scout_snooze_open not in dispatch table"
+    assert "_SNOOZE_DURATIONS" in src, "_SNOOZE_DURATIONS constant missing"
+    assert "scout_snooze_submit" in src, "scout_snooze_submit callback not wired"
+    return True, "scout_handlers: snooze handler + durations config + submission wired"
+
+
+@test("Phase 12 — _refire_context_block is a pure function")
+def test_refire_context_block():
+    from scout_ui_kit import _refire_context_block
+    b = _refire_context_block("U123", "2026-06-16T14:00:00+00:00")
+    assert b["type"] == "context"
+    assert "<@U123>" in b["elements"][0]["text"]
+    assert "re-firing now" in b["elements"][0]["text"]
+    assert _refire_context_block("U123", "2026-06-16T14:00:00+00:00") == b
+    return True, "_refire_context_block: pure function, correct output"
+
+
+@test("Phase 12 — scout_drill_publisher in _BLOCK_ACTION_DISPATCH")
+def test_drill_publisher_in_dispatch():
+    import pathlib
+    src = pathlib.Path("scout_handlers.py").read_text()
+    assert '"scout_drill_publisher"' in src, "scout_drill_publisher not in dispatch table"
+    assert "_handle_drill_publisher" in src, "_handle_drill_publisher not defined"
+    assert "daemon=True" in src, "thread not daemonized"
+    return True, "scout_handlers: scout_drill_publisher wired, thread daemonized"
+
+
+@test("Phase 12 — _drill_loading_modal is a pure function")
+def test_drill_loading_modal():
+    from scout_ui_kit import _drill_loading_modal, _drill_data_modal, _drill_error_modal
+    lm = _drill_loading_modal()
+    assert lm["type"] == "modal"
+    assert _drill_loading_modal() == lm
+    summary = {"pub_id": "x", "pub_name": "X", "rev_7d": 0.0, "conv_7d": 0,
+               "rev_yesterday": 0.0, "conv_yesterday": 0, "top_offer": None, "as_of": ""}
+    dm = _drill_data_modal(summary)
+    assert dm["type"] == "modal"
+    em = _drill_error_modal()
+    assert "warning" in em["blocks"][0]["text"]["text"]
+    return True, "drill modals: all three pure, correct shapes"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

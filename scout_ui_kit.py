@@ -1764,3 +1764,118 @@ def _build_maintenance_home_view() -> dict:
         Surface.HOME,
     )
     return {"type": "home", "blocks": blocks}
+
+
+def _refire_context_block(snoozed_by: str, snoozed_at_iso: str) -> dict:
+    """Build a context block announcing a re-fire after snooze.
+
+    Pure function — no Slack API calls, no registry reads.
+    """
+    from datetime import datetime, timezone as _tz
+    try:
+        dt = datetime.fromisoformat(snoozed_at_iso)
+        display_time = dt.astimezone(_tz.utc).strftime("%-I:%M%p").lower()
+    except Exception:
+        display_time = "earlier"
+    text = f"⏸ Snoozed by <@{snoozed_by}> at {display_time} · re-firing now"
+    return {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": text}],
+    }
+
+
+def _alert_status_chip_blocks(
+    status: str,
+    actor_id: str,
+    display_time: str,
+) -> list[dict]:
+    """Return a minimal blocks list replacing an alert card's actions block.
+
+    Used by acknowledge and snooze handlers to update the card in-place.
+    status: "acknowledged" | "snoozed"
+    """
+    if status == "acknowledged":
+        text = f"✓ Acknowledged by <@{actor_id}> at {display_time}"
+    else:
+        text = f"⏸ Snoozed by <@{actor_id}> until {display_time}"
+    return [{"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}]
+
+
+def _drill_loading_modal() -> dict:
+    """Loading state modal shown immediately on drill button click.
+
+    Pure function — no side effects. views_open consumes this.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "scout_drill_publisher_loading",
+        "title": {"type": "plain_text", "text": "Publisher Drill"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [{
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":hourglass_flowing_sand: Loading publisher data…"},
+        }],
+    }
+
+
+def _drill_data_modal(summary: dict) -> dict:
+    """Data-populated modal for publisher drill. Pure function.
+
+    summary: dict matching get_publisher_drill_summary output shape.
+    """
+    pub_name = summary.get("pub_name") or summary.get("pub_id", "Unknown")
+    rev_7d = summary.get("rev_7d", 0.0)
+    conv_7d = summary.get("conv_7d", 0)
+    rev_yd = summary.get("rev_yesterday", 0.0)
+    conv_yd = summary.get("conv_yesterday", 0)
+    top_offer = summary.get("top_offer") or "—"
+    as_of = summary.get("as_of", "")
+
+    def _fmt(v: float) -> str:
+        return f"${v / 1000:.1f}K" if v >= 1000 else f"${v:.0f}"
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"Publisher: {pub_name}"},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*7d Revenue*\n{_fmt(rev_7d)}"},
+                {"type": "mrkdwn", "text": f"*7d Conversions*\n{conv_7d:,}"},
+                {"type": "mrkdwn", "text": f"*Yesterday Revenue*\n{_fmt(rev_yd)}"},
+                {"type": "mrkdwn", "text": f"*Yesterday Conversions*\n{conv_yd:,}"},
+            ],
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Top Offer:* {top_offer}"},
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"Data as of {as_of}"}],
+        },
+    ]
+    return {
+        "type": "modal",
+        "callback_id": "scout_drill_publisher_data",
+        "title": {"type": "plain_text", "text": "Publisher Drill"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks,
+    }
+
+
+def _drill_error_modal() -> dict:
+    """Error state modal shown when drill query fails. Pure function."""
+    return {
+        "type": "modal",
+        "callback_id": "scout_drill_publisher_error",
+        "title": {"type": "plain_text", "text": "Publisher Drill"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [{
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": ":warning: Couldn't load publisher data. Try again or check ClickHouse directly."},
+        }],
+    }
