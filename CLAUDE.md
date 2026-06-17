@@ -1,72 +1,125 @@
-# Scout — Engineering Context
+@~/code/mosci/CLAUDE.md
 
-Extends `~/.claude/CLAUDE.md`. Scout-specific only.
+# Scout — Specific Instructions
 
-## Quickstart
+Scout never surfaces unverified data silently. If a query result can't be validated, the response must say so explicitly.
 
-In order, no skipping:
+## Repository Map
 
-1. `python3 smoke_test.py` — green or stop. "It worked last time" is not a baseline. Known baseline: 164/164 pass.
-2. Read what you're touching:
-   - `scout_system.md` — Claude's system prompt and reasoning scope
-   - `scout_agent.py:5198` (TOOL_MAP) + `:5415` (runtime additions) — what routes where
-   - `scout_handlers.py:115` (_FORCE_MONITOR_FNS) — registered monitor signals
-   - `alert_registry.py` — dedup, kill switches, per-monitor schedules (monitors only)
-3. `/mem-search scout` — check what was already decided before re-deciding it.
-
-## Operating Mode
-
-**Product sense before engineering sense.** Before writing any handler, query, or signal: does this change the answer for the user in Slack? If not, don't build it. If the existing pattern handles 80% of the case, extend — don't add new infrastructure. The bar for new code is "users get better information," not "the code is cleaner."
-
-**Parallelize by default.** Scout sessions often have independent sub-questions. Don't serialize what can fan out:
-- Multiple independent ClickHouse questions → parallel queries, synthesize in main thread
-- Auditing across `queries_*.py` → `Explore` subagent, keep main context lean
-- Multi-signal investigation → one subagent per signal, main thread synthesizes
-
-Never parallelize: single bug root cause (shared investigation = one thread), two agents touching the same handler, ClickHouse tuning (shared schema context).
-
-**Main thread = orchestrator.** Dispatch, synthesize, write. Don't redo what subagents already found. Subagents read; main thread decides and commits.
-
-## Architecture
-
-Two services. Don't cross the boundary.
-
-| Service       | Entry point          | Owns                                                        |
-|---------------|----------------------|-------------------------------------------------------------|
-| `scout-bot`   | `scout_bot.py`       | Slack event dispatch, slash command routing, digest posting |
-| `demand-feed` | `demand_feed_main.py`| Monitor polling loops, signal detection, alert posting      |
-
-**Event flow:**
 ```
-Slack event
-  └─ scout_bot.py
-       ├─ slash command ──────── scout_handlers.py
-       │                              └─ force signal → _FORCE_MONITOR_FNS[name]()
-       └─ @mention
-            ├─ file/URL ──────── ask_with_attachment() → tool loop → ScoutKit → Slack
-            └─ text only ─────── ask()               → tool loop → ScoutKit → Slack
+scout_agent.py         — main agent, ask() boundary, tool dispatch
+queries_revenue.py     — SQL: revenue, CVR, fill rate
+queries_monitor.py     — SQL: ghost campaigns, publisher health
+queries_campaign.py    — SQL: campaign analytics
+queries_publisher.py   — SQL: publisher analytics
+scout_ui_kit.py        — Slack Block Kit patterns
+scout_handlers.py      — @Scout routing + handler dispatch
+scout_attachments.py   — file + Google Sheets ingest
+offer_scraper.py       — daily scrapes + payout parsing
+demand_feed_main.py    — MS Platform feed (has 5 MS_PLATFORM_TODO before live)
+smoke_test.py          — gate tests (run before every push)
 ```
 
-**Prohibited patterns — these have caused bugs:**
-- Never call ClickHouse directly from `scout_bot.py`. Route through `queries_*.py`.
-- Never modify `ask()` at `:6132` for attachment handling. `ask_with_attachment()` at `:6202` is the attachment path. Structural guarantee (AC-9 — no regression on text-only @mentions).
-- Never `shell=True` anywhere.
-- Never call `web.chat_postMessage` with hand-built blocks. Always go through `wrap_response()` — pattern enforcement is in that call.
+Other files present but not primary entry points: `scout_bot.py`, `scout_ch.py`, `scout_digest.py`, `scout_images.py`, `scout_notion.py`, `scout_slack_safe.py`, `scout_state.py`, `scout_telemetry.py`, `scout_types.py`, `alert_registry.py`, `queries.py`.
+
+## Scout Quickstart
+
+**First session:**
+1. `/mem-search scout` for prior context
+2. Read `scout_agent.py` SYSTEM_PROMPT + TOOLS + TOOL_MAP — always before planning anything new
+3. Run `python3 smoke_test.py` to confirm baseline
+4. Check `KNOWN_DEBT.md` for open TODOs before touching `demand_feed_main.py` or `scout_ui_kit.py`
+
+**Returning to a bug:**
+1. Run `python3 smoke_test.py` — confirm the failing test before writing any fix
+2. Read the relevant handler in `scout_handlers.py` and the query file it calls
+3. Fix, re-run smoke_test, then commit
+
+**Building a new capability:**
+1. Read `scout_agent.py` SYSTEM_PROMPT + TOOLS + TOOL_MAP — required before any new tool is planned
+2. Check the Response Patterns table below — new handlers must map to an existing pattern
+3. Add the new extractor/handler, add a row to the dispatch table or TOOL_MAP, add a smoke test
+4. Run `python3 smoke_test.py` before pushing
+
+## Scout Response Patterns
+
+Scout uses ScoutKit (`scout_ui_kit.py`) for all Slack output. Every response maps to one of six patterns. Match pattern → surface → severity before writing new handlers.
+
+| Pattern | Surface | Severity | Max blocks | Buttons | When |
+|---|---|---|---|---|---|
+| `ALERT` | `MONITOR_ALARM` | WARN / CRITICAL | per budget | ≤2 | monitor alarm fires |
+| `ANSWER` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO | per budget | ≤3 | ask() reply |
+| `STATUS` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO / WARN | per budget | ≤3 | `@Scout status` |
+| `CONFIRM` | `EPHEMERAL` | POSITIVE | per budget | 0 | action acknowledged |
+| `EMPTY` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO | per budget | 0 | no data found |
+| `ERROR` | `EPHEMERAL` | CRITICAL | per budget | 0 | ClickHouse failure |
+
+**Actionability rule:** every ALERT and ANSWER must give the reader one next action. No number without context.
+
+### Code example (ANSWER pattern)
+
+```python
+from scout_ui_kit import Card, Severity, Surface, ResponsePattern, wrap_response
+
+card = Card(severity=Severity.INFO, headline="Revenue MTD", body="$847K / $1M · 71%")
+_, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER)
+web.chat_postMessage(channel=channel, text="Revenue MTD", blocks=blocks)
+```
+
+### Pattern enforcement
+
+Passing `pattern=` raises `ValueError` at call time if the surface is wrong:
+
+```python
+# This raises ValueError — ALERT requires MONITOR_ALARM, not CHANNEL_ROOT
+wrap_response(card=card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ALERT)
+```
+
+Existing callers that don't pass `pattern=` are unaffected.
+
+## Scout Attachment Ingestion
+
+Scout extracts content from @mention attachments and Google Sheets URLs and passes it as per-turn context to `ask_with_attachment()`. Read-only — no write-back to external systems.
+
+**Required Slack scope:** `files:read` — register at api.slack.com/apps → OAuth & Permissions → Bot Token Scopes. Reinstall the app after adding.
+
+**Supported sources:**
+- Google Sheets URLs in `@mention` text — fetched anonymously via `export?format=csv`. Sheet must be shared as **anyone with the link can view**. Auto-unwraps Slack's `<url|label>` formatting and handles `#gid=` fragments.
+- File attachments via `event.files[]`, routed via the dispatch table in `scout_attachments.py` (`_EXTRACTORS`): PDF, Excel (.xlsx/.xls), Word (.docx), CSV, Images (.png/.jpg/.gif/.webp via Claude vision), Text (.txt/.md/.json/.log)
+- Unsupported types degrade gracefully — Scout answers the text question and prepends a one-line note.
+
+**Adding a new format:** implement an extractor in `scout_attachments.py` + add one row to `_EXTRACTORS`. `smoke_test.test_dispatch_table_routes_each_known_format` is the regression guard.
+
+**Limits:** 10MB per file/sheet, 30K char extracted text, 5MB raw image bytes before base64. File takes priority over URL if both present in the same @mention.
+
+**Security guards (`scout_attachments.py`):**
+- SSRF protection on Sheets fetch — host allowlist (`docs.google.com`, `accounts.google.com`), max 3 redirect hops, private/loopback/link-local IP blocked via `_resolves_to_private_ip`
+- pdftotext runs via `subprocess.run` with timeout, `tempfile.mkstemp`, no shell — never `shell=True`
+- Slack `url_private` downloads gated on `https://files.slack.com/` prefix only
+
+**Boundary:** `ask()` is NOT modified — `ask_with_attachment()` is a separate function. AC-9 ("no regression on text-only @mentions") is structurally guaranteed.
+
+## Scout Slash Commands
+
+Registered at api.slack.com/apps — each must be added to the Slack app manifest.
+
+| Command | What it does |
+|---|---|
+| `/scout-cap` | Force-run cap signal now; results post in the channel |
+| `/scout-vel` | Force-run velocity signal now |
+| `/scout-ghost` | Force-run ghost (zero-conversion) signal now |
+| `/scout-fill` | Force-run fill-rate signal now |
+| `/scout-signal-status` | List signals currently firing (reads alert_registry) |
+| `/scout-revenue` | Prompts user to ask `@Scout revenue` for full response |
+| `/scout-pub [publisher]` | Revenue health card for a publisher |
+| `/scout-enter [advertiser]` | Campaign entry card for the MS platform |
+| `/scout-queue` | Current demand queue with Notion links |
+| `/scout-status` | System health + benchmark freshness |
+| `/scout-help` | Full reference card (ephemeral) |
+
+All `/scout-cap/vel/ghost/fill` commands route to `_FORCE_MONITOR_FNS` — same path as `@Scout force <signal>`. Requires the demand-feed service running with monitors initialized.
 
 ## Engineering Gates
-
-Pre-conditions. Stop at the gate; don't proceed without passing.
-
-**Before writing a new ClickHouse query:**
-Define the output shape (column names, types, row grain) before writing SQL. If you can't name the shape, you don't understand the question yet.
-
-**Before patching a bug:**
-Classify the layer first:
-- Scout query layer (`queries_*.py` logic, `scout_agent.py`) — bad reasoning or wrong tool selection
-- ClickHouse data layer (`scout_ch.py`, `queries_*.py` SQL) — wrong SQL, bad join, stale schema
-- Feed/scraper layer (`offer_scraper.py`, `demand_feed_main.py`) — upstream data missing or malformed
-
-Wrong-layer patches waste time. Name the layer before writing any code.
 
 **Before adding a new monitor signal — touch exactly these 5:**
 1. Signal function in `scout_bot.py` (default) or `demand_feed_main.py` (if demand-feed-native)
@@ -77,100 +130,28 @@ Wrong-layer patches waste time. Name the layer before writing any code.
 
 All 5 or don't ship. A signal that can't be force-run can't be debugged.
 
-**Before adding new infrastructure (new module, service, dependency):**
-Does the existing layer solve 80% of this? If yes, extend it. If no, name what it can't do before proposing something new.
+**Before writing a new ClickHouse query:** Define the output shape (column names, types, row grain) before writing SQL. If you can't name the shape, you don't understand the question yet.
 
-**When the elegant solution hits a constraint:**
-Ship the simpler path. Name the constraint inline. Don't block the fix waiting for elegance.
+**Before patching a bug:** Classify the layer first — Scout query layer (`scout_agent.py`), ClickHouse data layer (`scout_ch.py`, SQL), or feed/scraper layer (`demand_feed_main.py`). Wrong-layer patches waste time.
 
-**Before merging any PR (Vamsee Lens):**
-Vamsee Gomatam (AdsPostX CTO) will review significant backend work. Run this check before closing a PAUL APPLY phase:
+**Before adding new infrastructure:** Does the existing layer solve 80% of this? If yes, extend it. If no, name what it can't do before proposing something new.
+
+## Prohibited Patterns
+
+These have caused bugs — never do:
+- Never call ClickHouse directly from `scout_bot.py`. Route through `queries_*.py`.
+- Never modify `ask()` at `:6132` for attachment handling. `ask_with_attachment()` at `:6202` is the attachment path. Structural guarantee (AC-9 — no regression on text-only @mentions).
+- Never `shell=True` anywhere.
+- Never call `web.chat_postMessage` with hand-built blocks. Always go through `wrap_response()`.
+
+## Vamsee Lens (run before closing any significant PR)
+
+Vamsee Gomatam (AdsPostX CTO) reviews significant backend work. Check before closing a PAUL APPLY phase:
+
 1. **No invisible accumulators** — if a list is built up silently inside a loop, it must be returned as a value or passed as a collector, not captured as a closure side effect.
 2. **No no-op handlers with side-channel capture** — if a TOOL_MAP function returns a placeholder string while real capture happens elsewhere in the loop, document the contract explicitly in the docstring or restructure.
 3. **No repeated inline comprehensions** — if the same filter/transform pattern appears ≥2 times across handlers, extract to a named pure function (`_coerce_X(raw)`) before shipping.
-4. **Config objects, not scattered env reads** — feature flags should be gathered into a named constant block or config dataclass at module top; not scattered inline `os.getenv()` calls throughout the code.
+4. **Config objects, not scattered env reads** — feature flags gathered into a named constant block or config dataclass at module top; not scattered inline `os.getenv()` calls throughout the code.
 5. **Validate at construction** — dataclasses use `__post_init__`, flags validate at startup. If the flag is on but required config is missing, warn or raise.
 
 If any check fails: fix inline (≤5 min) or name the constraint and file the debt explicitly.
-
-## Extension Points
-
-| Adding...              | Touch these files                                                                    |
-|------------------------|--------------------------------------------------------------------------------------|
-| New Claude tool        | `scout_agent.py:TOOL_MAP` + implementation in `queries_*.py` + `smoke_test.py`     |
-| New monitor signal     | Signal fn + `scout_handlers.py:_FORCE_MONITOR_FNS` + `alert_registry.py` + Slack manifest + `smoke_test.py` |
-| New slash command      | Handler in `scout_handlers.py` + api.slack.com/apps manifest                        |
-| New attachment format  | `scout_attachments.py:_EXTRACTORS` + extractor fn + `smoke_test.py`                |
-| New Slack pattern      | `scout_ui_kit.py` + pattern table below                                             |
-| New ClickHouse query   | New fn in `queries_*.py` — define output shape first                                |
-| New block action       | Handler fn + `scout_handlers.py:_BLOCK_ACTION_DISPATCH` + `smoke_test.py`          |
-
-## Verified = Done
-
-All three, not one:
-1. `python3 smoke_test.py` green
-2. Slack confirmed — @mention in test channel, response received
-3. One output count spot-checked against ClickHouse directly
-
-Code that looks right is not verified.
-
-## Product Principle
-
-Scout never surfaces unverified data silently. If Scout shows a number, it was verified. If Scout cannot verify, Scout says so in the response.
-
-Implementation: (a) `PayoutResult.state` catches enrichment failures at parse time; (b) failed Impact offers appear as a footer count in the digest; (c) `/scout-health` shows the data quality section alongside module sizes.
-
-## Response Patterns
-
-ScoutKit (`scout_ui_kit.py`) is the only place that builds Slack blocks. Match pattern → surface → severity before writing new handlers.
-
-| Pattern   | Surface                           | Severity        | Buttons | When                   |
-|-----------|-----------------------------------|-----------------|---------|------------------------|
-| `ALERT`   | `MONITOR_ALARM`                   | WARN / CRITICAL | ≤2      | monitor alarm fires    |
-| `ANSWER`  | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO            | ≤3      | ask() reply            |
-| `STATUS`  | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO / WARN     | ≤3      | `@Scout status`        |
-| `CONFIRM` | `EPHEMERAL`                       | POSITIVE        | 0       | action acknowledged    |
-| `EMPTY`   | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO            | 0       | no data found          |
-| `ERROR`   | `EPHEMERAL`                       | CRITICAL        | 0       | ClickHouse failure     |
-
-Actionability rule: every ALERT and ANSWER must give the reader one next action. No number without context.
-
-Pattern mismatch raises `ValueError` at call time — callers without `pattern=` are unaffected.
-
-```python
-from scout_ui_kit import Card, Severity, Surface, ResponsePattern, wrap_response
-
-card = Card(severity=Severity.INFO, headline="Revenue MTD", body="$847K / $1M · 71%")
-_, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER)
-web.chat_postMessage(channel=channel, text="Revenue MTD", blocks=blocks)
-```
-
-## Attachment Ingestion
-
-Dispatch table: `scout_attachments.py:178` (`_EXTRACTORS`) — single source of truth. `smoke_test.test_dispatch_table_routes_each_known_format` is the regression guard.
-
-Adding a format: one extractor fn + one row in `_EXTRACTORS`. That's the full change.
-
-Google Sheets URLs fetched anonymously via `export?format=csv` — sheet must be shared publicly. Slack `url_private` downloads gated on `https://files.slack.com/` prefix only.
-
-Limits: 10MB per source, 30K char extracted, 5MB raw image bytes. Single source per @mention (file takes priority over URL).
-
-Security: SSRF protection on Sheets fetch (host allowlist, 3-redirect max, private IP blocked). Never `shell=True` in extractors.
-
-## Slash Commands
-
-| Command                | What it does                                              |
-|------------------------|-----------------------------------------------------------|
-| `/scout-cap`           | Force-run cap signal now                                  |
-| `/scout-vel`           | Force-run velocity signal now                             |
-| `/scout-ghost`         | Force-run ghost (zero-conversion) signal now              |
-| `/scout-fill`          | Force-run fill-rate signal now                            |
-| `/scout-signal-status` | List signals currently firing (reads alert_registry)      |
-| `/scout-revenue`       | Prompts user to ask `@Scout revenue`                      |
-| `/scout-pub [pub]`     | Revenue health card for a publisher                       |
-| `/scout-enter [adv]`   | Campaign entry card for MS platform                       |
-| `/scout-queue`         | Current demand queue with Notion links                    |
-| `/scout-status`        | System health + benchmark freshness                       |
-| `/scout-help`          | Full reference card (ephemeral)                           |
-
-All `/scout-cap/vel/ghost/fill` route through `scout_handlers.py:_FORCE_MONITOR_FNS`.
