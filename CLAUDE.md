@@ -137,9 +137,6 @@ Interactive button clicks route through `_BLOCK_ACTION_DISPATCH` in `scout_handl
 | `pulse_top_opps` | `_dispatch_pulse_top_opps` | Top opportunities |
 | `pulse_scout_offers` | `_dispatch_pulse_scout_offers` | Scout offers pulse |
 | `pulse_dig_in` | `_dispatch_pulse_dig_in` | Dig in action |
-| `scout_feedback_good` | `_handle_feedback` | Thumbs-up feedback on ANSWER card |
-| `scout_feedback_bad` | `_handle_feedback` | Thumbs-down feedback on ANSWER card |
-| `scout_feedback_correct` | `_handle_feedback` | Correction feedback on ANSWER card |
 
 ## Engineering Gates
 
