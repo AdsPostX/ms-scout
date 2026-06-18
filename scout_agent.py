@@ -786,7 +786,7 @@ _TOOL_STEP_LABELS: dict[str, str] = {
     "get_publisher_revenue_trends": "Publisher trends",
     "get_top_revenue_opportunities": "Revenue opportunities",
     # Signals
-    "get_ghost_campaigns": "Ghost (zero-conv)",
+    "get_ghost_campaigns": "Ghost campaigns",
     "get_low_fill_publishers": "Fill rate",
     "get_exposure_rate_anomalies": "Exposure anomalies",
     "get_publisher_fleet_health": "Fleet health",
@@ -797,7 +797,6 @@ _TOOL_STEP_LABELS: dict[str, str] = {
     "get_perkswall_engagement": "Perkswall engagement",
     # Campaigns / demand
     "get_campaign_status": "Campaign status",
-    "get_ghost_campaigns": "Ghost campaigns",
     "get_expiring_campaigns": "Expiring campaigns",
     "get_top_opportunities": "Opportunity scan",
     "get_supply_demand_gaps": "Supply/demand gaps",
@@ -815,6 +814,8 @@ _TOOL_STEP_LABELS: dict[str, str] = {
     "get_pulse_summary": "Pulse summary",
     "get_scout_status": "Scout status",
     "get_pipeline_health": "Pipeline health",
+    # Free-form SQL
+    "run_sql_query": "Run SQL",
 }
 
 _TOOL_SKIP_SYNTHESIS: frozenset[str] = frozenset({
@@ -847,10 +848,15 @@ def _synthesize_agent_steps(tool_call_log: list[tuple[str, any]]) -> list[dict]:
         elif isinstance(result, list):
             finding = f"{len(result)} result{'s' if len(result) != 1 else ''}"
         elif isinstance(result, dict):
-            finding = next(
-                (f"{k}: {v}" for k, v in result.items() if k not in {"error", "err", "raw"}),
-                "—"
-            )[:80]
+            if status == "fail":
+                # Show the actual error, not the next non-error key (e.g. sql_run: SELECT...)
+                err = result.get("error") or result.get("err") or ""
+                finding = str(err)[:80] if err else "—"
+            else:
+                finding = next(
+                    (f"{k}: {v}" for k, v in result.items() if k not in {"error", "err", "raw"}),
+                    "—"
+                )[:80]
         else:
             # For formatted strings, skip pure title lines (e.g. "*Report Title*") —
             # they repeat the label. Use the first content line instead.
@@ -861,6 +867,19 @@ def _synthesize_agent_steps(tool_call_log: list[tuple[str, any]]) -> list[dict]:
             )
             finding = content[:80]
         steps.append({"label": label, "status": status, "finding": finding})
+
+    # Collapse consecutive same-label/same-status runs (e.g. 5× SQL retry) into one step
+    if len(steps) > 1:
+        collapsed = [dict(steps[0])]
+        for step in steps[1:]:
+            prev = collapsed[-1]
+            if prev["label"] == step["label"] and prev["status"] == step["status"]:
+                n = prev.get("_count", 1) + 1
+                collapsed[-1] = {**prev, "_count": n, "finding": f"×{n}: {step['finding']}"}
+            else:
+                collapsed.append(dict(step))
+        steps = [{k: v for k, v in s.items() if k != "_count"} for s in collapsed]
+
     return steps
 
 
