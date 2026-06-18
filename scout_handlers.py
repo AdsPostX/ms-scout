@@ -3075,7 +3075,7 @@ def _handle_event_impl(req: SocketModeRequest):
             response_text  = _sanitize_slack(response.text)[:3000]
             _dm_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
             _dm_interp = _build_interpretation(_dm_ctx)
-            _dm6_card = Card(Severity.INFO, "", body=response_text)
+            _dm6_card = Card(Severity.INFO, "", body=response_text, chart_url=response.chart_url)
             _dm_agent_steps = [
                 AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
                 for s in (response.agent_steps or [])
@@ -3260,7 +3260,7 @@ def _handle_event_impl(req: SocketModeRequest):
         response_text  = _sanitize_slack(response.text)[:3000]
         _ch_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
         _ch_interp = _build_interpretation(_ch_ctx)
-        _ch8_card = Card(Severity.INFO, "", body=response_text)
+        _ch8_card = Card(Severity.INFO, "", body=response_text, chart_url=response.chart_url)
         _ch_agent_steps = [
             AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
             for s in (response.agent_steps or [])

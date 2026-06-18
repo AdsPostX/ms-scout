@@ -164,6 +164,7 @@ class Card:
     body: str = ""
     facts: list[tuple[str, str]] = field(default_factory=list)
     actions: list[tuple[str, str, str, str]] = field(default_factory=list)
+    chart_url: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.severity, Severity):
@@ -594,6 +595,13 @@ def wrap_response(
     blocks.extend(_render_body(card, surface))
     if card.facts:
         blocks.extend(_build_facts_blocks(card.facts))
+
+    if card.chart_url:
+        blocks.append({
+            "type": "image",
+            "image_url": card.chart_url,
+            "alt_text": "Revenue trend — last 7 days",
+        })
 
     capped = [s.strip() for s in suggestions if isinstance(s, str) and s.strip()][:max_btn]
     if capped:

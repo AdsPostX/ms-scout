@@ -17,6 +17,7 @@ from scout_ch import (
     _get_ch_client,
     _run_parallel,
     _query_advertiser_revenue_trends,
+    _query_revenue_sparkline_series,
     project_today_revenue,
 )
 from scout_ch import CHBusyError
@@ -473,6 +474,7 @@ GROUP BY c.user_id
 
         today_rows = ch.query(today_sql).result_rows
         avg_rows = ch.query(avg_sql).result_rows
+        series_rows = _query_revenue_sparkline_series(ch)
 
         # Build avg lookup: user_id → avg_daily_rev
         avg_lookup: dict[int, float] = {int(r[0]): float(r[1] or 0) for r in avg_rows}
@@ -498,10 +500,16 @@ GROUP BY c.user_id
             total_today += rev
             total_avg += avg
 
+        # Build sparkline from 7-day series (cents for _build_sparkline_url)
+        from scout_ui_kit import _build_sparkline_url
+        _series_cents = [int(float(r[1] or 0) * 100) for r in series_rows]
+        _sparkline_url = _build_sparkline_url(_series_cents) or ""
+
         # Empty / early state
         if not publishers:
             return {
                 "formatted": "_No revenue data yet today. Check back after 9am CT._",
+                "chart_url": _sparkline_url,
             }
 
         # Headline
@@ -525,7 +533,7 @@ GROUP BY c.user_id
             rest_total = sum(p["rev"] for p in rest)
             lines.append(f"> {len(rest)} others · {_fmt_rev(rest_total)} combined")
 
-        return {"formatted": "\n".join(lines)}
+        return {"formatted": "\n".join(lines), "chart_url": _sparkline_url}
 
     except Exception as e:
         if isinstance(e, CHBusyError):
@@ -533,6 +541,7 @@ GROUP BY c.user_id
         log.exception("get_revenue_today failed")
         return {
             "formatted": "⚠️ Revenue data unavailable — query failed. Try again or check ClickHouse.",
+            "chart_url": "",
         }
 
 
