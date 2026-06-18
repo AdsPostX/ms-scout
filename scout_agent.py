@@ -859,10 +859,16 @@ def _synthesize_agent_steps(tool_call_log: list[tuple[str, any]]) -> list[dict]:
                 err = result.get("error") or result.get("err") or ""
                 finding = str(err)[:80] if err else "—"
             else:
-                finding = next(
-                    (f"{k}: {v}" for k, v in result.items() if k not in {"error", "err", "raw"}),
-                    "—"
-                )[:80]
+                if "finding" in result:
+                    finding = str(result["finding"])[:80]
+                elif "summary" in result:
+                    finding = str(result["summary"])[:80]
+                else:
+                    finding = next(
+                        (f"{k}: {v}" for k, v in result.items()
+                         if k not in {"error", "err", "raw"} and not isinstance(v, (list, dict))),
+                        "—"
+                    )[:80]
         else:
             # For formatted strings, skip pure title lines (e.g. "*Report Title*") —
             # they repeat the label. Use the first content line instead.

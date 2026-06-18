@@ -230,6 +230,7 @@ def get_publisher_competitive_landscape(
                     weekly_impressions * weeks * cur_share / 100
                 )
 
+        result["finding"] = f"{result.get('publisher', '?')}: {len(competitors)} provisioned, {serving_count} serving"
         return result
 
     except Exception as e:
@@ -387,6 +388,7 @@ def get_publisher_health(
                 )
 
         return {
+            "finding":       top_placement_note or f"{pub_name or f'Partner {pid}'}: {total_sessions:,} sessions ({days}d)",
             "publisher":     pub_name or f"Partner {pid}",
             "days":          days,
             "geo_state":     geo_state or None,
@@ -506,6 +508,7 @@ def get_perkswall_engagement(
             )
 
         return {
+            "finding":                 insight or f"{selection_rate_pct}% selection rate ({days}d)",
             "publisher":               pub_name or f"Partner {pid}",
             "publisher_id":            int(pid),
             "days":                    days,

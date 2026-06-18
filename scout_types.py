@@ -143,3 +143,23 @@ class PulseSignal(TypedDict, total=False):
     body: str
     urgency: str         # "high" | "medium" | "low"
     data: list           # list[dict] — raw signal rows, shape varies by signal_type
+
+
+# ── Tool result contract ───────────────────────────────────────────────────────
+# Every TOOL_MAP function that returns a dict MUST call tool_result() instead of
+# returning a bare dict. This guarantees a non-empty "finding" key that
+# _synthesize_agent_steps reads directly — no heuristic sniffing.
+#
+# Tools that already return "formatted" or "summary" are exempt; those keys have
+# their own synthesis branches. Error returns (dicts with "error" key) are also
+# exempt — synthesizer extracts the error message directly.
+
+def tool_result(finding: str, **kwargs) -> dict:
+    """Build a TOOL_MAP return dict with a guaranteed non-empty finding.
+
+    The 'finding' is a ≤80-char human-readable string summarising the result
+    for the Scout Reasoning chain. Raises ValueError at call time if empty.
+    """
+    if not finding or not finding.strip():
+        raise ValueError("tool_result() requires a non-empty finding")
+    return {"finding": finding, **kwargs}

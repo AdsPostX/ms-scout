@@ -128,6 +128,7 @@ def get_pulse_summary() -> dict:
             msg = "No monitoring signals have fired today yet."
 
         return {
+            "finding": msg,
             "has_pulse": any_fired,
             "had_content": any_fired,
             "fired_today": fired_today,
