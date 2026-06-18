@@ -4410,6 +4410,35 @@ def test_alert_card_buttons():
     return True, "ack/snooze buttons present on all 5 alert card types; absent without alert_name"
 
 
+@test("chart_url threads: AskResult → Card → image block")
+def test_chart_url_threads_through_ask_result():
+    """chart_url on AskResult flows from tool result dict → Card.chart_url."""
+    from scout_agent import AskResult
+    from scout_ui_kit import Card, Severity, Surface, wrap_response
+
+    # AskResult carries chart_url
+    r = AskResult(text="Revenue today: $10K", chart_url="https://quickchart.io/chart?c=test")
+    if r.chart_url != "https://quickchart.io/chart?c=test":
+        return False, "AskResult did not preserve chart_url"
+
+    # Card carries chart_url → image block appears in wrap_response output
+    card = Card(Severity.INFO, "Revenue", body="$10K today", chart_url="https://quickchart.io/chart?c=test")
+    _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
+    img_blocks = [b for b in blocks if b.get("type") == "image"]
+    if not img_blocks:
+        return False, "wrap_response did not emit image block when chart_url is set"
+    if img_blocks[0].get("image_url") != "https://quickchart.io/chart?c=test":
+        return False, f"image_url mismatch: {img_blocks[0].get('image_url')!r}"
+
+    # No chart_url → no image block
+    card_no_chart = Card(Severity.INFO, "Revenue", body="$10K today")
+    _, blocks_no_chart = wrap_response(card=card_no_chart, surface=Surface.CHANNEL_ROOT)
+    if any(b.get("type") == "image" for b in blocks_no_chart):
+        return False, "wrap_response emitted unexpected image block when chart_url is empty"
+
+    return True, "chart_url threads correctly: AskResult → Card → image block"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

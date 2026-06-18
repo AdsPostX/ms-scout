@@ -38,6 +38,7 @@ from scout_ch import (  # noqa: F401 — backward compat re-exports
     _query_advertiser_rpm_context,
     _query_cvr_anomaly, _query_expiring_campaigns,
     _query_publisher_revenue_trends, _query_advertiser_revenue_trends,
+    _query_revenue_sparkline_series,
 )
 from scout_images import (  # noqa: F401 — backward compat re-exports
     _scrape_og_image, _clearbit_domain, _google_favicon, _app_store_icon,
@@ -92,6 +93,7 @@ class AskResult:
     tools_called: tuple = ()
     duration_ms: int = 0
     payload: Optional[Mapping] = None
+    chart_url: str = ""
     agent_steps: Optional[list] = None
 
     def __post_init__(self) -> None:
@@ -103,6 +105,10 @@ class AskResult:
         if self.payload is not None and not isinstance(self.payload, MappingProxyType):
             object.__setattr__(self, "payload", _freeze(dict(self.payload)))
 
+
+def _extract_chart_url(result: object) -> str:
+    """Return chart_url from a tool result dict, or empty string."""
+    return result.get("chart_url", "") if isinstance(result, dict) else ""
 
 
 from scout_thresholds import _manager, AmbiguousThresholdKey
@@ -1197,6 +1203,7 @@ def _run_tool_loop(
     if _all_tool_results is None:
         _all_tool_results = []
     _tool_call_log: list[tuple[str, any]] = []
+    _chart_url: str = ""
 
     # user_message is the RAW pre-prefix string — passed explicitly so the
     # MAX_ROUNDS warning log line matches pre-refactor behavior (logging the
@@ -1306,6 +1313,7 @@ def _run_tool_loop(
                     text=_fallback_text,
                     tools_called=_tools_called,
                     duration_ms=_dur(),
+                    chart_url=_chart_url,
                     payload={
                         "type": "brief",
                         "brief_data": brief_data,
@@ -1336,6 +1344,7 @@ def _run_tool_loop(
                     text=text or "",
                     tools_called=_tools_called,
                     duration_ms=_dur(),
+                    chart_url=_chart_url,
                     payload={
                         "type": "opportunities",
                         "text": text or "",
@@ -1356,6 +1365,7 @@ def _run_tool_loop(
                         text=text or "(no response)",
                         tools_called=_tools_called,
                         duration_ms=_dur(),
+                        chart_url=_chart_url,
                         payload={
                             "type": "text_with_context",
                             "text": text or "(no response)",
@@ -1369,6 +1379,7 @@ def _run_tool_loop(
                 text=text or "(no response)",
                 tools_called=_tools_called,
                 duration_ms=_dur(),
+                chart_url=_chart_url,
                 agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
             )
 
@@ -1415,6 +1426,7 @@ def _run_tool_loop(
                         _opportunity_offers.extend(result)
                     if block.name == "get_offers_for_publisher" and isinstance(result, dict) and result.get("offers") and not _opportunity_offers:
                         _opportunity_offers.extend(result["offers"])
+                    _chart_url = _extract_chart_url(result) or _chart_url
                     _all_tool_results.append(result)
                     tool_results.append({
                         "type": "tool_result",
@@ -1429,6 +1441,7 @@ def _run_tool_loop(
                     _tool_call_log.append((block.name, result))
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
+                    _chart_url = _extract_chart_url(result) or _chart_url
                     _all_tool_results.append(result)
                     tool_results.append({
                         "type": "tool_result",
@@ -1447,6 +1460,7 @@ def _run_tool_loop(
                     _opportunity_offers.extend(result)
                 if block.name == "get_offers_for_publisher" and isinstance(result, dict) and result.get("offers") and not _opportunity_offers:
                     _opportunity_offers.extend(result["offers"])
+                _chart_url = _extract_chart_url(result) or _chart_url
                 _all_tool_results.append(result)  # accumulate all for entity extraction
                 tool_results.append({
                     "type": "tool_result",
@@ -1461,9 +1475,10 @@ def _run_tool_loop(
                         text=block.text,
                         tools_called=_tools_called,
                         duration_ms=_dur(),
+                        chart_url=_chart_url,
                         agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
                     )
-            return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur(), agent_steps=_synthesize_agent_steps(_tool_call_log) or None)
+            return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur(), chart_url=_chart_url, agent_steps=_synthesize_agent_steps(_tool_call_log) or None)
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
@@ -1478,6 +1493,7 @@ def _run_tool_loop(
         ),
         tools_called=_tools_called,
         duration_ms=_dur(),
+        chart_url=_chart_url,
         agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
     )
 
