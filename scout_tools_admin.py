@@ -325,6 +325,7 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
             col_names = _keep
 
         return {
+            "finding": f"{len(rows_as_dicts)} row(s): {description or 'query run'}"[:80],
             "description": description,
             "sql_run": sql_stripped,
             "row_count": len(rows_as_dicts),
@@ -456,6 +457,7 @@ def get_scout_status() -> dict:
         status["warnings"] = warnings
 
     status["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    status["finding"] = f"{status.get('offer_inventory', 0)} offers, {status.get('queue_depth', 0)} queued, CH {status.get('clickhouse', 'unknown')}"
 
     try:
         import scout_digest as _sd
@@ -732,6 +734,7 @@ def run_self_qa() -> dict:
 
     passed_count = sum(1 for r in results if r["passed"])
     return {
+        "finding": f"{passed_count}/{total} checks passed",
         "total": total,
         "passed": passed_count,
         "failed": total - passed_count,

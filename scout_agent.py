@@ -859,7 +859,9 @@ def _synthesize_agent_steps(tool_call_log: list[tuple[str, any]]) -> list[dict]:
                 err = result.get("error") or result.get("err") or ""
                 finding = str(err)[:80] if err else "—"
             else:
-                if "summary" in result:
+                if "finding" in result:
+                    finding = str(result["finding"])[:80]
+                elif "summary" in result:
                     finding = str(result["summary"])[:80]
                 else:
                     finding = next(

@@ -380,6 +380,7 @@ def get_category_performance(category: str = None) -> dict:
     top_offers = sorted(by_offer.items(), key=lambda x: x[1].get("rpm", 0), reverse=True)[:10]
 
     return {
+        "finding": f"{len(cat_data)} {'category' if len(cat_data) == 1 else 'categories'} benchmarked",
         "category_benchmarks": cat_data,
         "note": "CVR and RPM are real MS performance data from ClickHouse (Jan 2025+). Use RPM to estimate expected value of new offers: RPM = payout × (CVR/100) × 1000.",
         "top_performing_offers_by_rpm": [
@@ -420,6 +421,7 @@ def get_offer_stats() -> dict:
     top5 = sorted(offers, key=lambda x: _scout_score(x, benchmarks), reverse=True)[:5]
 
     return {
+        "finding": f"{len(offers)} offers, {len(by_network)} networks",
         "total_offers": len(offers),
         "by_network": {
             k: {
@@ -699,6 +701,7 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
     fallback_category_subs = fallback.get("category_alts", [])[:2]
 
     return {
+        "finding": f"{o.get('advertiser', '?')} · {net.upper() if net else '?'} · {o.get('_raw_payout') or o.get('payout', '?')}",
         "advertiser": o.get("advertiser"),
         "network": o.get("network"),
         "offer_id": offer_id,
@@ -781,6 +784,7 @@ def get_fallback_candidates(
     cat_subs.sort(key=lambda x: _scout_score(x, benchmarks), reverse=True)
 
     return {
+        "finding": f"{offer_name}: {len(same_brand[:limit])} brand alt(s), {len(cat_subs[:limit])} category alt(s)",
         "primary_offer": offer_name,
         "primary_network": primary_network,
         "primary_category": inferred_category,

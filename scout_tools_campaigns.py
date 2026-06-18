@@ -36,7 +36,7 @@ def get_queue_status() -> dict:
         text = "Queue is clear — nothing awaiting entry or in platform."
     else:
         text = f"Offer pipeline: {len(items)} offer{'s' if len(items) != 1 else ''} in queue."
-    return {"blocks": blocks, "text": text}
+    return {"finding": text, "blocks": blocks, "text": text}
 
 
 def get_demand_queue_status() -> dict:
@@ -53,7 +53,7 @@ def get_demand_queue_status() -> dict:
     ]
 
     if not pending:
-        return {"pending": [], "count": 0}
+        return {"finding": "0 queued", "pending": [], "count": 0}
 
     # Batch ClickHouse check: impressions per advertiser since approved_at
     impression_counts: dict = {}
@@ -112,7 +112,7 @@ def get_demand_queue_status() -> dict:
             "impressions_since_approval": imp,
         })
 
-    return {"pending": result_items, "count": len(result_items)}
+    return {"finding": f"{len(result_items)} queued", "pending": result_items, "count": len(result_items)}
 
 
 def mark_offer_launched(advertiser: str) -> dict:
@@ -141,6 +141,7 @@ def mark_offer_launched(advertiser: str) -> dict:
         log.warning(f"mark_offer_launched write failed: {e}")
 
     return {
+        "finding":     f"{key} launched",
         "status":      "launched",
         "advertiser":  key,
         "approved_by": entry.get("approved_by"),
@@ -270,6 +271,7 @@ def get_campaign_status(advertiser_name: str) -> dict:
         status_summary = f"{active_count} active, {paused_count} paused.{last_change_str}"
 
         return {
+            "finding":        status_summary,
             "advertiser":     advertiser_name,
             "campaign_count": len(campaigns),
             "active_count":   active_count,

@@ -4064,7 +4064,42 @@ def test_synthesize_agent_steps():
     mixed_steps = _synthesize_agent_steps(mixed_log)
     if "campaigns" in mixed_steps[0]["finding"] and "[" in mixed_steps[0]["finding"]:
         return False, f"List-valued key should be skipped, got: {mixed_steps[0]['finding']!r}"
+    # Dict with "finding" key — must use it directly, no heuristic sniffing
+    finding_log = [("get_campaign_status", {
+        "finding": "3 active, 1 paused.",
+        "trends": [1, 2, 3],
+        "count": 3,
+    })]
+    finding_steps = _synthesize_agent_steps(finding_log)
+    if finding_steps[0]["finding"] != "3 active, 1 paused.":
+        return False, f"Should use 'finding' key directly, got: {finding_steps[0]['finding']!r}"
     return True, "_synthesize_agent_steps produces correct steps from tool call log"
+
+
+@test("tool_result() factory enforces non-empty finding contract")
+def test_tool_result_contract():
+    from scout_types import tool_result
+    # Raises on empty finding
+    try:
+        tool_result("")
+        return False, "Should have raised ValueError on empty finding"
+    except ValueError:
+        pass
+    # Raises on whitespace-only finding
+    try:
+        tool_result("   ")
+        return False, "Should have raised ValueError on blank finding"
+    except ValueError:
+        pass
+    # Valid call returns dict with "finding" as first key
+    result = tool_result("3 active, 1 paused.", count=4, extra="data")
+    if list(result.keys())[0] != "finding":
+        return False, f"'finding' must be first key, got: {list(result.keys())[0]!r}"
+    if result["finding"] != "3 active, 1 paused.":
+        return False, f"Wrong finding value: {result['finding']!r}"
+    if result.get("count") != 4 or result.get("extra") != "data":
+        return False, "kwargs not forwarded correctly"
+    return True, "tool_result() enforces finding contract"
 
 
 @test("Phase 3A — _build_modal_view returns correct structure")
