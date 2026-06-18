@@ -7,8 +7,15 @@ Scout never surfaces unverified data silently. If a query result can't be valida
 ## Repository Map
 
 ```
-scout_agent.py         — main agent, ask() boundary, tool dispatch
-queries_revenue.py     — SQL: revenue, CVR, fill rate
+scout_agent.py            — main agent, ask() boundary, tool dispatch
+scout_tools_admin.py      — admin, health, status tools
+scout_tools_campaigns.py  — campaign analytics tools
+scout_tools_definitions.py — TOOLS schema (tool definitions for Claude)
+scout_tools_offers.py     — offer/supply gap tools
+scout_tools_publisher.py  — publisher health tools
+scout_tools_revenue.py    — revenue/CVR tools
+scout_thresholds.py       — ThresholdManager config object
+queries_revenue.py        — SQL: revenue, CVR, fill rate
 queries_monitor.py     — SQL: ghost campaigns, publisher health
 queries_campaign.py    — SQL: campaign analytics
 queries_publisher.py   — SQL: publisher analytics
@@ -155,11 +162,22 @@ All 5 or don't ship. A signal that can't be force-run can't be debugged.
 
 **Before adding new infrastructure:** Does the existing layer solve 80% of this? If yes, extend it. If no, name what it can't do before proposing something new.
 
+## Extension Points
+
+| Adding...               | Touch these files                                                                          |
+|-------------------------|--------------------------------------------------------------------------------------------|
+| New Claude tool         | `scout_agent.py:TOOL_MAP` + implementation in `scout_tools_*.py` + `smoke_test.py`       |
+| New monitor signal      | Signal fn + `scout_handlers.py:_FORCE_MONITOR_FNS` + `alert_registry.py` + Slack manifest + `smoke_test.py` |
+| New slash command       | Handler in `scout_handlers.py` + api.slack.com/apps manifest                              |
+| New attachment format   | `scout_attachments.py:_EXTRACTORS` + extractor fn + `smoke_test.py`                      |
+| New Slack pattern       | `scout_ui_kit.py` + pattern table above                                                   |
+| New ClickHouse query    | New fn in `queries_*.py` — define output shape first                                      |
+
 ## Prohibited Patterns
 
 These have caused bugs — never do:
 - Never call ClickHouse directly from `scout_bot.py`. Route through `queries_*.py`.
-- Never modify `ask()` at `:6132` for attachment handling. `ask_with_attachment()` at `:6202` is the attachment path. Structural guarantee (AC-9 — no regression on text-only @mentions).
+- Never modify `ask()` for attachment handling. `ask_with_attachment()` is the attachment path. Structural guarantee (AC-9 — no regression on text-only @mentions).
 - Never `shell=True` anywhere.
 - Never call `web.chat_postMessage` with hand-built blocks. Always go through `wrap_response()`.
 
