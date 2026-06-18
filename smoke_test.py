@@ -4050,6 +4050,20 @@ def test_synthesize_agent_steps():
     # Empty log → empty list (falsy, so agent_steps stays None)
     if _synthesize_agent_steps([]):
         return False, "Empty log should return empty list"
+    # Dict with "summary" key — must use summary, not the first (list-valued) key
+    trend_log = [("get_publisher_revenue_trends", {
+        "trends": [{"publisher_id": 2666, "publisher_name": "Pinger", "rev_30d": 9272.98}],
+        "count": 1,
+        "summary": "1 publishers with velocity anomalies: 0 down, 1 up.",
+    })]
+    trend_steps = _synthesize_agent_steps(trend_log)
+    if not trend_steps[0]["finding"].startswith("1 publishers"):
+        return False, f"Should use summary key, got: {trend_steps[0]['finding']!r}"
+    # Dict with no summary but list-valued first key — must skip list, use scalar
+    mixed_log = [("get_ghost_campaigns", {"campaigns": [1, 2, 3], "count": 3})]
+    mixed_steps = _synthesize_agent_steps(mixed_log)
+    if "campaigns" in mixed_steps[0]["finding"] and "[" in mixed_steps[0]["finding"]:
+        return False, f"List-valued key should be skipped, got: {mixed_steps[0]['finding']!r}"
     return True, "_synthesize_agent_steps produces correct steps from tool call log"
 
 
