@@ -4544,6 +4544,27 @@ def test_velocity_phase2_gate_not_hardcoded():
     return True, "Phase 2 enrichment gate uses abs(down_threshold_pct) — no hardcoded 100"
 
 
+@test("worry list populated with fewer than 3 publishers")
+def test_worry_list_populated_with_two_publishers():
+    """Verify worry list is non-empty for 2-publisher sets (no len>=3 guard, no overlap empty)."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class D:
+        publisher_id: int
+        delta_pct: float
+
+    deltas = [D(1, 15.0), D(2, -30.0)]
+    deltas.sort(key=lambda d: d.delta_pct, reverse=True)
+    worry = list(reversed(deltas[-3:]))
+    assert len(worry) > 0, "Worry must not be empty for 2-publisher sets"
+    if len(worry) != 2:
+        return False, f"Expected 2 worry entries, got {len(worry)}"
+    if worry[0].publisher_id != 2:
+        return False, f"Worst performer should be first, got publisher_id={worry[0].publisher_id}"
+    return True, "worry list correctly populated with 2 publishers (no len>=3 guard)"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

@@ -194,7 +194,7 @@ HAVING rev_today >= 50 OR rev_baseline >= 50
 
     deltas.sort(key=lambda d: d.delta_pct, reverse=True)
     winners = deltas[:3]
-    worry   = list(reversed(deltas[-3:])) if len(deltas) >= 3 else []
+    worry   = list(reversed(deltas[-3:]))
     # If winners and worry overlap (very few publishers), prefer winners as-is
     # and trim worry to non-overlapping tail.
     win_ids = {d.publisher_id for d in winners}
