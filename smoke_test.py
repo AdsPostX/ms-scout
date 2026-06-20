@@ -5002,6 +5002,23 @@ def test_build_opportunity_cards_uses_resolve_icon_image():
         return False, str(e)
 
 
+@test("Anthropic client constructed once — singleton factory in place")
+def test_anthropic_client_not_constructed_multiple_times():
+    """Inline anthropic.Anthropic() calls must be replaced by _get_anthropic_client()."""
+    import inspect
+    import re
+    import scout_agent
+
+    src = inspect.getsource(scout_agent)
+    hits = re.findall(r"anthropic\.Anthropic\(", src)
+    if len(hits) > 1:
+        return False, (
+            f"Anthropic client constructed {len(hits)} times — should be a singleton factory; "
+            f"replace extra calls with _get_anthropic_client()"
+        )
+    return True, f"Anthropic client constructed {len(hits)} time(s) — singleton factory in use"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

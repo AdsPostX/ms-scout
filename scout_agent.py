@@ -28,6 +28,23 @@ from types import MappingProxyType
 from typing import Mapping, Optional
 import anthropic
 from scout_types import FormattedOffer, Brief  # type: ignore[import]  # noqa: F401
+
+# ---------------------------------------------------------------------------
+# Anthropic client singleton — avoids constructing a new httpx session on
+# every ask() / ask_with_attachment() call.  Thread-safe: GIL protects the
+# None-check; the constructor is idempotent if races occur during startup.
+# ---------------------------------------------------------------------------
+_ANTHROPIC_CLIENT: "anthropic.Anthropic | None" = None
+
+
+def _get_anthropic_client() -> "anthropic.Anthropic":
+    global _ANTHROPIC_CLIENT
+    if _ANTHROPIC_CLIENT is None:
+        _ANTHROPIC_CLIENT = anthropic.Anthropic(
+            api_key=os.getenv("ANTHROPIC_API_KEY"),
+            default_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+        )
+    return _ANTHROPIC_CLIENT
 from dotenv import load_dotenv
 import queries as _q
 from scout_ch import (  # noqa: F401 — backward compat re-exports
@@ -6073,6 +6090,18 @@ def _run_tool_loop(
     All previously-closure-scoped state from ask() is passed explicitly. Mutable
     accumulators default to None (instantiated locally) so callers can supply
     pre-seeded lists or rely on per-call lists.
+
+    Mutation contract (caller-owned accumulators):
+      _tools_called  — APPENDED in-place each time a tool block fires (str name).
+                       Caller declares an empty list before calling this function
+                       and reads it back via the returned AskResult.tools_called.
+                       Do NOT pass a shared/global list — each ask() invocation
+                       must supply a fresh list.
+
+    Locally-owned accumulators (instantiated here when caller passes None):
+      _brief_results, _opportunity_offers, _all_tool_results — collected per-call
+      and never returned to the caller directly; their contents drive payload
+      construction inside the loop.
     """
     def _dur() -> int:
         return int((time.monotonic() - _start_ms) * 1000)
@@ -6473,10 +6502,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
             tools_called=[], duration_ms=_dur(),
         )
 
-    client = anthropic.Anthropic(
-        api_key=api_key,
-        default_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
-    )
+    client = _get_anthropic_client()
     prefix = _build_prefix_context(user_id, user_tz)
     # Intent classification — narrow tool surface and prepend focused context.
     # Runs once per ask() call, outside the retry loop.
@@ -6555,10 +6581,7 @@ def ask_with_attachment(
             duration_ms=int((time.monotonic() - _start_ms) * 1000),
         )
 
-    client = anthropic.Anthropic(
-        api_key=api_key,
-        default_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
-    )
+    client = _get_anthropic_client()
     prefix = _build_prefix_context(user_id, user_tz)
     _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
     _ask_tools = TOOLS
