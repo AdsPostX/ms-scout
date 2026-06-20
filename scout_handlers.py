@@ -73,7 +73,8 @@ def _is_under_maintenance(user_id: str) -> bool:
 # Injected at startup by scout_bot.main() — avoids circular import
 _BOT_USER_ID: str = ""
 _LAST_THREAD_PER_CHANNEL: dict = {}
-_LAST_THREAD_LOCK = None  # threading.Lock, set by scout_bot
+_LAST_THREAD_LOCK: threading.Lock = threading.Lock()
+_ADOPS_NOTIFY_UID: str = os.getenv("ADOPS_NOTIFY_USER_ID", "")
 
 # ── Per-user easter egg responses ────────────────────────────────────────────
 _FUNZONE_USER_ID = "U05BAJK1NH4"
@@ -1174,7 +1175,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
 
     # Launch notification (same logic as handle_event)
     if launched_offer_sg:
-        adops_uid   = os.getenv("ADOPS_NOTIFY_USER_ID", "")
+        adops_uid   = _ADOPS_NOTIFY_UID
         approved_by = launched_offer_sg.get("approved_by", "")
         advertiser  = launched_offer_sg.get("advertiser", "")
         payout      = launched_offer_sg.get("payout", "")
@@ -3030,6 +3031,7 @@ def _handle_event_impl(req: SocketModeRequest):
             _LAST_THREAD_PER_CHANNEL[channel] = thread_ts or msg_ts
 
         # Extract structured context + suggestion buttons
+        launched_offer_dm = None
         suggestions: list = []
         if response.payload and response.payload.get("type") == "text_with_context":
             extracted = response.payload.get("extracted_context", {})
@@ -3038,6 +3040,29 @@ def _handle_event_impl(req: SocketModeRequest):
                 launched_offer_dm = extracted.pop("launched_offer", None)
                 _merge_thread_context(thread_ts or msg_ts, extracted)
             suggestions = response.payload.get("suggestions", [])
+
+        if launched_offer_dm:
+            adops_uid   = _ADOPS_NOTIFY_UID
+            approved_by = launched_offer_dm.get("approved_by", "")
+            advertiser  = launched_offer_dm.get("advertiser", "")
+            payout      = launched_offer_dm.get("payout", "")
+            network     = launched_offer_dm.get("network", "")
+            t_url       = launched_offer_dm.get("thread_url", "")
+            tags = f"<@{approved_by}>" if approved_by else ""
+            if adops_uid and adops_uid != approved_by:
+                tags += f" <@{adops_uid}>"
+            brief_link = f" · <{t_url}|brief>" if t_url else ""
+            msg = f":rocket: *{advertiser}* is live. {payout} · {network}{brief_link}"
+            if tags:
+                msg += f"\n{tags}"
+            web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+            _notion_url = launched_offer_dm.get("notion_url", "")
+            if _notion_url:
+                threading.Thread(
+                    target=_update_notion_status,
+                    args=(_notion_url, "Live"),
+                    daemon=True,
+                ).start()
 
         # Post reply — flat DM message (thread_ts=None) or in-thread if user was already in one
         if response.payload and response.payload.get("type") == "brief":
@@ -3181,7 +3206,7 @@ def _handle_event_impl(req: SocketModeRequest):
 
     # Launch notification — thread-only, targeted tags, no channel noise
     if launched_offer:
-        adops_uid   = os.getenv("ADOPS_NOTIFY_USER_ID", "")
+        adops_uid   = _ADOPS_NOTIFY_UID
         approved_by = launched_offer.get("approved_by", "")
         advertiser  = launched_offer.get("advertiser", "")
         payout      = launched_offer.get("payout", "")

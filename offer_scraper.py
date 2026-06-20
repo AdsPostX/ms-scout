@@ -1634,7 +1634,7 @@ def fetch_shareasale() -> list:
 
     def _auth_headers(action: str) -> dict:
         ts = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-        sig_str = f"{token}:{ts}:{action}:{secret}"
+        sig_str = f"{token}:{ts}:{action}"
         sig = hmac.new(secret.encode(), sig_str.encode(), hashlib.sha256).hexdigest()
         return {
             "x-ShareASale-APIToken": token,
