@@ -4591,13 +4591,11 @@ def test_ghost_campaigns_as_of_date_replaces_now():
         def query(self, sql, parameters=None):
             captured["sql"] = sql
             return FakeResult()
-    try:
-        queries_campaign.ghost_campaigns(FakeCH(), as_of_date="2025-01-15")
-    except Exception:
-        pass
-    if captured.get("sql"):
-        assert "now()" not in captured["sql"], "as_of_date did not substitute now()"
-        assert "today()" not in captured["sql"], "as_of_date did not substitute today()"
+    queries_campaign.ghost_campaigns(FakeCH(), as_of_date="2025-01-15")
+    if not captured.get("sql"):
+        return False, "ghost_campaigns never called ch.query — SQL substitution could not be verified"
+    assert "now()" not in captured["sql"], "as_of_date did not substitute now()"
+    assert "today()" not in captured["sql"], "as_of_date did not substitute today()"
     return True, "as_of_date substitutes both now() and today() in ghost_campaigns SQL"
 
 
