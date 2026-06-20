@@ -74,6 +74,7 @@ def _is_under_maintenance(user_id: str) -> bool:
 _BOT_USER_ID: str = ""
 _LAST_THREAD_PER_CHANNEL: dict = {}
 _LAST_THREAD_LOCK: threading.Lock = threading.Lock()
+_ADOPS_NOTIFY_UID: str = os.getenv("ADOPS_NOTIFY_USER_ID", "")
 
 # ── Per-user easter egg responses ────────────────────────────────────────────
 _FUNZONE_USER_ID = "U05BAJK1NH4"
@@ -1174,7 +1175,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
 
     # Launch notification (same logic as handle_event)
     if launched_offer_sg:
-        adops_uid   = os.getenv("ADOPS_NOTIFY_USER_ID", "")
+        adops_uid   = _ADOPS_NOTIFY_UID
         approved_by = launched_offer_sg.get("approved_by", "")
         advertiser  = launched_offer_sg.get("advertiser", "")
         payout      = launched_offer_sg.get("payout", "")
@@ -3041,7 +3042,7 @@ def _handle_event_impl(req: SocketModeRequest):
             suggestions = response.payload.get("suggestions", [])
 
         if launched_offer_dm:
-            adops_uid   = os.getenv("ADOPS_NOTIFY_USER_ID", "")
+            adops_uid   = _ADOPS_NOTIFY_UID
             approved_by = launched_offer_dm.get("approved_by", "")
             advertiser  = launched_offer_dm.get("advertiser", "")
             payout      = launched_offer_dm.get("payout", "")
@@ -3205,7 +3206,7 @@ def _handle_event_impl(req: SocketModeRequest):
 
     # Launch notification — thread-only, targeted tags, no channel noise
     if launched_offer:
-        adops_uid   = os.getenv("ADOPS_NOTIFY_USER_ID", "")
+        adops_uid   = _ADOPS_NOTIFY_UID
         approved_by = launched_offer.get("approved_by", "")
         advertiser  = launched_offer.get("advertiser", "")
         payout      = launched_offer.get("payout", "")
