@@ -196,9 +196,11 @@ HAVING rev_today >= 50 OR rev_baseline >= 50
     winners = deltas[:3]
     worry   = list(reversed(deltas[-3:]))
     # If winners and worry overlap (very few publishers), prefer winners as-is
-    # and trim worry to non-overlapping tail.
-    win_ids = {d.publisher_id for d in winners}
-    worry = [d for d in worry if d.publisher_id not in win_ids][:3]
+    # and trim worry to non-overlapping tail — only when enough publishers exist
+    # to guarantee non-empty worry after dedup.
+    if len(deltas) > 3:
+        win_ids = {d.publisher_id for d in winners}
+        worry = [d for d in worry if d.publisher_id not in win_ids][:3]
 
     # ── 7-day daily revenue series (sparkline data) ──
     # Fetches one row per completed day (D-7 through D-1); fills missing days

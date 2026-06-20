@@ -4562,6 +4562,8 @@ def test_worry_list_populated_with_two_publishers():
         return False, f"Expected 2 worry entries, got {len(worry)}"
     if worry[0].publisher_id != 2:
         return False, f"Worst performer should be first, got publisher_id={worry[0].publisher_id}"
+    # Also verify: with 2 publishers worry must NOT be empty (overlap used to empty it)
+    assert len(worry) > 0, "Worry must not be empty for 2-publisher sets"
     return True, "worry list correctly populated with 2 publishers (no len>=3 guard)"
 
 
