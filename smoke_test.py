@@ -4520,6 +4520,30 @@ def test_dm_launched_offer_variable_always_defined():
     return True, "launched_offer_dm = None sentinel present in DM path"
 
 
+@test("fill_rate_publishers GROUP BY must not include sessions_with_imps")
+def test_fill_rate_group_by_no_sessions_with_imps():
+    """Confirm fill_rate_publishers GROUP BY does not fan rows via sessions_with_imps."""
+    import inspect, queries_monitor
+    src = inspect.getsource(queries_monitor.fill_rate_publishers)
+    gb = src.upper()
+    gb_start = gb.find("GROUP BY")
+    having = gb.find("HAVING", gb_start)
+    clause = gb[gb_start:having if having != -1 else gb_start + 200]
+    assert "SESSIONS_WITH_IMPS" not in clause, "sessions_with_imps in GROUP BY fans publisher rows"
+    return True, "GROUP BY contains only s.user_id — no sessions_with_imps fan-out"
+
+
+@test("velocity_alerts Phase 2 gate must use down_threshold_pct, not hardcoded 100")
+def test_velocity_phase2_gate_not_hardcoded():
+    """Assert velocity Phase 2 enrichment gate uses the configured threshold, not a hardcoded 100."""
+    import inspect, queries_monitor
+    src = inspect.getsource(queries_monitor.velocity_alerts)
+    assert ">= 100" not in src and ">=100" not in src, \
+        "Phase 2 gate hardcoded >=100 — enrichment skips 25-99% swings"
+    assert "down_threshold_pct" in src, "Phase 2 gate must reference down_threshold_pct"
+    return True, "Phase 2 enrichment gate uses abs(down_threshold_pct) — no hardcoded 100"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

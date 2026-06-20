@@ -96,7 +96,8 @@ def fill_rate_publishers(
             ) i ON toInt64(i.user_id) = toInt64(s.user_id)
             WHERE toDate(s.created_at) > {date_expr} - {window_days}
               AND s.placement IN {{placements: Array(String)}}
-            GROUP BY s.user_id, i.sessions_with_imps
+            -- GRAIN: one row per publisher (s.user_id only)
+            GROUP BY s.user_id
             HAVING sessions_{window_days}d > {{min_sessions: UInt64}}
                AND fill_rate_pct < {{threshold_pct: Float64}}
             ORDER BY fill_rate_pct ASC
@@ -236,8 +237,9 @@ def velocity_alerts(
     candidates = [p for _, p in pairs]
 
     # Phase 2 — advertiser attribution enrichment for the top candidates.
-    # Gate on raw unrounded value so 99.96 does not cross the >=100 threshold after rounding.
-    enrich_ids = [p[1]["publisher_id"] for p in pairs if abs(p[0]) >= 100]
+    # Gate on raw unrounded value using the configured down-threshold magnitude.
+    # This avoids rounded values crossing the gate unexpectedly.
+    enrich_ids = [p[1]["publisher_id"] for p in pairs if abs(p[0]) >= abs(down_threshold_pct)]
     if enrich_ids:
         pub_id_csv = ", ".join(str(pid) for pid in enrich_ids)
         try:
