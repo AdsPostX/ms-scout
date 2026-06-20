@@ -4582,6 +4582,7 @@ def test_worry_list_populated_with_two_publishers():
 
 @test("ghost_campaigns as_of_date substitutes now() and today()")
 def test_ghost_campaigns_as_of_date_replaces_now():
+    """Asserts that passing as_of_date to ghost_campaigns substitutes both now() and today() in the emitted SQL."""
     import queries_campaign
     captured = {}
     class FakeResult:
