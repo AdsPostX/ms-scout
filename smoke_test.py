@@ -4490,6 +4490,7 @@ def test_chart_url_threads_through_ask_result():
 
 @test("last_thread_lock_is_initialized")
 def test_last_thread_lock_is_initialized():
+    """Verify _LAST_THREAD_LOCK is a live threading.Lock at import time, not None."""
     import threading, scout_handlers
     assert scout_handlers._LAST_THREAD_LOCK is not None
     assert isinstance(scout_handlers._LAST_THREAD_LOCK, type(threading.Lock()))
@@ -4501,6 +4502,7 @@ def test_last_thread_lock_is_initialized():
 
 @test("shareasale_hmac_secret_not_in_message")
 def test_shareasale_hmac_secret_not_in_message():
+    """Assert the ShareASale HMAC sig_str does not include the secret as a message component."""
     import inspect, offer_scraper as m
     src = inspect.getsource(m)
     for line in src.splitlines():
@@ -4511,6 +4513,7 @@ def test_shareasale_hmac_secret_not_in_message():
 
 @test("dm_launched_offer_variable_always_defined")
 def test_dm_launched_offer_variable_always_defined():
+    """Confirm launched_offer_dm = None sentinel exists in DM path to prevent NameError."""
     import inspect, scout_handlers
     src = inspect.getsource(scout_handlers)
     assert "launched_offer_dm = None" in src, "launched_offer_dm = None sentinel missing"
