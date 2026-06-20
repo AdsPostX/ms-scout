@@ -4648,6 +4648,7 @@ def test_fetch_baseline_no_positional_access():
 
 @test("normalize_geo — 5 countries is Global")
 def test_normalize_geo_five_countries_is_global():
+    """Asserts that a geo string with 5 distinct non-US/CA countries maps to 'Global'."""
     from offer_scraper import normalize_geo
     # normalize_geo splits on commas; 5 distinct non-US/CA/NA countries must be Global
     result = normalize_geo("DE, FR, IT, ES, PT")
@@ -4657,6 +4658,7 @@ def test_normalize_geo_five_countries_is_global():
 
 @test("normalize_geo — 4 countries is not Global")
 def test_normalize_geo_four_countries_not_global():
+    """Asserts that a geo string with only 4 countries does not map to 'Global'."""
     from offer_scraper import normalize_geo
     result = normalize_geo("DE, FR, IT, ES")
     assert result != "Global", "4 countries should not be Global"
