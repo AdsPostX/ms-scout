@@ -4667,6 +4667,7 @@ def test_normalize_geo_four_countries_not_global():
 
 @test("_trim_to_limit helper exists, no inline trim pattern outside it")
 def test_trim_to_limit_helper_exists():
+    """Asserts that _trim_to_limit exists in scout_attachments and no inline trim pattern remains outside it."""
     import inspect, scout_attachments
     assert hasattr(scout_attachments, "_trim_to_limit"), "_trim_to_limit not found"
     # No inline pattern should remain outside the helper
