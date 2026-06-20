@@ -21,6 +21,12 @@ log = logging.getLogger("scout_attachments")
 MAX_FILE_BYTES = 10 * 1024 * 1024        # 10MB hard cap
 MAX_IMAGE_BYTES = 5 * 1024 * 1024        # 5MB before base64
 MAX_TEXT_CHARS = 30_000                   # extracted text cap
+
+
+def _trim_to_limit(text: str, limit: int = MAX_TEXT_CHARS) -> str:
+    return text[:limit] + "\n…[trimmed]" if len(text) > limit else text
+
+
 PDFTOTEXT_TIMEOUT_S = 10
 MAX_REDIRECT_HOPS = 3
 ALLOWED_SHEETS_HOSTS = frozenset({"docs.google.com", "accounts.google.com"})
@@ -123,8 +129,7 @@ def extract_sheets_url(url: str) -> AttachmentResult:
                                 error=f"csv_parse_failed: {e}")
 
     summary = _summarize_dataframe(df)
-    if len(summary) > MAX_TEXT_CHARS:
-        summary = summary[:MAX_TEXT_CHARS] + "\n…[trimmed]"
+    summary = _trim_to_limit(summary)
     return AttachmentResult(kind="text", source="sheets_url", name=name, text=summary)
 
 # --- File extraction ---------------------------------------------------------
@@ -320,8 +325,7 @@ def _extract_pdf(body_bytes: bytes, name: str) -> AttachmentResult:
             return AttachmentResult(kind="error", source="file", name=name,
                                     error=f"pdftotext_exit_{result.returncode}")
         text = result.stdout.decode("utf-8", errors="ignore")
-        if len(text) > MAX_TEXT_CHARS:
-            text = text[:MAX_TEXT_CHARS] + "\n…[trimmed]"
+        text = _trim_to_limit(text)
         return AttachmentResult(kind="text", source="file", name=name, text=text)
     finally:
         try:
@@ -340,8 +344,7 @@ def _extract_pdf_fallback(body_bytes: bytes, name: str) -> AttachmentResult:
     try:
         with pdfplumber.open(io.BytesIO(body_bytes)) as pdf:
             text = "\n".join((page.extract_text() or "") for page in pdf.pages)
-        if len(text) > MAX_TEXT_CHARS:
-            text = text[:MAX_TEXT_CHARS] + "\n…[trimmed]"
+        text = _trim_to_limit(text)
         return AttachmentResult(kind="text", source="file", name=name, text=text)
     except Exception as e:
         return AttachmentResult(kind="error", source="file", name=name,
@@ -354,8 +357,7 @@ def _extract_csv(body_bytes: bytes, name: str) -> AttachmentResult:
         return AttachmentResult(kind="error", source="file", name=name,
                                 error=f"csv_parse_failed: {e}")
     summary = _summarize_dataframe(df)
-    if len(summary) > MAX_TEXT_CHARS:
-        summary = summary[:MAX_TEXT_CHARS] + "\n…[trimmed]"
+    summary = _trim_to_limit(summary)
     return AttachmentResult(kind="text", source="file", name=name, text=summary)
 
 
@@ -397,8 +399,7 @@ def _extract_excel(body_bytes: bytes, name: str, engine: str = "openpyxl") -> At
         header = f"Sheet: {first_name!r}\n"
 
     summary = header + _summarize_dataframe(first_df)
-    if len(summary) > MAX_TEXT_CHARS:
-        summary = summary[:MAX_TEXT_CHARS] + "\n…[trimmed]"
+    summary = _trim_to_limit(summary)
     return AttachmentResult(kind="text", source="file", name=name, text=summary)
 
 
@@ -432,8 +433,7 @@ def _extract_docx(body_bytes: bytes, name: str) -> AttachmentResult:
             parts.append("\t".join(cells))
 
     text = "\n".join(parts) if parts else "(empty document)"
-    if len(text) > MAX_TEXT_CHARS:
-        text = text[:MAX_TEXT_CHARS] + "\n…[trimmed]"
+    text = _trim_to_limit(text)
     return AttachmentResult(kind="text", source="file", name=name, text=text)
 
 
@@ -450,8 +450,7 @@ def _extract_text(body_bytes: bytes, name: str) -> AttachmentResult:
     except Exception as e:
         return AttachmentResult(kind="error", source="file", name=name,
                                 error=f"text_decode_failed: {e}")
-    if len(text) > MAX_TEXT_CHARS:
-        text = text[:MAX_TEXT_CHARS] + "\n…[trimmed]"
+    text = _trim_to_limit(text)
     return AttachmentResult(kind="text", source="file", name=name, text=text)
 
 def _summarize_dataframe(df: "pd.DataFrame") -> str:

@@ -4665,6 +4665,20 @@ def test_normalize_geo_four_countries_not_global():
     return True, f"normalize_geo 4-country set → {result!r}"
 
 
+@test("_trim_to_limit helper exists, no inline trim pattern outside it")
+def test_trim_to_limit_helper_exists():
+    import inspect, scout_attachments
+    assert hasattr(scout_attachments, "_trim_to_limit"), "_trim_to_limit not found"
+    # No inline pattern should remain outside the helper
+    src = inspect.getsource(scout_attachments)
+    helper_src = inspect.getsource(scout_attachments._trim_to_limit)
+    remaining = src.replace(helper_src, "")
+    # Check for the inline pattern variant
+    assert "[trimmed]" not in remaining or remaining.count("[trimmed]") == 0, \
+        "Inline trim pattern still present outside helper"
+    return True, "_trim_to_limit present; no inline trim pattern outside helper"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
