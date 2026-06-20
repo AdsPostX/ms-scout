@@ -4680,6 +4680,28 @@ def test_trim_to_limit_helper_exists():
     return True, "_trim_to_limit present; no inline trim pattern outside helper"
 
 
+@test("handler_config_loads_from_env")
+def test_handler_config_loads_from_env():
+    """_HandlerConfig frozen dataclass exists, is instantiated as _CFG singleton."""
+    import scout_handlers
+    if not hasattr(scout_handlers, "_HandlerConfig"):
+        return False, "_HandlerConfig class not found in scout_handlers"
+    if not hasattr(scout_handlers, "_CFG"):
+        return False, "_CFG singleton not found in scout_handlers"
+    cfg = scout_handlers._CFG
+    if not isinstance(cfg, scout_handlers._HandlerConfig):
+        return False, f"_CFG is {type(cfg)!r}, expected _HandlerConfig"
+    # Must be frozen — mutation must raise
+    try:
+        cfg.adops_notify_user_id = "mutate"
+        return False, "_HandlerConfig is not frozen — mutation succeeded"
+    except Exception as exc:
+        if "mutate" in str(exc):
+            # The mutation value leaked into the error message — unexpected
+            return False, f"Unexpected mutation error: {exc}"
+    return True, "_HandlerConfig frozen dataclass and _CFG singleton verified"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
