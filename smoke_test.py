@@ -4599,6 +4599,22 @@ def test_ghost_campaigns_as_of_date_replaces_now():
     return True, "as_of_date substitutes both now() and today() in ghost_campaigns SQL"
 
 
+@test("queries_publisher — publisher_campaign_rpms accepts pub_pid parameter")
+def test_publisher_campaign_rpms_accepts_pub_pid():
+    import inspect, queries_publisher
+    sig = inspect.signature(queries_publisher.publisher_campaign_rpms)
+    assert "pub_pid" in sig.parameters, "publisher_campaign_rpms missing pub_pid parameter"
+    return True, "publisher_campaign_rpms has pub_pid parameter"
+
+
+@test("queries_publisher — supply_gap_opportunities excludes provisioned campaigns")
+def test_supply_gap_excludes_provisioned():
+    import inspect, queries_publisher
+    src = inspect.getsource(queries_publisher.supply_gap_opportunities)
+    assert "NOT IN" in src.upper(), "supply_gap missing NOT IN exclusion for provisioned campaigns"
+    return True, "supply_gap_opportunities contains NOT IN exclusion for provisioned campaigns"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

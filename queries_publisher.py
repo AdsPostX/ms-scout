@@ -238,13 +238,16 @@ def publisher_serving_campaign_impressions(
 
 
 def publisher_campaign_rpms(
-    ch, pub_user_id: str, campaign_ids: list[str], days: int = 14
+    ch, pub_user_id: str, campaign_ids: list[str], days: int = 14,
+    pub_pid: str | None = None,
 ) -> dict[str, float]:
     """
     RPM (revenue per 1,000 impressions) per campaign on this publisher.
     Only campaigns in `campaign_ids` that are actively serving are included.
 
     pub_user_id: numeric publisher ID as string (the traffic/attribution publisher).
+    pub_pid: pid for impressions table (optional; defaults to pub_user_id). Pass when
+        publisher's impressions-table pid differs from their traffic user_id.
 
     IMPORTANT — two different ID columns, two different tables:
     - adpx_impressions_details uses `pid` (offer-owner publisher). Correct for impression counts.
@@ -284,7 +287,7 @@ def publisher_campaign_rpms(
         ) cv ON toInt64(imp.campaign_id) = toInt64(cv.campaign_id)
         """,
         parameters={
-            "pub_pid":       pub_user_id,   # impressions table: pid column (offer-owner, correct here)
+            "pub_pid":       pub_pid if pub_pid is not None else pub_user_id,   # impressions table: pid column (offer-owner, correct here)
             "pub_user_id":   pub_user_id,   # conversions table: user_id column (traffic attribution)
             "cids":          campaign_ids,
             "days":          days,
@@ -336,6 +339,13 @@ def supply_gap_opportunities(ch, pub_id: int) -> list[dict]:
             WHERE is_active = true
               AND deleted_at IS NULL
               AND user_id != {{pub_id: Int64}}
+              AND campaign_id NOT IN (
+                  SELECT campaign_id
+                  FROM from_airbyte_publisher_campaigns
+                  WHERE user_id = {{pub_id: Int64}}
+                    AND is_active = true
+                    AND deleted_at IS NULL
+              )
             GROUP BY campaign_id
         )
         SELECT
