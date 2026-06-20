@@ -4601,6 +4601,7 @@ def test_ghost_campaigns_as_of_date_replaces_now():
 
 @test("queries_publisher — publisher_campaign_rpms accepts pub_pid parameter")
 def test_publisher_campaign_rpms_accepts_pub_pid():
+    """Assert that publisher_campaign_rpms accepts a pub_pid parameter."""
     import inspect, queries_publisher
     sig = inspect.signature(queries_publisher.publisher_campaign_rpms)
     assert "pub_pid" in sig.parameters, "publisher_campaign_rpms missing pub_pid parameter"
@@ -4609,6 +4610,7 @@ def test_publisher_campaign_rpms_accepts_pub_pid():
 
 @test("queries_publisher — supply_gap_opportunities excludes provisioned campaigns")
 def test_supply_gap_excludes_provisioned():
+    """Assert that supply_gap_opportunities excludes already-provisioned campaigns via NOT IN."""
     import inspect, queries_publisher
     src = inspect.getsource(queries_publisher.supply_gap_opportunities)
     assert "NOT IN" in src.upper(), "supply_gap missing NOT IN exclusion for provisioned campaigns"
