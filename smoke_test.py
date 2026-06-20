@@ -4544,6 +4544,42 @@ def test_velocity_phase2_gate_not_hardcoded():
     return True, "Phase 2 enrichment gate uses abs(down_threshold_pct) — no hardcoded 100"
 
 
+@test("worry list populated with fewer than 3 publishers")
+def test_worry_list_populated_with_two_publishers():
+    """Verify worry list is non-empty when only 2 publishers exist.
+
+    Calls scoreboard_rollup() directly with a stubbed ClickHouse client so the
+    test exercises the actual winner/worry dedup path, not a local simulation.
+    """
+    from queries_revenue import scoreboard_rollup
+
+    _call_idx = [0]
+
+    class FakeCH:
+        def query(self, _sql):
+            class R:
+                pass
+            r = R()
+            idx = _call_idx[0]
+            _call_idx[0] += 1
+            if idx == 0:
+                # totals: (rev_today, rev_yest, rev_7d_avg, conv_today, conv_yest, conv_7d_avg, rev_mtd)
+                r.result_rows = [(500.0, 400.0, 350.0, 10, 8, 7.0, 500.0)]
+            elif idx == 1:
+                # publishers: (uid, name, rev_today, rev_baseline) — both exceed $50 noise floor
+                r.result_rows = [(1, "Pub A", 500.0, 200.0), (2, "Pub B", 100.0, 400.0)]
+            else:
+                r.result_rows = []
+            return r
+
+    rollup = scoreboard_rollup(FakeCH())
+    if not rollup.worry:
+        return False, "worry list empty for 2-publisher set — overlap dedup still fires unconditionally"
+    if rollup.worry[0].publisher_id != 2:
+        return False, f"worst performer should be pub 2, got {rollup.worry[0].publisher_id}"
+    return True, "worry list non-empty for 2 publishers — dedup guard working"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
