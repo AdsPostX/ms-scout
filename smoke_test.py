@@ -4646,6 +4646,23 @@ def test_fetch_baseline_no_positional_access():
     return True, "baseline_rows uses named dict keys throughout"
 
 
+@test("normalize_geo — 5 countries is Global")
+def test_normalize_geo_five_countries_is_global():
+    from offer_scraper import normalize_geo
+    # normalize_geo splits on commas; 5 distinct non-US/CA/NA countries must be Global
+    result = normalize_geo("DE, FR, IT, ES, PT")
+    assert result == "Global", f"5 countries returned {result!r}, expected 'Global'"
+    return True, f"normalize_geo 5-country set → {result!r}"
+
+
+@test("normalize_geo — 4 countries is not Global")
+def test_normalize_geo_four_countries_not_global():
+    from offer_scraper import normalize_geo
+    result = normalize_geo("DE, FR, IT, ES")
+    assert result != "Global", "4 countries should not be Global"
+    return True, f"normalize_geo 4-country set → {result!r}"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
