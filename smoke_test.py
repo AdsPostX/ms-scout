@@ -4488,6 +4488,35 @@ def test_chart_url_threads_through_ask_result():
     return True, "chart_url threads correctly: AskResult → Card → image block"
 
 
+@test("last_thread_lock_is_initialized")
+def test_last_thread_lock_is_initialized():
+    import threading, scout_handlers
+    assert scout_handlers._LAST_THREAD_LOCK is not None
+    assert isinstance(scout_handlers._LAST_THREAD_LOCK, type(threading.Lock()))
+    acquired = scout_handlers._LAST_THREAD_LOCK.acquire(blocking=False)
+    if acquired:
+        scout_handlers._LAST_THREAD_LOCK.release()
+    return True, "_LAST_THREAD_LOCK is a live threading.Lock at import time"
+
+
+@test("shareasale_hmac_secret_not_in_message")
+def test_shareasale_hmac_secret_not_in_message():
+    import inspect, offer_scraper as m
+    src = inspect.getsource(m)
+    for line in src.splitlines():
+        if "sig_str" in line and "sig = " not in line and ':{secret}"' in line:
+            raise AssertionError(f"SECURITY: secret in sig_str: {line!r}")
+    return True, "ShareASale HMAC sig_str does not include the secret"
+
+
+@test("dm_launched_offer_variable_always_defined")
+def test_dm_launched_offer_variable_always_defined():
+    import inspect, scout_handlers
+    src = inspect.getsource(scout_handlers)
+    assert "launched_offer_dm = None" in src, "launched_offer_dm = None sentinel missing"
+    return True, "launched_offer_dm = None sentinel present in DM path"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
