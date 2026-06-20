@@ -238,6 +238,7 @@ def velocity_alerts(
 
     # Phase 2 — advertiser attribution enrichment for the top candidates.
     # Gate on raw unrounded value using the configured down-threshold magnitude.
+    # This avoids rounded values crossing the gate unexpectedly.
     enrich_ids = [p[1]["publisher_id"] for p in pairs if abs(p[0]) >= abs(down_threshold_pct)]
     if enrich_ids:
         pub_id_csv = ", ".join(str(pid) for pid in enrich_ids)
