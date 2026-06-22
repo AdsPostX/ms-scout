@@ -22,12 +22,12 @@
 
 **Where the TODOs live in the file:**
 - Line 623: startup log warns about missing env vars
-- Lines 1217–1247: full env var spec + flip-live instructions block
-- Line 1293: `_fire_campaign_creation()` dry_run return — review `would_send` before flipping
-- Line 1375: `/queue/config` handler — mode should read `"live"` before launch
+- Line 1275: full env var spec + flip-live instructions block
+- Line 1351: `_fire_campaign_creation()` dry_run return — review `would_send` before flipping
+- Line 1433: `/queue/config` handler — mode should read `"live"` before launch
 
 ## App Home Scoreboard (scout_ui_kit.py)
 
-`TODO(App-Home-3.4)` at line 1708: revenue EOD projection range (`revenue_eod_projection_low_cents` / `revenue_eod_projection_high_cents`) is rendered conditionally but the upstream `scoreboard_rollup()` does not yet populate these fields.
+`TODO(App-Home-3.4)` at line 1604: revenue EOD projection range (`revenue_eod_projection_low_cents` / `revenue_eod_projection_high_cents`) is rendered conditionally but the upstream `scoreboard_rollup()` does not yet populate these fields.
 
 Status: blocked on `scoreboard_rollup()` returning the projection range. The render path is already wired — once the fields exist on the rollup object, no UI changes needed.
