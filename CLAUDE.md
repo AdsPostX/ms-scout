@@ -32,7 +32,7 @@ Other files present but not primary entry points: `scout_bot.py`, `scout_ch.py`,
 ## Scout Quickstart
 
 **First session:**
-1. `/mem-search scout` for prior context
+1. `/mem-search scout` + read `GOALS.md` for prior context and current objectives
 2. Read `scout_agent.py` SYSTEM_PROMPT + TOOLS + TOOL_MAP — always before planning anything new
 3. Run `python3 smoke_test.py` to confirm baseline
 4. Check `KNOWN_DEBT.md` for open TODOs before touching `demand_feed_main.py` or `scout_ui_kit.py`
@@ -47,6 +47,20 @@ Other files present but not primary entry points: `scout_bot.py`, `scout_ch.py`,
 2. Check the Response Patterns table below — new handlers must map to an existing pattern
 3. Add the new extractor/handler, add a row to the dispatch table or TOOL_MAP, add a smoke test
 4. Run `python3 smoke_test.py` before pushing
+
+## Timeout & Retry Architecture
+
+**`_HandlerConfig` / `_CFG`** (`scout_handlers.py:68`): immutable dataclass, all `os.getenv()` in the file consolidated here, validated at module import.
+
+**`_ASK_SEMAPHORE`** (`scout_handlers.py:191`): `BoundedSemaphore(3)`.
+- New requests: non-blocking acquire → `AskTimeout` immediately if at cap.
+- Retry paths: blocking acquire up to `_CFG.ask_timeout_s` via `blocking_acquire_timeout_s=`.
+
+**`AskTimeout`** (`scout_handlers.py:194`): raised when `ask()` exceeds 90s OR semaphore full.
+
+**`_retry_after_timeout()`** (`scout_handlers.py:294`): postman pattern. Daemon thread → 30s+jitter sleep → blocking semaphore acquire → retry `ask()` → @mention thread-back. Four sites: DM, channel, App Home DM, App Home modal (no retry on modal).
+
+**`_run_pulse_action`** (`scout_handlers.py:1327`): intentionally bypasses semaphore and timeout — pulse actions are fire-and-forget. Do not add `_ask_with_timeout` guard here.
 
 ## Scout Response Patterns
 
@@ -172,6 +186,14 @@ All 5 or don't ship. A signal that can't be force-run can't be debugged.
 | New attachment format   | `scout_attachments.py:_EXTRACTORS` + extractor fn + `smoke_test.py`                      |
 | New Slack pattern       | `scout_ui_kit.py` + pattern table above                                                   |
 | New ClickHouse query    | New fn in `queries_*.py` — define output shape first                                      |
+
+**Step-by-step workflows** (trigger with `/scout-new-*`):
+- New Claude tool → `.claude/skills/scout-new-tool/SKILL.md`
+- New monitor signal → `.claude/skills/scout-new-monitor/SKILL.md`
+- New slash command → `.claude/skills/scout-new-slash-cmd/SKILL.md`
+- New attachment format → `.claude/skills/scout-new-attachment/SKILL.md`
+
+**Per-file invariants:** `.claude/rules/` — scoped rule files loaded automatically when editing `scout_agent.py`, `scout_bot.py`, `scout_handlers.py`, `scout_digest.py`, `offer_scraper.py`, `smoke_test.py`.
 
 ## Prohibited Patterns
 
