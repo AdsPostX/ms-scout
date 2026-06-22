@@ -832,8 +832,8 @@ def earnings_breakdown(
         rev_rows = ch.query(
             f"""
             SELECT
-                coalesce(sum(toFloat64OrZero(revenue)), 0) AS gross_rev,
-                coalesce(sum(toFloat64OrZero(payout)), 0)  AS partner_rev
+                coalesce(sum(toFloat64OrNull(revenue)), 0) AS gross_rev,
+                coalesce(sum(toFloat64OrNull(payout)), 0)  AS partner_rev
             FROM adpx_conversionsdetails
             WHERE toDate(created_at) BETWEEN {{start_date: String}} AND {{end_date: String}}
               {pub_filter_cv}

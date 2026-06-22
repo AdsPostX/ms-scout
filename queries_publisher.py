@@ -947,7 +947,7 @@ def publisher_fleet_health_stats(
         current_window AS (
             SELECT
                 user_id                                                AS publisher_id,
-                round(sum(toFloat64OrZero(revenue)), 2)               AS revenue_actual
+                round(sum(toFloat64OrNull(revenue)), 2)               AS revenue_actual
             FROM adpx_conversionsdetails
             PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL {days: Int32} DAY)
             WHERE created_at >= today() - INTERVAL {days: Int32} DAY
@@ -963,7 +963,7 @@ def publisher_fleet_health_stats(
                     - {days: Int32},
                     {days: Int32}
                 )                                                      AS window_idx,
-                round(sum(toFloat64OrZero(revenue)), 2)               AS window_revenue
+                round(sum(toFloat64OrNull(revenue)), 2)               AS window_revenue
             FROM adpx_conversionsdetails
             PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL {lookback: Int32} DAY)
             WHERE created_at >= today() - INTERVAL {lookback: Int32} DAY
