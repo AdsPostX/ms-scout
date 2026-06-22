@@ -107,6 +107,7 @@ LIMIT 25
         _validate_as_of_date(as_of_date)
         _ref = f"toDate('{as_of_date}')"
         sql = sql.replace("today()", _ref)
+        sql = sql.replace("now()", f"toDateTime('{as_of_date} 23:59:59')")
     rows = ch.query(sql, parameters={"recency_hours": recency_hours}).result_rows
     return [
         {

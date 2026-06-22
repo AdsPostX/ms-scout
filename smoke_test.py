@@ -4580,6 +4580,25 @@ def test_worry_list_populated_with_two_publishers():
     return True, "worry list non-empty for 2 publishers — dedup guard working"
 
 
+@test("ghost_campaigns as_of_date substitutes now() and today()")
+def test_ghost_campaigns_as_of_date_replaces_now():
+    """Asserts that passing as_of_date to ghost_campaigns substitutes both now() and today() in the emitted SQL."""
+    import queries_campaign
+    captured = {}
+    class FakeResult:
+        result_rows = []
+    class FakeCH:
+        def query(self, sql, parameters=None):
+            captured["sql"] = sql
+            return FakeResult()
+    queries_campaign.ghost_campaigns(FakeCH(), as_of_date="2025-01-15")
+    if not captured.get("sql"):
+        return False, "ghost_campaigns never called ch.query — SQL substitution could not be verified"
+    assert "now()" not in captured["sql"], "as_of_date did not substitute now()"
+    assert "today()" not in captured["sql"], "as_of_date did not substitute today()"
+    return True, "as_of_date substitutes both now() and today() in ghost_campaigns SQL"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
