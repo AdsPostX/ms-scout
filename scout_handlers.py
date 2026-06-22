@@ -1327,6 +1327,12 @@ _PULSE_QUERIES: dict[str, str] = {
 def _run_pulse_action(
     query: str, channel: str, user_id: str, msg_ts: str, web: WebClient, *, sanitize: bool = False,
 ) -> None:
+    """Fire a pulse query on a daemon thread and post the reply in-thread.
+
+    Intentionally bypasses _ask_with_timeout and _ASK_SEMAPHORE — pulse actions are
+    fire-and-forget UI refreshes, not interactive asks, so shed-on-busy and
+    postman-retry don't apply here.
+    """
     def _run(q=query, ch=channel, u=user_id, t=msg_ts):
         resp = ask(q, history=[], user_id=u)
         text = _sanitize_slack(str(resp.text)) if sanitize else resp.text
@@ -2426,6 +2432,12 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
             pass
 
 def handle_event(client: SocketModeClient, req: SocketModeRequest):
+    """Top-level Slack Socket Mode entry point.
+
+    Acks immediately (Slack requires <3s), logs an arrival breadcrumb, then
+    delegates to _handle_event_impl under a broad try/except so a crash in any
+    event path drops that event rather than killing the socket loop.
+    """
     # Acknowledge immediately — Slack requires <3s ack
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
 
@@ -2448,6 +2460,11 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
 
 def _handle_event_impl(req: SocketModeRequest):
+    """Dispatch a Slack request to its handler.
+
+    Split from handle_event so the broad crash guard in the outer function
+    catches failures here without wrapping the ack call.
+    """
     web = WebClient(token=_CFG.slack_bot_token, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
     from scout_slack_safe import guard_web_client
     guard_web_client(web)
