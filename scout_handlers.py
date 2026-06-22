@@ -263,12 +263,12 @@ def _ask_with_timeout(query: str, timeout_s: int = _CFG.ask_timeout_s, **kwargs)
     return result_box["resp"]
 
 
-_TIMEOUT_FALLBACK_TEXT = (
-    ":hourglass_flowing_sand: *ClickHouse is under pressure right now.*\n"
-    "Your query took longer than expected — likely a memory-heavy time "
-    "window or a busy moment. Try again in 10–15 minutes, or narrow the "
-    "scope (e.g. a single publisher instead of all)."
-)
+def _ch_busy_message(user_id: str | None = None) -> str:
+    """Timeout fallback text. Adds @mention prefix for channel paths where
+    a reply does not generate a notification without it. Pass None for DMs
+    (reply always notifies) and modals (no user context)."""
+    prefix = f"<@{user_id}> " if user_id else ""
+    return f"{prefix}_On it. Taking a bit longer than usual. I'll tag you here when it's ready._"
 
 
 # ── Part 9 — Smart 👎 handler: clarification detection ───────────────────────
@@ -1408,7 +1408,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     web.views_update(
                         view_id=v_id,
                         view=_build_modal_view(
-                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _ch_busy_message()}}],
                             title="Scout",
                             callback_id="home_try_query",
                         ),
@@ -1480,11 +1480,11 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 response = _ask_with_timeout(query, on_stage=lambda s: _stage.__setitem__(0, s))
             except AskTimeout:
                 # stop_rotating() handled by finally below
+                _busy_msg = _ch_busy_message()
                 web.chat_update(
                     channel=dm_channel, ts=_placeholder_ts_ah,
-                    text="ClickHouse is under pressure — try again in 10–15 minutes.",
-                    blocks=[{"type": "section",
-                             "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                    text=_busy_msg,
+                    blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _busy_msg}}],
                 )
                 return
             _elapsed = int(time.monotonic() - _t0)
@@ -3036,11 +3036,11 @@ def _handle_event_impl(req: SocketModeRequest):
             _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
         except AskTimeout:
             # reactions_remove is handled by the finally block below
+            _busy_msg = _ch_busy_message()
             web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
-                text="ClickHouse is under pressure — try again in 10–15 minutes.",
-                blocks=[{"type": "section",
-                         "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                text=_busy_msg,
+                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _busy_msg}}],
             )
             return
         except Exception as e:
@@ -3191,11 +3191,11 @@ def _handle_event_impl(req: SocketModeRequest):
         _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
     except AskTimeout:
         stop_rotating()  # join the rotating thread before updating to avoid race
+        _busy_msg = _ch_busy_message(user_id)
         web.chat_update(
             channel=channel, ts=placeholder["ts"],
-            text="ClickHouse is under pressure — try again in 10–15 minutes.",
-            blocks=[{"type": "section",
-                     "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+            text=_busy_msg,
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _busy_msg}}],
         )
         return
     except Exception as e:
