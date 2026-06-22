@@ -87,6 +87,21 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes")
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    value = _env_int(name, default)
+    if value <= 0:
+        log.warning("[demand-feed] %s must be positive; using default %d", name, default)
+        return default
+    return value
+
+
 _DEMAND_FEED_HQ_CHANNEL = "C0AQEECF800"  # #bot-qa — shared fallback for non-production routing
 
 # All env vars read once at module init — no scattered os.getenv() calls beyond this block.
@@ -126,7 +141,7 @@ class _FeedConfig:
             demand_feed_port=_env_int("DEMAND_FEED_PORT", 8080),
             campaign_create_webhook_url=os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "").strip(),
             campaign_create_api_key=os.getenv("CAMPAIGN_CREATE_API_KEY", "").strip(),
-            campaign_create_dry_run=os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes"),
+            campaign_create_dry_run=_env_bool("CAMPAIGN_CREATE_DRY_RUN", default=True),
             scout_env=os.getenv("SCOUT_ENV", "development"),
             revenue_ops_channel=os.getenv("REVENUE_OPS_CHANNEL", _hq),
             revenue_tracker_enabled=os.getenv("REVENUE_TRACKER_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
@@ -142,7 +157,7 @@ class _FeedConfig:
             projection_autocheck_apples_hour_ct=_env_int("PROJECTION_AUTOCHECK_APPLES_HOUR_CT", 15),
             projection_autocheck_apples_tol_usd=_env_float("PROJECTION_AUTOCHECK_APPLES_TOL_USD", 500.0),
             projection_autocheck_max_errors=_env_int("PROJECTION_AUTOCHECK_MAX_ERRORS", 2),
-            scraper_timeout_secs=_env_int("SCRAPER_TIMEOUT_SECS", 1800),
+            scraper_timeout_secs=_env_positive_int("SCRAPER_TIMEOUT_SECS", 1800),
         )
 
 

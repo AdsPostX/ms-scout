@@ -118,6 +118,7 @@ def _env_int(name: str, default: int) -> int:
 class _BotConfig:
     bot_token: str = ""
     app_token: str = ""
+    anthropic_api_key: str = ""
     scout_env: str = "development"
     pulse_channel: str = ""
     scout_digest_channel: str = ""
@@ -129,12 +130,20 @@ class _BotConfig:
     port: int = 10000
     is_render: bool = False
 
+    def __post_init__(self) -> None:
+        if self.scout_env == "production" and self.scout_digest_channel == _SCOUT_HQ_CHANNEL:
+            log.warning(
+                "[scout-bot] SCOUT_DIGEST_CHANNEL not set in production — "
+                "_route_channel('offers') will fall back to #bot-qa"
+            )
+
     @classmethod
     def from_env(cls) -> "_BotConfig":
         _hq = _SCOUT_HQ_CHANNEL
         return cls(
             bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
             app_token=os.getenv("SLACK_APP_TOKEN", ""),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             scout_env=os.getenv("SCOUT_ENV", "development"),
             pulse_channel=os.getenv("PULSE_CHANNEL", _hq),
             scout_digest_channel=os.getenv("SCOUT_DIGEST_CHANNEL", _hq),
@@ -342,7 +351,8 @@ def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
 
         down_entries = [
             (v, v["publisher_id"], v.get("publisher_name", ""),
-             next((a for a in v.get("top_advertisers", []) if a.get("delta_ann", 0) < 0), None))
+             next((a for a in v.get("top_advertisers", [])
+                   if a.get("delta_ann", 0) < 0 and a.get("adv_name", "") != "(unattributed)"), None))
             for v in results
             if v["direction"] == "down" and v.get("publisher_id")
         ]
@@ -367,8 +377,6 @@ def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
             _ch = _gcc()
             hyp = ""
             gaps = []
-            if top_adv and top_adv.get("adv_name") == "(unattributed)":
-                top_adv = None
             if top_adv:
                 try:
                     _hyp_sql = """
@@ -1877,9 +1885,12 @@ def _compute_health_status() -> dict:
         checks["notion_queue_url"] = {"ok": True, "detail": f"Pipeline DB configured ({queue_db_id[:8]}...)"}
 
     # 4. Environment
-    for env_var in ("ANTHROPIC_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"):
-        val = os.getenv(env_var, "")
-        checks[env_var] = {"ok": bool(val), "detail": "set" if val else "missing"}
+    for key, val in (
+        ("ANTHROPIC_API_KEY", _BOT_CFG.anthropic_api_key),
+        ("SLACK_BOT_TOKEN", _BOT_CFG.bot_token),
+        ("SLACK_APP_TOKEN", _BOT_CFG.app_token),
+    ):
+        checks[key] = {"ok": bool(val), "detail": "set" if val else "missing"}
 
     all_ok = all(v["ok"] for v in checks.values())
     return {"ok": all_ok, "checks": checks}
