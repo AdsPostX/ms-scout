@@ -105,6 +105,14 @@ _BOT_USER_ID: str = ""  # cached at startup — never changes
 _SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #bot-qa (was #scout-qa, was #scout-hq)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        log.warning("[scout-bot] %s is not a valid integer; using default %d", name, default)
+        return default
+
+
 # All env vars read once at module init — no scattered os.getenv() calls beyond this block.
 @dataclass(frozen=True)
 class _BotConfig:
@@ -135,7 +143,7 @@ class _BotConfig:
             demand_feed_url=os.getenv("DEMAND_FEED_URL", "").rstrip("/"),
             notion_queue_db_id=os.getenv("NOTION_QUEUE_DB_ID", ""),
             sidd_qa_channel_id=os.getenv("SIDD_QA_CHANNEL_ID", ""),
-            port=int(os.getenv("PORT", "10000")),
+            port=_env_int("PORT", 10000),
             is_render=bool(os.getenv("RENDER")),
         )
 
@@ -359,6 +367,8 @@ def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
             _ch = _gcc()
             hyp = ""
             gaps = []
+            if top_adv and top_adv.get("adv_name") == "(unattributed)":
+                top_adv = None
             if top_adv:
                 try:
                     _hyp_sql = """

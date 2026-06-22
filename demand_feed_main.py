@@ -79,6 +79,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        log.warning("[demand-feed] %s is not a valid float; using default %g", name, default)
+        return default
+
+
+_DEMAND_FEED_HQ_CHANNEL = "C0AQEECF800"  # #bot-qa — shared fallback for non-production routing
+
 # All env vars read once at module init — no scattered os.getenv() calls beyond this block.
 @dataclass(frozen=True)
 class _FeedConfig:
@@ -108,7 +118,7 @@ class _FeedConfig:
 
     @classmethod
     def from_env(cls) -> "_FeedConfig":
-        _hq = "C0AQEECF800"
+        _hq = _DEMAND_FEED_HQ_CHANNEL
         return cls(
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
             slack_alert_channel=os.getenv("SLACK_ALERT_CHANNEL", "#scout-offers"),
@@ -119,18 +129,18 @@ class _FeedConfig:
             campaign_create_dry_run=os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes"),
             scout_env=os.getenv("SCOUT_ENV", "development"),
             revenue_ops_channel=os.getenv("REVENUE_OPS_CHANNEL", _hq),
-            revenue_tracker_enabled=os.getenv("REVENUE_TRACKER_ENABLED", "false").strip().lower() == "true",
+            revenue_tracker_enabled=os.getenv("REVENUE_TRACKER_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
             revenue_tracker_check_hour_ct=_env_int("REVENUE_TRACKER_CHECK_HOUR_CT", 10),
             scout_monitor_channel=os.getenv("SCOUT_MONITOR_CHANNEL", "#scout-offers"),
             scout_shadow_channel=os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa"),
             scout_hourly_shadow_enabled=os.getenv("SCOUT_HOURLY_SHADOW_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
-            projection_autocheck_enabled=os.getenv("PROJECTION_AUTOCHECK_ENABLED", "false").strip().lower() == "true",
+            projection_autocheck_enabled=os.getenv("PROJECTION_AUTOCHECK_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
             projection_autocheck_window_start_ct=_env_int("PROJECTION_AUTOCHECK_WINDOW_START_CT", 10),
             projection_autocheck_window_end_ct=_env_int("PROJECTION_AUTOCHECK_WINDOW_END_CT", 17),
             projection_autocheck_eod_hour_ct=_env_int("PROJECTION_AUTOCHECK_EOD_HOUR_CT", 17),
             projection_autocheck_eod_minute_ct=_env_int("PROJECTION_AUTOCHECK_EOD_MINUTE_CT", 30),
             projection_autocheck_apples_hour_ct=_env_int("PROJECTION_AUTOCHECK_APPLES_HOUR_CT", 15),
-            projection_autocheck_apples_tol_usd=float(os.getenv("PROJECTION_AUTOCHECK_APPLES_TOL_USD", "500")),
+            projection_autocheck_apples_tol_usd=_env_float("PROJECTION_AUTOCHECK_APPLES_TOL_USD", 500.0),
             projection_autocheck_max_errors=_env_int("PROJECTION_AUTOCHECK_MAX_ERRORS", 2),
             scraper_timeout_secs=_env_int("SCRAPER_TIMEOUT_SECS", 1800),
         )
@@ -423,7 +433,7 @@ def _projection_autocheck_daemon() -> None:
     """Demand-feed port of scout_bot._projection_autocheck_monitor.
 
     Hourly projection anomaly check within a configurable CT window.
-    Kill switch: PROJECTION_AUTOCHECK_ENABLED env var (default false — off).
+    Kill switch: PROJECTION_AUTOCHECK_ENABLED env var (default false — off; requires redeploy to take effect).
     Wired to job_runs telemetry.
     """
     while True:  # outer restart wrapper
@@ -651,7 +661,7 @@ def main() -> None:
         daemon=True,
         name="revenue-tracker",
     ).start()
-    log.info("[demand-feed] revenue-tracker daemon started (kill switch: REVENUE_TRACKER_ENABLED)")
+    log.info("[demand-feed] revenue-tracker daemon started (kill switch: REVENUE_TRACKER_ENABLED — requires redeploy to change)")
     threading.Thread(
         target=_projection_autocheck_daemon,
         daemon=True,
@@ -659,7 +669,7 @@ def main() -> None:
     ).start()
     log.info(
         "[demand-feed] projection-autocheck daemon started "
-        "(kill switch: PROJECTION_AUTOCHECK_ENABLED)"
+        "(kill switch: PROJECTION_AUTOCHECK_ENABLED — requires redeploy to change)"
     )
 
     for _monitor_fn, _monitor_name in [
@@ -671,7 +681,7 @@ def main() -> None:
         (_expiration_monitor_daemon, "expiration-monitor"),
     ]:
         threading.Thread(target=_monitor_fn, daemon=True, name=_monitor_name).start()
-    log.info("[demand-feed] hourly-shadow monitors started (kill switch: SCOUT_HOURLY_SHADOW_ENABLED)")
+    log.info("[demand-feed] hourly-shadow monitors started (kill switch: SCOUT_HOURLY_SHADOW_ENABLED — requires redeploy to change)")
     _wh  = _FEED_CFG.campaign_create_webhook_url
     _dry = _FEED_CFG.campaign_create_dry_run
     _cc_mode = "live" if (_wh and not _dry) else "dry_run"
@@ -762,7 +772,7 @@ def _revenue_tracker_daemon() -> None:
     Daily fallback (revenue_tracker_hourly_enabled=false):
       Legacy once-daily behaviour at revenue_tracker_check_hour_ct (now 10am CT).
 
-    Kill switch: REVENUE_TRACKER_ENABLED env var (default false — off).
+    Kill switch: REVENUE_TRACKER_ENABLED env var (default false — off; requires redeploy to take effect).
     Wired to job_runs telemetry via scout_core.job_runs.record_job_run.
 
     Posts to REVENUE_OPS_CHANNEL (production) or #bot-qa (non-production).
@@ -770,11 +780,9 @@ def _revenue_tracker_daemon() -> None:
     Outer restart wrapper: any unhandled crash logs the traceback and restarts
     after 30s so the thread stays alive indefinitely without a Render redeploy.
     """
-    _HQ_CHANNEL = "C0AQEECF800"  # #bot-qa fallback (matches scout_bot._SCOUT_HQ_CHANNEL)
-
     def _get_channel() -> str:
         if _FEED_CFG.scout_env != "production":
-            return _HQ_CHANNEL
+            return _DEMAND_FEED_HQ_CHANNEL
         return _FEED_CFG.revenue_ops_channel
 
     while True:  # outer restart wrapper — self-heals any unhandled crash
@@ -806,7 +814,7 @@ def _revenue_tracker_daemon() -> None:
             while True:  # inner poll loop
                 _time.sleep(300)  # 5-min poll
                 try:
-                    # Kill switch — default false; set REVENUE_TRACKER_ENABLED=true to activate
+                    # Kill switch — default false; set REVENUE_TRACKER_ENABLED=true and redeploy to activate
                     if not _FEED_CFG.revenue_tracker_enabled:
                         continue
 
@@ -1016,7 +1024,7 @@ def _run_shadow_monitor(
             while True:  # inner poll loop
                 _time.sleep(300)
                 try:
-                    # Outer kill switch — entire framework disabled by default
+                    # Outer kill switch — entire framework disabled by default; requires redeploy to change
                     if not _FEED_CFG.scout_hourly_shadow_enabled:
                         continue
 

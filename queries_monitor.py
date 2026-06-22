@@ -270,7 +270,8 @@ def velocity_alerts(
                     {"advertiser": adv_name, "rev_30d": round(float(r30), 2), "rev_7d": round(float(r7), 2)}
                 )
             for c in candidates:
-                c["advertisers"] = adv_by_pub.get(c["publisher_id"], [])[:5]
+                _advs = [a for a in adv_by_pub.get(c["publisher_id"], []) if a["advertiser"] != "(unattributed)"]
+                c["advertisers"] = _advs[:5]
         except Exception as e:
             logging.getLogger(__name__).warning(f"velocity_alerts phase-2 advertiser enrichment failed: {e}")
 

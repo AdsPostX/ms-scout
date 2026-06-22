@@ -62,11 +62,6 @@ _set_geo_normalizer(_normalize_geo)
 log = logging.getLogger("scout_agent")
 
 
-def _norm(s) -> str:
-    """Lowercase-strip any string or None; guards against None inputs."""
-    return (s or "").strip().lower()
-
-
 # ── Environment config — read once at import, warn if required vars absent ────
 _ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
 _PULSE_ENABLED        = os.getenv("PULSE_ENABLED", "true").lower() == "true"
@@ -718,6 +713,7 @@ from scout_tools_offers import (
     # Private helpers re-exported for backward-compat (scout_digest + smoke_test import these)
     _scout_score,
     _network_portal_url,
+    _norm,  # re-exported — scout_handlers imports _norm from scout_agent
 )
 from scout_tools_admin import (
     run_sql_query,
