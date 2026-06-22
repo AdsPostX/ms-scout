@@ -3971,7 +3971,7 @@ def test_slash_mention_format_parity():
 
 @test("Agent blocks — AgentStep dataclass validates status")
 def test_agent_step_dataclass():
-    """AgentStep dataclass is constructable and rejects invalid status values."""
+    """AgentStep dataclass instantiates correctly and rejects invalid status values."""
     import os
     os.environ.setdefault("SCOUT_AGENT_BLOCKS", "1")
     from scout_ui_kit import AgentStep
@@ -3990,7 +3990,7 @@ def test_agent_step_dataclass():
 
 @test("Agent blocks — _agent_plan_block renders native plan block")
 def test_agent_plan_block_renders():
-    """_agent_plan_block returns a native plan block with correct structure, statuses, and findings."""
+    """_agent_plan_block returns a native plan block with correct task structure and status mapping."""
     import os
     os.environ.setdefault("SCOUT_AGENT_BLOCKS", "1")
     from scout_ui_kit import AgentStep, _agent_plan_block
@@ -4026,7 +4026,7 @@ def test_agent_plan_block_renders():
 
 @test("Agent blocks — _synthesize_agent_steps derives steps from tool call log")
 def test_synthesize_agent_steps():
-    """_synthesize_agent_steps derives correct step labels, statuses, and findings from the tool call log."""
+    """_synthesize_agent_steps derives correct step labels, statuses, and findings from a tool call log."""
     from scout_agent import _synthesize_agent_steps, _TOOL_SKIP_SYNTHESIS
     # Normal tool call produces a step with correct label
     log = [("get_revenue_today", {"formatted": "$14K today, 71% of daily avg.", "pubs": []})]
@@ -4081,7 +4081,7 @@ def test_synthesize_agent_steps():
 
 @test("tool_result() factory enforces non-empty finding contract")
 def test_tool_result_contract():
-    """tool_result() raises ValueError on empty/blank finding and returns a dict with 'finding' as the first key."""
+    """tool_result() raises ValueError on empty/blank finding and returns a dict with finding as first key."""
     from scout_types import tool_result
     # Raises on empty finding
     try:
@@ -4313,7 +4313,7 @@ def test_build_maintenance_home_view():
 
 @test("Phase 12 — ScoutResponse importable with correct validation")
 def test_scout_response_importable():
-    """ScoutResponse imports cleanly, validates status enum, and derives confidence correctly."""
+    """ScoutResponse imports cleanly, validates status on construction, and derives confidence correctly."""
     from scout_response import ScoutResponse, Metric, Item
     r = ScoutResponse(
         status="warn", subject_type="publisher",
@@ -4331,7 +4331,7 @@ def test_scout_response_importable():
 
 @test("Phase 12 — alert_registry post-state functions present")
 def test_alert_registry_post_state_functions():
-    """alert_registry exports all five post-state functions: set, get, snooze, clear_snooze, and acknowledge."""
+    """alert_registry exports all five post-state functions required by the Phase 12 contract."""
     import alert_registry as ar
     for fn_name in ("set_post_state", "get_post_state", "snooze_alert",
                     "clear_snooze", "acknowledge_alert"):
@@ -4341,7 +4341,7 @@ def test_alert_registry_post_state_functions():
 
 @test("Phase 12 — scout_handlers uses eyes reaction (not thinking_face)")
 def test_scout_handlers_eyes_reaction():
-    """scout_handlers uses the 'eyes' reaction at least 4 times and no longer references thinking_face."""
+    """scout_handlers.py uses the eyes reaction in at least 4 places and contains no thinking_face reference."""
     import ast, pathlib
     src = pathlib.Path("scout_handlers.py").read_text()
     assert "thinking_face" not in src, "thinking_face still present in scout_handlers.py"
@@ -4351,7 +4351,7 @@ def test_scout_handlers_eyes_reaction():
 
 @test("Phase 12 — demand_feed_main wires set_post_state after mark_firing")
 def test_demand_feed_set_post_state_wired():
-    """demand_feed_main calls set_post_state at both alert post sites after mark_firing."""
+    """demand_feed_main.py calls set_post_state at both alert post sites."""
     import pathlib
     src = pathlib.Path("demand_feed_main.py").read_text()
     assert "set_post_state" in src, "set_post_state not found in demand_feed_main.py"
@@ -4361,7 +4361,7 @@ def test_demand_feed_set_post_state_wired():
 
 @test("Phase 12 — scout_acknowledge in _BLOCK_ACTION_DISPATCH")
 def test_acknowledge_in_dispatch():
-    """scout_acknowledge action_id and _handle_acknowledge handler are both present in scout_handlers."""
+    """scout_acknowledge action_id and _handle_acknowledge handler are both present in scout_handlers.py."""
     import pathlib
     src = pathlib.Path("scout_handlers.py").read_text()
     assert '"scout_acknowledge"' in src, "scout_acknowledge not in dispatch table"
@@ -4371,7 +4371,7 @@ def test_acknowledge_in_dispatch():
 
 @test("Phase 12 — scout_snooze_open in _BLOCK_ACTION_DISPATCH")
 def test_snooze_in_dispatch():
-    """scout_snooze_open, _SNOOZE_DURATIONS, and scout_snooze_submit are all wired in scout_handlers."""
+    """scout_snooze_open, _SNOOZE_DURATIONS, and scout_snooze_submit are all wired in scout_handlers.py."""
     import pathlib
     src = pathlib.Path("scout_handlers.py").read_text()
     assert '"scout_snooze_open"' in src, "scout_snooze_open not in dispatch table"
@@ -4382,7 +4382,7 @@ def test_snooze_in_dispatch():
 
 @test("Phase 12 — _refire_context_block is a pure function")
 def test_refire_context_block():
-    """_refire_context_block is a pure function that returns a context block mentioning the user and re-firing."""
+    """_refire_context_block is a pure function that returns a context block containing the user mention."""
     from scout_ui_kit import _refire_context_block
     b = _refire_context_block("U123", "2026-06-16T14:00:00+00:00")
     assert b["type"] == "context"
@@ -4394,7 +4394,7 @@ def test_refire_context_block():
 
 @test("Phase 12 — scout_drill_publisher in _BLOCK_ACTION_DISPATCH")
 def test_drill_publisher_in_dispatch():
-    """scout_drill_publisher action_id, _handle_drill_publisher handler, and a daemonized thread are all present."""
+    """scout_drill_publisher action, _handle_drill_publisher handler, and daemonized thread are all present."""
     import pathlib
     src = pathlib.Path("scout_handlers.py").read_text()
     assert '"scout_drill_publisher"' in src, "scout_drill_publisher not in dispatch table"
@@ -4405,7 +4405,7 @@ def test_drill_publisher_in_dispatch():
 
 @test("Phase 12 — _drill_loading_modal is a pure function")
 def test_drill_loading_modal():
-    """_drill_loading_modal, _drill_data_modal, and _drill_error_modal are pure functions with correct shapes."""
+    """_drill_loading_modal, _drill_data_modal, and _drill_error_modal are pure functions returning valid modal dicts."""
     from scout_ui_kit import _drill_loading_modal, _drill_data_modal, _drill_error_modal
     lm = _drill_loading_modal()
     assert lm["type"] == "modal"
@@ -4421,7 +4421,7 @@ def test_drill_loading_modal():
 
 @test("Phase 12 — acknowledge+snooze buttons rendered on alert cards")
 def test_alert_card_buttons():
-    """All alert card formatters render acknowledge and snooze buttons; buttons are absent when alert_name is omitted."""
+    """All five alert card formatters render acknowledge and snooze buttons when alert_name is provided."""
     from scout_bot import _format_cap_alert, _format_velocity_down_alert, _format_ghost_alert
     from scout_bot import _format_fill_alert, _format_cvr_alert, _format_expiration_alert
     from scout_bot import _format_revenue_alert
@@ -4678,6 +4678,28 @@ def test_trim_to_limit_helper_exists():
     assert "[trimmed]" not in remaining or remaining.count("[trimmed]") == 0, \
         "Inline trim pattern still present outside helper"
     return True, "_trim_to_limit present; no inline trim pattern outside helper"
+
+
+@test("handler_config_loads_from_env")
+def test_handler_config_loads_from_env():
+    """_HandlerConfig frozen dataclass exists, is instantiated as _CFG singleton."""
+    import scout_handlers
+    if not hasattr(scout_handlers, "_HandlerConfig"):
+        return False, "_HandlerConfig class not found in scout_handlers"
+    if not hasattr(scout_handlers, "_CFG"):
+        return False, "_CFG singleton not found in scout_handlers"
+    cfg = scout_handlers._CFG
+    if not isinstance(cfg, scout_handlers._HandlerConfig):
+        return False, f"_CFG is {type(cfg)!r}, expected _HandlerConfig"
+    # Must be frozen — mutation must raise
+    try:
+        cfg.adops_notify_user_id = "mutate"
+        return False, "_HandlerConfig is not frozen — mutation succeeded"
+    except Exception as exc:
+        if "mutate" in str(exc):
+            # The mutation value leaked into the error message — unexpected
+            return False, f"Unexpected mutation error: {exc}"
+    return True, "_HandlerConfig frozen dataclass and _CFG singleton verified"
 
 
 if __name__ == "__main__":

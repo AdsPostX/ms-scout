@@ -17,6 +17,7 @@ import random
 import re
 import threading
 import time
+from dataclasses import dataclass as _dataclass
 from dataclasses import replace as _dc_replace
 from datetime import datetime, timezone
 
@@ -61,6 +62,41 @@ from scout_state import (
 )
 
 log = logging.getLogger("scout_handlers")
+
+
+# ── Handler configuration — gathered at module load, not scattered inline ────
+@_dataclass(frozen=True)
+class _HandlerConfig:
+    """Immutable config read from env at module import time.
+
+    Vamsee: config gathered at construction, not scattered inline os.getenv calls.
+    """
+    adops_notify_user_id: str = ""
+    sidd_qa_channel_id: str = ""
+    slack_bot_token: str = ""
+
+    @classmethod
+    def from_env(cls) -> "_HandlerConfig":
+        return cls(
+            adops_notify_user_id=os.getenv("ADOPS_NOTIFY_USER_ID", ""),
+            sidd_qa_channel_id=os.getenv("SIDD_QA_CHANNEL_ID", ""),
+            slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
+        )
+
+
+_CFG = _HandlerConfig.from_env()
+
+
+def _get_display_name(web: "WebClient", user_id: str) -> str:
+    """Return Slack display name or username, falling back to user_id."""
+    try:
+        info = web.users_info(user=user_id)
+        return (
+            info.get("user", {}).get("profile", {}).get("display_name", "")
+            or info.get("user", {}).get("name", user_id)
+        )
+    except Exception:
+        return user_id
 
 
 def _is_under_maintenance(user_id: str) -> bool:
@@ -1175,7 +1211,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
 
     # Launch notification (same logic as handle_event)
     if launched_offer_sg:
-        adops_uid   = _ADOPS_NOTIFY_UID
+        adops_uid   = _CFG.adops_notify_user_id
         approved_by = launched_offer_sg.get("approved_by", "")
         advertiser  = launched_offer_sg.get("advertiser", "")
         payout      = launched_offer_sg.get("payout", "")
@@ -1867,7 +1903,7 @@ def _post_maintenance_summary(web: WebClient, channel: str, attempts: list) -> N
     breakdown = ", ".join(f"<@{u}> ×{c}" for u, c in users.items())
     web.chat_postMessage(channel=channel,
         text=f":white_check_mark: Maintenance off. {len(attempts)} message(s) blocked: {breakdown}")
-    sidd_qa = os.getenv("SIDD_QA_CHANNEL_ID", "")
+    sidd_qa = _CFG.sidd_qa_channel_id
     if sidd_qa and sidd_qa != channel:
         try:
             web.chat_postMessage(channel=sidd_qa,
@@ -2338,7 +2374,7 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
 
 def _handle_event_impl(req: SocketModeRequest):
-    web = WebClient(token=os.getenv("SLACK_BOT_TOKEN", ""), retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
+    web = WebClient(token=_CFG.slack_bot_token, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
     from scout_slack_safe import guard_web_client
     guard_web_client(web)
 
@@ -2901,7 +2937,7 @@ def _handle_event_impl(req: SocketModeRequest):
                 f"_I see {len(_files)} files attached — using the first one "
                 f"({_files[0].get('name', 'unknown')})._"
             )
-        _result = extract_file(_files[0], os.getenv("SLACK_BOT_TOKEN", ""))
+        _result = extract_file(_files[0], _CFG.slack_bot_token)
     elif _sheets_url:
         _result = extract_sheets_url(_sheets_url)
     else:
@@ -2998,12 +3034,7 @@ def _handle_event_impl(req: SocketModeRequest):
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
             _tools_called = response.tools_called
-            try:
-                user_info = web.users_info(user=user_id)
-                _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
-                          or user_info.get("user", {}).get("name", user_id))
-            except Exception:
-                _uname = user_id
+            _uname = _get_display_name(web, user_id)
             _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
         except AskTimeout:
             # reactions_remove is handled by the finally block below
@@ -3158,12 +3189,7 @@ def _handle_event_impl(req: SocketModeRequest):
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting
         _tools_called = response.tools_called
-        try:
-            user_info = web.users_info(user=user_id)
-            _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
-                      or user_info.get("user", {}).get("name", user_id))
-        except Exception:
-            _uname = user_id
+        _uname = _get_display_name(web, user_id)
         _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
     except AskTimeout:
         stop_rotating()  # join the rotating thread before updating to avoid race
@@ -3206,7 +3232,7 @@ def _handle_event_impl(req: SocketModeRequest):
 
     # Launch notification — thread-only, targeted tags, no channel noise
     if launched_offer:
-        adops_uid   = _ADOPS_NOTIFY_UID
+        adops_uid   = _CFG.adops_notify_user_id
         approved_by = launched_offer.get("approved_by", "")
         advertiser  = launched_offer.get("advertiser", "")
         payout      = launched_offer.get("payout", "")
