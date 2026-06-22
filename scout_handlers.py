@@ -197,7 +197,12 @@ class AskTimeout(Exception):
     again in 10-15 minutes.'"""
 
 
-def _ask_with_timeout(query: str, timeout_s: int = _CFG.ask_timeout_s, **kwargs):
+def _ask_with_timeout(
+    query: str,
+    timeout_s: int = _CFG.ask_timeout_s,
+    blocking_acquire_timeout_s: int | None = None,
+    **kwargs,
+):
     """Run ask() in a worker thread; raise AskTimeout if it exceeds
     timeout_s. The worker thread keeps running (daemon) so the agent
     can finish in the background, but the caller stops waiting.
@@ -206,11 +211,19 @@ def _ask_with_timeout(query: str, timeout_s: int = _CFG.ask_timeout_s, **kwargs)
     under sustained CH pressure. If the cap is full, raise AskTimeout
     immediately rather than queueing.
 
+    blocking_acquire_timeout_s: when set, block-wait up to that many seconds
+    for a semaphore slot instead of failing immediately. Use in retry paths
+    where the user has already been acknowledged and a longer wait is acceptable.
+
     Use this in any user-facing path where an infinite spinner is worse
     than a 'try again in 10-15m' message: App Home tries, channel
     @mentions, DMs.
     """
-    if not _ASK_SEMAPHORE.acquire(blocking=False):
+    if blocking_acquire_timeout_s is not None:
+        acquired = _ASK_SEMAPHORE.acquire(blocking=True, timeout=blocking_acquire_timeout_s)
+    else:
+        acquired = _ASK_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
         log.warning(
             "ask() semaphore full (>=3 inflight); shedding query=%r",
             query[:80],
@@ -263,12 +276,71 @@ def _ask_with_timeout(query: str, timeout_s: int = _CFG.ask_timeout_s, **kwargs)
     return result_box["resp"]
 
 
-_TIMEOUT_FALLBACK_TEXT = (
-    ":hourglass_flowing_sand: *ClickHouse is under pressure right now.*\n"
-    "Your query took longer than expected — likely a memory-heavy time "
-    "window or a busy moment. Try again in 10–15 minutes, or narrow the "
-    "scope (e.g. a single publisher instead of all)."
-)
+def _mention(user_id: str | None) -> str:
+    return f"<@{user_id}> " if user_id else ""
+
+
+def _ch_busy_message(user_id: str | None = None, *, promise_followup: bool = True) -> str:
+    """Timeout fallback text. Adds @mention prefix for channel paths where
+    a reply does not generate a notification without it. Pass None for DMs
+    (reply always notifies) and modals (no user context).
+
+    promise_followup=False for paths where no retry is wired — avoids
+    showing a tag-back promise the code cannot keep."""
+    tail = "I'll tag you here when it's ready." if promise_followup else "Try again in a moment."
+    return f"{_mention(user_id)}_On it. Taking a bit longer than usual. {tail}_"
+
+
+def _retry_after_timeout(
+    web: WebClient,
+    channel: str,
+    thread_ts: str | None,
+    query: str,
+    user_id: str | None = None,
+    user_tz: str = "",
+    surface: Surface = Surface.DM,
+    delay_s: int = 30,
+    history: list | None = None,
+) -> None:
+    """Spawn a daemon thread that retries ask() after *delay_s* seconds and
+    posts the answer back to the original thread (postman pattern).
+
+    Pass user_id for channel paths — the reply includes <@user_id> so the
+    user is notified. Omit for DMs: reply auto-notifies, no tag needed.
+    Pass surface explicitly; do not rely on user_id as a surface proxy.
+    Pass history to preserve thread context on follow-up questions."""
+    def _run() -> None:
+        time.sleep(delay_s + random.uniform(0, 10))
+        prefix = _mention(user_id)
+        try:
+            response = _ask_with_timeout(
+                query, user_id=user_id or "", user_tz=user_tz,
+                **({"history": history} if history else {}),
+                blocking_acquire_timeout_s=_CFG.ask_timeout_s,
+            )
+            response_text = (response.text or "")[:3000]
+            card = Card(severity=Severity.INFO, headline="", body=response_text)
+            fallback, blocks = wrap_response(
+                card=card, surface=surface, pattern=ResponsePattern.ANSWER,
+            )
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=f"{prefix}{fallback}",
+                blocks=blocks,
+                unfurl_links=False,
+            )
+        except AskTimeout:
+            log.warning("[CH] retry also timed out; query=%r", query[:80])
+            _still_slow = f"{prefix}Still slow. Try again in a few minutes."
+            _sc = Card(severity=Severity.INFO, headline="", body=_still_slow)
+            _, _sb = wrap_response(card=_sc, surface=surface, pattern=ResponsePattern.ANSWER)
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=_still_slow, blocks=_sb,
+            )
+        except Exception as exc:
+            log.error("[CH] async retry failed: %s", exc)
+    threading.Thread(target=_run, daemon=True, name="ask-retry").start()
 
 
 # ── Part 9 — Smart 👎 handler: clarification detection ───────────────────────
@@ -1408,7 +1480,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     web.views_update(
                         view_id=v_id,
                         view=_build_modal_view(
-                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _ch_busy_message(promise_followup=False)}}],
                             title="Scout",
                             callback_id="home_try_query",
                         ),
@@ -1480,12 +1552,16 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 response = _ask_with_timeout(query, on_stage=lambda s: _stage.__setitem__(0, s))
             except AskTimeout:
                 # stop_rotating() handled by finally below
+                _busy_msg = _ch_busy_message()
+                _bcard = Card(severity=Severity.INFO, headline="", body=_busy_msg)
+                _, _busy_blocks = wrap_response(card=_bcard, surface=Surface.DM, pattern=ResponsePattern.ANSWER)
                 web.chat_update(
                     channel=dm_channel, ts=_placeholder_ts_ah,
-                    text="ClickHouse is under pressure — try again in 10–15 minutes.",
-                    blocks=[{"type": "section",
-                             "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                    text=_busy_msg,
+                    blocks=_busy_blocks,
                 )
+                _retry_after_timeout(web, dm_channel, thread_ts, query,
+                                     user_tz=_get_user_tz(web, user_id))
                 return
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
@@ -3014,12 +3090,13 @@ def _handle_event_impl(req: SocketModeRequest):
         except Exception:
             pass  # reactions:write scope may not be set yet — degrade gracefully
 
+        _user_tz = _get_user_tz(web, user_id)
         try:
             _t0 = time.monotonic()
             _permalink = _permalink_for(web, channel, msg_ts)
             response = _ask_with_timeout(
                 agent_query, history=history, user_id=user_id, permalink=_permalink,
-                user_tz=_get_user_tz(web, user_id), thread_ts=thread_ts or "",
+                user_tz=_user_tz, thread_ts=thread_ts or "",
                 attached_text=attached_text, attached_image=attached_image,
             )
             # Prepend attachment_note (e.g. unsupported/error fallback notice)
@@ -3036,12 +3113,16 @@ def _handle_event_impl(req: SocketModeRequest):
             _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
         except AskTimeout:
             # reactions_remove is handled by the finally block below
+            _busy_msg = _ch_busy_message()
+            _bcard = Card(severity=Severity.INFO, headline="", body=_busy_msg)
+            _, _busy_blocks = wrap_response(card=_bcard, surface=Surface.DM, pattern=ResponsePattern.ANSWER)
             web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
-                text="ClickHouse is under pressure — try again in 10–15 minutes.",
-                blocks=[{"type": "section",
-                         "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                text=_busy_msg,
+                blocks=_busy_blocks,
             )
+            _retry_after_timeout(web, channel, thread_ts, agent_query,
+                                 user_tz=_user_tz, history=history)
             return
         except Exception as e:
             log.error(f"Agent error (DM): {e}", exc_info=True)
@@ -3169,11 +3250,12 @@ def _handle_event_impl(req: SocketModeRequest):
     _stage: list = [f'"{_q_seed}"']
     stop_rotating = _rotating_status(web, channel, _placeholder_ts, stage_ref=_stage)
 
+    _user_tz = _get_user_tz(web, user_id)
     try:
         _t0 = time.monotonic()
         _permalink = _permalink_for(web, channel, msg_ts)
         response = _ask_with_timeout(agent_query, history=history, user_id=user_id, permalink=_permalink,
-                                     thread_ts=thread_ts or "",
+                                     user_tz=_user_tz, thread_ts=thread_ts or "",
                                      attached_text=attached_text, attached_image=attached_image,
                                      on_stage=lambda s: _stage.__setitem__(0, s))
         # Prepend attachment_note (e.g. unsupported/error fallback notice)
@@ -3191,12 +3273,16 @@ def _handle_event_impl(req: SocketModeRequest):
         _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
     except AskTimeout:
         stop_rotating()  # join the rotating thread before updating to avoid race
+        _busy_msg = _ch_busy_message(user_id)
+        _bcard = Card(severity=Severity.INFO, headline="", body=_busy_msg)
+        _, _busy_blocks = wrap_response(card=_bcard, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER)
         web.chat_update(
             channel=channel, ts=placeholder["ts"],
-            text="ClickHouse is under pressure — try again in 10–15 minutes.",
-            blocks=[{"type": "section",
-                     "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+            text=_busy_msg,
+            blocks=_busy_blocks,
         )
+        _retry_after_timeout(web, channel, thread_ts, agent_query, user_id=user_id,
+                             user_tz=_user_tz, surface=Surface.THREAD, history=history)
         return
     except Exception as e:
         log.error(f"Agent error: {e}")
