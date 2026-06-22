@@ -2,7 +2,7 @@
 
 ## demand_feed_main.py — MS Platform Feed (NOT live)
 
-5 MS_PLATFORM_TODO items must be resolved before flipping live. Contact Vamsee for the endpoint.
+5 `MS_PLATFORM_TODO` code comments must be resolved before flipping live (see "Where the TODOs live" below). Contact Vamsee for the endpoint.
 
 **Required env vars (set in Render):**
 
