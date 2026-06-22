@@ -3971,6 +3971,7 @@ def test_slash_mention_format_parity():
 
 @test("Agent blocks — AgentStep dataclass validates status")
 def test_agent_step_dataclass():
+    """AgentStep dataclass is constructable and rejects invalid status values."""
     import os
     os.environ.setdefault("SCOUT_AGENT_BLOCKS", "1")
     from scout_ui_kit import AgentStep
@@ -3989,6 +3990,7 @@ def test_agent_step_dataclass():
 
 @test("Agent blocks — _agent_plan_block renders native plan block")
 def test_agent_plan_block_renders():
+    """_agent_plan_block returns a native plan block with correct structure, statuses, and findings."""
     import os
     os.environ.setdefault("SCOUT_AGENT_BLOCKS", "1")
     from scout_ui_kit import AgentStep, _agent_plan_block
@@ -4024,6 +4026,7 @@ def test_agent_plan_block_renders():
 
 @test("Agent blocks — _synthesize_agent_steps derives steps from tool call log")
 def test_synthesize_agent_steps():
+    """_synthesize_agent_steps derives correct step labels, statuses, and findings from the tool call log."""
     from scout_agent import _synthesize_agent_steps, _TOOL_SKIP_SYNTHESIS
     # Normal tool call produces a step with correct label
     log = [("get_revenue_today", {"formatted": "$14K today, 71% of daily avg.", "pubs": []})]
@@ -4078,6 +4081,7 @@ def test_synthesize_agent_steps():
 
 @test("tool_result() factory enforces non-empty finding contract")
 def test_tool_result_contract():
+    """tool_result() raises ValueError on empty/blank finding and returns a dict with 'finding' as the first key."""
     from scout_types import tool_result
     # Raises on empty finding
     try:
@@ -4309,6 +4313,7 @@ def test_build_maintenance_home_view():
 
 @test("Phase 12 — ScoutResponse importable with correct validation")
 def test_scout_response_importable():
+    """ScoutResponse imports cleanly, validates status enum, and derives confidence correctly."""
     from scout_response import ScoutResponse, Metric, Item
     r = ScoutResponse(
         status="warn", subject_type="publisher",
@@ -4326,6 +4331,7 @@ def test_scout_response_importable():
 
 @test("Phase 12 — alert_registry post-state functions present")
 def test_alert_registry_post_state_functions():
+    """alert_registry exports all five post-state functions: set, get, snooze, clear_snooze, and acknowledge."""
     import alert_registry as ar
     for fn_name in ("set_post_state", "get_post_state", "snooze_alert",
                     "clear_snooze", "acknowledge_alert"):
@@ -4335,6 +4341,7 @@ def test_alert_registry_post_state_functions():
 
 @test("Phase 12 — scout_handlers uses eyes reaction (not thinking_face)")
 def test_scout_handlers_eyes_reaction():
+    """scout_handlers uses the 'eyes' reaction at least 4 times and no longer references thinking_face."""
     import ast, pathlib
     src = pathlib.Path("scout_handlers.py").read_text()
     assert "thinking_face" not in src, "thinking_face still present in scout_handlers.py"
@@ -4344,6 +4351,7 @@ def test_scout_handlers_eyes_reaction():
 
 @test("Phase 12 — demand_feed_main wires set_post_state after mark_firing")
 def test_demand_feed_set_post_state_wired():
+    """demand_feed_main calls set_post_state at both alert post sites after mark_firing."""
     import pathlib
     src = pathlib.Path("demand_feed_main.py").read_text()
     assert "set_post_state" in src, "set_post_state not found in demand_feed_main.py"
@@ -4353,6 +4361,7 @@ def test_demand_feed_set_post_state_wired():
 
 @test("Phase 12 — scout_acknowledge in _BLOCK_ACTION_DISPATCH")
 def test_acknowledge_in_dispatch():
+    """scout_acknowledge action_id and _handle_acknowledge handler are both present in scout_handlers."""
     import pathlib
     src = pathlib.Path("scout_handlers.py").read_text()
     assert '"scout_acknowledge"' in src, "scout_acknowledge not in dispatch table"
@@ -4362,6 +4371,7 @@ def test_acknowledge_in_dispatch():
 
 @test("Phase 12 — scout_snooze_open in _BLOCK_ACTION_DISPATCH")
 def test_snooze_in_dispatch():
+    """scout_snooze_open, _SNOOZE_DURATIONS, and scout_snooze_submit are all wired in scout_handlers."""
     import pathlib
     src = pathlib.Path("scout_handlers.py").read_text()
     assert '"scout_snooze_open"' in src, "scout_snooze_open not in dispatch table"
@@ -4372,6 +4382,7 @@ def test_snooze_in_dispatch():
 
 @test("Phase 12 — _refire_context_block is a pure function")
 def test_refire_context_block():
+    """_refire_context_block is a pure function that returns a context block mentioning the user and re-firing."""
     from scout_ui_kit import _refire_context_block
     b = _refire_context_block("U123", "2026-06-16T14:00:00+00:00")
     assert b["type"] == "context"
@@ -4383,6 +4394,7 @@ def test_refire_context_block():
 
 @test("Phase 12 — scout_drill_publisher in _BLOCK_ACTION_DISPATCH")
 def test_drill_publisher_in_dispatch():
+    """scout_drill_publisher action_id, _handle_drill_publisher handler, and a daemonized thread are all present."""
     import pathlib
     src = pathlib.Path("scout_handlers.py").read_text()
     assert '"scout_drill_publisher"' in src, "scout_drill_publisher not in dispatch table"
@@ -4393,6 +4405,7 @@ def test_drill_publisher_in_dispatch():
 
 @test("Phase 12 — _drill_loading_modal is a pure function")
 def test_drill_loading_modal():
+    """_drill_loading_modal, _drill_data_modal, and _drill_error_modal are pure functions with correct shapes."""
     from scout_ui_kit import _drill_loading_modal, _drill_data_modal, _drill_error_modal
     lm = _drill_loading_modal()
     assert lm["type"] == "modal"
@@ -4408,6 +4421,7 @@ def test_drill_loading_modal():
 
 @test("Phase 12 — acknowledge+snooze buttons rendered on alert cards")
 def test_alert_card_buttons():
+    """All alert card formatters render acknowledge and snooze buttons; buttons are absent when alert_name is omitted."""
     from scout_bot import _format_cap_alert, _format_velocity_down_alert, _format_ghost_alert
     from scout_bot import _format_fill_alert, _format_cvr_alert, _format_expiration_alert
     from scout_bot import _format_revenue_alert
@@ -4615,6 +4629,21 @@ def test_supply_gap_excludes_provisioned():
     src = inspect.getsource(queries_publisher.supply_gap_opportunities)
     assert "NOT IN" in src.upper(), "supply_gap missing NOT IN exclusion for provisioned campaigns"
     return True, "supply_gap_opportunities contains NOT IN exclusion for provisioned campaigns"
+
+
+@test("_fetch_baseline returns named dicts — no positional r[N] access")
+def test_fetch_baseline_no_positional_access():
+    """get_advertiser_revenue_projection uses named dict keys for baseline_rows access, not positional r[N] indices."""
+    import inspect, re
+    import scout_tools_revenue
+    src = inspect.getsource(scout_tools_revenue.get_advertiser_revenue_projection)
+    # Old pattern: r[2], r[3], r[4], r[5], r[6], r[7]
+    hits = re.findall(r'baseline_rows[^\n]*r\[\d+\]', src)
+    if hits:
+        return False, f"Positional baseline_rows access still present: {hits}"
+    if 'r["revenue_30d"]' not in src and "r['revenue_30d']" not in src:
+        return False, "Named access r[\"revenue_30d\"] not found in source"
+    return True, "baseline_rows uses named dict keys throughout"
 
 
 if __name__ == "__main__":

@@ -184,7 +184,11 @@ def get_advertiser_revenue_projection(
     # Step 1: 30-day baseline — impressions + revenue per publisher
     # Step 2: Campaign end dates + monthly caps
     def _fetch_baseline():
-        return ch.query(
+        _COLS = (
+            "publisher_pid", "publisher_name", "impressions_30d", "sessions_30d",
+            "revenue_30d", "payout_30d", "conversions_30d", "clicks_30d",
+        )
+        _q = ch.query(
             """
             SELECT
                 cast(i.pid AS String)          AS publisher_pid,
@@ -222,7 +226,8 @@ def get_advertiser_revenue_projection(
             LIMIT 30
             """,
             parameters={"adv": f"%{advertiser_name}%"},
-        ).result_rows
+        )
+        return [dict(zip(_COLS, row)) for row in _q.result_rows]
 
     def _fetch_cap_data():
         return ch.query(
@@ -265,12 +270,12 @@ def get_advertiser_revenue_projection(
     )
 
     # ── Step 3: Projection ────────────────────────────────────────────────────
-    total_revenue_30d     = sum(r[4] for r in baseline_rows)
-    total_payout_30d      = sum(r[5] for r in baseline_rows)
-    total_impressions_30d = sum(r[2] for r in baseline_rows)
-    total_sessions_30d    = sum(r[3] for r in baseline_rows)
-    total_conversions_30d = sum(r[6] for r in baseline_rows)
-    total_clicks_30d      = sum(r[7] for r in baseline_rows)
+    total_revenue_30d     = sum(r["revenue_30d"]     for r in baseline_rows)
+    total_payout_30d      = sum(r["payout_30d"]      for r in baseline_rows)
+    total_impressions_30d = sum(r["impressions_30d"]  for r in baseline_rows)
+    total_sessions_30d    = sum(r["sessions_30d"]     for r in baseline_rows)
+    total_conversions_30d = sum(r["conversions_30d"]  for r in baseline_rows)
+    total_clicks_30d      = sum(r["clicks_30d"]       for r in baseline_rows)
 
     uncapped_projected_revenue = round((total_revenue_30d / 30) * days_in_month, 2)
     uncapped_projected_payout  = round((total_payout_30d  / 30) * days_in_month, 2)
@@ -281,7 +286,14 @@ def get_advertiser_revenue_projection(
 
     by_publisher = []
     for row in baseline_rows[:10]:
-        pub_pid, pub_name, impr, sess, rev, pay, convs, clicks = row
+        pub_pid  = row["publisher_pid"]
+        pub_name = row["publisher_name"]
+        impr     = row["impressions_30d"]
+        sess     = row["sessions_30d"]
+        rev      = row["revenue_30d"]
+        pay      = row["payout_30d"]
+        convs    = row["conversions_30d"]
+        clicks   = row["clicks_30d"]
         by_publisher.append({
             "publisher":          pub_name or f"Partner {pub_pid}",
             "impressions_30d":    impr,
