@@ -852,8 +852,8 @@ def normalize_geo(raw: str) -> str:
         return "US + CA"
     if n <= 4 and parts <= (_US_VARIANTS | _CA_VARIANTS | {"mexico", "puertorico"}):
         return "North America"
-    if n > 5:
-        return "Global"   # 6+ countries = treat as global
+    if n >= 5:
+        return "Global"   # 5+ countries = treat as global
     if has_us:
         return "US + CA" if has_ca else "US Only"
     if len(parts & _EU_COUNTRIES) >= n - 1:
