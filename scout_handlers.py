@@ -27,7 +27,7 @@ from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web import WebClient
 
-from scout_agent import ask
+from scout_agent import ask, _norm
 from scout_thresholds import _manager as _tm
 from scout_attachments import detect_sheets_url, extract_sheets_url, extract_file
 from scout_notion import (
@@ -74,13 +74,25 @@ class _HandlerConfig:
     adops_notify_user_id: str = ""
     sidd_qa_channel_id: str = ""
     slack_bot_token: str = ""
+    ask_timeout_s: int = 90
+    anthropic_api_key: str = ""
 
     @classmethod
     def from_env(cls) -> "_HandlerConfig":
+        raw_timeout = os.getenv("SCOUT_ASK_TIMEOUT_S", "90")
+        try:
+            timeout = int(raw_timeout)
+            if timeout <= 0:
+                raise ValueError
+        except ValueError:
+            log.warning("Invalid SCOUT_ASK_TIMEOUT_S=%r; defaulting to 90", raw_timeout)
+            timeout = 90
         return cls(
             adops_notify_user_id=os.getenv("ADOPS_NOTIFY_USER_ID", ""),
             sidd_qa_channel_id=os.getenv("SIDD_QA_CHANNEL_ID", ""),
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
+            ask_timeout_s=timeout,
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
         )
 
 
@@ -110,8 +122,6 @@ def _is_under_maintenance(user_id: str) -> bool:
 _BOT_USER_ID: str = ""
 _LAST_THREAD_PER_CHANNEL: dict = {}
 _LAST_THREAD_LOCK: threading.Lock = threading.Lock()
-_ADOPS_NOTIFY_UID: str = os.getenv("ADOPS_NOTIFY_USER_ID", "")
-
 # ── Per-user easter egg responses ────────────────────────────────────────────
 _FUNZONE_USER_ID = "U05BAJK1NH4"
 
@@ -169,20 +179,8 @@ def _set_force_monitor_fn(name: str, fn) -> None:
 # CH-pressure days surface as a friendly degraded message, not an infinite
 # spinner. The orphaned ask() thread is allowed to complete in the
 # background (daemon=True so it dies on process exit).
-# Defensive parse: a bad SCOUT_ASK_TIMEOUT_S (e.g. "90s", "", "0") would
-# either crash the module at import or time out every request instantly.
-# Clamp to a sane minimum so misconfiguration degrades to "slow" not "broken".
-_raw_ask_timeout_s = os.getenv("SCOUT_ASK_TIMEOUT_S", "90")
-try:
-    ASK_TIMEOUT_S = int(_raw_ask_timeout_s)
-    if ASK_TIMEOUT_S <= 0:
-        raise ValueError
-except ValueError:
-    log.warning(
-        "Invalid SCOUT_ASK_TIMEOUT_S=%r; defaulting to 90",
-        _raw_ask_timeout_s,
-    )
-    ASK_TIMEOUT_S = 90
+# Timeout is read from _CFG.ask_timeout_s (parsed from SCOUT_ASK_TIMEOUT_S
+# in _HandlerConfig.from_env with defensive validation and warning on bad input).
 
 # Bounded concurrency for in-flight ask() workers. Under sustained CH
 # pressure, timed-out workers keep running in the background (daemon=True);
@@ -199,7 +197,7 @@ class AskTimeout(Exception):
     again in 10-15 minutes.'"""
 
 
-def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
+def _ask_with_timeout(query: str, timeout_s: int = _CFG.ask_timeout_s, **kwargs):
     """Run ask() in a worker thread; raise AskTimeout if it exceeds
     timeout_s. The worker thread keeps running (daemon) so the agent
     can finish in the background, but the caller stops waiting.
@@ -295,7 +293,7 @@ def _is_clarification_response(text: str) -> bool:
       3. Is short (<300 chars) — excludes long factual answers with trailing
          confirmation questions like "Is this the breakdown you needed?"
     """
-    lower = text.lower().strip()
+    lower = _norm(text)
     has_phrase = any(phrase in lower for phrase in _CLARIFICATION_PHRASES)
     if not has_phrase:
         return False
@@ -384,7 +382,7 @@ def _run_preflight_qa(  # replaces _check_url_async (removed — this is a stric
         # 2. Advertiser history on MS platform
         try:
             benchmarks = _tm.benchmarks()
-            adv_key = (brief_data.get("advertiser") or "").lower().strip()
+            adv_key = _norm(brief_data.get("advertiser"))
             by_adv = benchmarks.get("by_adv_name", {})
             if adv_key and adv_key in by_adv:
                 hist = by_adv[adv_key]
@@ -788,7 +786,7 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     # activation API. Normalize first (casing/whitespace, None-safe) and accept either
     # the raw upstream token ("sourcing_signal") or the already-canonical form so a
     # re-entrant call doesn't silently misclassify a sourcing offer as queue-approved.
-    raw_source = str(offer.get("source") or "").strip().lower()
+    raw_source = _norm(offer.get("source"))
     offer["source"] = (
         "sourcing-approved"
         if raw_source in {"sourcing_signal", "sourcing-approved"}
@@ -2315,7 +2313,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 web.chat_postEphemeral(channel=channel, user=user_id,
                                        text="Only admins can toggle maintenance mode.")
                 return
-            arg = payload.get("text", "").strip().lower()
+            arg = _norm(payload.get("text", ""))
             if arg == "on" or arg == "":
                 m = set_maintenance(user_id)
                 web.chat_postMessage(channel=channel,
@@ -2516,8 +2514,8 @@ def _handle_event_impl(req: SocketModeRequest):
         _permalink = _permalink_for(web, channel, msg_ts)
         try:
             from scout_agent import record_entity_note
-            import anthropic as _ant, os as _os
-            _ant_client = _ant.Anthropic(api_key=_os.getenv("ANTHROPIC_API_KEY", ""))
+            import anthropic as _ant
+            _ant_client = _ant.Anthropic(api_key=_CFG.anthropic_api_key)
             from scout_telemetry import capture as _lat_capture
             _parse_resp = _lat_capture(
                 "scout/entity-parse",
@@ -2544,7 +2542,7 @@ def _handle_event_impl(req: SocketModeRequest):
                 _raw_text = _raw_text.strip()
             _parsed = _json.loads(_raw_text)
             _ename = _parsed.get("entity_name", "").strip()
-            _etype = _parsed.get("entity_type", "publisher").lower().strip()
+            _etype = _norm(_parsed.get("entity_type", "publisher"))
             _enote = _parsed.get("note", _body).strip()
             if _etype not in ("publisher", "advertiser"):
                 _etype = "publisher"
@@ -3073,7 +3071,7 @@ def _handle_event_impl(req: SocketModeRequest):
             suggestions = response.payload.get("suggestions", [])
 
         if launched_offer_dm:
-            adops_uid   = _ADOPS_NOTIFY_UID
+            adops_uid   = _CFG.adops_notify_user_id
             approved_by = launched_offer_dm.get("approved_by", "")
             advertiser  = launched_offer_dm.get("advertiser", "")
             payout      = launched_offer_dm.get("payout", "")

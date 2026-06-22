@@ -61,6 +61,7 @@ _set_geo_normalizer(_normalize_geo)
 
 log = logging.getLogger("scout_agent")
 
+
 # ── Environment config — read once at import, warn if required vars absent ────
 _ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
 _PULSE_ENABLED        = os.getenv("PULSE_ENABLED", "true").lower() == "true"
@@ -630,7 +631,7 @@ def force_run_monitor(monitor: str = "", _caller_user_id: str = "") -> dict:
         return {"ok": False, "error": "not_initialized",
                 "message": "Force-monitor context not injected yet — Scout still warming up."}
 
-    name = (monitor or "").strip().lower()
+    name = _norm(monitor)
     import scout_handlers
     allowed = set(scout_handlers._FORCE_MONITOR_FNS.keys())
     if name not in allowed:
@@ -712,6 +713,7 @@ from scout_tools_offers import (
     # Private helpers re-exported for backward-compat (scout_digest + smoke_test import these)
     _scout_score,
     _network_portal_url,
+    _norm,  # re-exported — scout_handlers imports _norm from scout_agent
 )
 from scout_tools_admin import (
     run_sql_query,
@@ -1532,7 +1534,7 @@ def _match_command(raw: str) -> tuple[str | None, dict | None]:
     Returns (command_name, registry_entry) on hit, (None, None) on miss.
     Must be called on the raw message with @mention stripped.
     """
-    normalized = re.sub(r"<@[A-Z0-9]+>", "", raw or "").strip().lower()
+    normalized = _norm(re.sub(r"<@[A-Z0-9]+>", "", raw or ""))
     if not normalized:
         return None, None
     for name, entry in _COMMAND_REGISTRY.items():

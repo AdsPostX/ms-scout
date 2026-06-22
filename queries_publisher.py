@@ -107,44 +107,6 @@ def publisher_impression_volume(ch, pid_list: list[str], days: int = 7) -> dict[
     return result
 
 
-def publisher_recent_sessions(ch, candidate_ids: list[int], days: int = 7) -> dict[int, int]:
-    """
-    Return session count per publisher user_id over the last `days` days.
-    Used alongside publisher_impression_volume to pick the most active account
-    when multiple accounts share a publisher name.
-
-    Returns: dict mapping user_id (int) -> session_count
-    """
-    if not candidate_ids:
-        return {}
-    rows = ch.query(
-        """
-        SELECT user_id, count() AS sessions
-        FROM adpx_sdk_sessions
-        PREWHERE user_id IN {ids: Array(Int64)}
-            AND toYYYYMM(created_at) >= toYYYYMM(today() - {days: UInt32})
-        WHERE created_at >= today() - {days: UInt32}
-        GROUP BY user_id
-        ORDER BY sessions DESC
-        LIMIT 10
-        """,
-        parameters={"ids": [int(i) for i in candidate_ids], "days": days},
-    ).result_rows
-    return {int(r[0]): int(r[1]) for r in rows}
-
-
-def publisher_name_by_id(ch, pub_id: int) -> Optional[str]:
-    """
-    Return the organization name for a publisher, or None if not found.
-    Lightweight fallback for callers that have a numeric ID but need the display name.
-    """
-    rows = ch.query(
-        "SELECT organization FROM from_airbyte_users WHERE id = {pid: UInt64} LIMIT 1",
-        parameters={"pid": int(pub_id)},
-    ).result_rows
-    return rows[0][0] if rows else None
-
-
 # ===========================================================================
 # Publisher competitive landscape (was: get_publisher_competitive_landscape)
 # These 4 functions replace the 5 f-string SQL injections in the original.
@@ -947,7 +909,7 @@ def publisher_fleet_health_stats(
         current_window AS (
             SELECT
                 user_id                                                AS publisher_id,
-                round(sum(toFloat64OrZero(revenue)), 2)               AS revenue_actual
+                round(sum(toFloat64OrNull(revenue)), 2)               AS revenue_actual
             FROM adpx_conversionsdetails
             PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL {days: Int32} DAY)
             WHERE created_at >= today() - INTERVAL {days: Int32} DAY
@@ -963,7 +925,7 @@ def publisher_fleet_health_stats(
                     - {days: Int32},
                     {days: Int32}
                 )                                                      AS window_idx,
-                round(sum(toFloat64OrZero(revenue)), 2)               AS window_revenue
+                round(sum(toFloat64OrNull(revenue)), 2)               AS window_revenue
             FROM adpx_conversionsdetails
             PREWHERE toYYYYMM(created_at) >= toYYYYMM(today() - INTERVAL {lookback: Int32} DAY)
             WHERE created_at >= today() - INTERVAL {lookback: Int32} DAY

@@ -296,8 +296,8 @@ def _load_offers() -> list:
     return offers
 
 
-def _norm(s: str) -> str:
-    return s.lower().strip() if s else ""
+def _norm(s) -> str:
+    return str(s or "").strip().lower()
 
 
 # ── Tool implementations ─────────────────────────────────────────────────────

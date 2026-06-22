@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from typing import Optional
 
 _PROCESS_START_TS = time.time()
@@ -78,8 +79,89 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Scraper is killed and retried after this many seconds (default 30 min).
-_SCRAPER_TIMEOUT_SECS = _env_int("SCRAPER_TIMEOUT_SECS", 1800)
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        log.warning("[demand-feed] %s is not a valid float; using default %g", name, default)
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes")
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    value = _env_int(name, default)
+    if value <= 0:
+        log.warning("[demand-feed] %s must be positive; using default %d", name, default)
+        return default
+    return value
+
+
+_DEMAND_FEED_HQ_CHANNEL = "C0AQEECF800"  # #bot-qa — shared fallback for non-production routing
+
+# All env vars read once at module init — no scattered os.getenv() calls beyond this block.
+@dataclass(frozen=True)
+class _FeedConfig:
+    slack_bot_token: str = ""
+    slack_alert_channel: str = "#scout-offers"
+    scout_qa_channel: str = "#sidd-qa"
+    demand_feed_port: int = 8080
+    campaign_create_webhook_url: str = ""
+    campaign_create_api_key: str = ""
+    campaign_create_dry_run: bool = True
+    scout_env: str = "development"
+    revenue_ops_channel: str = "C0AQEECF800"
+    revenue_tracker_enabled: bool = False
+    revenue_tracker_check_hour_ct: int = 10
+    scout_monitor_channel: str = "#scout-offers"
+    scout_shadow_channel: str = "#scout-qa"
+    scout_hourly_shadow_enabled: bool = False
+    projection_autocheck_enabled: bool = False
+    projection_autocheck_window_start_ct: int = 10
+    projection_autocheck_window_end_ct: int = 17
+    projection_autocheck_eod_hour_ct: int = 17
+    projection_autocheck_eod_minute_ct: int = 30
+    projection_autocheck_apples_hour_ct: int = 15
+    projection_autocheck_apples_tol_usd: float = 500.0
+    projection_autocheck_max_errors: int = 2
+    scraper_timeout_secs: int = 1800
+
+    @classmethod
+    def from_env(cls) -> "_FeedConfig":
+        _hq = _DEMAND_FEED_HQ_CHANNEL
+        return cls(
+            slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
+            slack_alert_channel=os.getenv("SLACK_ALERT_CHANNEL", "#scout-offers"),
+            scout_qa_channel=os.getenv("SCOUT_QA_CHANNEL", "#sidd-qa"),
+            demand_feed_port=_env_int("DEMAND_FEED_PORT", 8080),
+            campaign_create_webhook_url=os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "").strip(),
+            campaign_create_api_key=os.getenv("CAMPAIGN_CREATE_API_KEY", "").strip(),
+            campaign_create_dry_run=_env_bool("CAMPAIGN_CREATE_DRY_RUN", default=True),
+            scout_env=os.getenv("SCOUT_ENV", "development"),
+            revenue_ops_channel=os.getenv("REVENUE_OPS_CHANNEL", _hq),
+            revenue_tracker_enabled=os.getenv("REVENUE_TRACKER_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
+            revenue_tracker_check_hour_ct=_env_int("REVENUE_TRACKER_CHECK_HOUR_CT", 10),
+            scout_monitor_channel=os.getenv("SCOUT_MONITOR_CHANNEL", "#scout-offers"),
+            scout_shadow_channel=os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa"),
+            scout_hourly_shadow_enabled=os.getenv("SCOUT_HOURLY_SHADOW_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
+            projection_autocheck_enabled=os.getenv("PROJECTION_AUTOCHECK_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
+            projection_autocheck_window_start_ct=_env_int("PROJECTION_AUTOCHECK_WINDOW_START_CT", 10),
+            projection_autocheck_window_end_ct=_env_int("PROJECTION_AUTOCHECK_WINDOW_END_CT", 17),
+            projection_autocheck_eod_hour_ct=_env_int("PROJECTION_AUTOCHECK_EOD_HOUR_CT", 17),
+            projection_autocheck_eod_minute_ct=_env_int("PROJECTION_AUTOCHECK_EOD_MINUTE_CT", 30),
+            projection_autocheck_apples_hour_ct=_env_int("PROJECTION_AUTOCHECK_APPLES_HOUR_CT", 15),
+            projection_autocheck_apples_tol_usd=_env_float("PROJECTION_AUTOCHECK_APPLES_TOL_USD", 500.0),
+            projection_autocheck_max_errors=_env_int("PROJECTION_AUTOCHECK_MAX_ERRORS", 2),
+            scraper_timeout_secs=_env_positive_int("SCRAPER_TIMEOUT_SECS", 1800),
+        )
+
+
+_FEED_CFG = _FeedConfig.from_env()
 
 
 def _now_chicago() -> datetime:
@@ -105,8 +187,8 @@ def _save_state(state: dict) -> None:
 
 
 def _alert_slack(msg: str) -> None:
-    token = os.getenv("SLACK_BOT_TOKEN")
-    channel = os.getenv("SLACK_ALERT_CHANNEL", "#scout-offers")
+    token = _FEED_CFG.slack_bot_token
+    channel = _FEED_CFG.slack_alert_channel
     if not token:
         return
     try:
@@ -135,13 +217,13 @@ def _run() -> None:
     q: multiprocessing.Queue = multiprocessing.Queue()
     p = multiprocessing.Process(target=_scraper_worker, args=(q,), daemon=True)
     p.start()
-    p.join(timeout=_SCRAPER_TIMEOUT_SECS)
+    p.join(timeout=_FEED_CFG.scraper_timeout_secs)
     if p.is_alive():
         p.terminate()
         p.join(timeout=5)
         if p.is_alive():
             p.kill()
-        raise TimeoutError(f"run_headless() hung after {_SCRAPER_TIMEOUT_SECS}s")
+        raise TimeoutError(f"run_headless() hung after {_FEED_CFG.scraper_timeout_secs}s")
     if not q.empty():
         raise q.get()
 
@@ -366,7 +448,7 @@ def _projection_autocheck_daemon() -> None:
     """Demand-feed port of scout_bot._projection_autocheck_monitor.
 
     Hourly projection anomaly check within a configurable CT window.
-    Kill switch: PROJECTION_AUTOCHECK_ENABLED env var (default false — off).
+    Kill switch: PROJECTION_AUTOCHECK_ENABLED env var (default false — off; requires redeploy to take effect).
     Wired to job_runs telemetry.
     """
     while True:  # outer restart wrapper
@@ -389,9 +471,9 @@ def _projection_autocheck_daemon() -> None:
             from slack_sdk.web import WebClient
 
             CT_TZ   = pytz.timezone("America/Chicago")
-            channel = os.getenv("SCOUT_QA_CHANNEL", "#sidd-qa")
+            channel = _FEED_CFG.scout_qa_channel
             tag     = "[projection-autocheck]"
-            _bot_token = os.getenv("SLACK_BOT_TOKEN")
+            _bot_token = _FEED_CFG.slack_bot_token
             if not _bot_token:
                 log.error("[projection-autocheck] SLACK_BOT_TOKEN not set — retrying in 60s.")
                 _time.sleep(60)
@@ -410,17 +492,17 @@ def _projection_autocheck_daemon() -> None:
             while True:  # inner poll loop
                 try:
                     # Kill switch: default false — dormant until staging validated.
-                    if os.getenv("PROJECTION_AUTOCHECK_ENABLED", "false").strip().lower() != "true":
+                    if not _FEED_CFG.projection_autocheck_enabled:
                         _time.sleep(300)
                         continue
 
-                    win_start  = int(os.getenv("PROJECTION_AUTOCHECK_WINDOW_START_CT", "10"))
-                    win_end    = int(os.getenv("PROJECTION_AUTOCHECK_WINDOW_END_CT", "17"))
-                    eod_hour   = int(os.getenv("PROJECTION_AUTOCHECK_EOD_HOUR_CT", "17"))
-                    eod_minute = int(os.getenv("PROJECTION_AUTOCHECK_EOD_MINUTE_CT", "30"))
-                    cmp_hour   = int(os.getenv("PROJECTION_AUTOCHECK_APPLES_HOUR_CT", "15"))
-                    cmp_tol    = float(os.getenv("PROJECTION_AUTOCHECK_APPLES_TOL_USD", "500"))
-                    max_errs   = int(os.getenv("PROJECTION_AUTOCHECK_MAX_ERRORS", "2"))
+                    win_start  = _FEED_CFG.projection_autocheck_window_start_ct
+                    win_end    = _FEED_CFG.projection_autocheck_window_end_ct
+                    eod_hour   = _FEED_CFG.projection_autocheck_eod_hour_ct
+                    eod_minute = _FEED_CFG.projection_autocheck_eod_minute_ct
+                    cmp_hour   = _FEED_CFG.projection_autocheck_apples_hour_ct
+                    cmp_tol    = _FEED_CFG.projection_autocheck_apples_tol_usd
+                    max_errs   = _FEED_CFG.projection_autocheck_max_errors
 
                     now_ct    = _dt.now(CT_TZ)
                     today_str = now_ct.date().isoformat()
@@ -581,7 +663,7 @@ def _projection_autocheck_daemon() -> None:
 
 
 def _start_http_server() -> None:
-    port = int(os.getenv("DEMAND_FEED_PORT", "8080"))
+    port = _FEED_CFG.demand_feed_port
     server = socketserver.TCPServer(("", port), _OffersHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     log.info(f"[demand-feed] HTTP server started on :{port}")
@@ -594,7 +676,7 @@ def main() -> None:
         daemon=True,
         name="revenue-tracker",
     ).start()
-    log.info("[demand-feed] revenue-tracker daemon started (kill switch: REVENUE_TRACKER_ENABLED)")
+    log.info("[demand-feed] revenue-tracker daemon started (kill switch: REVENUE_TRACKER_ENABLED — requires redeploy to change)")
     threading.Thread(
         target=_projection_autocheck_daemon,
         daemon=True,
@@ -602,7 +684,7 @@ def main() -> None:
     ).start()
     log.info(
         "[demand-feed] projection-autocheck daemon started "
-        "(kill switch: PROJECTION_AUTOCHECK_ENABLED)"
+        "(kill switch: PROJECTION_AUTOCHECK_ENABLED — requires redeploy to change)"
     )
 
     for _monitor_fn, _monitor_name in [
@@ -614,9 +696,9 @@ def main() -> None:
         (_expiration_monitor_daemon, "expiration-monitor"),
     ]:
         threading.Thread(target=_monitor_fn, daemon=True, name=_monitor_name).start()
-    log.info("[demand-feed] hourly-shadow monitors started (kill switch: SCOUT_HOURLY_SHADOW_ENABLED)")
-    _wh  = os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "").strip()
-    _dry = os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes")
+    log.info("[demand-feed] hourly-shadow monitors started (kill switch: SCOUT_HOURLY_SHADOW_ENABLED — requires redeploy to change)")
+    _wh  = _FEED_CFG.campaign_create_webhook_url
+    _dry = _FEED_CFG.campaign_create_dry_run
     _cc_mode = "live" if (_wh and not _dry) else "dry_run"
     log.info(
         "[demand-feed] campaign-creation mode=%s webhook_url_set=%s "
@@ -705,7 +787,7 @@ def _revenue_tracker_daemon() -> None:
     Daily fallback (revenue_tracker_hourly_enabled=false):
       Legacy once-daily behaviour at revenue_tracker_check_hour_ct (now 10am CT).
 
-    Kill switch: REVENUE_TRACKER_ENABLED env var (default false — off).
+    Kill switch: REVENUE_TRACKER_ENABLED env var (default false — off; requires redeploy to take effect).
     Wired to job_runs telemetry via scout_core.job_runs.record_job_run.
 
     Posts to REVENUE_OPS_CHANNEL (production) or #bot-qa (non-production).
@@ -713,13 +795,10 @@ def _revenue_tracker_daemon() -> None:
     Outer restart wrapper: any unhandled crash logs the traceback and restarts
     after 30s so the thread stays alive indefinitely without a Render redeploy.
     """
-    _HQ_CHANNEL = "C0AQEECF800"  # #bot-qa fallback (matches scout_bot._SCOUT_HQ_CHANNEL)
-
     def _get_channel() -> str:
-        scout_env = os.getenv("SCOUT_ENV", "development")
-        if scout_env != "production":
-            return _HQ_CHANNEL
-        return os.getenv("REVENUE_OPS_CHANNEL", _HQ_CHANNEL)
+        if _FEED_CFG.scout_env != "production":
+            return _DEMAND_FEED_HQ_CHANNEL
+        return _FEED_CFG.revenue_ops_channel
 
     while True:  # outer restart wrapper — self-heals any unhandled crash
         try:
@@ -741,7 +820,7 @@ def _revenue_tracker_daemon() -> None:
             CT_TZ      = pytz.timezone("America/Chicago")
             sig        = _tm.load().get("signals", {})
             check_hour = int(sig.get("revenue_tracker_check_hour_ct",
-                             os.getenv("REVENUE_TRACKER_CHECK_HOUR_CT", "10")))
+                             _FEED_CFG.revenue_tracker_check_hour_ct))
             hourly_enabled     = sig.get("revenue_tracker_hourly_enabled", True)
             hourly_start       = int(sig.get("revenue_tracker_hourly_start_ct", 9))
             hourly_end         = int(sig.get("revenue_tracker_hourly_end_ct", 17))
@@ -750,8 +829,8 @@ def _revenue_tracker_daemon() -> None:
             while True:  # inner poll loop
                 _time.sleep(300)  # 5-min poll
                 try:
-                    # Kill switch — default false; set REVENUE_TRACKER_ENABLED=true to activate
-                    if os.getenv("REVENUE_TRACKER_ENABLED", "false").strip().lower() != "true":
+                    # Kill switch — default false; set REVENUE_TRACKER_ENABLED=true and redeploy to activate
+                    if not _FEED_CFG.revenue_tracker_enabled:
                         continue
 
                     now_ct = _dt.now(CT_TZ)
@@ -782,7 +861,7 @@ def _revenue_tracker_daemon() -> None:
                         slot = today_str  # not used below in daily mode
 
                     channel = _get_channel()
-                    _bot_token = os.getenv("SLACK_BOT_TOKEN")
+                    _bot_token = _FEED_CFG.slack_bot_token
                     if not _bot_token:
                         log.error("[revenue-tracker] SLACK_BOT_TOKEN not set — skipping slot.")
                         if not hourly_enabled:
@@ -952,16 +1031,16 @@ def _run_shadow_monitor(
     while True:  # outer restart wrapper
         try:
             CT_TZ          = pytz.timezone("America/Chicago")
-            channel        = os.getenv("SCOUT_MONITOR_CHANNEL", "#scout-offers")
-            shadow_channel = os.getenv("SCOUT_SHADOW_CHANNEL", "#scout-qa")
+            channel        = _FEED_CFG.scout_monitor_channel
+            shadow_channel = _FEED_CFG.scout_shadow_channel
             tag            = f"[{monitor_name}]"
             last_shadow_slot = None
 
             while True:  # inner poll loop
                 _time.sleep(300)
                 try:
-                    # Outer kill switch — entire framework disabled by default
-                    if os.getenv("SCOUT_HOURLY_SHADOW_ENABLED", "false").strip().lower() not in ("1", "true", "yes"):
+                    # Outer kill switch — entire framework disabled by default; requires redeploy to change
+                    if not _FEED_CFG.scout_hourly_shadow_enabled:
                         continue
 
                     # Per-monitor kill switch
@@ -971,7 +1050,7 @@ def _run_shadow_monitor(
                     check_hour = int(_tm.load().get("signals", {}).get(f"{config_key}_monitor_check_hour_ct", 9))
                     now_ct      = _dt.now(CT_TZ)
                     today_str   = now_ct.date().isoformat()
-                    shadow_on   = os.getenv("SCOUT_HOURLY_SHADOW_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+                    shadow_on   = _FEED_CFG.scout_hourly_shadow_enabled
                     in_prod_window = (now_ct.hour == check_hour and now_ct.minute < 10)
                     in_shadow_window = shadow_on
 
@@ -1039,7 +1118,7 @@ def _run_shadow_monitor(
                         continue
 
                     from slack_sdk.web import WebClient as _WC
-                    web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
+                    web = _WC(token=_FEED_CFG.slack_bot_token)
                     # UC-1: check snooze state before posting (prod only — shadow ticks always post)
                     _should_post = True
                     if not is_shadow_tick:
@@ -1320,9 +1399,9 @@ def _fire_campaign_creation(draft: dict) -> dict:
 
     See the MS_PLATFORM_TODO block above for flip-live instructions.
     """
-    webhook_url = os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "").strip()
-    api_key     = os.getenv("CAMPAIGN_CREATE_API_KEY", "").strip()
-    dry_run     = os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes")
+    webhook_url = _FEED_CFG.campaign_create_webhook_url
+    api_key     = _FEED_CFG.campaign_create_api_key
+    dry_run     = _FEED_CFG.campaign_create_dry_run
 
     # Build the CampaignRequest payload regardless — used for both dry_run
     # preview and the real POST so there's one source of truth.
@@ -1416,9 +1495,9 @@ def _handle_queue_config(handler: http.server.BaseHTTPRequestHandler) -> None:
           "queue_depth": { "pending": 3, "approved": 1, "rejected": 0 }
         }
     """
-    webhook_url = os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "").strip()
-    api_key     = os.getenv("CAMPAIGN_CREATE_API_KEY", "").strip()
-    dry_run     = os.getenv("CAMPAIGN_CREATE_DRY_RUN", "true").strip().lower() in ("1", "true", "yes")
+    webhook_url = _FEED_CFG.campaign_create_webhook_url
+    api_key     = _FEED_CFG.campaign_create_api_key
+    dry_run     = _FEED_CFG.campaign_create_dry_run
     live        = bool(webhook_url) and not dry_run
 
     drafts = _load_queue()

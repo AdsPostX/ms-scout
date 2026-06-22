@@ -1109,21 +1109,17 @@ def test_projection_autocheck_monitor_registered():
         if not hasattr(scout_state, fn) or not callable(getattr(scout_state, fn)):
             return False, f"{fn} missing/not callable on scout_state"
 
-    # Assert production-mapping directly so the dev-env fallback can't mask a
-    # missing / wrong "qa" entry. Patch _SCOUT_ENV to "production" for the call.
-    if scout_bot._PRODUCTION_CHANNELS.get("qa") != scout_bot._SCOUT_HQ_CHANNEL:
-        return False, (
-            f"_PRODUCTION_CHANNELS['qa']={scout_bot._PRODUCTION_CHANNELS.get('qa')!r}, "
-            f"expected {scout_bot._SCOUT_HQ_CHANNEL!r}"
-        )
-    _saved_env = scout_bot._SCOUT_ENV
+    # Assert production routing so the dev-env fallback can't mask a missing/wrong "qa" entry.
+    # Temporarily replace _BOT_CFG with a production-env instance (frozen dataclass — replace() is safe).
+    import dataclasses as _dc
+    _saved_cfg = scout_bot._BOT_CFG
     try:
-        scout_bot._SCOUT_ENV = "production"
+        scout_bot._BOT_CFG = _dc.replace(scout_bot._BOT_CFG, scout_env="production")
         routed = scout_bot._route_channel("qa")
     finally:
-        scout_bot._SCOUT_ENV = _saved_env
+        scout_bot._BOT_CFG = _saved_cfg
     if routed != scout_bot._SCOUT_HQ_CHANNEL:
-        return False, f"_route_channel('qa') under SCOUT_ENV=production returned {routed!r}, expected _SCOUT_HQ_CHANNEL"
+        return False, f"_route_channel('qa') under scout_env='production' returned {routed!r}, expected _SCOUT_HQ_CHANNEL"
 
     import scout_thresholds as _st
     sig = _st._manager.load().get("signals", {})

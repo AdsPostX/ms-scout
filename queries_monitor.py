@@ -183,15 +183,15 @@ def velocity_alerts(
             SELECT
                 toInt64(user_id)                                                AS publisher_id,
                 any(u.organization)                                             AS publisher_name,
-                coalesce(sum(toFloat64OrZero(revenue)), 0)                      AS revenue_30d,
+                coalesce(sum(toFloat64OrNull(revenue)), 0)                      AS revenue_30d,
                 coalesce(sumIf(
-                    toFloat64OrZero(revenue),
-                    toDate(created_at) > {date_expr} - 7
+                    toFloat64OrNull(revenue),
+                    created_at >= {date_expr} - INTERVAL 7 DAY
                 ), 0)                                                           AS revenue_7d
             FROM adpx_conversionsdetails cv
             -- mv_adpx_users columns: id (UInt64), organization — NOT pid/name
             LEFT JOIN mv_adpx_users u ON u.id = toUInt64(cv.user_id)
-            WHERE toDate(cv.created_at) > {date_expr} - 30
+            WHERE cv.created_at >= {date_expr} - INTERVAL 30 DAY
               {pub_filter}
             GROUP BY user_id
             HAVING revenue_30d >= {{min_rev_30d: Float64}}
@@ -247,18 +247,17 @@ def velocity_alerts(
                 f"""
                 SELECT
                     toInt64(cv.user_id)                                     AS publisher_id,
-                    c.adv_name,
-                    coalesce(sum(toFloat64OrZero(cv.revenue)), 0)           AS rev_30d,
+                    coalesce(c.adv_name, '(unattributed)')                  AS adv_name,
+                    coalesce(sum(toFloat64OrNull(cv.revenue)), 0)           AS rev_30d,
                     coalesce(sumIf(
-                        toFloat64OrZero(cv.revenue),
-                        toDate(cv.created_at) > {date_expr} - 7
+                        toFloat64OrNull(cv.revenue),
+                        cv.created_at >= {date_expr} - INTERVAL 7 DAY
                     ), 0)                                                   AS rev_7d
                 FROM adpx_conversionsdetails cv
-                JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = toInt64(c.id)
-                WHERE toDate(cv.created_at) > {date_expr} - 30
+                LEFT JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = toInt64(c.id)
+                WHERE cv.created_at >= {date_expr} - INTERVAL 30 DAY
                   AND toInt64(cv.user_id) IN ({pub_id_csv})
-                  AND c.deleted_at IS NULL
-                GROUP BY cv.user_id, c.adv_name
+                GROUP BY cv.user_id, coalesce(c.adv_name, '(unattributed)')
                 HAVING rev_30d > 0
                 ORDER BY rev_30d DESC
                 """
@@ -271,7 +270,8 @@ def velocity_alerts(
                     {"advertiser": adv_name, "rev_30d": round(float(r30), 2), "rev_7d": round(float(r7), 2)}
                 )
             for c in candidates:
-                c["advertisers"] = adv_by_pub.get(c["publisher_id"], [])[:5]
+                _advs = [a for a in adv_by_pub.get(c["publisher_id"], []) if a["advertiser"] != "(unattributed)"]
+                c["advertisers"] = _advs[:5]
         except Exception as e:
             logging.getLogger(__name__).warning(f"velocity_alerts phase-2 advertiser enrichment failed: {e}")
 
@@ -324,7 +324,7 @@ def cap_alert_campaigns(
                 c.id                                                        AS campaign_id,
                 c.adv_name,
                 c.capping_config,
-                coalesce(sum(toFloat64OrZero(cv.revenue)), 0)               AS revenue_mtd
+                coalesce(sum(toFloat64OrNull(cv.revenue)), 0)               AS revenue_mtd
             FROM from_airbyte_campaigns c
             LEFT JOIN adpx_conversionsdetails cv
                 ON toInt64(cv.campaign_id) = toInt64(c.id)

@@ -70,6 +70,13 @@ class PublisherDelta:
     revenue_baseline_cents: int  # 7-day same-time-of-day average
     delta_pct: float             # signed percentage Δ vs baseline
 
+    def __post_init__(self):
+        if self.revenue_today_cents < 0 or self.revenue_baseline_cents < 0:
+            raise ValueError(
+                f"PublisherDelta revenue fields must be non-negative, "
+                f"got today={self.revenue_today_cents}, baseline={self.revenue_baseline_cents}"
+            )
+
 
 @dataclass
 class ScoreboardRollup:
@@ -88,6 +95,13 @@ class ScoreboardRollup:
     revenue_eod_diagnostic:            Optional[str] = None      # one of: "efficiency", "traffic", "traffic_upside", "on_track", or None
     revenue_mtd_cents: int = 0                                    # month-to-date revenue in cents
     generated_at: datetime = field(default_factory=datetime.utcnow)
+
+    def __post_init__(self):
+        for _f in ("revenue_today_cents", "revenue_yesterday_same_time_cents",
+                   "revenue_7d_avg_cents", "revenue_mtd_cents"):
+            _v = getattr(self, _f)
+            if _v < 0:
+                raise ValueError(f"ScoreboardRollup.{_f} must be non-negative, got {_v}")
 
 
 def scoreboard_rollup(ch) -> ScoreboardRollup:
@@ -832,8 +846,8 @@ def earnings_breakdown(
         rev_rows = ch.query(
             f"""
             SELECT
-                coalesce(sum(toFloat64OrZero(revenue)), 0) AS gross_rev,
-                coalesce(sum(toFloat64OrZero(payout)), 0)  AS partner_rev
+                coalesce(sum(toFloat64OrNull(revenue)), 0) AS gross_rev,
+                coalesce(sum(toFloat64OrNull(payout)), 0)  AS partner_rev
             FROM adpx_conversionsdetails
             WHERE toDate(created_at) BETWEEN {{start_date: String}} AND {{end_date: String}}
               {pub_filter_cv}
