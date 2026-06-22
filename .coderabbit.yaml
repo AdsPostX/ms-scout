@@ -51,6 +51,12 @@ reviews:
         Scraper runs every 6h. Network-specific parsers are brittle — flag any
         change that could silently swallow offers (empty list returns, exception swallowing).
 
+    - path: "**/*.py"
+      instructions: |
+        Scout docstring policy: docstrings only where the WHY is non-obvious. 70% coverage
+        is intentional — trivial helpers and one-liner wrappers are exempt. Do not flag
+        missing docstrings on private helpers unless they have non-obvious invariants.
+
   auto_review:
     enabled: true
     drafts: false
