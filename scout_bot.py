@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import pathlib
+from dataclasses import dataclass
 import random
 import re
 import threading
@@ -58,9 +59,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("scout_bot")
 
-BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
-
 _LAST_THREAD_PER_CHANNEL: dict = {}  # channel → thread_ts
 _LAST_THREAD_LOCK = threading.Lock()
 _BOT_USER_ID: str = ""  # cached at startup — never changes
@@ -107,6 +105,44 @@ _BOT_USER_ID: str = ""  # cached at startup — never changes
 _SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #bot-qa (was #scout-qa, was #scout-hq)
 
 
+# All env vars read once at module init — no scattered os.getenv() calls beyond this block.
+@dataclass(frozen=True)
+class _BotConfig:
+    bot_token: str = ""
+    app_token: str = ""
+    scout_env: str = "development"
+    pulse_channel: str = ""
+    scout_digest_channel: str = ""
+    revenue_ops_channel: str = ""
+    digest_source: str = "local"
+    demand_feed_url: str = ""
+    notion_queue_db_id: str = ""
+    sidd_qa_channel_id: str = ""
+    port: int = 10000
+    is_render: bool = False
+
+    @classmethod
+    def from_env(cls) -> "_BotConfig":
+        _hq = _SCOUT_HQ_CHANNEL
+        return cls(
+            bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
+            app_token=os.getenv("SLACK_APP_TOKEN", ""),
+            scout_env=os.getenv("SCOUT_ENV", "development"),
+            pulse_channel=os.getenv("PULSE_CHANNEL", _hq),
+            scout_digest_channel=os.getenv("SCOUT_DIGEST_CHANNEL", _hq),
+            revenue_ops_channel=os.getenv("REVENUE_OPS_CHANNEL", _hq),
+            digest_source=os.getenv("DIGEST_SOURCE", "local"),
+            demand_feed_url=os.getenv("DEMAND_FEED_URL", "").rstrip("/"),
+            notion_queue_db_id=os.getenv("NOTION_QUEUE_DB_ID", ""),
+            sidd_qa_channel_id=os.getenv("SIDD_QA_CHANNEL_ID", ""),
+            port=int(os.getenv("PORT", "10000")),
+            is_render=bool(os.getenv("RENDER")),
+        )
+
+
+_BOT_CFG = _BotConfig.from_env()
+
+
 # ── Approve helpers ───────────────────────────────────────────────────────────
 
 
@@ -146,9 +182,6 @@ def _slack_thread_url(channel: str, thread_ts: str) -> str:
 # Fill rate exclusions are now managed dynamically via data/entity_overrides.json.
 # Use _load_entity_overrides() at pulse time (imported from scout_agent).
 # Seeded with Button on first deploy by _seed_entity_overrides() in main().
-_PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # kept for backwards compat
-_PULSE_ENABLED               = os.getenv("PULSE_ENABLED", "true").lower() == "true"
-
 # ── Live health heartbeat (PR 15c) ────────────────────────────────────────────
 # The HTTP /health endpoint (Render probe, every 30s) checks file-based + thread state
 # only. ClickHouse outages are NOT checked there — a CH ping in /health would cause
@@ -215,14 +248,6 @@ def _start_daemon(target, name: str, args: tuple = ()) -> None:
 # SCOUT_ENV=production → messages go to production channels (set in launchd plist)
 # Anything else (unset, "development") → everything goes to #scout-qa
 # force=True → always #scout-qa regardless of environment
-_SCOUT_ENV = os.getenv("SCOUT_ENV", "development")
-_PRODUCTION_CHANNELS = {
-    "pulse":    os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
-    "watchdog": os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
-    "offers":   os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL),   # #scout-offers
-    "revenue":  os.getenv("REVENUE_OPS_CHANNEL", _SCOUT_HQ_CHANNEL),    # #revenue-operations
-    "qa":       _SCOUT_HQ_CHANNEL,                                      # #sidd-qa — projection autocheck etc.
-}
 
 def _route_channel(purpose: str, force: bool = False) -> str:
     """
@@ -230,9 +255,16 @@ def _route_channel(purpose: str, force: bool = False) -> str:
     Foolproof: force=True OR non-production env always routes to #scout-qa.
     Production channels require SCOUT_ENV=production (set in launchd plist only).
     """
-    if force or _SCOUT_ENV != "production":
+    if force or _BOT_CFG.scout_env != "production":
         return _SCOUT_HQ_CHANNEL
-    return _PRODUCTION_CHANNELS.get(purpose, _SCOUT_HQ_CHANNEL)
+    channels = {
+        "pulse":    _BOT_CFG.pulse_channel,     # #revenue-operations
+        "watchdog": _BOT_CFG.pulse_channel,     # #revenue-operations
+        "offers":   _BOT_CFG.scout_digest_channel,  # #scout-offers
+        "revenue":  _BOT_CFG.revenue_ops_channel,   # #revenue-operations
+        "qa":       _SCOUT_HQ_CHANNEL,          # #sidd-qa — projection autocheck etc.
+    }
+    return channels.get(purpose, _SCOUT_HQ_CHANNEL)
 
 
 # ── Feedback buttons ──────────────────────────────────────────────────────────
@@ -605,9 +637,9 @@ def _digest_poster(web) -> None:
                     # post itself fails, revert so the next poll retries.
                     _save_digest_post_date(today_str)
                     try:
-                        _digest_source = os.getenv("DIGEST_SOURCE", "local")
+                        _digest_source = _BOT_CFG.digest_source
                         if _digest_source == "remote":
-                            _demand_url = os.getenv("DEMAND_FEED_URL", "").rstrip("/")
+                            _demand_url = _BOT_CFG.demand_feed_url
                             _used_remote = False
                             if not _demand_url:
                                 log.warning("[digest-poster] DIGEST_SOURCE=remote but DEMAND_FEED_URL is unset — falling back to local")
@@ -623,7 +655,7 @@ def _digest_poster(web) -> None:
                                     elif _r.ok:
                                         _payload = _r.json()
                                         _channel = _route_channel("offers")
-                                        _web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
+                                        _web = _WC(token=_BOT_CFG.bot_token)
                                         _gwc(_web)
                                         _resp = _web.chat_postMessage(
                                             channel=_channel,
@@ -1512,7 +1544,7 @@ def _check_singleton() -> None:
     import atexit, sys
 
     # Render sets RENDER=true automatically; trust the platform for single-instance.
-    if os.getenv("RENDER"):
+    if _BOT_CFG.is_render:
         log.info("[main] Running on Render — skipping singleton PID check")
         _PID_FILE.write_text(str(os.getpid()))
         atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
@@ -1828,7 +1860,7 @@ def _compute_health_status() -> dict:
         checks["daemon_threads"] = {"ok": True, "detail": f"{len(required)} threads alive"}
 
     # 3. NOTION_QUEUE_DB_ID — required for correct Pipeline links in Slack messages
-    queue_db_id = os.getenv("NOTION_QUEUE_DB_ID", "")
+    queue_db_id = _BOT_CFG.notion_queue_db_id
     if not queue_db_id:
         checks["notion_queue_url"] = {"ok": False, "detail": "NOTION_QUEUE_DB_ID not set — Pipeline links point to generic Notion homepage"}
     else:
@@ -1960,7 +1992,7 @@ def _on_startup(web: WebClient) -> None:
     Does NOT auto-clear maintenance — clearing is done only via /scout-maintenance off."""
     from scout_state import get_maintenance
     m = get_maintenance()
-    sidd_qa = os.getenv("SIDD_QA_CHANNEL_ID", "")
+    sidd_qa = _BOT_CFG.sidd_qa_channel_id
     if not sidd_qa:
         return
     msg = ":white_check_mark: Scout is back online."
@@ -1977,10 +2009,10 @@ def main():
     global _BOT_USER_ID
     _check_singleton()
     _seed_entity_overrides()  # ensure Button exclusion survives fresh Render deploys
-    if not BOT_TOKEN or not APP_TOKEN:
+    if not _BOT_CFG.bot_token or not _BOT_CFG.app_token:
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env")
 
-    web_client    = WebClient(token=BOT_TOKEN, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
+    web_client    = WebClient(token=_BOT_CFG.bot_token, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
     from scout_slack_safe import guard_web_client
     guard_web_client(web_client)
     _BOT_USER_ID  = web_client.auth_test()["user_id"]
@@ -1998,7 +2030,7 @@ def main():
     # the same monitor lambdas registered above.
     from scout_agent import _set_force_monitor_ctx as _set_fmc, _get_ch_client as _ch_factory
     _set_fmc(web_client, _ch_factory)
-    socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
+    socket_client = SocketModeClient(app_token=_BOT_CFG.app_token, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
 
     # PR 16b: required daemons go through _start_daemon() — auto-registered in
@@ -2025,7 +2057,7 @@ def main():
     threading.Thread(target=_thread_watchdog, args=(web_client,), daemon=True, name="thread-watchdog").start()
 
     # Health check HTTP server — Render pings /health every 30s to verify Scout is alive
-    _start_health_server(port=int(os.getenv("PORT", "10000")))
+    _start_health_server(port=_BOT_CFG.port)
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()
