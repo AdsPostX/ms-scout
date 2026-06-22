@@ -4698,6 +4698,26 @@ def test_handler_config_loads_from_env():
     return True, "_HandlerConfig frozen dataclass and _CFG singleton verified"
 
 
+@test("_ch_busy_message — channel adds @mention, DM/modal omits it")
+def test_ch_busy_message():
+    try:
+        import scout_handlers
+        if not hasattr(scout_handlers, "_ch_busy_message"):
+            return False, "_ch_busy_message not found in scout_handlers"
+        fn = scout_handlers._ch_busy_message
+        channel_msg = fn("U12345")
+        if "<@U12345>" not in channel_msg:
+            return False, f"channel path missing @mention: {channel_msg!r}"
+        dm_msg = fn()
+        if "<@" in dm_msg:
+            return False, f"DM path should not contain @mention: {dm_msg!r}"
+        if "On it" not in dm_msg:
+            return False, f"unexpected message copy: {dm_msg!r}"
+        return True, "channel @mention present, DM/modal clean"
+    except Exception as e:
+        return False, str(e)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

@@ -271,6 +271,46 @@ def _ch_busy_message(user_id: str | None = None) -> str:
     return f"{prefix}_On it. Taking a bit longer than usual. I'll tag you here when it's ready._"
 
 
+def _retry_after_timeout(
+    web: WebClient,
+    channel: str,
+    thread_ts: str | None,
+    query: str,
+    user_id: str | None = None,
+    delay_s: int = 30,
+) -> None:
+    """Spawn a daemon thread that retries ask() after *delay_s* seconds and
+    posts the answer back to the original thread (postman pattern).
+
+    Pass user_id for channel paths — the reply includes <@user_id> so the
+    user is notified. Omit for DMs: reply auto-notifies, no tag needed."""
+    def _run() -> None:
+        time.sleep(delay_s)
+        prefix = f"<@{user_id}> " if user_id else ""
+        _surface = Surface.THREAD if user_id else Surface.DM
+        try:
+            response = _ask_with_timeout(query)
+            response_text = (response.text or "")[:3000]
+            card = Card(severity=Severity.INFO, headline="", body=response_text)
+            fallback, blocks = wrap_response(
+                card=card, surface=_surface, pattern=ResponsePattern.ANSWER,
+            )
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=f"{prefix}{fallback}",
+                blocks=blocks,
+                unfurl_links=False,
+            )
+        except AskTimeout:
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=f"{prefix}Still slow. Try again in a few minutes.",
+            )
+        except Exception as exc:
+            log.warning("[CH] async retry failed: %s", exc)
+    threading.Thread(target=_run, daemon=True, name="ask-retry").start()
+
+
 # ── Part 9 — Smart 👎 handler: clarification detection ───────────────────────
 _CLARIFICATION_PHRASES: tuple = (
     "can you confirm",
@@ -3042,6 +3082,7 @@ def _handle_event_impl(req: SocketModeRequest):
                 text=_busy_msg,
                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _busy_msg}}],
             )
+            _retry_after_timeout(web, channel, thread_ts, agent_query)
             return
         except Exception as e:
             log.error(f"Agent error (DM): {e}", exc_info=True)
@@ -3197,6 +3238,7 @@ def _handle_event_impl(req: SocketModeRequest):
             text=_busy_msg,
             blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _busy_msg}}],
         )
+        _retry_after_timeout(web, channel, thread_ts, agent_query, user_id=user_id)
         return
     except Exception as e:
         log.error(f"Agent error: {e}")
