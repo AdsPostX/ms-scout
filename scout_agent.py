@@ -2147,6 +2147,23 @@ def get_offer_stats() -> dict:
     }
 
 
+def _load_usage_log_records(path_override: str = None) -> list:
+    """Pure helper: load usage_log.jsonl, parse lines, skip malformed."""
+    log_path = pathlib.Path(path_override or __file__).parent / "data" / "usage_log.jsonl"
+    if not log_path.exists():
+        return []
+    records = []
+    for line in log_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except Exception as e:
+            log.debug("_load_usage_log_records malformed: %s", e)
+    return records
+
+
 def _estimate_gap_revenue(gaps: list, daily_sessions: float) -> float:
     """
     Pure helper: estimate total daily revenue from gap opportunities.
@@ -4516,19 +4533,9 @@ def get_usage_report(requesting_user_id: str = "") -> str:
     if not _ADMIN_USER_ID or requesting_user_id != _ADMIN_USER_ID:
         return ":lock: Usage reports are admin-only."
 
-    log_path = pathlib.Path(__file__).parent / "data" / "usage_log.jsonl"
-    if not log_path.exists():
+    records = _load_usage_log_records()
+    if not records:
         return "No usage data yet — logging started after this deploy. Check back after a few queries."
-
-    records = []
-    for line in log_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(_json.loads(line))
-        except Exception as e:
-            log.debug("get_usage_report malformed line swallowed: %s", e)
     now = datetime.utcnow()  # naive UTC to match stored timestamps (utcnow().isoformat())
     cutoff_7d  = now - timedelta(days=7)
     cutoff_30d = now - timedelta(days=30)
