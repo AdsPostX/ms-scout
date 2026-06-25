@@ -248,6 +248,29 @@ except Exception as e:
 # Admin user ID centralized (loaded once at module init, not repeated per function call)
 _ADMIN_USER_ID = os.getenv("SCOUT_ADMIN_USER_ID", "").strip()
 
+# Network credential config (loaded once at module init)
+@dataclass
+class NetworkCredentialConfig:
+    rakuten_configured: bool = False
+    awin_configured: bool = False
+
+    @classmethod
+    def from_env(cls):
+        return cls(
+            rakuten_configured=bool(os.getenv("RAKUTEN_API_TOKEN", "").strip()),
+            awin_configured=bool(os.getenv("AWIN_PUBLISHER_ID", "").strip() and os.getenv("AWIN_API_KEY", "").strip()),
+        )
+
+    def missing_networks(self) -> list:
+        missing = []
+        if not self.rakuten_configured:
+            missing.append("rakuten")
+        if not self.awin_configured:
+            missing.append("awin")
+        return missing
+
+_NETWORK_CRED_CONFIG = NetworkCredentialConfig.from_env()
+
 
 def _is_admin(user_id: str) -> bool:
     """True if user_id is in SCOUT_THRESHOLD_ADMINS (comma-separated allowlist).
@@ -4308,12 +4331,7 @@ def get_scout_status() -> dict:
         status["offers_age"] = "no snapshot — run @Scout refresh offers"
 
     # Unconfigured networks (creds absent → scraper silently skips them)
-    import os as _os
-    _missing_nets = []
-    if not _os.getenv("RAKUTEN_API_TOKEN"):
-        _missing_nets.append("rakuten")
-    if not (_os.getenv("AWIN_PUBLISHER_ID") and _os.getenv("AWIN_API_KEY")):
-        _missing_nets.append("awin")
+    _missing_nets = _NETWORK_CRED_CONFIG.missing_networks()
     if _missing_nets:
         status["unconfigured_networks"] = _missing_nets
         warnings = status.get("warnings", [])
