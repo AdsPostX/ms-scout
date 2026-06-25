@@ -868,15 +868,14 @@ def get_supply_demand_gaps(
 
         if gaps:
             lines.append(":large_green_circle: *GAP OPPORTUNITIES* (performing on 2+ other publishers, not here)")
-            total_est = 0
             for d in gaps[:10]:
                 adv, pub_count, rev, rpm = d["adv_name"], d["pub_count"], d["revenue_30d"], d["rpm"]
                 est_daily = round(daily_sessions * (rpm / 1000), 0) if rpm else 0
-                total_est += est_daily
                 lines.append(
                     f"• *{adv}* — ${rev:,.0f}/mo elsewhere · RPM ${rpm:.2f} across {pub_count} publishers"
                     + (f" → *est. ${est_daily:,.0f}/day at {pub_org} volume*" if est_daily > 0 else "")
                 )
+            total_est = _estimate_gap_revenue(gaps, daily_sessions)
             if total_est > 0:
                 lines.append(f"\n:zap: Top gaps combined: est. *${total_est:,.0f}/day* incremental revenue potential.")
         else:
@@ -2121,6 +2120,20 @@ def get_offer_stats() -> dict:
         "ms_status_breakdown": by_ms_status,
         "top_5_by_scout_score": _format_offers(top5, benchmarks),
     }
+
+
+def _estimate_gap_revenue(gaps: list, daily_sessions: float) -> float:
+    """
+    Pure helper: estimate total daily revenue from gap opportunities.
+    Returns sum of (daily_sessions × rpm/1000) for top 10 gaps.
+    """
+    total = 0.0
+    for d in gaps[:10]:
+        rpm = d.get("rpm") or 0
+        if rpm > 0:
+            est_daily = daily_sessions * (rpm / 1000)
+            total += est_daily
+    return round(total, 0)
 
 
 def _by_direction(rows: list, direction: str) -> list:
