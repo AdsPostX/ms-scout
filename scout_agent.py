@@ -2505,23 +2505,7 @@ def get_publisher_competitive_landscape(
                 rpm_map = _q.publisher_campaign_rpms(ch, pub_pid, serving_ids, days=14)
 
         # Build unified list — serving first (by RPM), then provisioned-only (by payout desc).
-        competitors = []
-        for row in prov_rows:
-            campaign_id, adv_name, payout = row
-            cid = str(campaign_id)
-            impressions_2w = serving_map.get(cid, 0)
-            is_serving = impressions_2w > 0
-            rpm = rpm_map.get(cid, 0.0)
-            competitors.append({
-                "advertiser": adv_name,
-                "campaign_id": cid,
-                "provisioned": True,
-                "is_serving": is_serving,
-                "impressions_2w": impressions_2w,
-                "rpm": rpm,
-                "payout": float(payout) if payout else None,
-            })
-        competitors.sort(key=lambda x: (0 if x["is_serving"] else 1, -x["rpm"], -(x["payout"] or 0)))
+        competitors = _build_competitor_list(prov_rows, serving_map, rpm_map)
 
         serving_count = sum(1 for c in competitors if c["is_serving"])
         result = {
@@ -3355,6 +3339,50 @@ def get_advertiser_revenue_projection(
     result["formatted"] = "\n".join(_lines)
 
     return result
+
+
+def _build_competitor_list(prov_rows: list, serving_map: dict, rpm_map: dict) -> list:
+    """
+    Pure helper: build competitor list from provisioned campaigns with serving data.
+    Validates no duplicate campaign_ids (cardinality check).
+    Returns list sorted by (is_serving, rpm, payout).
+    """
+    competitors = []
+    seen_ids = set()
+
+    for row in prov_rows:
+        campaign_id, adv_name, payout = row
+        cid = str(campaign_id)
+
+        if cid in seen_ids:
+            log.warning(f"Duplicate campaign_id in prov_rows: {cid} — skipping")
+            continue
+        seen_ids.add(cid)
+
+        impressions_2w = serving_map.get(cid, 0)
+        is_serving = impressions_2w > 0
+        rpm = rpm_map.get(cid, 0.0)
+
+        competitors.append({
+            "advertiser": adv_name,
+            "campaign_id": cid,
+            "provisioned": True,
+            "is_serving": is_serving,
+            "impressions_2w": impressions_2w,
+            "rpm": rpm,
+            "payout": float(payout) if payout else None,
+        })
+
+    # Validate cardinality: all input rows became competitors (minus any duplicates)
+    if len(competitors) < len(prov_rows):
+        log.warning(
+            f"Competitor cardinality mismatch: "
+            f"input={len(prov_rows)}, output={len(competitors)} "
+            f"(duplicates detected)"
+        )
+
+    competitors.sort(key=lambda x: (0 if x["is_serving"] else 1, -x["rpm"], -(x["payout"] or 0)))
+    return competitors
 
 
 def _accumulate_metrics_by_placement(rows: list, value_builder) -> dict:
