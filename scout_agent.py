@@ -2123,6 +2123,13 @@ def get_offer_stats() -> dict:
     }
 
 
+def _selection_rate_pct(numerator: int, denominator: int) -> float:
+    """Pure helper: calculate selection rate as percentage (0-100 scale)."""
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator * 100, 2)
+
+
 def _count_campaigns_by_status(campaigns: list) -> dict:
     """
     Pure helper: count campaigns by active/paused status.
@@ -3853,7 +3860,6 @@ def get_perkswall_engagement(
         # ── Build offer breakdown ─────────────────────────────────────────────
         by_offer = []
         total_selections = 0
-        all_unique_members = set()
         for campaign_id, offer_name, selections, unique_members, sessions_with_selection in sel_rows:
             total_selections += int(selections)
             by_offer.append({
@@ -3862,11 +3868,11 @@ def get_perkswall_engagement(
                 "selections":               int(selections),
                 "unique_members":           int(unique_members),
                 "sessions_with_selection":  int(sessions_with_selection),
-                "selection_rate_pct":       round(int(selections) / total_sessions_safe * 100, 2),
+                "selection_rate_pct":       _selection_rate_pct(int(selections), total_sessions_safe),
             })
 
         total_unique_members = sum(o["unique_members"] for o in by_offer)
-        selection_rate_pct = round(total_selections / total_sessions_safe * 100, 2)
+        selection_rate_pct = _selection_rate_pct(total_selections, total_sessions_safe)
 
         # ── Insight ───────────────────────────────────────────────────────────
         insight = ""
