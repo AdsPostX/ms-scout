@@ -2096,28 +2096,7 @@ def get_offer_stats() -> dict:
     if not offers:
         return {"error": "No offer data available"}
 
-    by_network: dict = {}
-    by_category: dict = {}
-    by_ms_status: dict = {}
-
-    for o in offers:
-        net = o.get("network", "unknown")
-        score = _scout_score(o, benchmarks)
-        payout = o.get("_payout_num") or 0
-        cats = o.get("_categories") or [o.get("category", "Other")]
-        ms = o.get("_ms_status", "Unknown")
-
-        by_network.setdefault(net, {"count": 0, "total_score": 0, "total_payout": 0})
-        by_network[net]["count"] += 1
-        by_network[net]["total_score"] += score
-        by_network[net]["total_payout"] += payout
-
-        for cat in (cats if isinstance(cats, list) else [cats]):
-            by_category.setdefault(cat, {"count": 0, "total_score": 0})
-            by_category[cat]["count"] += 1
-            by_category[cat]["total_score"] += score
-
-        by_ms_status[ms] = by_ms_status.get(ms, 0) + 1
+    by_network, by_category, by_ms_status = _accumulate_offer_dimensions(offers, benchmarks)
 
     top5 = sorted(offers, key=lambda x: _scout_score(x, benchmarks), reverse=True)[:5]
 
@@ -2142,6 +2121,38 @@ def get_offer_stats() -> dict:
         "ms_status_breakdown": by_ms_status,
         "top_5_by_scout_score": _format_offers(top5, benchmarks),
     }
+
+
+def _accumulate_offer_dimensions(offers: list, benchmarks: dict) -> tuple[dict, dict, dict]:
+    """
+    Pure helper: accumulate offers by network, category, and ms_status.
+    Returns three dicts: (by_network, by_category, by_ms_status).
+    No closure mutations — explicit return values.
+    """
+    by_network: dict = {}
+    by_category: dict = {}
+    by_ms_status: dict = {}
+
+    for o in offers:
+        net = o.get("network", "unknown")
+        score = _scout_score(o, benchmarks)
+        payout = o.get("_payout_num") or 0
+        cats = o.get("_categories") or [o.get("category", "Other")]
+        ms = o.get("_ms_status", "Unknown")
+
+        by_network.setdefault(net, {"count": 0, "total_score": 0, "total_payout": 0})
+        by_network[net]["count"] += 1
+        by_network[net]["total_score"] += score
+        by_network[net]["total_payout"] += payout
+
+        for cat in (cats if isinstance(cats, list) else [cats]):
+            by_category.setdefault(cat, {"count": 0, "total_score": 0})
+            by_category[cat]["count"] += 1
+            by_category[cat]["total_score"] += score
+
+        by_ms_status[ms] = by_ms_status.get(ms, 0) + 1
+
+    return by_network, by_category, by_ms_status
 
 
 def _format_offers(offers: list, benchmarks: dict) -> list[FormattedOffer]:
