@@ -22,6 +22,13 @@ smoke_test.py          — gate tests (run before every push)
 
 Other files present but not primary entry points: `scout_bot.py`, `scout_ch.py`, `scout_digest.py`, `scout_images.py`, `scout_notion.py`, `scout_slack_safe.py`, `scout_state.py`, `scout_telemetry.py`, `scout_types.py`, `alert_registry.py`, `queries.py`.
 
+## Feature Surface & Audit
+
+**43 tools** across 6 domains. See [FEATURES.md](FEATURES.md) for the complete inventory, handler mapping, and status.
+Audit Status: Complete (engineering audit) — see [VAMSEE_AUDIT.md](VAMSEE_AUDIT.md) for findings.
+
+**To regenerate the feature map:** `python3 scripts/generate_feature_map.py` (auto-syncs TOOL_MAP changes).
+
 ## Scout Quickstart
 
 **First session:**

@@ -2,7 +2,7 @@
 
 ## demand_feed_main.py — MS Platform Feed (NOT live)
 
-5 MS_PLATFORM_TODO items must be resolved before flipping live. Contact Vamsee for the endpoint.
+5 MS_PLATFORM_TODO items must be resolved before flipping live. Contact the platform team for the webhook endpoint.
 
 **Required env vars (set in Render):**
 
@@ -13,7 +13,7 @@
 | `CAMPAIGN_CREATE_DRY_RUN` | `"true"` (default) → log + return preview, no HTTP call. Set `"false"` AND set WEBHOOK_URL to go live. |
 
 **Flip-live checklist (in order):**
-- [ ] Get `CAMPAIGN_CREATE_WEBHOOK_URL` from Vamsee — confirm POST shape matches `_fire_campaign_creation` payload (`draft_id`, `offer`, `ai_copy`, `approver`, `approved_at`, `dry_run`)
+- [ ] Get `CAMPAIGN_CREATE_WEBHOOK_URL` from platform team — confirm POST shape matches `_fire_campaign_creation` payload (`draft_id`, `offer`, `ai_copy`, `approver`, `approved_at`, `dry_run`)
 - [ ] Set `CAMPAIGN_CREATE_WEBHOOK_URL` in Render
 - [ ] Set `CAMPAIGN_CREATE_API_KEY` in Render (if platform requires auth)
 - [ ] Keep `CAMPAIGN_CREATE_DRY_RUN=true` — test one approve, inspect `would_send` in the dry_run response

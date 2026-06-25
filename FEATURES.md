@@ -2,7 +2,7 @@
 
 **Last generated:** Auto-generated from `scout_agent.py` TOOL_MAP.
 **Regenerate:** Run `python3 scripts/generate_feature_map.py` when TOOL_MAP changes.
-**Status:** Audit in progress (Vamsee lens — see VAMSEE_AUDIT.md).
+**Status:** Audit complete (Engineering audit — see VAMSEE_AUDIT.md).
 
 ---
 
@@ -100,7 +100,7 @@
    - Run: `python3 scripts/generate_feature_map.py`
    - Commit both changes together
 
-2. **After completing a Vamsee audit:**
+2. **After completing the engineering audit:**
    - Update the Status column above (Working/Deferred/In Maintenance)
    - Log findings in VAMSEE_AUDIT.md
 
@@ -127,7 +127,7 @@ fi
 
 | Status | Meaning |
 |--------|---------|
-| ✓ Working | Feature complete, tests passing, Vamsee audit passed |
+| ✓ Working | Feature complete, tests passing, engineering audit passed |
 | ⏳ Deferred | Feature built but gated (e.g., awaiting API, blocked PR) |
 | 🔧 In Maintenance | Feature working but has known debt (TODO items, gaps) |
 | ❌ Broken | Feature implemented but failing tests or not called |

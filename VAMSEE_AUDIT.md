@@ -1,8 +1,8 @@
-# Scout — Vamsee Engineering Audit
+# Scout — Engineering Audit
 
-**Goal:** Remove maintenance mode by ensuring every feature passes the Vamsee lens (five checks).
+**Goal:** Remove maintenance mode by ensuring every feature passes the engineering quality checks (five core patterns).
 
-**Vamsee Lens** (AdsPostX CTO standard):
+**Engineering Quality Checks** (backend standard patterns):
 1. **No invisible accumulators** — lists built silently in loops must return as values or pass as collectors
 2. **No no-op side-channel handlers** — if a function returns while real work happens elsewhere, document the contract
 3. **No repeated inline patterns** — same filter/transform ≥2 times → extract to named pure function
@@ -18,7 +18,7 @@
 **Violations Found:** 24 total (8 HIGH, 13 MEDIUM, 3 LOW)
 **Violations Fixed:** 24/24 (8 HIGH, 13 MEDIUM, 3 LOW) ✓ 100% COMPLETE
 **Violations Remaining:** 0/24
-**Auditor:** Claude Code (Vamsee lens)
+**Auditor:** Claude Code (Engineering lens)
 **Last Updated:** 2026-06-24 — 18 commits merged, all tests passing (ALL PASS) — AUDIT COMPLETE
 
 | Domain | Tools | Status | Violations Found | Passing |
@@ -91,7 +91,7 @@
 
 ---
 
-## Tools Passing Vamsee Audit
+## Tools Passing Engineering Audit
 
 *(Checkmarks added as each tool completes audit)*
 
@@ -147,7 +147,7 @@ These features have known debt or deferred work:
 
 | Feature | Gate | Issue | Blocker |
 |---------|------|-------|---------|
-| `demand_feed_main.py` (MS Platform Feed) | 5 MS_PLATFORM_TODO items | Awaiting webhook URL from Vamsee | Env vars not set |
+| `demand_feed_main.py` (MS Platform Feed) | 5 MS_PLATFORM_TODO items | Awaiting webhook URL from platform team | Env vars not set |
 | `App Home` (scotbot_ui_kit.py) | `TODO(App-Home-3.4)` | Revenue EOD projection range | upstream scoreboard_rollup() |
 
 ---
@@ -276,4 +276,4 @@ Then regenerate FEATURES.md with status updates.
 
 **Audit run:** 2026-06-24
 **Status:** ✅ COMPLETE — All 24 violations fixed, merged, and tested
-**Conclusion:** Scout codebase passes full Vamsee lens audit. Ready to exit maintenance mode.
+**Conclusion:** Scout codebase passes full engineering audit. Ready to exit maintenance mode.

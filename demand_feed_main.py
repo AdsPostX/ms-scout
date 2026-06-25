@@ -1214,7 +1214,7 @@ def _read_body(handler: http.server.BaseHTTPRequestHandler) -> Optional[dict]:
 
 # ── MS Platform integration — env vars needed before going live ────────────────
 #
-# MS_PLATFORM_TODO: Ask Vamsee to provide the following before flipping live:
+# MS_PLATFORM_TODO: Platform team must provide the following before flipping live:
 #
 #   CAMPAIGN_CREATE_WEBHOOK_URL
 #       POST endpoint on MS Platform that accepts a CampaignRequest JSON body.
@@ -1239,7 +1239,7 @@ def _read_body(handler: http.server.BaseHTTPRequestHandler) -> Optional[dict]:
 #       Set "false" AND set WEBHOOK_URL to go live.
 #       GET /queue/config shows current state without exposing secrets.
 #
-# Flip order once Vamsee provides the endpoint:
+# Flip order once platform team provides the endpoint:
 #   1. Set CAMPAIGN_CREATE_WEBHOOK_URL in Render
 #   2. Set CAMPAIGN_CREATE_API_KEY in Render  (if platform requires auth)
 #   3. Keep CAMPAIGN_CREATE_DRY_RUN=true — test one approve, check /queue/config
@@ -1254,8 +1254,8 @@ def _fire_campaign_creation(draft: dict) -> dict:
     Safe-by-default: returns {"status": "dry_run"} when
     CAMPAIGN_CREATE_DRY_RUN=true (the default) or when
     CAMPAIGN_CREATE_WEBHOOK_URL is not set. In dry-run mode the full payload
-    that *would* be sent is included as "would_send" so Vamsee can review
-    it before flipping live.
+    that *would* be sent is included as "would_send" for review
+    before flipping live.
 
     Auth: if CAMPAIGN_CREATE_API_KEY is set, it is sent as
     "Authorization: Bearer <key>".  Uses stdlib urllib — no extra dep.
@@ -1344,7 +1344,7 @@ def _handle_queue_config(handler: http.server.BaseHTTPRequestHandler) -> None:
     """GET /queue/config — returns current MS Platform integration status.
 
     No secrets are exposed — only booleans for set/unset and the current mode.
-    The platform team (or Vamsee) can hit this to verify the connection is
+    The platform team can hit this endpoint to verify the connection is
     configured before flipping CAMPAIGN_CREATE_DRY_RUN=false.
 
     Example response:
