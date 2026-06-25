@@ -2123,6 +2123,11 @@ def get_offer_stats() -> dict:
     }
 
 
+def _by_direction(rows: list, direction: str) -> list:
+    """Pure helper: filter rows by direction field. Used for trend classification."""
+    return [r for r in rows if r.get("direction") == direction]
+
+
 def _selection_rate_pct(numerator: int, denominator: int) -> float:
     """Pure helper: calculate selection rate as percentage (0-100 scale)."""
     if denominator <= 0:
@@ -5152,8 +5157,8 @@ def get_publisher_revenue_trends(days: int = 7) -> dict:
         rows = _q.velocity_alerts(ch)
         if not rows:
             return {"trends": [], "count": 0, "summary": "No publisher velocity anomalies detected."}
-        down = [r for r in rows if r["direction"] == "down"]
-        up = [r for r in rows if r["direction"] == "up"]
+        down = _by_direction(rows, "down")
+        up = _by_direction(rows, "up")
         return {
             "trends": rows,
             "count": len(rows),
