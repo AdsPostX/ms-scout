@@ -3357,6 +3357,25 @@ def get_advertiser_revenue_projection(
     return result
 
 
+def _accumulate_metrics_by_placement(rows: list, value_builder) -> dict:
+    """
+    Pure helper: accumulate rows into dict keyed by placement, transform values via builder.
+    value_builder can be:
+    - A string field name: sum numeric values (e.g., "sessions")
+    - A callable: transform row into dict or value (e.g., lambda r: {"impressions": r["impr"], ...})
+    """
+    result = {}
+    for row in rows:
+        key = row.get("placement") or "unknown"
+        if isinstance(value_builder, str):
+            # Sum numeric field mode
+            result[key] = result.get(key, 0) + row[value_builder]
+        else:
+            # Transform mode: value_builder returns dict or value
+            result[key] = value_builder(row)
+    return result
+
+
 def get_publisher_health(
     publisher_name: str = None,
     publisher_id: int = None,
@@ -3411,33 +3430,27 @@ def get_publisher_health(
 
         # ── Combine results ───────────────────────────────────────────────────
         # Build placement-keyed dicts
-        sess_by_placement: dict = {}
+        sess_by_placement = _accumulate_metrics_by_placement(q1_data, "sessions")
+
         os_by_placement: dict = {}
         for row in q1_data:
             p = row["placement"] or "unknown"
-            sess_by_placement[p] = sess_by_placement.get(p, 0) + row["sessions"]
             os_by_placement.setdefault(p, {})
             os_val = row["os"] or "unknown"
             os_by_placement[p][os_val] = os_by_placement[p].get(os_val, 0) + row["sessions"]
 
-        ad_metrics: dict = {}
-        for row in q2_data:
-            p = row["placement"] or "unknown"
-            ad_metrics[p] = {
-                "impressions": row["impressions"],
-                "conversions": row["conversions"],
-                "revenue":     row["revenue"],
-                "payout":      row["payout"],
-            }
+        ad_metrics = _accumulate_metrics_by_placement(q2_data, lambda r: {
+            "impressions": r["impressions"],
+            "conversions": r["conversions"],
+            "revenue":     r["revenue"],
+            "payout":      r["payout"],
+        })
 
-        click_metrics: dict = {}
-        for row in q3_data:
-            p = row["placement"] or "unknown"
-            click_metrics[p] = {
-                "clicks":           row["clicks"],
-                "converted_clicks": row["converted_clicks"],
-                "avg_position":     row["avg_position"],
-            }
+        click_metrics = _accumulate_metrics_by_placement(q3_data, lambda r: {
+            "clicks":           r["clicks"],
+            "converted_clicks": r["converted_clicks"],
+            "avg_position":     r["avg_position"],
+        })
 
         # Aggregate OS split across all placements
         os_totals: dict = {}
