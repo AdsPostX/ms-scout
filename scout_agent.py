@@ -2837,8 +2837,8 @@ def get_pulse_summary() -> dict:
         except Exception:
             currently_active = []
 
+        fired_names = [k for k, v in fired_today.items() if v]
         if any_fired:
-            fired_names = [k for k, v in fired_today.items() if v]
             msg = "Today's signals fired: " + ", ".join(fired_names)
         else:
             msg = "No monitoring signals have fired today yet."
@@ -2848,6 +2848,7 @@ def get_pulse_summary() -> dict:
             "had_content": any_fired,
             "fired_today": fired_today,
             "currently_active": currently_active,
+            "fired_signal_names": fired_names,
             "message": msg,
         }
     except Exception as e:
