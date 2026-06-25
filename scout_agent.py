@@ -113,6 +113,21 @@ class PublisherRevenueSummary:
     total_avg: float
 
 
+@dataclass
+class PublisherFleetHealthConfig:
+    """Fleet health classification thresholds (σ-based)."""
+    act_now_sigma: float = -2.0
+    act_now_gap: float = 500.0
+    watch_sigma: float = -1.5
+    watch_gap: float = 200.0
+
+    def __post_init__(self) -> None:
+        if self.act_now_sigma >= self.watch_sigma:
+            raise ValueError(f"act_now_sigma ({self.act_now_sigma}) must be < watch_sigma ({self.watch_sigma})")
+        if self.act_now_gap < 0 or self.watch_gap < 0:
+            raise ValueError(f"gap thresholds must be >= 0: act_now_gap={self.act_now_gap}, watch_gap={self.watch_gap}")
+
+
 # ── PR 17c / PR 18: SUPPORTED_NETWORKS — single source ───────────────────────
 # ACTIVE networks only (creds present on Render → scraper actually returns offers).
 # PR 18 trimmed this from 9 → 4: ShareASale, Rakuten, AWIN, Tune, Everflow all
@@ -216,6 +231,19 @@ def _load_thresholds() -> dict:
 # set_threshold. SCOUT_THRESHOLDS below is the merged read-view callers actually see.
 _BASE_THRESHOLDS: dict = _load_base_thresholds()
 SCOUT_THRESHOLDS: dict = _load_thresholds()
+
+# Fleet health config loaded from config/scout_thresholds.json at module init
+try:
+    fleet_cfg = SCOUT_THRESHOLDS.get("fleet_health", {})
+    FLEET_HEALTH_CONFIG = PublisherFleetHealthConfig(
+        act_now_sigma=float(fleet_cfg.get("act_now_sigma", -2.0)),
+        act_now_gap=float(fleet_cfg.get("act_now_gap", 500.0)),
+        watch_sigma=float(fleet_cfg.get("watch_sigma", -1.5)),
+        watch_gap=float(fleet_cfg.get("watch_gap", 200.0)),
+    )
+except Exception as e:
+    log.warning(f"Failed to load fleet_health config: {e} — using defaults")
+    FLEET_HEALTH_CONFIG = PublisherFleetHealthConfig()
 
 
 def _is_admin(user_id: str) -> bool:
@@ -5221,13 +5249,21 @@ def get_publisher_fleet_health(
     - Platform alarm: > 5 Act Now publishers simultaneously
 
     Returns formatted Slack text in the 'formatted' key.
+    Thresholds loaded from config/scout_thresholds.json at module init.
     """
     try:
         days = max(1, min(90, int(days)))
 
         from queries import get_publisher_fleet_health_data
         ch = _get_ch_client()
-        result = get_publisher_fleet_health_data(ch, days=days)
+        result = get_publisher_fleet_health_data(
+            ch,
+            days=days,
+            act_now_sigma=FLEET_HEALTH_CONFIG.act_now_sigma,
+            act_now_gap=FLEET_HEALTH_CONFIG.act_now_gap,
+            watch_sigma=FLEET_HEALTH_CONFIG.watch_sigma,
+            watch_gap=FLEET_HEALTH_CONFIG.watch_gap,
+        )
 
         return {"formatted": _format_fleet_health(result, days)}
 
