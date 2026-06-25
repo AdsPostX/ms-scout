@@ -94,6 +94,7 @@ class AskResult:
     tools_called: tuple = ()
     duration_ms: int = 0
     payload: Optional[Mapping] = None
+    chart_url: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Defense-in-depth: callers may pass a list; coerce to tuple so handlers
@@ -3051,6 +3052,10 @@ def set_threshold(section: str = "", key: str = "", value=None, reason: str = ""
             "action": "set",
         })
 
+        # Invalidate ThresholdManager cache so subsequent load() calls see the new value
+        import scout_thresholds
+        scout_thresholds._manager._thresholds_cache = None
+
         # Reload module-level SCOUT_THRESHOLDS so this process sees the change
         SCOUT_THRESHOLDS = _load_thresholds()
 
@@ -4021,6 +4026,75 @@ def _filter_non_id_columns(rows_as_dicts: list, col_names: list) -> tuple:
     _keep = [c for c in col_names if not _ID_SUFFIX.search(c)]
     filtered_rows = [{k: v for k, v in row.items() if not _ID_SUFFIX.search(k)} for row in rows_as_dicts]
     return filtered_rows, _keep
+
+
+# Tools whose results don't need synthesis into step findings (admin/debug only)
+_TOOL_SKIP_SYNTHESIS = {"run_self_qa", "get_scout_config", "list_thresholds", "get_threshold_history"}
+
+# Human-readable labels for tools in agent_steps blocks
+_TOOL_LABELS = {
+    "search_offers": "Offer search",
+    "get_top_opportunities": "Top opportunities",
+    "get_running_offers": "Running offers",
+    "get_offer_stats": "Offer statistics",
+    "get_publisher_health": "Publisher health",
+    "get_publisher_revenue_trends": "Revenue trends",
+    "get_campaign_status": "Campaign status",
+    "get_revenue_today": "Revenue check",
+    "get_ghost_campaigns": "Ghost campaigns",
+    "get_low_fill_publishers": "Fill-rate check",
+    "get_top_revenue_opportunities": "Revenue gaps",
+    "get_demand_queue_status": "Demand queue",
+    "get_pipeline_health": "Pipeline health",
+    "get_pulse_summary": "Signal status",
+    "run_sql_query": "SQL query",
+}
+
+
+def _synthesize_agent_steps(log: list) -> list:
+    """Derive step labels, statuses, and findings from a tool call log.
+
+    Args:
+      log: list of (tool_name, result) tuples from ask() execution
+
+    Returns:
+      list of dicts with keys: label, status, finding
+    """
+    steps = []
+    for tool_name, result in log:
+        if tool_name in _TOOL_SKIP_SYNTHESIS:
+            continue
+
+        label = _TOOL_LABELS.get(tool_name, tool_name.replace("_", " ").title())
+        status = "fail" if isinstance(result, str) else "pass"
+
+        # Extract finding from result
+        if isinstance(result, str):
+            finding = result[:80]
+        elif isinstance(result, dict):
+            # Prefer explicit "finding" key
+            if "finding" in result:
+                finding = str(result["finding"])[:80]
+            # Then "summary" key
+            elif "summary" in result:
+                finding = str(result["summary"])[:80]
+            # Then first scalar-valued key (skip lists/dicts)
+            else:
+                finding = None
+                for key, val in result.items():
+                    if not isinstance(val, (list, dict)):
+                        finding = str(val)[:80]
+                        break
+                finding = finding or "(no data)"
+        else:
+            finding = str(result)[:80]
+
+        steps.append({
+            "label": label,
+            "status": status,
+            "finding": finding,
+        })
+    return steps
 
 
 def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
