@@ -565,7 +565,7 @@ def _load_performance_benchmarks() -> dict:
             # Tier 2 — keep the highest-RPM offer per advertiser as representative.
             # Highest RPM (not highest impressions) is the right benchmark: it reflects what
             # a well-matched new offer from this advertiser could realistically achieve on MS.
-            adv_key = (adv_name or "").lower().strip()
+            adv_key = _norm(adv_name)
             if adv_key and (adv_key not in by_adv or rpm_val > by_adv[adv_key]["rpm"]):
                 by_adv[adv_key] = entry
 
@@ -673,9 +673,9 @@ def _scout_score(offer: dict, benchmarks: dict) -> float:
         return 0.0
 
     offer_id     = str(offer.get("offer_id", ""))
-    payout_type  = (offer.get("_payout_type_norm") or "").lower().strip()
+    payout_type  = _norm(offer.get("_payout_type_norm", ""))
     category     = (offer.get("category") or "").strip()
-    adv_name     = (offer.get("advertiser") or "").lower().strip()
+    adv_name     = _norm(offer.get("advertiser", ""))
 
     by_offer     = benchmarks.get("by_offer_impact_id", {})
     by_adv       = benchmarks.get("by_adv_name", {})
@@ -2318,9 +2318,9 @@ def draft_campaign_brief(advertiser: str, network: str = None) -> dict:
     by_cat_pt  = benchmarks.get("by_category_payout", {})
     by_pt      = benchmarks.get("by_payout_type", {})
 
-    adv_key    = (o.get("advertiser") or "").lower().strip()
+    adv_key    = _norm(o.get("advertiser", ""))
     category   = (o.get("category") or "").strip()
-    payout_type = (o.get("_payout_type_norm") or "").lower().strip()
+    payout_type = _norm(o.get("_payout_type_norm", ""))
 
     if offer_id in by_offer:
         perf = by_offer[offer_id]
@@ -2986,7 +2986,7 @@ def force_run_monitor(monitor: str = "", _caller_user_id: str = "") -> dict:
         return {"ok": False, "error": "not_initialized",
                 "message": "Force-monitor context not injected yet — Scout still warming up."}
 
-    name = (monitor or "").strip().lower()
+    name = _norm(monitor)
     import scout_handlers
     allowed = set(scout_handlers._FORCE_MONITOR_FNS.keys())
     if name not in allowed:
