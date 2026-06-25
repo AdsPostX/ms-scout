@@ -2123,6 +2123,17 @@ def get_offer_stats() -> dict:
     }
 
 
+def _count_campaigns_by_status(campaigns: list) -> dict:
+    """
+    Pure helper: count campaigns by active/paused status.
+    Returns dict with 'active' and 'paused' keys (excludes deleted campaigns).
+    """
+    return {
+        "active": sum(1 for c in campaigns if c["is_active"] and not c["is_deleted"]),
+        "paused": sum(1 for c in campaigns if not c["is_active"] and not c["is_deleted"]),
+    }
+
+
 def _accumulate_offer_dimensions(offers: list, benchmarks: dict) -> tuple[dict, dict, dict]:
     """
     Pure helper: accumulate offers by network, category, and ms_status.
@@ -3710,8 +3721,9 @@ def get_campaign_status(advertiser_name: str) -> dict:
                 "is_deleted":            deleted_at is not None,
             })
 
-        active_count = sum(1 for c in campaigns if c["is_active"] and not c["is_deleted"])
-        paused_count = sum(1 for c in campaigns if not c["is_active"] and not c["is_deleted"])
+        status_counts = _count_campaigns_by_status(campaigns)
+        active_count = status_counts["active"]
+        paused_count = status_counts["paused"]
 
         # ── Parse audit log ───────────────────────────────────────────────────
         recent_changes = []
