@@ -105,6 +105,14 @@ class AskResult:
             object.__setattr__(self, "payload", _freeze(dict(self.payload)))
 
 
+@dataclass
+class PublisherRevenueSummary:
+    """Accumulated revenue data from intraday revenue query."""
+    publishers: list
+    total_today: float
+    total_avg: float
+
+
 # ── PR 17c / PR 18: SUPPORTED_NETWORKS — single source ───────────────────────
 # ACTIVE networks only (creds present on Render → scraper actually returns offers).
 # PR 18 trimmed this from 9 → 4: ShareASale, Rakuten, AWIN, Tune, Everflow all
@@ -4768,6 +4776,48 @@ def get_offers_for_publisher(publisher_name: str) -> dict:  # returns dict since
     }
 
 
+def _build_publisher_revenue_summary(today_rows: list, avg_lookup: dict) -> PublisherRevenueSummary:
+    """
+    Pure helper: accumulate today's revenue by publisher with averages.
+    Returns explicit PublisherRevenueSummary with all accumulators as values.
+    No closure mutations. Uses signal thresholds: ≥80% → 🟢, ≥40% → 🟡, <40% → 🔴.
+    """
+    def _signal(today_rev: float, avg_rev: float) -> str:
+        if avg_rev <= 0:
+            return "🟢"
+        pct = today_rev / avg_rev
+        if pct >= 0.80:
+            return "🟢"
+        elif pct >= 0.40:
+            return "🟡"
+        return "🔴"
+
+    publishers = []
+    total_today = 0.0
+    total_avg = 0.0
+
+    for row in today_rows:
+        uid = int(row[0])
+        name = (row[1] or "").strip() or "Unknown Partner"
+        rev = float(row[2] or 0)
+        convs = int(row[3] or 0)
+        avg = avg_lookup.get(uid, 0.0)
+
+        publishers.append({
+            "uid": uid,
+            "name": name,
+            "rev": rev,
+            "convs": convs,
+            "avg": avg,
+            "signal": _signal(rev, avg),
+        })
+        total_today += rev
+        total_avg += avg
+
+    publishers.sort(key=lambda x: -x["rev"])
+    return PublisherRevenueSummary(publishers=publishers, total_today=total_today, total_avg=total_avg)
+
+
 def get_revenue_today() -> dict:
     """
     Return today's intraday revenue by publisher vs 30-day rolling average.
@@ -4789,16 +4839,6 @@ def get_revenue_today() -> dict:
         ≥ $10K → $XK (nearest $100)   ≥ $1K → $X,X00 (nearest $100)   < $1K → exact
     """
     import datetime as _dt_mod
-
-    def _signal(today_rev: float, avg_rev: float) -> str:
-        if avg_rev <= 0:
-            return "🟢"
-        pct = today_rev / avg_rev
-        if pct >= 0.80:
-            return "🟢"
-        elif pct >= 0.40:
-            return "🟡"
-        return "🔴"
 
     try:
         ch = _get_ch_client()
@@ -4842,26 +4882,11 @@ GROUP BY c.user_id
         # Build avg lookup: user_id → avg_daily_rev
         avg_lookup: dict[int, float] = {int(r[0]): float(r[1] or 0) for r in avg_rows}
 
-        # Today rows: (user_id, publisher_name, today_rev, conversions)
-        publishers = []
-        total_today = 0.0
-        total_avg = 0.0
-        for row in today_rows:
-            uid = int(row[0])
-            name = (row[1] or "").strip() or "Unknown Partner"
-            rev = float(row[2] or 0)
-            convs = int(row[3] or 0)
-            avg = avg_lookup.get(uid, 0.0)
-            publishers.append({
-                "uid": uid,
-                "name": name,
-                "rev": rev,
-                "convs": convs,
-                "avg": avg,
-                "signal": _signal(rev, avg),
-            })
-            total_today += rev
-            total_avg += avg
+        # Accumulate revenue with explicit return value
+        revenue_summary = _build_publisher_revenue_summary(today_rows, avg_lookup)
+        publishers = revenue_summary.publishers
+        total_today = revenue_summary.total_today
+        total_avg = revenue_summary.total_avg
 
         # Empty / early state
         if not publishers:
