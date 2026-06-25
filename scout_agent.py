@@ -245,6 +245,9 @@ except Exception as e:
     log.warning(f"Failed to load fleet_health config: {e} — using defaults")
     FLEET_HEALTH_CONFIG = PublisherFleetHealthConfig()
 
+# Admin user ID centralized (loaded once at module init, not repeated per function call)
+_ADMIN_USER_ID = os.getenv("SCOUT_ADMIN_USER_ID", "").strip()
+
 
 def _is_admin(user_id: str) -> bool:
     """True if user_id is in SCOUT_THRESHOLD_ADMINS (comma-separated allowlist).
@@ -255,9 +258,8 @@ def _is_admin(user_id: str) -> bool:
     if not user_id:
         return False
     allow = {x.strip() for x in os.getenv("SCOUT_THRESHOLD_ADMINS", "").split(",") if x.strip()}
-    legacy = os.getenv("SCOUT_ADMIN_USER_ID", "").strip()
-    if legacy:
-        allow.add(legacy)
+    if _ADMIN_USER_ID:
+        allow.add(_ADMIN_USER_ID)
     return user_id in allow
 
 
@@ -4492,8 +4494,7 @@ def get_usage_report(requesting_user_id: str = "") -> str:
     from collections import Counter
     from datetime import datetime, timezone, timedelta
 
-    admin_uid = os.getenv("SCOUT_ADMIN_USER_ID", "")
-    if not admin_uid or requesting_user_id != admin_uid:
+    if not _ADMIN_USER_ID or requesting_user_id != _ADMIN_USER_ID:
         return ":lock: Usage reports are admin-only."
 
     log_path = pathlib.Path(__file__).parent / "data" / "usage_log.jsonl"
@@ -4542,8 +4543,7 @@ def export_usage_log(days: int = 30, limit: int = 200,
     import os, pathlib, json as _json
     from datetime import datetime, timedelta
 
-    admin_uid = os.getenv("SCOUT_ADMIN_USER_ID", "")
-    if not admin_uid or requesting_user_id != admin_uid:
+    if not _ADMIN_USER_ID or requesting_user_id != _ADMIN_USER_ID:
         return ":lock: Usage export is admin-only."
 
     log_path = pathlib.Path(__file__).parent / "data" / "usage_log.jsonl"
