@@ -247,6 +247,14 @@ except Exception as e:
 
 # Admin user ID centralized (loaded once at module init, not repeated per function call)
 _ADMIN_USER_ID = os.getenv("SCOUT_ADMIN_USER_ID", "").strip()
+if not _ADMIN_USER_ID:
+    log.warning("[startup] SCOUT_ADMIN_USER_ID not set — admin tools (set_threshold, force_run_monitor, get_usage_report, export_usage_log) will reject requests")
+
+# Notion config centralized (loaded once at module init)
+_NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
+_NOTION_QUEUE_DB_ID = os.getenv("NOTION_QUEUE_DB_ID", "").strip()
+if not (_NOTION_TOKEN and _NOTION_QUEUE_DB_ID):
+    log.warning("[startup] NOTION_TOKEN or NOTION_QUEUE_DB_ID not set — get_pipeline_health will not function")
 
 # Network credential config (loaded once at module init)
 @dataclass
@@ -307,6 +315,7 @@ _PULSE_STATE_PATH = pathlib.Path(__file__).parent / "data" / "pulse_state.json"
 _BENCHMARKS: dict = {}
 _BENCHMARKS_LOADED_AT: float = 0.0
 _BENCHMARKS_TTL = 3600  # 1 hour
+assert _BENCHMARKS_TTL > 0, "Benchmark TTL must be > 0 seconds"
 _BENCHMARKS_LOCK = threading.Lock()
 
 # ── Data quality tier helper ──────────────────────────────────────────────────
@@ -3210,13 +3219,10 @@ def mark_offer_launched(advertiser: str) -> dict:
     entry.update({"status": "launched", "launched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")})
     state[key] = entry
 
-    try:
-        _LAUNCHED_OFFERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _LAUNCHED_OFFERS_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2))
-        os.replace(tmp, _LAUNCHED_OFFERS_PATH)
-    except Exception as e:
-        log.warning(f"mark_offer_launched write failed: {e}")
+    _LAUNCHED_OFFERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _LAUNCHED_OFFERS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    os.replace(tmp, _LAUNCHED_OFFERS_PATH)
 
     return {
         "status":      "launched",
@@ -4005,6 +4011,18 @@ def _validate_sql_query(sql: str) -> list:
     return warnings
 
 
+def _filter_non_id_columns(rows_as_dicts: list, col_names: list) -> tuple:
+    """Strip internal ID columns (user_id, publisher_id, *_id) from result set.
+
+    Returns (filtered_rows, filtered_col_names).
+    """
+    import re as _re_id
+    _ID_SUFFIX = _re_id.compile(r'(?:^|_)id$', _re_id.IGNORECASE)
+    _keep = [c for c in col_names if not _ID_SUFFIX.search(c)]
+    filtered_rows = [{k: v for k, v in row.items() if not _ID_SUFFIX.search(k)} for row in rows_as_dicts]
+    return filtered_rows, _keep
+
+
 def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
     """
     Execute an arbitrary SELECT query against ClickHouse.
@@ -4062,12 +4080,8 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
             rows_as_dicts = [[_sanitize(v) for v in row] for row in rows[:max_rows]]
 
         # Strip internal ID columns — never surface user_id, publisher_id, campaign_id, etc. to LLM
-        import re as _re_id
-        _ID_SUFFIX = _re_id.compile(r'(?:^|_)id$', _re_id.IGNORECASE)
         if col_names:
-            _keep = [c for c in col_names if not _ID_SUFFIX.search(c)]
-            rows_as_dicts = [{k: v for k, v in row.items() if not _ID_SUFFIX.search(k)} for row in rows_as_dicts]
-            col_names = _keep
+            rows_as_dicts, col_names = _filter_non_id_columns(rows_as_dicts, col_names)
 
         return {
             "description": description,
@@ -4459,11 +4473,11 @@ def get_pipeline_health() -> str:
     how many are stale (>7 days without a Live/Done status), and the oldest pending.
     Reads from the Notion Scout Demand Queue database.
     """
-    import os, requests as _req, json as _json
+    import requests as _req, json as _json
     from datetime import datetime, timezone, timedelta
 
-    notion_token = os.getenv("NOTION_TOKEN")
-    db_id = os.getenv("NOTION_QUEUE_DB_ID")
+    notion_token = _NOTION_TOKEN
+    db_id = _NOTION_QUEUE_DB_ID
     if not notion_token or not db_id:
         return (":warning: Pipeline health unavailable — `NOTION_QUEUE_DB_ID` not configured. "
                 "Add it to Render env vars.")
@@ -4691,7 +4705,7 @@ def forget_entity_note(entity_name: str, entity_type: str,
                 "permalink": _caller_permalink or "",
             }) + "\n")
     except Exception as e:
-        log.debug("forget_entity_note audit swallowed: %s", e)
+        log.warning("forget_entity_note audit write failed: %s", e)
 
     return (f":wastebasket: Forgot the note about *{entity_name}* ({entity_type}). "
             f"Was: _{dropped.get('note','(no note)')}_")
