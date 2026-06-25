@@ -3091,15 +3091,24 @@ def get_demand_queue_status() -> dict:
     if not pending:
         return {"pending": [], "count": 0}
 
-    # Batch ClickHouse check: impressions per advertiser since approved_at
-    impression_counts: dict = {}
+    from datetime import datetime, timezone as _tz
+
+    # Single-pass build: CH query + result construction in one loop
+    result_items = []
+    ch = None
     try:
         ch = _get_ch_client()
-        # Find campaign IDs matching each advertiser name, then count impressions
-        # since that offer's approved_at date
-        for item in pending:
-            adv = item["advertiser"]
-            approved_at = item.get("approved_at", "2000-01-01T00:00:00")
+    except Exception as e:
+        log.warning(f"get_demand_queue_status: ClickHouse unavailable: {e}")
+
+    for item in pending:
+        adv = item["advertiser"]
+        approved_at = item.get("approved_at", "2000-01-01T00:00:00")
+        approved_at_str = item.get("approved_at", "")
+
+        # Query impressions for this advertiser
+        imp = 0
+        if ch:
             try:
                 rows = ch.query(
                     """
@@ -3112,20 +3121,12 @@ def get_demand_queue_status() -> dict:
                     """,
                     parameters={"adv": f"%{adv}%", "approved_at": approved_at},
                 ).result_rows
-                impression_counts[adv] = rows[0][0] if rows else 0
+                imp = rows[0][0] if rows else 0
             except Exception as e:
                 log.debug(f"CH impression check failed for {adv}: {e}")
-                impression_counts[adv] = 0
-    except Exception as e:
-        log.warning(f"get_demand_queue_status: ClickHouse unavailable: {e}")
+                imp = 0
 
-    from datetime import datetime, timezone as _tz
-
-    result_items = []
-    for item in pending:
-        adv = item["advertiser"]
-        imp = impression_counts.get(adv, 0)
-        approved_at_str = item.get("approved_at", "")
+        # Compute days_queued
         days_queued = 0
         if approved_at_str:
             try:
