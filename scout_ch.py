@@ -94,10 +94,9 @@ def _get_ch_client():
 class _LoggingCHClient:
     """Thin wrapper that logs every SQL query to the terminal before execution.
 
-    Vamsee's ask: "when running locally, we should be printing all queries to
-    the terminal — that's where you'll verify." This satisfies that without
-    touching every call site. Logs at INFO so it appears in both local terminal
-    and Railway log stream. Truncates to 400 chars to keep it readable.
+    Log all queries to terminal for local debugging — shows actual queries hitting
+    ClickHouse. Logs at INFO so it appears in both local terminal and log stream.
+    Truncates to 400 chars to keep output readable.
     """
 
     def __init__(self, client):

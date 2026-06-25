@@ -64,5 +64,11 @@
     "heartbeat_interval_minutes": 30,
     "heartbeat_warmup_seconds": 300,
     "heartbeat_consecutive_threshold": 2
+  },
+  "fleet_health": {
+    "act_now_sigma": -2.0,
+    "act_now_gap": 500.0,
+    "watch_sigma": -1.5,
+    "watch_gap": 200.0
   }
 }
