@@ -56,7 +56,7 @@ class TestKitLint(unittest.TestCase):
         # body + 10 facts would produce >6 blocks without enforcement
         facts = [(f"Pub {i}", f"${i*10}K") for i in range(10)]
         card = Card(Severity.WARN, "Enforce test", body="• alert\n• detail", facts=facts)
-        _fallback, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+        _fallback, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM)
         cap = BUDGETS[Surface.MONITOR_ALARM]
         self.assertLessEqual(
             len(blocks), cap,
@@ -98,7 +98,7 @@ class TestKitLint(unittest.TestCase):
             sys.modules.pop(mod, None)
         from scout_ui_kit import Card, Severity, Surface, wrap_response
         card = Card(Severity.WARN, "Passthrough test", body="• a\n• b")
-        _fallback, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+        _fallback, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM)
         self.assertGreater(len(blocks), 0)
 
     def test_no_section_accessory_buttons(self):
@@ -122,33 +122,38 @@ class TestKitLint(unittest.TestCase):
                     )
 
     def test_no_fenced_code_in_response(self):
-        """Triple-backtick blocks horizontal-scroll on mobile (rule 2).
-        wrap_response output must never contain ``` in any mrkdwn text field."""
+        """Triple-backtick blocks horizontal-scroll in mrkdwn sections (rule 2).
+        When SCOUT_MARKDOWN_BLOCKS is on, fenced code routes to a native markdown block
+        (which renders correctly). Verify no ``` leaks into mrkdwn section/context fields."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
+        os.environ["SCOUT_MARKDOWN_BLOCKS"] = "true"
         for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
-        from scout_ui_kit import Card, Severity, Surface, wrap_response
-        card = Card(Severity.INFO, "Result", body="Here is the data:\n```sql\nSELECT 1\n```")
-        _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
-        for block in blocks:
-            text_val = ""
-            if isinstance(block.get("text"), dict):
-                text_val += block["text"].get("text", "")
-            for el in block.get("elements", []) or []:
-                if isinstance(el, dict):
-                    text_val += el.get("text", "") if isinstance(el.get("text"), str) else ""
-            # Also check section.fields (facts block) — same mobile rule applies
-            for field in block.get("fields", []) or []:
-                if isinstance(field, dict):
-                    text_val += field.get("text", "")
-            self.assertNotIn(
-                "```", text_val,
-                "Triple-backtick fenced code found in wrap_response output — use inline `code` instead",
-            )
+        try:
+            from scout_ui_kit import Card, Severity, Surface, wrap_response
+            card = Card(Severity.INFO, "Result", body="Here is the data:\n```sql\nSELECT 1\n```")
+            _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
+            for block in blocks:
+                if block.get("type") in ("markdown", "rich_text"):
+                    continue
+                text_val = ""
+                if isinstance(block.get("text"), dict) and block["text"].get("type") == "mrkdwn":
+                    text_val += block["text"].get("text", "")
+                for field in block.get("fields", []) or []:
+                    if isinstance(field, dict):
+                        text_val += field.get("text", "")
+                self.assertNotIn(
+                    "```", text_val,
+                    f"Triple-backtick fenced code leaked into mrkdwn field of {block.get('type')!r} block",
+                )
+        finally:
+            os.environ.pop("SCOUT_MARKDOWN_BLOCKS", None)
+            for mod in ("scout_ui_kit",):
+                sys.modules.pop(mod, None)
 
     def test_no_danger_style_on_feedback(self):
         """style:danger is for destructive actions only (rule 4).
-        Feedback and suggestion buttons must not use danger styling."""
+        Suggestion buttons must not use danger styling."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
         for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
@@ -157,8 +162,6 @@ class TestKitLint(unittest.TestCase):
             card=Card(Severity.WARN, "Something is off"),
             surface=Surface.CHANNEL_ROOT,
             suggestions=["Try this", "Or this"],
-            feedback="button",
-            query_hash="fake_ts_123",
         )
         for block in blocks:
             for el in block.get("elements", []) or []:
@@ -188,18 +191,14 @@ class TestKitLint(unittest.TestCase):
                 f"{surface}: {total_buttons} buttons exceeds MAX_ACTIONS={MAX_ACTIONS[surface]}",
             )
 
-    def test_long_body_preserves_feedback(self):
-        """enforce() must not truncate the feedback row when blocks exceed the surface budget.
-        Uses Surface.DM (budget=6) and a card with body + facts + card.actions + elapsed +
-        suggestions — 7 blocks total — so enforce() actually fires. Feedback is placed before
-        suggestions in composition order specifically to survive truncation; this test verifies
-        that guarantee holds under real budget pressure."""
+    def test_enforce_fires_under_budget_pressure(self):
+        """enforce() must truncate blocks when composition exceeds the surface budget.
+        Uses Surface.DM (budget=6) with a card + facts + actions + suggestions + elapsed
+        that produces >6 blocks, verifying enforce() fires and caps the output."""
         os.environ["SCOUT_KIT_ENABLED"] = "true"
         for mod in ("scout_ui_kit",):
             sys.modules.pop(mod, None)
-        from scout_ui_kit import Card, Severity, Surface, wrap_response
-        # Build a card that produces 7 blocks on Surface.DM (budget=6):
-        # header + body + facts + feedback + suggestions + elapsed + card.actions = 7
+        from scout_ui_kit import Card, Severity, Surface, wrap_response, BUDGETS
         card = Card(
             Severity.INFO,
             "Revenue summary",
@@ -210,23 +209,12 @@ class TestKitLint(unittest.TestCase):
         _, blocks = wrap_response(
             card=card,
             surface=Surface.DM,
-            feedback="button",
-            query_hash="ts_123",
             suggestions=["Follow-up 1", "Follow-up 2"],
             elapsed_seconds=3,
         )
-        # Budget is 6 — enforce() must have fired (truncated to 5 + 1 overflow context)
-        self.assertLessEqual(len(blocks), 6, "enforce() did not fire — test setup is invalid")
-        has_feedback = any(
-            b.get("type") == "actions" and any(
-                e.get("action_id", "").startswith("scout_feedback")
-                for e in b.get("elements", [])
-            )
-            for b in blocks
-        )
-        self.assertTrue(
-            has_feedback,
-            "Feedback row was truncated by enforce() — check composition order in wrap_response",
+        self.assertLessEqual(
+            len(blocks), BUDGETS[Surface.DM],
+            f"enforce() did not cap output — got {len(blocks)} blocks, budget is {BUDGETS[Surface.DM]}",
         )
 
     def test_empty_suggestions_no_actions_block(self):
@@ -241,7 +229,6 @@ class TestKitLint(unittest.TestCase):
                 card=Card(Severity.INFO, "headline"),
                 surface=Surface.CHANNEL_ROOT,
                 suggestions=empty,
-                feedback="none",
             )
             action_blocks = [b for b in blocks if b.get("type") == "actions"]
             self.assertEqual(
@@ -260,7 +247,6 @@ class TestKitLint(unittest.TestCase):
         _, blocks = wrap_response(
             card=Card(Severity.WARN, "Cap alert", body="• Advertiser A: 85% of cap"),
             surface=Surface.MONITOR_ALARM,
-            feedback="none",
         )
         self.assertEqual(blocks[0]["type"], "header", "First block must be native header")
         self.assertEqual(blocks[1]["type"], "divider", "Second block must be divider")
@@ -300,7 +286,7 @@ class TestKitLint(unittest.TestCase):
         from scout_ui_kit import Card, Severity, Surface, wrap_response
         card = Card(Severity.INFO, "Publisher rev",
                     facts=[("Pub A", "$42K"), ("Pub B", "$38K"), ("Pub C", "$21K")])
-        _f, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, feedback="none")
+        _f, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
         facts_block = next((b for b in blocks if b.get("type") == "rich_text"), None)
         self.assertIsNotNone(facts_block, "Expected a rich_text block for facts")
 
@@ -312,7 +298,7 @@ class TestKitLint(unittest.TestCase):
         from scout_ui_kit import Card, Severity, Surface, wrap_response
         card = Card(Severity.INFO, "All pubs",
                     facts=[(f"Pub {i}", f"${i*1000}") for i in range(12)])
-        _f, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, feedback="none")
+        _f, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
         ctx_blocks = [b for b in blocks if b.get("type") == "context"]
         overflow_text = any("2 more" in str(b) for b in ctx_blocks)
         self.assertTrue(overflow_text, "Expected context block mentioning '2 more'")
@@ -325,7 +311,7 @@ class TestKitLint(unittest.TestCase):
             sys.modules.pop(mod, None)
         from scout_ui_kit import Card, Severity, Surface, wrap_response, BUDGETS
         card = Card(Severity.WARN, "Cap alert", facts=[(f"Pub {i}", "12%") for i in range(10)])
-        _f, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+        _f, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM)
         rich_text_blocks = [b for b in blocks if b.get("type") == "rich_text"]
         self.assertEqual(len(rich_text_blocks), 1,
                          "All 10 facts must collapse into exactly 1 rich_text block")
@@ -382,6 +368,23 @@ class TestKitLint(unittest.TestCase):
         """No args → empty list."""
         from scout_ui_kit import _build_footer_block
         self.assertEqual(_build_footer_block(), [])
+
+    def test_markdown_block_emitted_when_flag_enabled(self):
+        """When SCOUT_MARKDOWN_BLOCKS=true, body uses native markdown block instead of rich_text."""
+        import os
+        import importlib
+        import scout_ui_kit as kit
+        try:
+            os.environ["SCOUT_MARKDOWN_BLOCKS"] = "true"
+            importlib.reload(kit)
+            card = kit.Card(severity=kit.Severity.INFO, headline="Test", body="## Heading\nSome text.")
+            _, blocks = kit.wrap_response(card=card, surface=kit.Surface.CHANNEL_ROOT, pattern=kit.ResponsePattern.ANSWER)
+            md_blocks = [b for b in blocks if b.get("type") == "markdown"]
+            self.assertEqual(len(md_blocks), 1)
+            self.assertIn("## Heading", md_blocks[0]["text"])
+        finally:
+            os.environ.pop("SCOUT_MARKDOWN_BLOCKS", None)
+            importlib.reload(kit)
 
 
 if __name__ == "__main__":

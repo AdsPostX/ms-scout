@@ -17,7 +17,9 @@ import random
 import re
 import threading
 import time
+from dataclasses import dataclass as _dataclass
 from dataclasses import replace as _dc_replace
+from datetime import datetime, timezone
 
 from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 from slack_sdk.socket_mode import SocketModeClient
@@ -25,7 +27,8 @@ from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web import WebClient
 
-from scout_agent import ask
+from scout_agent import ask, _norm
+from scout_thresholds import _manager as _tm
 from scout_attachments import detect_sheets_url, extract_sheets_url, extract_file
 from scout_notion import (
     _generate_offer_copy, _write_to_notion_queue, _update_notion_status,
@@ -39,12 +42,15 @@ from scout_ui_kit import (
     _build_help_blocks,
     _build_home_view, _build_queue_card, _is_help_query,
     _build_advertiser_rpm_context_blocks,
+    _build_modal_view,
+    _build_maintenance_home_view,
+    _render_subheader,
+    AgentStep,
 )
 from scout_state import (
     _store_brief, _get_brief, _delete_brief,
     _merge_thread_context, _get_thread_context,
     _load_launched_offers, _save_launched_offers,
-    _load_learnings, _save_learnings,
     _log_usage,
     _DATA_DIR,
     _strip_mention, _sanitize_slack, _slack_thread_url,
@@ -58,6 +64,53 @@ from scout_state import (
 log = logging.getLogger("scout_handlers")
 
 
+# ── Handler configuration — gathered at module load, not scattered inline ────
+@_dataclass(frozen=True)
+class _HandlerConfig:
+    """Immutable config read from env at module import time.
+
+    Vamsee: config gathered at construction, not scattered inline os.getenv calls.
+    """
+    adops_notify_user_id: str = ""
+    sidd_qa_channel_id: str = ""
+    slack_bot_token: str = ""
+    ask_timeout_s: int = 90
+    anthropic_api_key: str = ""
+
+    @classmethod
+    def from_env(cls) -> "_HandlerConfig":
+        raw_timeout = os.getenv("SCOUT_ASK_TIMEOUT_S", "90")
+        try:
+            timeout = int(raw_timeout)
+            if timeout <= 0:
+                raise ValueError
+        except ValueError:
+            log.warning("Invalid SCOUT_ASK_TIMEOUT_S=%r; defaulting to 90", raw_timeout)
+            timeout = 90
+        return cls(
+            adops_notify_user_id=os.getenv("ADOPS_NOTIFY_USER_ID", ""),
+            sidd_qa_channel_id=os.getenv("SIDD_QA_CHANNEL_ID", ""),
+            slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
+            ask_timeout_s=timeout,
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+        )
+
+
+_CFG = _HandlerConfig.from_env()
+
+
+def _get_display_name(web: "WebClient", user_id: str) -> str:
+    """Return Slack display name or username, falling back to user_id."""
+    try:
+        info = web.users_info(user=user_id)
+        return (
+            info.get("user", {}).get("profile", {}).get("display_name", "")
+            or info.get("user", {}).get("name", user_id)
+        )
+    except Exception:
+        return user_id
+
+
 def _is_under_maintenance(user_id: str) -> bool:
     if not user_id:
         return False
@@ -68,8 +121,7 @@ def _is_under_maintenance(user_id: str) -> bool:
 # Injected at startup by scout_bot.main() — avoids circular import
 _BOT_USER_ID: str = ""
 _LAST_THREAD_PER_CHANNEL: dict = {}
-_LAST_THREAD_LOCK = None  # threading.Lock, set by scout_bot
-
+_LAST_THREAD_LOCK: threading.Lock = threading.Lock()
 # ── Per-user easter egg responses ────────────────────────────────────────────
 _FUNZONE_USER_ID = "U05BAJK1NH4"
 
@@ -127,20 +179,8 @@ def _set_force_monitor_fn(name: str, fn) -> None:
 # CH-pressure days surface as a friendly degraded message, not an infinite
 # spinner. The orphaned ask() thread is allowed to complete in the
 # background (daemon=True so it dies on process exit).
-# Defensive parse: a bad SCOUT_ASK_TIMEOUT_S (e.g. "90s", "", "0") would
-# either crash the module at import or time out every request instantly.
-# Clamp to a sane minimum so misconfiguration degrades to "slow" not "broken".
-_raw_ask_timeout_s = os.getenv("SCOUT_ASK_TIMEOUT_S", "90")
-try:
-    ASK_TIMEOUT_S = int(_raw_ask_timeout_s)
-    if ASK_TIMEOUT_S <= 0:
-        raise ValueError
-except ValueError:
-    log.warning(
-        "Invalid SCOUT_ASK_TIMEOUT_S=%r; defaulting to 90",
-        _raw_ask_timeout_s,
-    )
-    ASK_TIMEOUT_S = 90
+# Timeout is read from _CFG.ask_timeout_s (parsed from SCOUT_ASK_TIMEOUT_S
+# in _HandlerConfig.from_env with defensive validation and warning on bad input).
 
 # Bounded concurrency for in-flight ask() workers. Under sustained CH
 # pressure, timed-out workers keep running in the background (daemon=True);
@@ -157,7 +197,12 @@ class AskTimeout(Exception):
     again in 10-15 minutes.'"""
 
 
-def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
+def _ask_with_timeout(
+    query: str,
+    timeout_s: int = _CFG.ask_timeout_s,
+    blocking_acquire_timeout_s: int | None = None,
+    **kwargs,
+):
     """Run ask() in a worker thread; raise AskTimeout if it exceeds
     timeout_s. The worker thread keeps running (daemon) so the agent
     can finish in the background, but the caller stops waiting.
@@ -166,11 +211,19 @@ def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
     under sustained CH pressure. If the cap is full, raise AskTimeout
     immediately rather than queueing.
 
+    blocking_acquire_timeout_s: when set, block-wait up to that many seconds
+    for a semaphore slot instead of failing immediately. Use in retry paths
+    where the user has already been acknowledged and a longer wait is acceptable.
+
     Use this in any user-facing path where an infinite spinner is worse
     than a 'try again in 10-15m' message: App Home tries, channel
     @mentions, DMs.
     """
-    if not _ASK_SEMAPHORE.acquire(blocking=False):
+    if blocking_acquire_timeout_s is not None:
+        acquired = _ASK_SEMAPHORE.acquire(blocking=True, timeout=blocking_acquire_timeout_s)
+    else:
+        acquired = _ASK_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
         log.warning(
             "ask() semaphore full (>=3 inflight); shedding query=%r",
             query[:80],
@@ -223,16 +276,72 @@ def _ask_with_timeout(query: str, timeout_s: int = ASK_TIMEOUT_S, **kwargs):
     return result_box["resp"]
 
 
-_TIMEOUT_FALLBACK_TEXT = (
-    ":hourglass_flowing_sand: *ClickHouse is under pressure right now.*\n"
-    "Your query took longer than expected — likely a memory-heavy time "
-    "window or a busy moment. Try again in 10–15 minutes, or narrow the "
-    "scope (e.g. a single publisher instead of all)."
-)
+def _mention(user_id: str | None) -> str:
+    return f"<@{user_id}> " if user_id else ""
 
 
-# ── Part 3.6 — 👍/👎 feedback loop ──────────────────────────────────────────
-_FEEDBACK_LOG = _DATA_DIR / "feedback_log.jsonl"
+def _ch_busy_message(user_id: str | None = None, *, promise_followup: bool = True) -> str:
+    """Timeout fallback text. Adds @mention prefix for channel paths where
+    a reply does not generate a notification without it. Pass None for DMs
+    (reply always notifies) and modals (no user context).
+
+    promise_followup=False for paths where no retry is wired — avoids
+    showing a tag-back promise the code cannot keep."""
+    tail = "I'll tag you here when it's ready." if promise_followup else "Try again in a moment."
+    return f"{_mention(user_id)}_On it. Taking a bit longer than usual. {tail}_"
+
+
+def _retry_after_timeout(
+    web: WebClient,
+    channel: str,
+    thread_ts: str | None,
+    query: str,
+    user_id: str | None = None,
+    user_tz: str = "",
+    surface: Surface = Surface.DM,
+    delay_s: int = 30,
+    history: list | None = None,
+) -> None:
+    """Spawn a daemon thread that retries ask() after *delay_s* seconds and
+    posts the answer back to the original thread (postman pattern).
+
+    Pass user_id for channel paths — the reply includes <@user_id> so the
+    user is notified. Omit for DMs: reply auto-notifies, no tag needed.
+    Pass surface explicitly; do not rely on user_id as a surface proxy.
+    Pass history to preserve thread context on follow-up questions."""
+    def _run() -> None:
+        time.sleep(delay_s + random.uniform(0, 10))
+        prefix = _mention(user_id)
+        try:
+            response = _ask_with_timeout(
+                query, user_id=user_id or "", user_tz=user_tz,
+                **({"history": history} if history else {}),
+                blocking_acquire_timeout_s=_CFG.ask_timeout_s,
+            )
+            response_text = (response.text or "")[:3000]
+            card = Card(severity=Severity.INFO, headline="", body=response_text)
+            fallback, blocks = wrap_response(
+                card=card, surface=surface, pattern=ResponsePattern.ANSWER,
+            )
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=f"{prefix}{fallback}",
+                blocks=blocks,
+                unfurl_links=False,
+            )
+        except AskTimeout:
+            log.warning("[CH] retry also timed out; query=%r", query[:80])
+            _still_slow = f"{prefix}Still slow. Try again in a few minutes."
+            _sc = Card(severity=Severity.INFO, headline="", body=_still_slow)
+            _, _sb = wrap_response(card=_sc, surface=surface, pattern=ResponsePattern.ANSWER)
+            web.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=_still_slow, blocks=_sb,
+            )
+        except Exception as exc:
+            log.error("[CH] async retry failed: %s", exc)
+    threading.Thread(target=_run, daemon=True, name="ask-retry").start()
+
 
 # ── Part 9 — Smart 👎 handler: clarification detection ───────────────────────
 _CLARIFICATION_PHRASES: tuple = (
@@ -256,7 +365,7 @@ def _is_clarification_response(text: str) -> bool:
       3. Is short (<300 chars) — excludes long factual answers with trailing
          confirmation questions like "Is this the breakdown you needed?"
     """
-    lower = text.lower().strip()
+    lower = _norm(text)
     has_phrase = any(phrase in lower for phrase in _CLARIFICATION_PHRASES)
     if not has_phrase:
         return False
@@ -276,123 +385,6 @@ def _get_user_tz(web: WebClient, user_id: str) -> str:
         return info.get("user", {}).get("tz", "") or ""
     except Exception:
         return ""
-
-
-def _already_retried(msg_ts: str) -> bool:
-    """True if this message already triggered a down_retry — prevents infinite retry loop.
-
-    Checks both message_ts (original question) and retry_message_ts (the retry
-    reply) so that 👎-ing the retry itself doesn't spawn a second retry loop.
-    """
-    if not _FEEDBACK_LOG.exists():
-        return False
-    try:
-        with _FEEDBACK_LOG.open() as fh:
-            for line in fh:
-                try:
-                    row = json.loads(line)
-                    if row.get("rating") != "down_retry":
-                        continue
-                    if row.get("message_ts") == msg_ts or row.get("retry_message_ts") == msg_ts:
-                        return True
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        pass
-    return False
-
-
-
-def _feedback_log_row(row: dict) -> None:
-    """Append one row to feedback_log.jsonl. Best-effort, never raises."""
-    try:
-        _FEEDBACK_LOG.parent.mkdir(parents=True, exist_ok=True)
-        from datetime import datetime, timezone
-        row.setdefault("ts", datetime.now(timezone.utc).isoformat())
-        with _FEEDBACK_LOG.open("a") as fh:
-            fh.write(json.dumps(row) + "\n")
-    except Exception as e:
-        log.warning(f"[feedback] log write failed: {e}")
-
-
-
-def _retry_with_hint(web: WebClient, channel: str, msg_ts: str,
-                     rater_id: str, hint_kind: str) -> bool:
-    """Re-run ask() on the thread's original question with a steering hint.
-
-    Posts the retry in-thread. Idempotent per msg_ts via _already_retried.
-    hint_kind:
-      'clarification' — model asked for clarification; force a direct answer
-      'retry'         — generic 👎; nudge toward a different angle
-    Returns True if a retry was posted, False if gated or fetch failed.
-    """
-    if _already_retried(msg_ts):
-        return False
-    try:
-        replies = web.conversations_replies(channel=channel, ts=msg_ts, limit=1).get("messages", [{}])
-        scout_msg = replies[0] if replies else {}
-        if not scout_msg.get("bot_id"):
-            return False
-        answer_text = scout_msg.get("text", "")[:1000]
-        parent_ts = scout_msg.get("thread_ts") or ""
-        question_text = ""
-        if parent_ts:
-            try:
-                # Walk all thread messages to find the last non-bot message
-                # that precedes msg_ts — this is what the user actually asked,
-                # not necessarily the thread-root opening message.
-                thread_msgs = web.conversations_replies(
-                    channel=channel, ts=parent_ts, limit=50
-                ).get("messages", [])
-                for m in reversed(thread_msgs):
-                    if m.get("ts", "") >= msg_ts:
-                        continue  # skip the Scout reply itself and anything after
-                    if not m.get("bot_id") and m.get("text", "").strip():
-                        question_text = m["text"][:500]
-                        break
-            except Exception:
-                pass
-        if not question_text:
-            return False
-
-        if hint_kind == "clarification":
-            hint = (
-                "\n\n[Retry: answer directly using your best interpretation. "
-                "Do not ask for clarification.]"
-            )
-        else:
-            hint = (
-                "\n\n[Retry: previous answer was marked off. "
-                "Try a different angle — don't repeat the same reasoning.]"
-            )
-
-        retry_msg = question_text.strip() + hint
-        retry_result = ask(retry_msg, user_id=rater_id)
-        retry_text = (
-            retry_result.text
-            if hasattr(retry_result, "text")
-            else str(retry_result)
-        )
-        reply = web.chat_postMessage(
-            channel=channel,
-            thread_ts=parent_ts or msg_ts,
-            text=retry_text,
-            unfurl_links=False,
-        )
-        retry_ts = reply.get("ts", "")
-        _feedback_log_row({
-            "user":             rater_id,
-            "message_ts":       msg_ts,
-            "retry_message_ts": retry_ts,
-            "channel":          channel,
-            "question":         question_text,
-            "answer":           answer_text,
-            "rating":           "down_retry",
-        })
-        return True
-    except Exception as e:
-        log.warning(f"[feedback] retry failed: {e}")
-        return False
 
 
 def _permalink_for(web: WebClient, channel: str, msg_ts: str) -> str:
@@ -461,9 +453,8 @@ def _run_preflight_qa(  # replaces _check_url_async (removed — this is a stric
 
         # 2. Advertiser history on MS platform
         try:
-            from scout_agent import _get_benchmarks
-            benchmarks = _get_benchmarks()
-            adv_key = (brief_data.get("advertiser") or "").lower().strip()
+            benchmarks = _tm.benchmarks()
+            adv_key = _norm(brief_data.get("advertiser"))
             by_adv = benchmarks.get("by_adv_name", {})
             if adv_key and adv_key in by_adv:
                 hist = by_adv[adv_key]
@@ -867,7 +858,7 @@ def _handle_approve(action: dict, payload: dict, web: WebClient):
     # activation API. Normalize first (casing/whitespace, None-safe) and accept either
     # the raw upstream token ("sourcing_signal") or the already-canonical form so a
     # re-entrant call doesn't silently misclassify a sourcing offer as queue-approved.
-    raw_source = str(offer.get("source") or "").strip().lower()
+    raw_source = _norm(offer.get("source"))
     offer["source"] = (
         "sourcing-approved"
         if raw_source in {"sourcing_signal", "sourcing-approved"}
@@ -1265,9 +1256,8 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
         offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
         _sg_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
         _sg_fallback, _sg_blocks = wrap_response(
-            card=_sg_card, surface=Surface.THREAD,
+            card=_sg_card, surface=Surface.THREAD, pattern=ResponsePattern.ANSWER,
             suggestions=list(response.payload.get("suggestions", [])),
-            feedback="reaction", query_hash=_placeholder_ts_sg,
             elapsed_seconds=_elapsed,
         )
         _sg_final = [*_sg_blocks[:1], *offer_cards, *_sg_blocks[1:]] if offer_cards else _sg_blocks
@@ -1291,7 +1281,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
 
     # Launch notification (same logic as handle_event)
     if launched_offer_sg:
-        adops_uid   = os.getenv("ADOPS_NOTIFY_USER_ID", "")
+        adops_uid   = _CFG.adops_notify_user_id
         approved_by = launched_offer_sg.get("approved_by", "")
         advertiser  = launched_offer_sg.get("advertiser", "")
         payout      = launched_offer_sg.get("payout", "")
@@ -1309,9 +1299,8 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     response_text = response_text[:3000]  # cap for Slack text= limit
     _sg2_card = Card(Severity.INFO, "", body=response_text)
     _sg2_fallback, _sg2_blocks = wrap_response(
-        card=_sg2_card, surface=Surface.THREAD,
+        card=_sg2_card, surface=Surface.THREAD, pattern=ResponsePattern.ANSWER,
         suggestions=list(sugg),
-        feedback="reaction", query_hash=_placeholder_ts_sg,
         elapsed_seconds=_elapsed,
     )
     _sg2_period = (
@@ -1338,6 +1327,12 @@ _PULSE_QUERIES: dict[str, str] = {
 def _run_pulse_action(
     query: str, channel: str, user_id: str, msg_ts: str, web: WebClient, *, sanitize: bool = False,
 ) -> None:
+    """Fire a pulse query on a daemon thread and post the reply in-thread.
+
+    Intentionally bypasses _ask_with_timeout and _ASK_SEMAPHORE — pulse actions are
+    fire-and-forget UI refreshes, not interactive asks, so shed-on-busy and
+    postman-retry don't apply here.
+    """
     def _run(q=query, ch=channel, u=user_id, t=msg_ts):
         resp = ask(q, history=[], user_id=u)
         text = _sanitize_slack(str(resp.text)) if sanitize else resp.text
@@ -1398,87 +1393,6 @@ def _dispatch_pulse_dig_in(action: dict, payload: dict, web: WebClient) -> None:
     _run_pulse_action(f"dig into {pub}", ctx["channel"], ctx["user_id"], ctx["message_ts"], web)
 
 
-def _handle_feedback(action: dict, payload: dict, web: WebClient) -> None:
-    """
-    Handle 👍 / 👎 / ✏️ feedback buttons on Scout responses.
-    Stores to data/learnings.json for future prompt injection.
-    """
-    import uuid as _uuid
-    from datetime import datetime as _dt, timezone as _tz
-
-    action_id   = action.get("action_id", "")
-    query_hash  = action.get("value", "")
-    ctx         = _extract_interaction_context(payload)
-    user_id     = ctx["user_id"]
-    channel     = ctx["channel"]
-    message     = payload.get("message", {})
-    thread_ts   = message.get("thread_ts") or message.get("ts", "")
-    msg_ts      = message.get("ts", "")
-
-    learnings = _load_learnings()
-    now_str   = _dt.now(_tz.utc).isoformat()
-
-    if action_id == "scout_feedback_good":
-        learnings.setdefault("positive_signals", []).append({
-            "id":         str(_uuid.uuid4())[:8],
-            "created_at": now_str,
-            "query_hash": query_hash,
-            "user":       user_id,
-        })
-        _save_learnings(learnings)
-        # Acknowledge with an ephemeral message (visible only to the clicker)
-        try:
-            web.chat_postEphemeral(
-                channel=channel, user=user_id, thread_ts=thread_ts,
-                text=":white_check_mark: Got it — noted as accurate.",
-            )
-        except Exception:
-            pass
-
-    elif action_id == "scout_feedback_bad":
-        learnings.setdefault("negative_signals", []).append({
-            "id":         str(_uuid.uuid4())[:8],
-            "created_at": now_str,
-            "query_hash": query_hash,
-            "user":       user_id,
-        })
-        _save_learnings(learnings)
-        # Fire a retry on the underlying message so the button does real work,
-        # not just record the vote. Match the reaction-handler behavior.
-        fired = _retry_with_hint(web, channel, msg_ts, user_id, "retry")
-        if not fired:
-            try:
-                web.chat_postEphemeral(
-                    channel=channel, user=user_id, thread_ts=thread_ts,
-                    text=("_Still off? Hit ✏️ *Correct this* or run "
-                          "`@Scout remember <correct fact>`._"),
-                )
-            except Exception:
-                pass
-
-    elif action_id == "scout_feedback_correct":
-        # Store a pending correction keyed by msg_ts — _handle_event will capture the follow-up reply
-        corr_id = str(_uuid.uuid4())[:8]
-        learnings.setdefault("pending_corrections", {})[msg_ts] = {
-            "id":          corr_id,
-            "created_at":  now_str,
-            "query_hash":  query_hash,
-            "correction_by": user_id,
-            "channel":     channel,
-            "thread_ts":   thread_ts,
-            "msg_ts":      msg_ts,
-        }
-        _save_learnings(learnings)
-        try:
-            web.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=f"<@{user_id}> What's the correct answer? Reply here and I'll remember it. :memo:",
-            )
-        except Exception:
-            pass
-
-    log.info(f"Feedback recorded: {action_id} query={query_hash} user={user_id}")
-
 def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id: str = ""):
     """
     Execute an example query from App Home.
@@ -1494,15 +1408,14 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
         try:
             open_resp = web.views_open(
                 trigger_id=trigger_id,
-                view={
-                    "type": "modal",
-                    "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                    "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                    "blocks": [{
+                view=_build_modal_view(
+                    blocks=[{
                         "type": "section",
                         "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{_LOADING_MSG}"},
                     }],
-                },
+                    title="Scout",
+                    callback_id="home_try_query",
+                ),
             )
             assert open_resp.get("ok"), f"views_open failed: {open_resp.get('error')}"
             view_id = open_resp["view"]["id"]
@@ -1544,15 +1457,14 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     try:
                         web.views_update(
                             view_id=v_id,
-                            view={
-                                "type": "modal",
-                                "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                                "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                                "blocks": [
+                            view=_build_modal_view(
+                                blocks=[
                                     {"type": "section", "text": {"type": "mrkdwn", "text": f"_{query}_\n\n{step}"}},
                                     {"type": "context", "elements": [{"type": "mrkdwn", "text": f"_Scout · {elapsed_str}_"}]},
                                 ],
-                            },
+                                title="Scout",
+                                callback_id="home_try_query",
+                            ),
                         )
                     except Exception:
                         pass  # best-effort — never crash the modal over a heartbeat
@@ -1573,12 +1485,11 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     _stop_heartbeat()
                     web.views_update(
                         view_id=v_id,
-                        view={
-                            "type": "modal",
-                            "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                            "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
-                        },
+                        view=_build_modal_view(
+                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _ch_busy_message(promise_followup=False)}}],
+                            title="Scout",
+                            callback_id="home_try_query",
+                        ),
                     )
                     return
                 _elapsed = int(time.monotonic() - _t0)
@@ -1587,15 +1498,14 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 _stop_heartbeat()
                 response_text = (response.text or "")[:3000]
                 card = Card(severity=Severity.INFO, headline="", body=response_text)
-                _, blocks = wrap_response(card=card, surface=Surface.MODAL, feedback="none")
+                _, blocks = wrap_response(card=card, surface=Surface.MODAL)  # MODAL has no ResponsePattern — pattern= intentionally omitted
                 web.views_update(
                     view_id=v_id,
-                    view={
-                        "type": "modal",
-                        "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                        "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                        "blocks": blocks,
-                    },
+                    view=_build_modal_view(
+                        blocks=blocks,
+                        title="Scout",
+                        callback_id="home_try_query",
+                    ),
                 )
                 log.info("home_try_query modal: ran %r for %s in %ss", query[:50], user_id, _elapsed)
             except Exception:
@@ -1604,12 +1514,11 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 try:
                     web.views_update(
                         view_id=v_id,
-                        view={
-                            "type": "modal",
-                            "title": {"type": "plain_text", "text": "Scout", "emoji": False},
-                            "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"Something went wrong — try `@Scout {query}` directly in any channel."}}],
-                        },
+                        view=_build_modal_view(
+                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"Something went wrong — try `@Scout {query}` directly in any channel."}}],
+                            title="Scout",
+                            callback_id="home_try_query",
+                        ),
                     )
                 except Exception:
                     log.exception("_handle_home_try_query: error modal update also failed for %s", user_id)
@@ -1649,12 +1558,16 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 response = _ask_with_timeout(query, on_stage=lambda s: _stage.__setitem__(0, s))
             except AskTimeout:
                 # stop_rotating() handled by finally below
+                _busy_msg = _ch_busy_message()
+                _bcard = Card(severity=Severity.INFO, headline="", body=_busy_msg)
+                _, _busy_blocks = wrap_response(card=_bcard, surface=Surface.DM, pattern=ResponsePattern.ANSWER)
                 web.chat_update(
                     channel=dm_channel, ts=_placeholder_ts_ah,
-                    text="ClickHouse is under pressure — try again in 10–15 minutes.",
-                    blocks=[{"type": "section",
-                             "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                    text=_busy_msg,
+                    blocks=_busy_blocks,
                 )
+                _retry_after_timeout(web, dm_channel, thread_ts, query,
+                                     user_tz=_get_user_tz(web, user_id))
                 return
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
@@ -1674,9 +1587,8 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
             _ah3_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
             _ah3_fallback, _ah3_blocks = wrap_response(
-                card=_ah3_card, surface=Surface.DM,
+                card=_ah3_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(response.payload.get("suggestions", [])),
-                feedback="reaction", query_hash=_placeholder_ts_ah,
                 elapsed_seconds=_elapsed,
             )
             _ah3_final = [*_ah3_blocks[:1], *offer_cards, *_ah3_blocks[1:]] if offer_cards else _ah3_blocks
@@ -1694,9 +1606,8 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
             response_text = response_text[:3000]  # cap for Slack text= limit
             _ah4_card = Card(Severity.INFO, "", body=response_text)
             _ah4_fallback, _ah4_blocks = wrap_response(
-                card=_ah4_card, surface=Surface.DM,
+                card=_ah4_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(suggestions) if isinstance(suggestions, list) else [],
-                feedback="reaction", query_hash=_placeholder_ts_ah,
                 elapsed_seconds=_elapsed,
             )
             web.chat_update(
@@ -1749,15 +1660,200 @@ def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
     try:
         web.views_open(
             trigger_id=trigger_id,
-            view={
-                "type": "modal",
-                "title": {"type": "plain_text", "text": "Firing Alerts", "emoji": False},
-                "close": {"type": "plain_text", "text": "Close", "emoji": False},
-                "blocks": blocks,
-            },
+            view=_build_modal_view(
+                blocks=blocks,
+                title="Firing Alerts",
+                callback_id="home_alert_drill",
+            ),
         )
     except Exception:
         log.exception("_handle_home_alert_drill: views_open failed")
+
+
+# ── Alert acknowledge / snooze handlers ───────────────────────────────────────
+
+_SNOOZE_DURATIONS: dict[str, int] = {
+    "1h":  3600,
+    "4h":  14400,
+    "24h": 86400,
+    "48h": 172800,
+}
+
+
+def _handle_acknowledge(action: dict, payload: dict, web: WebClient) -> None:
+    """Acknowledge a MONITOR_ALARM alert in-place via chat_update."""
+    import alert_registry
+    ctx = _extract_interaction_context(payload)
+    channel = ctx["channel"]
+    user_id = ctx["user_id"]
+    alert_name = action.get("value", "")
+
+    ps = alert_registry.get_post_state(alert_name)
+    if ps is None:
+        web.chat_postEphemeral(channel=channel, user=user_id,
+            text=":warning: Alert state lost — can't update card. Check alerts directly.")
+        return
+
+    if ps.acknowledged_by:
+        web.chat_postEphemeral(channel=channel, user=user_id,
+            text=f":white_check_mark: Already acknowledged by <@{ps.acknowledged_by}>.")
+        return
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    alert_registry.acknowledge_alert(alert_name, user_id, now_iso)
+    now_display = datetime.now(timezone.utc).strftime("%-I:%M%p").lower()
+
+    from scout_ui_kit import _alert_status_chip_blocks
+    chip_blocks = _alert_status_chip_blocks(
+        status="acknowledged",
+        actor_id=user_id,
+        display_time=now_display,
+    )
+    try:
+        resp = web.chat_update(
+            channel=ps.channel,
+            ts=ps.message_ts,
+            text=f"✓ Acknowledged by <@{user_id}>",
+            blocks=chip_blocks,
+        )
+        if not resp.get("ok", False):
+            raise ValueError(f"chat_update returned ok=false: {resp.get('error', 'unknown')}")
+    except Exception as e:
+        log.warning("[acknowledge] chat_update failed: %s — posting ephemeral fallback", e)
+        try:
+            web.chat_postEphemeral(channel=channel, user=user_id,
+                text=":white_check_mark: Acknowledged, but couldn't update the alert card.")
+        except Exception:
+            pass
+
+
+def _handle_snooze_open(action: dict, payload: dict, web: WebClient) -> None:
+    """Open the snooze duration-picker modal."""
+    import alert_registry
+    ctx = _extract_interaction_context(payload)
+    channel = ctx["channel"]
+    user_id = ctx["user_id"]
+    trigger_id = payload.get("trigger_id", "")
+    alert_name = action.get("value", "")
+
+    ps = alert_registry.get_post_state(alert_name)
+    if ps is None:
+        web.chat_postEphemeral(channel=channel, user=user_id,
+            text=":warning: Alert state lost — can't snooze. Check alerts directly.")
+        return
+
+    private_metadata = json.dumps({
+        "alert_name": alert_name,
+        "message_ts": ps.message_ts,
+        "channel": ps.channel,
+    })
+
+    modal = {
+        "type": "modal",
+        "callback_id": "scout_snooze_submit",
+        "private_metadata": private_metadata,
+        "title": {"type": "plain_text", "text": "Snooze Alert"},
+        "submit": {"type": "plain_text", "text": "Snooze"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [{
+            "type": "input",
+            "block_id": "snooze_duration",
+            "label": {"type": "plain_text", "text": "Snooze for"},
+            "element": {
+                "type": "static_select",
+                "action_id": "snooze_duration_select",
+                "placeholder": {"type": "plain_text", "text": "Select duration"},
+                "options": [
+                    {"text": {"type": "plain_text", "text": "1 hour"},   "value": "1h"},
+                    {"text": {"type": "plain_text", "text": "4 hours"},  "value": "4h"},
+                    {"text": {"type": "plain_text", "text": "24 hours"}, "value": "24h"},
+                    {"text": {"type": "plain_text", "text": "48 hours"}, "value": "48h"},
+                ],
+            },
+        }],
+    }
+    try:
+        web.views_open(trigger_id=trigger_id, view=modal)
+    except Exception as e:
+        log.warning("[snooze_open] views_open failed: %s", e)
+
+
+def _handle_snooze_submit(payload: dict, web: WebClient) -> None:
+    """Process snooze modal submission."""
+    import alert_registry
+    view = payload.get("view", {})
+    meta = json.loads(view.get("private_metadata", "{}"))
+    alert_name = meta.get("alert_name", "")
+    message_ts = meta.get("message_ts", "")
+    channel = meta.get("channel", "")
+    user_id = payload.get("user", {}).get("id", "")
+
+    values = view.get("state", {}).get("values", {})
+    duration_str = (values.get("snooze_duration", {})
+                           .get("snooze_duration_select", {})
+                           .get("selected_option", {})
+                           .get("value", "1h"))
+
+    seconds = _SNOOZE_DURATIONS.get(duration_str, 3600)
+    now = datetime.now(timezone.utc)
+    snooze_until = datetime.fromtimestamp(now.timestamp() + seconds, tz=timezone.utc)
+    snooze_until_iso = snooze_until.isoformat()
+
+    alert_registry.snooze_alert(alert_name, snooze_until_iso, user_id)
+
+    display_until = snooze_until.strftime("%-I:%M%p").lower()
+    from scout_ui_kit import _alert_status_chip_blocks
+    chip_blocks = _alert_status_chip_blocks(
+        status="snoozed",
+        actor_id=user_id,
+        display_time=display_until,
+    )
+    try:
+        web.chat_update(
+            channel=channel,
+            ts=message_ts,
+            text=f"⏸ Snoozed by <@{user_id}> until {display_until}",
+            blocks=chip_blocks,
+        )
+    except Exception as e:
+        log.warning("[snooze_submit] chat_update failed: %s", e)
+
+
+def _extract_view_submission_context(payload: dict) -> dict:
+    """Extract channel + user_id from a view_submission payload.
+
+    view_submission carries context in view.private_metadata, NOT in
+    container.channel_id (which doesn't exist on view payloads).
+    """
+    user_id = payload.get("user", {}).get("id", "")
+    view = payload.get("view", {})
+    try:
+        meta = json.loads(view.get("private_metadata", "{}"))
+        channel = meta.get("channel", "")
+    except Exception:
+        channel = ""
+    return {"user_id": user_id, "channel": channel}
+
+
+def _handle_view_submission(req: SocketModeRequest, web: WebClient) -> None:
+    """Route view_submission payloads by view.callback_id."""
+    payload = req.payload
+    callback_id = payload.get("view", {}).get("callback_id", "")
+    handler = _VIEW_SUBMISSION_DISPATCH.get(callback_id)
+    if handler is None:
+        log.debug("[view_submission] no handler for callback_id=%r", callback_id)
+        return
+    try:
+        handler(payload, web)
+    except Exception:
+        log.exception("[view_submission] handler %r raised", callback_id)
+
+
+# Display-only modals push content only — no submission callback.
+# Only action modals with Submit buttons register here.
+_VIEW_SUBMISSION_DISPATCH: dict = {
+    "scout_snooze_submit": _handle_snooze_submit,
+}
 
 
 # ── Block-action dispatch table ───────────────────────────────────────────────
@@ -1768,19 +1864,58 @@ def _handle_home_alert_drill(web: WebClient, trigger_id: str) -> None:
 #
 # All referenced functions are defined above this point.
 
+
+def _handle_drill_publisher(action: dict, payload: dict, web: WebClient) -> None:
+    """Open loading modal, then async-fetch pub drill summary and update modal."""
+    import threading as _threading
+    ctx = _extract_interaction_context(payload)
+    channel = ctx["channel"]
+    trigger_id = payload.get("trigger_id", "")
+    pub_id = action.get("value", "")
+
+    if not trigger_id:
+        log.warning("[drill_publisher] no trigger_id in payload")
+        return
+
+    from scout_ui_kit import _drill_loading_modal, _drill_data_modal, _drill_error_modal
+
+    try:
+        open_resp = web.views_open(trigger_id=trigger_id, view=_drill_loading_modal())
+        view_id = open_resp["view"]["id"]
+    except Exception as e:
+        log.warning("[drill_publisher] views_open failed: %s", e)
+        return
+
+    def _fetch_and_update():
+        try:
+            from queries_revenue import get_publisher_drill_summary
+            summary = get_publisher_drill_summary(pub_id)
+            updated_view = _drill_data_modal(summary)
+        except Exception as e:
+            log.warning("[drill_publisher] query failed for %s: %s", pub_id, e)
+            updated_view = _drill_error_modal()
+        try:
+            web.views_update(view_id=view_id, view=updated_view)
+        except Exception as e:
+            log.warning("[drill_publisher] views_update failed: %s", e)
+
+    t = _threading.Thread(target=_fetch_and_update, daemon=True)
+    t.start()
+
+
 _BLOCK_ACTION_DISPATCH: dict = {
     "scout_approve":           _handle_approve,
     "scout_reject":            _handle_reject,
     "scout_brief_queue":       _handle_brief_queue,
     "home_alert_drill":        _dispatch_home_alert_drill,
-    "scout_feedback_good":     _handle_feedback,
-    "scout_feedback_bad":      _handle_feedback,
-    "scout_feedback_correct":  _handle_feedback,
     "pulse_ghost_brief":       _dispatch_pulse_static,
     "pulse_fill_rate_brief":   _dispatch_pulse_static,
     "pulse_top_opps":          _dispatch_pulse_top_opps,
     "pulse_scout_offers":      _dispatch_pulse_scout_offers,
     "pulse_dig_in":            _dispatch_pulse_dig_in,
+    "scout_acknowledge":       _handle_acknowledge,
+    "scout_snooze_open":       _handle_snooze_open,
+    "scout_drill_publisher":   _handle_drill_publisher,
 }
 
 
@@ -1808,11 +1943,7 @@ def _handle_block_action(req: SocketModeRequest, web: WebClient):
                 text=":wrench: Scout is offline for maintenance.")
         else:
             try:
-                web.views_publish(user_id=user_id, view={
-                    "type": "home",
-                    "blocks": [{"type": "section", "text": {"type": "mrkdwn",
-                        "text": ":wrench: Scout is offline for maintenance."}}]
-                })
+                web.views_publish(user_id=user_id, view=_build_maintenance_home_view())
             except Exception as e:
                 log.warning("[maintenance] views_publish failed for %s: %s", user_id, e)
         return
@@ -1852,7 +1983,7 @@ def _post_maintenance_summary(web: WebClient, channel: str, attempts: list) -> N
     breakdown = ", ".join(f"<@{u}> ×{c}" for u, c in users.items())
     web.chat_postMessage(channel=channel,
         text=f":white_check_mark: Maintenance off. {len(attempts)} message(s) blocked: {breakdown}")
-    sidd_qa = os.getenv("SIDD_QA_CHANNEL_ID", "")
+    sidd_qa = _CFG.sidd_qa_channel_id
     if sidd_qa and sidd_qa != channel:
         try:
             web.chat_postMessage(channel=sidd_qa,
@@ -2117,8 +2248,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
 
         elif command == "/scout-help":
             help_blocks = [
-                {"type": "header", "text": {"type": "plain_text",
-                    "text": "Scout — quick reference", "emoji": False}},
+                _render_subheader("Scout — quick reference", level=1),
                 {"type": "section", "text": {"type": "mrkdwn", "text":
                     "*Talk to Scout in any channel or thread*\n"
                     "Mention `@Scout` followed by your question in plain English. "
@@ -2265,7 +2395,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 web.chat_postEphemeral(channel=channel, user=user_id,
                                        text="Only admins can toggle maintenance mode.")
                 return
-            arg = payload.get("text", "").strip().lower()
+            arg = _norm(payload.get("text", ""))
             if arg == "on" or arg == "":
                 m = set_maintenance(user_id)
                 web.chat_postMessage(channel=channel,
@@ -2302,6 +2432,12 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
             pass
 
 def handle_event(client: SocketModeClient, req: SocketModeRequest):
+    """Top-level Slack Socket Mode entry point.
+
+    Acks immediately (Slack requires <3s), logs an arrival breadcrumb, then
+    delegates to _handle_event_impl under a broad try/except so a crash in any
+    event path drops that event rather than killing the socket loop.
+    """
     # Acknowledge immediately — Slack requires <3s ack
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
 
@@ -2324,12 +2460,21 @@ def handle_event(client: SocketModeClient, req: SocketModeRequest):
 
 
 def _handle_event_impl(req: SocketModeRequest):
-    web = WebClient(token=os.getenv("SLACK_BOT_TOKEN", ""), retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
+    """Dispatch a Slack request to its handler.
+
+    Split from handle_event so the broad crash guard in the outer function
+    catches failures here without wrapping the ack call.
+    """
+    web = WebClient(token=_CFG.slack_bot_token, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
     from scout_slack_safe import guard_web_client
     guard_web_client(web)
 
-    # ── Button clicks ─────────────────────────────────────────────────────────
+    # ── Button clicks + modal submissions ────────────────────────────────────
     if req.type == "interactive":
+        # view_submission must be intercepted before _handle_block_action which drops it
+        if req.payload.get("type") == "view_submission":
+            _handle_view_submission(req, web)
+            return
         _handle_block_action(req, web)
         return
 
@@ -2352,11 +2497,7 @@ def _handle_event_impl(req: SocketModeRequest):
             if _is_under_maintenance(user_id):
                 from scout_state import log_maintenance_attempt
                 log_maintenance_attempt(user_id, "[home]")
-                web.views_publish(user_id=user_id, view={
-                    "type": "home",
-                    "blocks": [{"type": "section", "text": {"type": "mrkdwn",
-                        "text": ":wrench: Scout is offline for maintenance."}}]
-                })
+                web.views_publish(user_id=user_id, view=_build_maintenance_home_view())
                 return
             # Best-effort scoreboard rollup. Each source is independently
             # try/excepted — a CH failure should not prevent the activation
@@ -2412,73 +2553,6 @@ def _handle_event_impl(req: SocketModeRequest):
                 log.warning(f"[delete] failed to delete {item.get('ts')}: {e}")
         return
 
-    # ── 👍 / 👎 reaction → feedback signal ───────────────────────────────────
-    # Trust signal from Part 3.6. Scout pre-seeds +1/-1 on its own replies so
-    # they show up as visible affordances; user clicks increment the count.
-    # We log the user's rating and (for 👎) drop a threaded "remember" hint.
-    if event.get("type") == "reaction_added" and event.get("reaction") in ("+1", "-1"):
-        rater_id = event.get("user", "")
-        emoji_name = event.get("reaction", "")
-        if _is_under_maintenance(rater_id):
-            from scout_state import log_maintenance_attempt
-            log_maintenance_attempt(rater_id, emoji_name[:80])
-            return
-        # Scout no longer seeds 👍/👎 on its own messages, so the
-        # "ignore Scout's own seed reactions" branch is gone.
-        item = event.get("item", {})
-        if item.get("type") != "message":
-            return
-        ch_id  = item.get("channel", "")
-        msg_ts = item.get("ts", "")
-        try:
-            # reactions.get fetches the exact reacted-to message by ts, whether
-            # it's a channel root or a thread reply — conversations_replies only
-            # works with the thread root ts and silently misses replies.
-            react_resp = web.reactions_get(channel=ch_id, timestamp=msg_ts, full=True)
-            scout_msg  = react_resp.get("message", {})
-            if not scout_msg.get("bot_id"):
-                return  # only count reactions on Scout's own messages
-            answer_text = scout_msg.get("text", "")[:1000]
-            # Fetch the question (thread parent) when we're in a thread
-            question_text = ""
-            parent_ts = scout_msg.get("thread_ts") or ""
-            if parent_ts and parent_ts != msg_ts:
-                try:
-                    parent = web.conversations_replies(channel=ch_id, ts=parent_ts, limit=1).get("messages", [{}])[0]
-                    if not parent.get("bot_id"):
-                        question_text = parent.get("text", "")[:500]
-                except Exception:
-                    pass
-            rating = "up" if event["reaction"] == "+1" else "down"
-            _feedback_log_row({
-                "user":       rater_id,
-                "message_ts": msg_ts,
-                "channel":    ch_id,
-                "question":   question_text,
-                "answer":     answer_text,
-                "rating":     rating,
-            })
-            if rating == "down":
-                # Always retry on 👎 — gated only by _already_retried.
-                # Clarification responses get a direct-answer hint; everything
-                # else gets a "different angle" hint.
-                hint_kind = "clarification" if _is_clarification_response(answer_text) else "retry"
-                fired = _retry_with_hint(web, ch_id, msg_ts, rater_id, hint_kind)
-                if not fired:
-                    # Already retried, or no question text — point at the
-                    # correction affordance instead so the loop stays visible.
-                    try:
-                        web.chat_postEphemeral(
-                            channel=ch_id, user=rater_id, thread_ts=parent_ts or msg_ts,
-                            text=("_Still off? Hit ✏️ *Correct this* or run "
-                                  "`@Scout remember <correct fact>`._"),
-                        )
-                    except Exception as e:
-                        log.warning(f"[feedback] correction pointer failed: {e}")
-        except Exception as e:
-            log.warning(f"[feedback] reaction handler failed: {e}")
-        return
-
     is_mention = event.get("type") == "app_mention"
     is_dm      = event.get("type") == "message" and event.get("channel_type") == "im"
 
@@ -2519,36 +2593,6 @@ def _handle_event_impl(req: SocketModeRequest):
                 text=f":wrench: Scout is offline for maintenance.\n\nYour message: \"{query[:200]}\"")
         return
 
-    # ── Correction capture — if this thread has a pending correction, store it ─
-    learnings_state = _load_learnings()
-    pending_corrs   = learnings_state.get("pending_corrections", {})
-    if pending_corrs:
-        # Check if any pending correction belongs to this thread
-        matched_key = None
-        for key, corr in pending_corrs.items():
-            if corr.get("thread_ts") == thread_ts:
-                matched_key = key
-                break
-        if matched_key:
-            corr = pending_corrs.pop(matched_key)
-            import uuid as _uuid
-            learnings_state.setdefault("corrections", []).append({
-                "id":            corr.get("id", str(_uuid.uuid4())[:8]),
-                "created_at":    corr.get("created_at", ""),
-                "query_hash":    corr.get("query_hash", ""),
-                "correction":    query,
-                "corrected_by":  user_id_event,
-                "confidence":    "high",
-            })
-            learnings_state["pending_corrections"] = pending_corrs
-            _save_learnings(learnings_state)
-            web.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=":white_check_mark: Got it — I'll remember that.",
-            )
-            log.info(f"Correction captured for query_hash={corr.get('query_hash')}: {query[:80]!r}")
-            return  # don't process this as a normal query
-
     lower = query.lower()
 
     # ── Special commands (handled before agent) ───────────────────────────────
@@ -2563,8 +2607,8 @@ def _handle_event_impl(req: SocketModeRequest):
         _permalink = _permalink_for(web, channel, msg_ts)
         try:
             from scout_agent import record_entity_note
-            import anthropic as _ant, os as _os
-            _ant_client = _ant.Anthropic(api_key=_os.getenv("ANTHROPIC_API_KEY", ""))
+            import anthropic as _ant
+            _ant_client = _ant.Anthropic(api_key=_CFG.anthropic_api_key)
             from scout_telemetry import capture as _lat_capture
             _parse_resp = _lat_capture(
                 "scout/entity-parse",
@@ -2591,7 +2635,7 @@ def _handle_event_impl(req: SocketModeRequest):
                 _raw_text = _raw_text.strip()
             _parsed = _json.loads(_raw_text)
             _ename = _parsed.get("entity_name", "").strip()
-            _etype = _parsed.get("entity_type", "publisher").lower().strip()
+            _etype = _norm(_parsed.get("entity_type", "publisher"))
             _enote = _parsed.get("note", _body).strip()
             if _etype not in ("publisher", "advertiser"):
                 _etype = "publisher"
@@ -2779,7 +2823,7 @@ def _handle_event_impl(req: SocketModeRequest):
                     channel=channel, thread_ts=thread_ts,
                     text=f":test_tube: Scout Self-QA — {len(_QA_SUITE)} questions, live results",
                     blocks=[
-                        {"type": "header", "text": {"type": "plain_text", "text": "Scout Self-QA"}},
+                        _render_subheader("Scout Self-QA", level=1),
                         {"type": "section", "text": {"type": "mrkdwn", "text": "Testing every major intent. Pass = responded + expected content present.\nPosting each result as it completes…"}},
                         {"type": "divider"},
                     ],
@@ -2984,7 +3028,7 @@ def _handle_event_impl(req: SocketModeRequest):
                 f"_I see {len(_files)} files attached — using the first one "
                 f"({_files[0].get('name', 'unknown')})._"
             )
-        _result = extract_file(_files[0], os.getenv("SLACK_BOT_TOKEN", ""))
+        _result = extract_file(_files[0], _CFG.slack_bot_token)
     elif _sheets_url:
         _result = extract_sheets_url(_sheets_url)
     else:
@@ -3059,16 +3103,17 @@ def _handle_event_impl(req: SocketModeRequest):
         # Add 🤔 reaction to the user's message — the "I saw it, thinking" signal.
         # Appears on their message specifically, not as a bot post. Disappears when ready.
         try:
-            web.reactions_add(channel=channel, timestamp=msg_ts, name="thinking_face")
+            web.reactions_add(channel=channel, timestamp=msg_ts, name="eyes")
         except Exception:
             pass  # reactions:write scope may not be set yet — degrade gracefully
 
+        _user_tz = _get_user_tz(web, user_id)
         try:
             _t0 = time.monotonic()
             _permalink = _permalink_for(web, channel, msg_ts)
             response = _ask_with_timeout(
                 agent_query, history=history, user_id=user_id, permalink=_permalink,
-                user_tz=_get_user_tz(web, user_id), thread_ts=thread_ts or "",
+                user_tz=_user_tz, thread_ts=thread_ts or "",
                 attached_text=attached_text, attached_image=attached_image,
             )
             # Prepend attachment_note (e.g. unsupported/error fallback notice)
@@ -3081,21 +3126,20 @@ def _handle_event_impl(req: SocketModeRequest):
             _elapsed = int(time.monotonic() - _t0)
             _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
             _tools_called = response.tools_called
-            try:
-                user_info = web.users_info(user=user_id)
-                _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
-                          or user_info.get("user", {}).get("name", user_id))
-            except Exception:
-                _uname = user_id
+            _uname = _get_display_name(web, user_id)
             _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
         except AskTimeout:
             # reactions_remove is handled by the finally block below
+            _busy_msg = _ch_busy_message()
+            _bcard = Card(severity=Severity.INFO, headline="", body=_busy_msg)
+            _, _busy_blocks = wrap_response(card=_bcard, surface=Surface.DM, pattern=ResponsePattern.ANSWER)
             web.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
-                text="ClickHouse is under pressure — try again in 10–15 minutes.",
-                blocks=[{"type": "section",
-                         "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+                text=_busy_msg,
+                blocks=_busy_blocks,
             )
+            _retry_after_timeout(web, channel, thread_ts, agent_query,
+                                 user_tz=_user_tz, history=history)
             return
         except Exception as e:
             log.error(f"Agent error (DM): {e}", exc_info=True)
@@ -3105,7 +3149,7 @@ def _handle_event_impl(req: SocketModeRequest):
             # Single point of cleanup: always remove the 🤔 — even on error
             # — so it doesn't hang on the user's message.
             try:
-                web.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
+                web.reactions_remove(channel=channel, timestamp=msg_ts, name="eyes")
             except Exception:
                 pass
 
@@ -3114,6 +3158,7 @@ def _handle_event_impl(req: SocketModeRequest):
             _LAST_THREAD_PER_CHANNEL[channel] = thread_ts or msg_ts
 
         # Extract structured context + suggestion buttons
+        launched_offer_dm = None
         suggestions: list = []
         if response.payload and response.payload.get("type") == "text_with_context":
             extracted = response.payload.get("extracted_context", {})
@@ -3122,6 +3167,29 @@ def _handle_event_impl(req: SocketModeRequest):
                 launched_offer_dm = extracted.pop("launched_offer", None)
                 _merge_thread_context(thread_ts or msg_ts, extracted)
             suggestions = response.payload.get("suggestions", [])
+
+        if launched_offer_dm:
+            adops_uid   = _CFG.adops_notify_user_id
+            approved_by = launched_offer_dm.get("approved_by", "")
+            advertiser  = launched_offer_dm.get("advertiser", "")
+            payout      = launched_offer_dm.get("payout", "")
+            network     = launched_offer_dm.get("network", "")
+            t_url       = launched_offer_dm.get("thread_url", "")
+            tags = f"<@{approved_by}>" if approved_by else ""
+            if adops_uid and adops_uid != approved_by:
+                tags += f" <@{adops_uid}>"
+            brief_link = f" · <{t_url}|brief>" if t_url else ""
+            msg = f":rocket: *{advertiser}* is live. {payout} · {network}{brief_link}"
+            if tags:
+                msg += f"\n{tags}"
+            web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+            _notion_url = launched_offer_dm.get("notion_url", "")
+            if _notion_url:
+                threading.Thread(
+                    target=_update_notion_status,
+                    args=(_notion_url, "Live"),
+                    daemon=True,
+                ).start()
 
         # Post reply — flat DM message (thread_ts=None) or in-thread if user was already in one
         if response.payload and response.payload.get("type") == "brief":
@@ -3145,9 +3213,8 @@ def _handle_event_impl(req: SocketModeRequest):
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
             _dm5_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
             _dm5_fallback, _dm5_blocks = wrap_response(
-                card=_dm5_card, surface=Surface.DM,
+                card=_dm5_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(response.payload.get("suggestions", [])),
-                feedback="reaction", query_hash=msg_ts,
                 elapsed_seconds=_elapsed,
             )
             _dm5_final = [*_dm5_blocks[:1], *offer_cards, *_dm5_blocks[1:]] if offer_cards else _dm5_blocks
@@ -3160,13 +3227,18 @@ def _handle_event_impl(req: SocketModeRequest):
             response_text  = _sanitize_slack(response.text)[:3000]
             _dm_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
             _dm_interp = _build_interpretation(_dm_ctx)
-            _dm6_card = Card(Severity.INFO, "", body=response_text)
+            _dm6_card = Card(Severity.INFO, "", body=response_text, chart_url=response.chart_url)
+            _dm_agent_steps = [
+                AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
+                for s in (response.agent_steps or [])
+                if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
+            ] or None
             _dm6_fallback, _dm6_blocks = wrap_response(
-                card=_dm6_card, surface=Surface.DM,
+                card=_dm6_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(suggestions),
-                feedback="reaction", query_hash=msg_ts,
                 elapsed_seconds=_elapsed,
                 interpretation=_dm_interp,
+                agent_steps=_dm_agent_steps,
             )
             if not _dm_interp:
                 _dm_period = _dm_ctx.get("period") if _dm_ctx else None
@@ -3179,6 +3251,11 @@ def _handle_event_impl(req: SocketModeRequest):
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
 
+    try:
+        web.reactions_add(channel=channel, timestamp=msg_ts, name="eyes")
+    except Exception:
+        pass
+
     _q_preview = (query[:80] + "…") if len(query) > 80 else query
     _msg_text = f"_{_q_preview}_"
     placeholder = web.chat_postMessage(
@@ -3190,11 +3267,12 @@ def _handle_event_impl(req: SocketModeRequest):
     _stage: list = [f'"{_q_seed}"']
     stop_rotating = _rotating_status(web, channel, _placeholder_ts, stage_ref=_stage)
 
+    _user_tz = _get_user_tz(web, user_id)
     try:
         _t0 = time.monotonic()
         _permalink = _permalink_for(web, channel, msg_ts)
         response = _ask_with_timeout(agent_query, history=history, user_id=user_id, permalink=_permalink,
-                                     thread_ts=thread_ts or "",
+                                     user_tz=_user_tz, thread_ts=thread_ts or "",
                                      attached_text=attached_text, attached_image=attached_image,
                                      on_stage=lambda s: _stage.__setitem__(0, s))
         # Prepend attachment_note (e.g. unsupported/error fallback notice)
@@ -3208,21 +3286,20 @@ def _handle_event_impl(req: SocketModeRequest):
         _elapsed_str = f"{_elapsed}s" if _elapsed < 60 else f"{_elapsed // 60}m {_elapsed % 60}s"
         # Log usage for admin reporting
         _tools_called = response.tools_called
-        try:
-            user_info = web.users_info(user=user_id)
-            _uname = (user_info.get("user", {}).get("profile", {}).get("display_name", "")
-                      or user_info.get("user", {}).get("name", user_id))
-        except Exception:
-            _uname = user_id
+        _uname = _get_display_name(web, user_id)
         _log_usage(user_id, _uname, query, _tools_called, _elapsed * 1000)
     except AskTimeout:
         stop_rotating()  # join the rotating thread before updating to avoid race
+        _busy_msg = _ch_busy_message(user_id)
+        _bcard = Card(severity=Severity.INFO, headline="", body=_busy_msg)
+        _, _busy_blocks = wrap_response(card=_bcard, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER)
         web.chat_update(
             channel=channel, ts=placeholder["ts"],
-            text="ClickHouse is under pressure — try again in 10–15 minutes.",
-            blocks=[{"type": "section",
-                     "text": {"type": "mrkdwn", "text": _TIMEOUT_FALLBACK_TEXT}}],
+            text=_busy_msg,
+            blocks=_busy_blocks,
         )
+        _retry_after_timeout(web, channel, thread_ts, agent_query, user_id=user_id,
+                             user_tz=_user_tz, surface=Surface.THREAD, history=history)
         return
     except Exception as e:
         log.error(f"Agent error: {e}")
@@ -3232,6 +3309,10 @@ def _handle_event_impl(req: SocketModeRequest):
     finally:
         # Idempotent cleanup — stop_rotating() is safe to call multiple times.
         stop_rotating()
+        try:
+            web.reactions_remove(channel=channel, timestamp=msg_ts, name="eyes")
+        except Exception:
+            pass
 
     # ── Route response: brief (Block Kit) vs text_with_context vs plain text ────
     # Track the active thread per channel so top-level follow-ups retain context
@@ -3252,7 +3333,7 @@ def _handle_event_impl(req: SocketModeRequest):
 
     # Launch notification — thread-only, targeted tags, no channel noise
     if launched_offer:
-        adops_uid   = os.getenv("ADOPS_NOTIFY_USER_ID", "")
+        adops_uid   = _CFG.adops_notify_user_id
         approved_by = launched_offer.get("approved_by", "")
         advertiser  = launched_offer.get("advertiser", "")
         payout      = launched_offer.get("payout", "")
@@ -3314,9 +3395,8 @@ def _handle_event_impl(req: SocketModeRequest):
         offer_cards = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
         _ch7_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
         _ch7_fallback, _ch7_blocks = wrap_response(
-            card=_ch7_card, surface=Surface.CHANNEL_ROOT,
+            card=_ch7_card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER,
             suggestions=list(response.payload.get("suggestions", [])),
-            feedback="reaction", query_hash=_placeholder_ts,
             elapsed_seconds=_elapsed,
         )
         _ch7_final = [*_ch7_blocks[:1], *offer_cards, *_ch7_blocks[1:]] if offer_cards else _ch7_blocks
@@ -3332,13 +3412,18 @@ def _handle_event_impl(req: SocketModeRequest):
         response_text  = _sanitize_slack(response.text)[:3000]
         _ch_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
         _ch_interp = _build_interpretation(_ch_ctx)
-        _ch8_card = Card(Severity.INFO, "", body=response_text)
+        _ch8_card = Card(Severity.INFO, "", body=response_text, chart_url=response.chart_url)
+        _ch_agent_steps = [
+            AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
+            for s in (response.agent_steps or [])
+            if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
+        ] or None
         _ch8_fallback, _ch8_blocks = wrap_response(
-            card=_ch8_card, surface=Surface.CHANNEL_ROOT,
+            card=_ch8_card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER,
             suggestions=list(suggestions),
-            feedback="reaction", query_hash=_placeholder_ts,
             elapsed_seconds=_elapsed,
             interpretation=_ch_interp,
+            agent_steps=_ch_agent_steps,
         )
         if not _ch_interp:
             _ch_period = _ch_ctx.get("period") if _ch_ctx else None

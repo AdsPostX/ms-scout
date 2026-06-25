@@ -128,7 +128,7 @@ def _run_hourly_with_web(
                         continue
 
                     # New or escalated — fire the alert
-                    fallback, blocks = format_fn(results)
+                    fallback, blocks = format_fn(results, alert_name=alert_name)
                     if not fallback:
                         record_job_run(alert_name, status="success", duration_ms=duration_ms)
                         continue

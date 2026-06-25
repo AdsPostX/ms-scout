@@ -258,8 +258,7 @@ class TestLoadOffers(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_load_offers_fetches_from_url_when_env_var_set(self):
         """When DEMAND_FEED_URL is set, _load_offers() calls urllib.request.urlopen."""
-        import scout_agent
-        importlib.reload(scout_agent)
+        import scout_tools_offers
 
         fake_url = "http://fake-demand-feed-host"
         os.environ["DEMAND_FEED_URL"] = fake_url
@@ -270,8 +269,10 @@ class TestLoadOffers(unittest.TestCase):
         fake_response.__enter__ = lambda s: s
         fake_response.__exit__ = MagicMock(return_value=False)
 
-        with patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
-            result = scout_agent._load_offers()
+        # _DEMAND_FEED_URL is captured at module import — patch the constant directly
+        with patch.object(scout_tools_offers, "_DEMAND_FEED_URL", fake_url):
+            with patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+                result = scout_tools_offers._load_offers()
 
         # urlopen must have been called with the correct URL
         mock_urlopen.assert_called_once()
@@ -287,8 +288,7 @@ class TestLoadOffers(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_load_offers_falls_back_to_disk_when_url_unset(self):
         """When DEMAND_FEED_URL is absent, _load_offers() reads from SNAPSHOT_PATH."""
-        import scout_agent
-        importlib.reload(scout_agent)
+        import scout_tools_offers
 
         # DEMAND_FEED_URL must not be set (cleared in setUp)
         self.assertNotIn("DEMAND_FEED_URL", os.environ)
@@ -298,8 +298,8 @@ class TestLoadOffers(unittest.TestCase):
         fake_snapshot.write_text(json.dumps(_FAKE_OFFERS))
 
         with patch("urllib.request.urlopen") as mock_urlopen, \
-             patch.object(scout_agent, "SNAPSHOT_PATH", fake_snapshot):
-            result = scout_agent._load_offers()
+             patch("scout_tools_offers.SNAPSHOT_PATH", fake_snapshot):
+            result = scout_tools_offers._load_offers()
 
         # urllib must NOT have been called
         mock_urlopen.assert_not_called()
@@ -312,8 +312,7 @@ class TestLoadOffers(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_load_offers_falls_back_to_disk_when_http_fails(self):
         """When DEMAND_FEED_URL is set but the fetch raises, _load_offers() reads disk."""
-        import scout_agent
-        importlib.reload(scout_agent)
+        import scout_tools_offers
 
         os.environ["DEMAND_FEED_URL"] = "http://broken-host"
 
@@ -321,8 +320,8 @@ class TestLoadOffers(unittest.TestCase):
         fake_snapshot.write_text(json.dumps(_FAKE_OFFERS))
 
         with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")), \
-             patch.object(scout_agent, "SNAPSHOT_PATH", fake_snapshot):
-            result = scout_agent._load_offers()
+             patch("scout_tools_offers.SNAPSHOT_PATH", fake_snapshot):
+            result = scout_tools_offers._load_offers()
 
         self.assertEqual(result, _FAKE_OFFERS)
 
@@ -331,12 +330,11 @@ class TestLoadOffers(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_load_offers_returns_empty_when_no_source(self):
         """When DEMAND_FEED_URL is unset and the disk snapshot is missing, return []."""
-        import scout_agent
-        importlib.reload(scout_agent)
+        import scout_tools_offers
 
         missing = self.tmp / "does_not_exist.json"
-        with patch.object(scout_agent, "SNAPSHOT_PATH", missing):
-            result = scout_agent._load_offers()
+        with patch("scout_tools_offers.SNAPSHOT_PATH", missing):
+            result = scout_tools_offers._load_offers()
 
         self.assertEqual(result, [])
 

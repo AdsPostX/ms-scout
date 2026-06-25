@@ -10,6 +10,7 @@ import threading
 import time
 
 import queries as _q
+from scout_thresholds import _manager as _tm
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,11 @@ def _env_float(name: str, default: float, minimum: float = 0.1) -> float:
 _CH_MAX_CONCURRENT = _env_int("CH_MAX_CONCURRENT", 4, minimum=1)
 _CH_ACQUIRE_TIMEOUT_S = _env_float("CH_ACQUIRE_TIMEOUT_S", 10.0, minimum=0.1)
 _CH_QUERY_SEMAPHORE = threading.BoundedSemaphore(_CH_MAX_CONCURRENT)
+
+# Revenue deviation threshold used by the intraday diagnostic classifier.
+# A projected or actual revenue deviation beyond this fraction triggers
+# a "traffic" or "efficiency" diagnostic label.
+_REVENUE_DEVIATION_THRESHOLD = 0.08
 
 
 class CHBusyError(RuntimeError):
@@ -131,8 +137,7 @@ def _query_ghost_campaigns(ch, as_of_date: str | None = None) -> list:
     as_of_date: optional ISO date string (e.g. '2026-01-15') for backtest replay.
     When provided, today() in the underlying SQL is substituted with toDate(as_of_date).
     """
-    from scout_agent import SCOUT_THRESHOLDS  # lazy — avoids circular import
-    recency_hours = int(SCOUT_THRESHOLDS.get("signals", {}).get("ghost_recency_hours", 48))
+    recency_hours = int(_tm.load().get("signals", {}).get("ghost_recency_hours", 48))
     return _q.ghost_campaigns(ch, recency_hours=recency_hours, as_of_date=as_of_date)
 
 
@@ -152,9 +157,8 @@ def _query_revenue_baseline(ch) -> dict | None:
     Returns None if no anomaly or insufficient history.
     Raises on ClickHouse error — callers must catch.
     """
-    from scout_agent import SCOUT_THRESHOLDS  # lazy — avoids circular import
-    tolerance = float(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
-    min_days  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_min_sample_days", 4))
+    tolerance = float(_tm.load().get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
+    min_days  = int(_tm.load().get("signals", {}).get("revenue_baseline_min_sample_days", 4))
 
     sql = """
 WITH history AS (
@@ -238,9 +242,8 @@ def _query_intraday_revenue_total(ch) -> dict | None:
     Returns None if no anomaly or insufficient history.
     Raises on ClickHouse error — callers must catch.
     """
-    from scout_agent import SCOUT_THRESHOLDS  # lazy — avoids circular import
-    tolerance = float(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
-    min_days  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_min_sample_days", 4))
+    tolerance = float(_tm.load().get("signals", {}).get("revenue_baseline_tolerance_pct", 70))
+    min_days  = int(_tm.load().get("signals", {}).get("revenue_baseline_min_sample_days", 4))
 
     sql = """
 WITH today_rev AS (
@@ -329,11 +332,10 @@ def _query_intraday_revenue_by_publisher(ch, total_result: dict) -> list[dict]:
     Note on publisher key mismatch: impressions use `pid` (string), sessions/conversions
     use `user_id` (numeric). We query them separately and align via mv_adpx_users.
     """
-    from scout_agent import SCOUT_THRESHOLDS  # lazy — avoids circular import
-    min_days        = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_baseline_min_sample_days", 4))
-    min_delta       = float(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_publisher_min_delta", 500))
-    ghost_min_impr  = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_ghost_min_impressions", 100))
-    cvr_min_impr    = int(SCOUT_THRESHOLDS.get("signals", {}).get("revenue_tracker_cvr_min_impressions", 500))
+    min_days        = int(_tm.load().get("signals", {}).get("revenue_baseline_min_sample_days", 4))
+    min_delta       = float(_tm.load().get("signals", {}).get("revenue_tracker_publisher_min_delta", 500))
+    ghost_min_impr  = int(_tm.load().get("signals", {}).get("revenue_tracker_ghost_min_impressions", 100))
+    cvr_min_impr    = int(_tm.load().get("signals", {}).get("revenue_tracker_cvr_min_impressions", 500))
 
     # ── Query 1: today's per-publisher revenue + conversions via user_id ──────
     revenue_sql = """
@@ -726,6 +728,42 @@ WHERE toDate(toTimeZone(created_at, 'America/Chicago')) = toDate({date_str:Strin
     return {"impressions": imps, "sessions": sess}
 
 
+def _classify_revenue_diagnostic(
+    traffic: dict | None,
+    t_band: dict | None,
+    today_revenue: float,
+    p50: float,
+    dow_median_val,
+    threshold: float = _REVENUE_DEVIATION_THRESHOLD,
+) -> str | None:
+    """Classify intraday revenue deviation as a named diagnostic label.
+
+    Returns one of: "traffic", "efficiency", "traffic_upside", "on_track", or None
+    (when traffic data or baseline is unavailable).
+    """
+    if not (traffic and t_band):
+        return None
+
+    imp_baseline = t_band.get("impressions_p50", 0)
+    if imp_baseline <= 0:
+        return None
+
+    if traffic["impressions"] == 0:
+        return "traffic"
+
+    imp_dev = (traffic["impressions"] - imp_baseline) / imp_baseline
+    denom = dow_median_val or today_revenue or 1.0
+    rev_dev = (today_revenue / denom - p50) / p50
+
+    if rev_dev < -threshold and abs(imp_dev) < threshold:
+        return "efficiency"
+    if rev_dev < -threshold and imp_dev < -threshold:
+        return "traffic"
+    if rev_dev > threshold and imp_dev > threshold:
+        return "traffic_upside"
+    return "on_track"
+
+
 def project_today_revenue(ch) -> dict:
     """Project today's full-day platform revenue from the intraday total and a
     90-day hour-of-day cumulative-share curve. Purely additive — daemon code
@@ -840,9 +878,6 @@ def project_today_revenue(ch) -> dict:
         base["pct_of_expected"] = round(100.0 * projected_full_day / dow_median, 1)
 
     # ── Diagnostic classification ─────────────────────────────────────────────
-    DEVIATION_THRESHOLD = 0.08
-
-    diagnostic = None
     traffic_impressions_today = 0
     traffic_sessions_today    = 0
 
@@ -853,32 +888,10 @@ def project_today_revenue(ch) -> dict:
     except Exception:
         traffic = None   # CH busy or table unavailable — degrade gracefully
 
-    t_band  = curve.get("traffic_by_dow", {}).get(dow, {}).get(curve_hour)
-    imp_baseline = t_band.get("impressions_p50", 0) if t_band else 0
-
-    if traffic and t_band:
-        if imp_baseline <= 0:
-            # No historical baseline — cannot compute imp_dev; skip classification.
-            pass
-        elif traffic["impressions"] == 0:
-            # Hard traffic outage: zero impressions against a positive baseline.
-            # imp_dev would be -1.0 (100% below baseline) — classify directly
-            # rather than falling through to diagnostic=None.
-            diagnostic = "traffic"
-        else:
-            imp_dev = (traffic["impressions"] - imp_baseline) / imp_baseline
-            dow_median_val = curve["dow_median"].get(dow)
-            denom = dow_median_val or today_revenue or 1.0
-            rev_dev = (today_revenue / denom - p50) / p50
-
-            if rev_dev < -DEVIATION_THRESHOLD and abs(imp_dev) < DEVIATION_THRESHOLD:
-                diagnostic = "efficiency"
-            elif rev_dev < -DEVIATION_THRESHOLD and imp_dev < -DEVIATION_THRESHOLD:
-                diagnostic = "traffic"
-            elif rev_dev > DEVIATION_THRESHOLD and imp_dev > DEVIATION_THRESHOLD:
-                diagnostic = "traffic_upside"
-            else:
-                diagnostic = "on_track"
+    t_band = curve.get("traffic_by_dow", {}).get(dow, {}).get(curve_hour)
+    diagnostic = _classify_revenue_diagnostic(
+        traffic, t_band, today_revenue, p50, curve["dow_median"].get(dow)
+    )
 
     base["diagnostic"]                = diagnostic
     base["traffic_impressions_today"] = traffic_impressions_today
@@ -962,8 +975,7 @@ def _query_cvr_anomaly(
     min_impressions_7d: int = None,
 ) -> list[dict]:
     """Thin wrapper — reads thresholds from config; per-call overrides take precedence."""
-    from scout_agent import SCOUT_THRESHOLDS
-    t = SCOUT_THRESHOLDS.get("signals", {})
+    t = _tm.load().get("signals", {})
     return _q.cvr_anomaly(
         ch,
         drop_pct=float(drop_pct if drop_pct is not None else t.get("cvr_anomaly_drop_pct", 30)),
@@ -974,8 +986,7 @@ def _query_cvr_anomaly(
 
 def _query_expiring_campaigns(ch, warning_days: int = None) -> list[dict]:
     """Thin wrapper — reads warning_days from config; per-call override takes precedence."""
-    from scout_agent import SCOUT_THRESHOLDS
-    t = SCOUT_THRESHOLDS.get("signals", {})
+    t = _tm.load().get("signals", {})
     return _q.expiring_campaigns(
         ch,
         warning_days=int(warning_days if warning_days is not None else t.get("expiration_warning_days", 7)),
@@ -984,8 +995,7 @@ def _query_expiring_campaigns(ch, warning_days: int = None) -> list[dict]:
 
 def _query_publisher_revenue_trends(ch, days: int = 7) -> list[dict]:
     """Thin wrapper — reads min_periods from config and delegates to queries.publisher_revenue_trends()."""
-    from scout_agent import SCOUT_THRESHOLDS
-    t = SCOUT_THRESHOLDS.get("signals", {})
+    t = _tm.load().get("signals", {})
     return _q.publisher_revenue_trends(
         ch,
         days=days,
@@ -995,10 +1005,34 @@ def _query_publisher_revenue_trends(ch, days: int = 7) -> list[dict]:
 
 def _query_advertiser_revenue_trends(ch, days: int = 7) -> list[dict]:
     """Thin wrapper — reads min_periods from config and delegates to queries.advertiser_revenue_trends()."""
-    from scout_agent import SCOUT_THRESHOLDS
-    t = SCOUT_THRESHOLDS.get("signals", {})
+    t = _tm.load().get("signals", {})
     return _q.advertiser_revenue_trends(
         ch,
         days=days,
         min_periods=int(t.get("revenue_trend_min_periods", 4)),
     )
+
+
+def _query_revenue_sparkline_series(ch) -> list[tuple]:
+    """
+    Return 7 days of prior daily revenue totals for sparkline rendering.
+
+    Excludes today — used to show the trailing trend behind today's intraday
+    number. Returns list of (date, rev_float) tuples ordered oldest → newest.
+    """
+    sql = """
+SELECT
+    toDate(toTimeZone(created_at, 'America/Chicago')) AS day,
+    sum(toFloat64OrNull(revenue)) AS day_rev
+FROM adpx_conversionsdetails
+PREWHERE toYYYYMM(created_at) >= toYYYYMM(
+    toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY
+)
+WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
+      >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 6 DAY
+  AND toDate(toTimeZone(created_at, 'America/Chicago'))
+      < toDate(toTimeZone(now(), 'America/Chicago'))
+GROUP BY day
+ORDER BY day ASC
+"""
+    return ch.query(sql).result_rows

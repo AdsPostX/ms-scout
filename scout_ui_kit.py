@@ -48,9 +48,10 @@ from enum import Enum
 from typing import Literal, Optional
 
 # ---------------------------------------------------------------------------
-# Kill switch — import from here, never re-read the env var elsewhere
+# Feature flags — import from here, never re-read env vars elsewhere
 # ---------------------------------------------------------------------------
-_KIT_ENABLED: bool = os.getenv("SCOUT_KIT_ENABLED", "true").lower() == "true"
+_MARKDOWN_BLOCKS_ENABLED: bool = os.getenv("SCOUT_MARKDOWN_BLOCKS", "").lower() in {"1", "true", "yes"}
+_AGENT_BLOCKS_ENABLED: bool = os.getenv("SCOUT_AGENT_BLOCKS", "").lower() in {"1", "true", "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +164,27 @@ class Card:
     body: str = ""
     facts: list[tuple[str, str]] = field(default_factory=list)
     actions: list[tuple[str, str, str, str]] = field(default_factory=list)
+    chart_url: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.severity, Severity):
+            raise TypeError(
+                f"Card.severity must be Severity, got {type(self.severity).__name__!r}"
+            )
+        if len(self.headline) > 150:
+            raise ValueError(
+                f"Card.headline exceeds 150 chars ({len(self.headline)})"
+            )
+        for i, f in enumerate(self.facts):
+            if not isinstance(f, tuple) or len(f) != 2:
+                raise TypeError(
+                    f"Card.facts[{i}] must be a 2-tuple (label, value)"
+                )
+        for i, a in enumerate(self.actions):
+            if not isinstance(a, tuple) or len(a) != 4:
+                raise TypeError(
+                    f"Card.actions[{i}] must be a 4-tuple (label, action_id, value, style)"
+                )
 
 
 
@@ -207,7 +229,9 @@ def enforce(
 
 
 # ---------------------------------------------------------------------------
-# MAX_ACTIONS — per-surface button budget (mobile-first defaults)
+# MAX_ACTIONS — per-surface suggestion button budget (mobile-first defaults)
+# _MAX_CARD_ACTIONS — hard cap on Card.actions CTAs (separate from suggestion budget;
+#                     these are data-specific CTAs, not follow-up query prompts)
 # ---------------------------------------------------------------------------
 MAX_ACTIONS: dict[Surface, int] = {
     Surface.CHANNEL_ROOT: 2,
@@ -218,14 +242,7 @@ MAX_ACTIONS: dict[Surface, int] = {
     Surface.EPHEMERAL: 1,
     Surface.MODAL: 0,
 }
-
-
-# ---------------------------------------------------------------------------
-# _escape_md_code — strip fenced code blocks (mobile horizontal-scroll) and
-#                   protect underscores inside backtick spans from italic.
-# ---------------------------------------------------------------------------
-_CODE_SPAN_RE = re.compile(r"`([^`]+)`")
-_FENCED_BLOCK_RE = re.compile(r"```[a-z]*\n?(.*?)```", re.DOTALL)
+_MAX_CARD_ACTIONS: int = 25
 
 
 def _fit(s: str, max_len: int = 25) -> str:
@@ -239,36 +256,92 @@ def _fit(s: str, max_len: int = 25) -> str:
 # Slack header block plain_text limit per Block Kit spec.
 _HEADER_PLAIN_TEXT_MAX = 150
 
-# Strings that signal markdown-formatted body content — route through _text_to_blocks()
-# instead of a plain mrkdwn section. Checked at the START of wrap_response() body routing.
-# "- " and "• " handle bodies that START with a single bullet (no leading \n).
-_MARKDOWN_SIGNALS = ("*", "•", "`", "\n-", "\n•", "- ", "• ", "\n|")
 
 
-def _escape_md_code(text: str) -> str:
-    """Convert fenced code blocks to inline code and escape underscores in spans.
+def _markdown_block(text: str) -> dict:
+    return {"type": "markdown", "text": text}
 
-    1. Triple-backtick fenced blocks cause horizontal scroll on mobile (Slack rule 2).
-       They are collapsed to a single inline ``code`` span containing just the first
-       non-blank line of the block, so context is preserved without the scroll trap.
 
-    2. Slack's mrkdwn parser treats _word_ as italic even inside inline code spans.
-       Underscores inside backtick spans are escaped so that ``cap_alert_pct``
-       renders as literal text rather than ``cap<em>alert</em>pct``.
+def _rich_text_code(code: str, language: str = "") -> dict:
+    """Return a rich_text block wrapping preformatted code.
+
+    Use instead of fenced code blocks — avoids horizontal scroll on iOS
+    (Scout mobile rule 2). language hint (e.g. "sql", "python") enables
+    syntax highlighting where Slack supports it.
     """
-    # Step 1: replace fenced blocks with inline code (first non-blank content line)
-    def _collapse_fenced(m: re.Match) -> str:
-        inner = m.group(1).strip()
-        first_line = next((ln for ln in inner.splitlines() if ln.strip()), inner)
-        return f"`{first_line.strip()}`"
+    preformatted: dict = {
+        "type": "rich_text_preformatted",
+        "elements": [{"type": "text", "text": code}],
+    }
+    if language:
+        preformatted["language"] = language
+    return {"type": "rich_text", "elements": [preformatted]}
 
-    text = _FENCED_BLOCK_RE.sub(_collapse_fenced, text)
 
-    # Step 2: escape underscores inside remaining inline code spans
-    def _escape_underscores(m: re.Match) -> str:
-        return "`" + m.group(1).replace("_", r"\_") + "`"
+# Surfaces where the native markdown block is valid per Block Kit spec.
+# HOME, MODAL, and EPHEMERAL do not support the markdown block type.
+_MESSAGE_SURFACES = frozenset({
+    Surface.CHANNEL_ROOT, Surface.THREAD, Surface.DM, Surface.MONITOR_ALARM
+})
 
-    return _CODE_SPAN_RE.sub(_escape_underscores, text)
+
+# ---------------------------------------------------------------------------
+# AgentStep + _agent_plan_block — reasoning chain surface (SCOUT_AGENT_BLOCKS)
+# ---------------------------------------------------------------------------
+_STATUS_EMOJI: dict[str, str] = {"pass": "✅", "fail": "❌", "warn": "⚠️", "skip": "⏭️"}
+
+# Maps Scout AgentStep.status to Slack plan block task status.
+# pass/warn/fail all map to "complete" — emoji in the title preserves visual state.
+_STATUS_TO_PLAN: dict[str, str] = {
+    "pass": "complete",
+    "warn": "complete",
+    "fail": "complete",
+    "skip": "pending",
+}
+
+
+_VALID_STATUSES = frozenset({"pass", "fail", "warn", "skip"})
+
+
+@dataclass(frozen=True)
+class AgentStep:
+    """One step in Scout's reasoning chain. Rendered via _agent_plan_block()."""
+    label: str                                      # ≤60 chars, e.g. "Cap signal check"
+    status: Literal["pass", "fail", "warn", "skip"]
+    finding: str                                    # one-line data point
+
+    def __post_init__(self) -> None:
+        if self.status not in _VALID_STATUSES:
+            raise TypeError(f"AgentStep.status must be one of {sorted(_VALID_STATUSES)!r}, got {self.status!r}")
+
+
+def _agent_plan_block(steps: list["AgentStep"]) -> list[dict]:
+    """Render agent reasoning steps as a native Slack plan block.
+
+    Status mapping: pass/warn/fail → complete (emoji in title preserves visual state),
+    skip → pending (step was never attempted).
+    """
+    if not steps:
+        return []
+    tasks = []
+    for i, step in enumerate(steps):
+        task: dict = {
+            "task_id": f"step_{i}",
+            "title": f"{_STATUS_EMOJI.get(step.status, '•')} {step.label}",
+            "status": _STATUS_TO_PLAN.get(step.status, "complete"),
+        }
+        if step.finding:
+            task["details"] = {
+                "type": "rich_text",
+                "elements": [{
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": step.finding}],
+                }],
+            }
+        tasks.append(task)
+    return [{"type": "plan", "plan_id": "scout_reasoning", "title": "Scout Reasoning", "tasks": tasks}]
+
+
 
 
 def _build_facts_blocks(facts: list[tuple[str, str]]) -> list[dict]:
@@ -333,6 +406,136 @@ def _build_footer_block(
 
 
 # ---------------------------------------------------------------------------
+# Modal / card / carousel helpers — used by scout_handlers.py
+# ---------------------------------------------------------------------------
+
+def _build_modal_view(
+    blocks: list[dict],
+    title: str,
+    callback_id: str,
+    submit_label: str | None = None,
+    close_label: str = "Close",
+) -> dict:
+    """Return a Slack modal view dict ready for views_open/update/push.
+
+    callback_id is required — Slack silently rejects action-containing modals
+    without it, and view_submission handlers key on it.
+
+    submit_label: when set, adds a Submit button (enables view_submission events).
+    When None, the modal is close-only (informational modal pattern).
+    """
+    if not callback_id:
+        raise ValueError("_build_modal_view: callback_id is required")
+    view: dict = {
+        "type": "modal",
+        "callback_id": callback_id,
+        "title": {"type": "plain_text", "text": title[:24], "emoji": False},
+        "close": {"type": "plain_text", "text": close_label[:24], "emoji": False},
+        "blocks": blocks,
+    }
+    if submit_label:
+        view["submit"] = {"type": "plain_text", "text": submit_label[:24], "emoji": False}
+    return view
+
+
+def _slack_card_block(
+    title: str,
+    body: str = "",
+    subtitle: str = "",
+    block_id: str = "",
+) -> dict:
+    """Return a native Slack card block.
+
+    Use for rich single-item presentations (demand queue entries, campaign cards).
+    For a list of cards, wrap in _carousel_block().
+    block_id must be unique within a message when used in a carousel.
+    """
+    card: dict = {
+        "type": "card",
+        "title": {"type": "plain_text", "text": title[:150]},
+    }
+    if subtitle:
+        card["subtitle"] = {"type": "plain_text", "text": subtitle[:150]}
+    if body:
+        card["body"] = {"type": "mrkdwn", "text": body[:200]}
+    if block_id:
+        card["block_id"] = block_id
+    return card
+
+
+def _carousel_block(cards: list[dict]) -> list[dict]:
+    """Wrap a list of card blocks in a Slack carousel.
+
+    Each card must have a unique block_id. Returns [] for empty input.
+    Slack carousels require ≥2 cards to render the navigation arrows —
+    a single card is returned unwrapped.
+    """
+    if not cards:
+        return []
+    if len(cards) == 1:
+        return [cards[0]]
+    return [{"type": "carousel", "elements": cards[:10]}]
+
+
+# ---------------------------------------------------------------------------
+# Private renderers — called only by wrap_response; data-in, blocks-out.
+# ---------------------------------------------------------------------------
+
+def _render_headline(card: "Card", surface: Surface) -> list[dict]:
+    """Return headline block(s) for a Card.
+
+    Non-INFO: native header block + divider (bold everywhere, renders on mobile).
+    INFO on CHANNEL_ROOT/DM: section visual anchor.
+    INFO on other surfaces (EPHEMERAL, THREAD, MONITOR_ALARM): no headline block.
+    """
+    headline = card.headline
+    if not headline:
+        return []
+    if headline.isupper() and len(headline) > 3:
+        headline = headline.title()
+    if card.severity is not Severity.INFO:
+        raw_header = f"{card.severity.emoji} {headline}"
+        if len(raw_header) > _HEADER_PLAIN_TEXT_MAX:
+            raw_header = raw_header[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": raw_header, "emoji": True}},
+            {"type": "divider"},
+        ]
+    if surface in (Surface.CHANNEL_ROOT, Surface.DM):
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": f"{card.severity.emoji}  *{headline}*"}}]
+    return []
+
+
+def _render_subheader(text: str, level: int = 2) -> dict:
+    """Return a header block with the given hierarchy level (1–4).
+
+    Level 1 is the page title (use _render_headline for that).
+    Level 2 is the default section header. Capped to [1, 4] per spec.
+    """
+    clamped = max(1, min(4, level))
+    return {
+        "type": "header",
+        "text": {"type": "plain_text", "text": text[:150], "emoji": False},
+        "level": clamped,
+    }
+
+
+def _render_body(card: "Card", surface: Surface) -> list[dict]:
+    """Return body block(s) for a Card.
+
+    Message surfaces (CHANNEL_ROOT, THREAD, DM, MONITOR_ALARM): native markdown block
+    when flag is on; otherwise plain mrkdwn section.
+    Non-message surfaces (HOME, MODAL, EPHEMERAL): mrkdwn section only — markdown
+    block is not valid on those surfaces per Block Kit spec.
+    """
+    if not card.body:
+        return []
+    if _MARKDOWN_BLOCKS_ENABLED and surface in _MESSAGE_SURFACES:
+        return [_markdown_block(card.body)]
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": card.body}}]
+
+
+# ---------------------------------------------------------------------------
 # wrap_response — single mobile-tuned chokepoint for all ask() exits
 # ---------------------------------------------------------------------------
 def wrap_response(
@@ -340,38 +543,33 @@ def wrap_response(
     card: "Card",
     surface: Surface,
     suggestions: Optional[list[str]] = None,
-    feedback: Literal["reaction", "button", "none"] = "reaction",
-    query_hash: Optional[str] = None,
     elapsed_seconds: Optional[int] = None,
     interpretation: Optional[str] = None,
     pattern: "ResponsePattern | None" = None,
+    agent_steps: "list[AgentStep] | None" = None,
 ) -> tuple[str, list[dict]]:
     """Single entry-point for every ask() reply surface.
 
     Composition order (earlier items are protected from enforce() truncation):
-        headline → body → facts → feedback → suggestions → elapsed/interpretation →
-        actions → POSITIVE context footer → CRITICAL trailing divider → enforce()
+        headline → body → facts → suggestions → elapsed/interpretation →
+        card.actions → POSITIVE footer → CRITICAL divider → enforce()
+
+    Two button mechanisms — use the right one:
+        suggestions:  Follow-up query strings rendered as "what to ask next" buttons.
+                      Capped at MAX_ACTIONS[surface]. These prompt further queries.
+        Card.actions: Data-specific CTAs the handler attaches to a Card (e.g. "View in
+                      ClickHouse", "Open in Notion"). Not subject to MAX_ACTIONS; capped
+                      at _MAX_CARD_ACTIONS. enforce() is the final backstop.
 
     Args:
         card:             Card to render (severity + headline + optional body/facts/actions).
-        surface:          Target Slack surface — drives budget and button caps.
-        suggestions:      Follow-up query strings. Capped at MAX_ACTIONS[surface].
-                          Pass [] or None to emit zero actions blocks.
-        feedback:         "reaction" — no button row, caller should seed 👎 reaction.
-                          "button"   — include 👎 Off + ✏️ Correct this actions block.
-                                       NOTE: requires query_hash; silently omitted if None.
-                          "none"     — omit feedback entirely.
-        query_hash:       Message ts / hash used as button value for feedback routing.
-                          Required when feedback="button"; pass None to suppress buttons.
-        elapsed_seconds:  If provided, appended as a context footer (ops surfaces only;
-                          omit on DM to keep output clean). Combined with interpretation
-                          when both are provided.
-        interpretation:   If provided, rendered as a muted footer on all surfaces:
-                          "_Interpreted as: {interpretation} · {elapsed}s_".
-                          Overrides the plain elapsed footer.
+        surface:          Target Slack surface — drives block budget and button caps.
+        suggestions:      Follow-up query strings. Pass [] or None to emit no suggestion row.
+        elapsed_seconds:  Appended as a context footer (omitted on DM/EPHEMERAL).
+        interpretation:   "_Interpreted as: {interpretation} · {elapsed}s_" footer.
+                          Takes precedence over plain elapsed footer.
         pattern:          Optional ResponsePattern for surface validation. Raises ValueError
-                          if the surface is incompatible with the pattern. Existing callers
-                          that omit pattern= are unaffected.
+                          on mismatch. Callers that omit pattern= are unaffected.
 
     Returns:
         (fallback_text, blocks) — fallback is always non-empty (mobile push previews).
@@ -390,65 +588,24 @@ def wrap_response(
     suggestions = suggestions or []
     max_btn = MAX_ACTIONS.get(surface, 2)
 
-    # 1. Headline + body from Card
     blocks: list[dict] = []
-
-    # 3d. Title-case enforcement: if headline is ALL CAPS (> 3 chars), convert to title case.
-    headline = card.headline
-    if headline and headline.isupper() and len(headline) > 3:
-        headline = headline.title()
-
-    # Non-INFO severity: native header block (always bold in Slack, renders on mobile)
-    # followed by divider. The section-based headline is suppressed to avoid duplication.
-    # INFO on CHANNEL_ROOT/DM: section-based visual anchor (3b).
-    # INFO on other surfaces (EPHEMERAL, THREAD, MONITOR_ALARM): no headline block.
-    if headline and card.severity is not Severity.INFO:
-        raw_header = f"{card.severity.emoji} {headline}"
-        if len(raw_header) > _HEADER_PLAIN_TEXT_MAX:
-            raw_header = raw_header[: _HEADER_PLAIN_TEXT_MAX - 1] + "…"
-        blocks.append({
-            "type": "header",
-            "text": {"type": "plain_text", "text": raw_header, "emoji": True},
-        })
-        blocks.append({"type": "divider"})
-    elif headline and surface in (Surface.CHANNEL_ROOT, Surface.DM):
-        # 3b. INFO on visible surfaces: single-line visual anchor
-        header_text = f"{card.severity.emoji}  *{headline}*"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
-
-    if card.body:
-        if any(sig in card.body for sig in _MARKDOWN_SIGNALS):
-            blocks.extend(_text_to_blocks(card.body))
-        else:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _escape_md_code(card.body)}})
-
+    blocks.extend(_render_headline(card, surface))
+    if agent_steps and _AGENT_BLOCKS_ENABLED and surface in _MESSAGE_SURFACES:
+        blocks.extend(_agent_plan_block(agent_steps))
+    blocks.extend(_render_body(card, surface))
     if card.facts:
         blocks.extend(_build_facts_blocks(card.facts))
 
-    # 2. Feedback row (protected — placed before suggestions so enforce() keeps it)
-    if feedback == "button" and query_hash:
+    if card.chart_url:
         blocks.append({
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "👎 Off", "emoji": True},
-                    "action_id": "scout_feedback_bad",
-                    "value": query_hash,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "✏️ Correct this", "emoji": True},
-                    "action_id": "scout_feedback_correct",
-                    "value": query_hash,
-                },
-            ],
+            "type": "image",
+            "image_url": card.chart_url,
+            "alt_text": "Revenue trend — last 7 days",
         })
 
-    # 3. Suggestion buttons — capped at MAX_ACTIONS[surface]; omit block entirely if empty
-    capped = [s for s in suggestions[:max_btn] if isinstance(s, str) and s.strip()]
+    capped = [s.strip() for s in suggestions if isinstance(s, str) and s.strip()][:max_btn]
     if capped:
-        elements = [
+        blocks.append({"type": "actions", "elements": [
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": _fit(s), "emoji": False},
@@ -456,19 +613,15 @@ def wrap_response(
                 "action_id": f"scout_suggestion_{i}",
             }
             for i, s in enumerate(capped)
-        ]
-        blocks.append({"type": "actions", "elements": elements})
+        ]})
 
-    # 4. Elapsed / interpretation footer
-    blocks.extend(_build_footer_block(interpretation=interpretation, elapsed_seconds=elapsed_seconds, surface=surface))
+    blocks.extend(_build_footer_block(
+        interpretation=interpretation, elapsed_seconds=elapsed_seconds, surface=surface,
+    ))
 
-    # 5. Card-level extra actions (e.g. drill-down CTAs from Card.actions)
-    # Intentionally not subject to MAX_ACTIONS: these are specific CTAs the caller
-    # attached to the Card (e.g. "View in ClickHouse"), not open-ended suggestions.
-    # Budget enforcement via enforce() is the final backstop.
     if card.actions:
         elements = []
-        for label, action_id, value, style in card.actions[:25]:
+        for label, action_id, value, style in card.actions[:_MAX_CARD_ACTIONS]:
             btn: dict = {
                 "type": "button",
                 "text": {"type": "plain_text", "text": label},
@@ -480,28 +633,24 @@ def wrap_response(
             elements.append(btn)
         blocks.append({"type": "actions", "elements": elements})
 
-    # 3c. POSITIVE with non-empty body: append "Scout confirmed" context footer
     if card.severity is Severity.POSITIVE and card.body:
         blocks.append({
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": "✓  Scout confirmed"}],
         })
 
-    # 3a. CRITICAL on message-feed surfaces: trailing divider bookend (iOS visibility fix).
-    # Excluded from MONITOR_ALARM (budget=6, dedicated ops channel — header+divider at top
-    # already anchors the alert; trailing divider would be first truncated by enforce()).
+    # Trailing divider bookend for CRITICAL on message-feed surfaces (iOS visibility fix).
+    # Excluded from MONITOR_ALARM — header+divider at top already anchors it, and the
+    # trailing divider would be first truncated by enforce() on a 6-block budget.
     if card.severity is Severity.CRITICAL and surface in (
         Surface.CHANNEL_ROOT, Surface.DM, Surface.THREAD
     ):
         blocks.append({"type": "divider"})
 
-    # 6. Budget enforcement — always last
     blocks = enforce(blocks, surface)
 
-    # Fallback text for push previews — always non-empty; strip markdown for clean preview
     _raw_fallback = card.headline or card.body or f"{card.severity.emoji} Scout update"
     fallback = _raw_fallback[:200].strip() or f"{card.severity.emoji} Scout update"
-
     return fallback, blocks
 
 
@@ -517,7 +666,7 @@ def context_block(
 
     Typical usage — append after wrap_response blocks::
 
-        _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT, feedback="none")
+        _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
         meta = context_block(queried_at="just now", period="7d")
         web.chat_postMessage(channel=channel, text="...", blocks=[*blocks, meta])
 
@@ -589,27 +738,6 @@ _HELP_TRIGGERS = {
     "show me what you can do", "options",
 }
 
-_EMOJI_ALIASES: dict[str, str] = {
-    "yellow_circle": "large_yellow_circle",
-}
-
-# Tokenizer for inline elements within a single text line.
-_INLINE_RE = re.compile(
-    r'\*\*(?P<bold_d>[^*]+?)\*\*'
-    r'|\*(?P<bold_s>[^*\n]+?)\*'
-    r'|_(?P<italic>[^_\n]+?)_'
-    r'|`(?P<code>[^`\n]+?)`'
-    r'|:(?P<emoji>[a-z0-9_\-+]+?):'
-    r'|<(?P<url>[^|>]+)\|(?P<url_text>[^>]*)>'
-    r'|<@(?P<user>[A-Z0-9]+)>'
-    r'|(?P<plain>[^*_`:<\n]+|\n|[*_`:<])'
-)
-
-# Pipe table fallback: requires ≥2 columns to avoid false-positives on single-pipe lines.
-_TABLE_ROW_RE = re.compile(r'^\|(.+\|){2,}\s*$')
-_TABLE_SEP_RE = re.compile(r'^\|[-:\s|]+\|?\s*$')
-
-_SOLO_HEADER_RE = re.compile(r'^\*[^*]{15,}\*\s*')
 
 
 # ---------------------------------------------------------------------------
@@ -643,7 +771,6 @@ def _build_alert_block(severity: str, title: str, body: str = "") -> list[dict]:
     _fallback, blocks = wrap_response(
         card=Card(severity=kit_sev, headline=title, body=body),
         surface=Surface.EPHEMERAL,
-        feedback="none",
     )
     return blocks
 
@@ -965,6 +1092,12 @@ def _build_brief_queue_button(
             "style":     "primary",
             "action_id": "scout_brief_queue",
             "value":     btn_val,
+            "confirm": {
+                "title":   {"type": "plain_text", "text": "Add to queue?"},
+                "text":    {"type": "plain_text", "text": "This will add the campaign to the demand queue for review."},
+                "confirm": {"type": "plain_text", "text": "Add"},
+                "deny":    {"type": "plain_text", "text": "Cancel"},
+            },
         }],
     }]
 
@@ -1074,244 +1207,7 @@ def _is_help_query(query: str) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Inline element parser + text-to-blocks converter
-# ---------------------------------------------------------------------------
-def _parse_inline_elements(text: str) -> list:
-    """Convert a plain-text line into Slack rich_text inline element objects."""
-    elements = []
-    for m in _INLINE_RE.finditer(text):
-        if m.group("bold_d") is not None:
-            elements.append({"type": "text", "text": m.group("bold_d"), "style": {"bold": True}})
-        elif m.group("bold_s") is not None:
-            elements.append({"type": "text", "text": m.group("bold_s"), "style": {"bold": True}})
-        elif m.group("italic") is not None:
-            elements.append({"type": "text", "text": m.group("italic"), "style": {"italic": True}})
-        elif m.group("code") is not None:
-            elements.append({"type": "text", "text": m.group("code"), "style": {"code": True}})
-        elif m.group("emoji") is not None:
-            name = _EMOJI_ALIASES.get(m.group("emoji"), m.group("emoji"))
-            elements.append({"type": "emoji", "name": name})
-        elif m.group("url") is not None:
-            elements.append({"type": "link", "url": m.group("url"), "text": m.group("url_text")})
-        elif m.group("user") is not None:
-            elements.append({"type": "user", "user_id": m.group("user")})
-        elif m.group("plain") is not None:
-            t = m.group("plain")
-            if elements and elements[-1].get("type") == "text" and "style" not in elements[-1]:
-                elements[-1]["text"] += t
-            else:
-                elements.append({"type": "text", "text": t})
-    return elements or [{"type": "text", "text": text}]
 
-
-def _text_to_blocks(text: str) -> list:
-    """
-    Convert Claude's markdown response text into Block Kit blocks using native rich_text.
-
-    Structure:
-    - '---' separators → divider blocks between sections
-    - Lines starting with '>' → mrkdwn context block
-    - Bullet lines (•, -, *) → rich_text_list element
-    - Triple-backtick fences → rich_text_preformatted element
-    - Everything else → rich_text_section with typed inline elements
-
-    Falls back to a single mrkdwn section block on any parse failure.
-    """
-    _BULLET_RE = re.compile(r'^[•\-\*]\s+')
-    _FENCE_RE  = re.compile(r'^```')
-
-    def _flush_section(line_buf: list) -> "list | None":
-        joined = "\n".join(line_buf).strip()
-        if not joined:
-            return None
-        inline = _parse_inline_elements(joined)
-        return {"type": "rich_text_section", "elements": inline}
-
-    def _flush_list(items: list) -> "dict | None":
-        if not items:
-            return None
-        return {
-            "type": "rich_text_list",
-            "style": "bullet",
-            "indent": 0,
-            "elements": [
-                {"type": "rich_text_section", "elements": _parse_inline_elements(item)}
-                for item in items
-            ],
-        }
-
-    def _part_to_rt_elements(part: str) -> "tuple[list, list]":
-        rt_elems: list = []
-        ctx_lines: list = []
-        line_buf: list = []
-        list_buf: list = []
-        table_buf: list = []
-        in_fence = False
-        fence_buf: list = []
-
-        def _flush_table(table_buf: list, rt_elems: list) -> list:
-            """Flush accumulated pipe-table rows into rt_elems. Returns empty list to reset table_buf."""
-            if not table_buf:
-                return []
-            col_count = len(table_buf[0].strip('|').split('|'))  # do NOT filter empty — sparse cols count
-            if col_count <= 3:
-                # Mobile-safe: emit each row as a rich_text_section
-                for row in table_buf:
-                    cells = [c.strip() for c in row.strip('|').split('|')]
-                    if len(cells) >= 2:
-                        rt_elems.append({
-                            "type": "rich_text_section",
-                            "elements": [
-                                {"type": "text", "text": cells[0], "style": {"bold": True}},
-                                {"type": "text", "text": "  " + "  ".join(cells[1:])},
-                            ],
-                        })
-            else:
-                # Wide table — keep preformatted + add mobile warning
-                table_text = '\n'.join(table_buf)
-                rt_elems.append({
-                    "type": "rich_text_preformatted",
-                    "elements": [{"type": "text", "text": table_text}],
-                })
-                rt_elems.append({
-                    "type": "rich_text_section",
-                    "elements": [{"type": "text",
-                                  "text": "⚠ Table may scroll horizontally on mobile",
-                                  "style": {"italic": True}}],
-                })
-            return []
-
-        for raw_line in part.split('\n'):
-            if _FENCE_RE.match(raw_line):
-                if in_fence:
-                    in_fence = False
-                    code_text = "\n".join(fence_buf)
-                    fence_buf = []
-                    if list_buf:
-                        el = _flush_list(list_buf)
-                        list_buf = []
-                        if el:
-                            rt_elems.append(el)
-                    if line_buf:
-                        el = _flush_section(line_buf)
-                        line_buf = []
-                        if el:
-                            rt_elems.append(el)
-                    rt_elems.append({
-                        "type": "rich_text_preformatted",
-                        "elements": [{"type": "text", "text": code_text}],
-                    })
-                else:
-                    in_fence = True
-                continue
-
-            if in_fence:
-                fence_buf.append(raw_line)
-                continue
-
-            if raw_line.startswith('>'):
-                ctx_lines.append(raw_line[1:].strip())
-                continue
-
-            stripped = raw_line.strip()
-
-            if _TABLE_ROW_RE.match(stripped):
-                if _TABLE_SEP_RE.match(stripped):
-                    continue
-                table_buf.append(stripped)
-                continue
-
-            if table_buf:
-                log.debug("[text_to_blocks] pipe table flush: %d rows", len(table_buf))
-                table_buf = _flush_table(table_buf, rt_elems)
-
-            if _BULLET_RE.match(stripped):
-                item_text = _BULLET_RE.sub('', stripped)
-                if line_buf:
-                    el = _flush_section(line_buf)
-                    line_buf = []
-                    if el:
-                        rt_elems.append(el)
-                list_buf.append(item_text)
-                continue
-
-            if list_buf:
-                el = _flush_list(list_buf)
-                list_buf = []
-                if el:
-                    rt_elems.append(el)
-
-            if not stripped:
-                if line_buf:
-                    el = _flush_section(line_buf)
-                    line_buf = []
-                    if el:
-                        rt_elems.append(el)
-            else:
-                line_buf.append(stripped)
-
-        if table_buf:
-            log.debug("[text_to_blocks] pipe table flush (end): %d rows", len(table_buf))
-            _flush_table(table_buf, rt_elems)
-        if list_buf:
-            el = _flush_list(list_buf)
-            if el:
-                rt_elems.append(el)
-        if line_buf:
-            el = _flush_section(line_buf)
-            if el:
-                rt_elems.append(el)
-
-        return rt_elems, ctx_lines
-
-    _SOLO_HEADER_RE_LOCAL = re.compile(r'^\*[^*]{15,}\*\s*$')
-
-    def _inject_section_dividers(raw: str) -> str:
-        lines = raw.strip().split('\n')
-        out: list[str] = []
-        saw_content = False
-        for line in lines:
-            stripped = line.strip()
-            if (
-                _SOLO_HEADER_RE_LOCAL.match(stripped)
-                and saw_content
-                and (not out or out[-1].strip() not in ('---', ''))
-            ):
-                out.append('---')
-            out.append(line)
-            if stripped and not stripped.startswith('>') and stripped != '---':
-                saw_content = True
-        return '\n'.join(out)
-
-    try:
-        parts = re.split(r'\n+\s*---\s*\n+', _inject_section_dividers(text.strip()))
-        blocks: list = []
-
-        for i, part in enumerate(parts):
-            part = part.strip()
-            if not part:
-                if i < len(parts) - 1:
-                    blocks.append({"type": "divider"})
-                continue
-
-            rt_elems, ctx_lines = _part_to_rt_elements(part)
-
-            if rt_elems:
-                blocks.append({"type": "rich_text", "elements": rt_elems})
-            if ctx_lines:
-                ctx_text = " · ".join(ctx_lines)
-                blocks.append({
-                    "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": ctx_text}],
-                })
-            if i < len(parts) - 1:
-                blocks.append({"type": "divider"})
-
-        return blocks or [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
-
-    except Exception:
-        return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
 # ---------------------------------------------------------------------------
@@ -1797,7 +1693,6 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
         })
 
     blocks.append({"type": "divider"})
-    blocks = enforce(blocks, Surface.HOME)
     return blocks
 
 
@@ -1886,4 +1781,129 @@ def _build_home_view(queue_items: "list[dict] | None" = None,
         }],
     })
 
+    blocks = enforce(blocks, Surface.HOME)
     return {"type": "home", "blocks": blocks}
+
+
+def _build_maintenance_home_view() -> dict:
+    blocks = enforce(
+        [{"type": "section", "text": {"type": "mrkdwn",
+            "text": ":wrench: Scout is offline for maintenance."}}],
+        Surface.HOME,
+    )
+    return {"type": "home", "blocks": blocks}
+
+
+def _refire_context_block(snoozed_by: str, snoozed_at_iso: str) -> dict:
+    """Build a context block announcing a re-fire after snooze.
+
+    Pure function — no Slack API calls, no registry reads.
+    """
+    from datetime import datetime, timezone as _tz
+    try:
+        dt = datetime.fromisoformat(snoozed_at_iso)
+        display_time = dt.astimezone(_tz.utc).strftime("%-I:%M%p").lower()
+    except Exception:
+        display_time = "earlier"
+    text = f"⏸ Snoozed by <@{snoozed_by}> at {display_time} · re-firing now"
+    return {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": text}],
+    }
+
+
+def _alert_status_chip_blocks(
+    status: str,
+    actor_id: str,
+    display_time: str,
+) -> list[dict]:
+    """Return a minimal blocks list replacing an alert card's actions block.
+
+    Used by acknowledge and snooze handlers to update the card in-place.
+    status: "acknowledged" | "snoozed"
+    """
+    if status == "acknowledged":
+        text = f"✓ Acknowledged by <@{actor_id}> at {display_time}"
+    else:
+        text = f"⏸ Snoozed by <@{actor_id}> until {display_time}"
+    return [{"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}]
+
+
+def _drill_loading_modal() -> dict:
+    """Loading state modal shown immediately on drill button click.
+
+    Pure function — no side effects. views_open consumes this.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "scout_drill_publisher_loading",
+        "title": {"type": "plain_text", "text": "Publisher Drill"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [{
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":hourglass_flowing_sand: Loading publisher data…"},
+        }],
+    }
+
+
+def _drill_data_modal(summary: dict) -> dict:
+    """Data-populated modal for publisher drill. Pure function.
+
+    summary: dict matching get_publisher_drill_summary output shape.
+    """
+    pub_name = summary.get("pub_name") or summary.get("pub_id", "Unknown")
+    rev_7d = summary.get("rev_7d", 0.0)
+    conv_7d = summary.get("conv_7d", 0)
+    rev_yd = summary.get("rev_yesterday", 0.0)
+    conv_yd = summary.get("conv_yesterday", 0)
+    top_offer = summary.get("top_offer") or "—"
+    as_of = summary.get("as_of", "")
+
+    def _fmt(v: float) -> str:
+        return f"${v / 1000:.1f}K" if v >= 1000 else f"${v:.0f}"
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"Publisher: {pub_name}"},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*7d Revenue*\n{_fmt(rev_7d)}"},
+                {"type": "mrkdwn", "text": f"*7d Conversions*\n{conv_7d:,}"},
+                {"type": "mrkdwn", "text": f"*Yesterday Revenue*\n{_fmt(rev_yd)}"},
+                {"type": "mrkdwn", "text": f"*Yesterday Conversions*\n{conv_yd:,}"},
+            ],
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Top Offer:* {top_offer}"},
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"Data as of {as_of}"}],
+        },
+    ]
+    return {
+        "type": "modal",
+        "callback_id": "scout_drill_publisher_data",
+        "title": {"type": "plain_text", "text": "Publisher Drill"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks,
+    }
+
+
+def _drill_error_modal() -> dict:
+    """Error state modal shown when drill query fails. Pure function."""
+    return {
+        "type": "modal",
+        "callback_id": "scout_drill_publisher_error",
+        "title": {"type": "plain_text", "text": "Publisher Drill"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [{
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": ":warning: Couldn't load publisher data. Try again or check ClickHouse directly."},
+        }],
+    }

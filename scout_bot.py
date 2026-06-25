@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import pathlib
+from dataclasses import dataclass
 import random
 import re
 import threading
@@ -26,11 +27,12 @@ from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 from slack_sdk.web import WebClient
 
 from scout_agent import ask
+from scout_thresholds import _manager as _tm
 from scout_notion import (
     _copy_coalescer_loop,
     _notion_watcher_loop,
 )
-from scout_ui_kit import Card, ResponsePattern, Severity, Surface, enforce, wrap_response, context_block, _KIT_ENABLED
+from scout_ui_kit import Card, ResponsePattern, Severity, Surface, enforce, wrap_response, context_block
 from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_state import (
     _DATA_DIR,
@@ -56,9 +58,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("scout_bot")
-
-BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 
 _LAST_THREAD_PER_CHANNEL: dict = {}  # channel → thread_ts
 _LAST_THREAD_LOCK = threading.Lock()
@@ -106,6 +105,61 @@ _BOT_USER_ID: str = ""  # cached at startup — never changes
 _SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #bot-qa (was #scout-qa, was #scout-hq)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        log.warning("[scout-bot] %s is not a valid integer; using default %d", name, default)
+        return default
+
+
+# All env vars read once at module init — no scattered os.getenv() calls beyond this block.
+@dataclass(frozen=True)
+class _BotConfig:
+    bot_token: str = ""
+    app_token: str = ""
+    anthropic_api_key: str = ""
+    scout_env: str = "development"
+    pulse_channel: str = ""
+    scout_digest_channel: str = ""
+    revenue_ops_channel: str = ""
+    digest_source: str = "local"
+    demand_feed_url: str = ""
+    notion_queue_db_id: str = ""
+    sidd_qa_channel_id: str = ""
+    port: int = 10000
+    is_render: bool = False
+
+    def __post_init__(self) -> None:
+        if self.scout_env == "production" and self.scout_digest_channel == _SCOUT_HQ_CHANNEL:
+            log.warning(
+                "[scout-bot] SCOUT_DIGEST_CHANNEL not set in production — "
+                "_route_channel('offers') will fall back to #bot-qa"
+            )
+
+    @classmethod
+    def from_env(cls) -> "_BotConfig":
+        _hq = _SCOUT_HQ_CHANNEL
+        return cls(
+            bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
+            app_token=os.getenv("SLACK_APP_TOKEN", ""),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            scout_env=os.getenv("SCOUT_ENV", "development"),
+            pulse_channel=os.getenv("PULSE_CHANNEL", _hq),
+            scout_digest_channel=os.getenv("SCOUT_DIGEST_CHANNEL", _hq),
+            revenue_ops_channel=os.getenv("REVENUE_OPS_CHANNEL", _hq),
+            digest_source=os.getenv("DIGEST_SOURCE", "local"),
+            demand_feed_url=os.getenv("DEMAND_FEED_URL", "").rstrip("/"),
+            notion_queue_db_id=os.getenv("NOTION_QUEUE_DB_ID", ""),
+            sidd_qa_channel_id=os.getenv("SIDD_QA_CHANNEL_ID", ""),
+            port=_env_int("PORT", 10000),
+            is_render=bool(os.getenv("RENDER")),
+        )
+
+
+_BOT_CFG = _BotConfig.from_env()
+
+
 # ── Approve helpers ───────────────────────────────────────────────────────────
 
 
@@ -145,9 +199,6 @@ def _slack_thread_url(channel: str, thread_ts: str) -> str:
 # Fill rate exclusions are now managed dynamically via data/entity_overrides.json.
 # Use _load_entity_overrides() at pulse time (imported from scout_agent).
 # Seeded with Button on first deploy by _seed_entity_overrides() in main().
-_PULSE_CHANNEL               = os.getenv("PULSE_CHANNEL", "")  # kept for backwards compat
-_PULSE_ENABLED               = os.getenv("PULSE_ENABLED", "true").lower() == "true"
-
 # ── Live health heartbeat (PR 15c) ────────────────────────────────────────────
 # The HTTP /health endpoint (Render probe, every 30s) checks file-based + thread state
 # only. ClickHouse outages are NOT checked there — a CH ping in /health would cause
@@ -165,8 +216,7 @@ _LAST_HEALTH_STATUS: dict | None = None  # last status seen by the heartbeat (us
 def _load_health_cfg() -> dict:
     """Load the health section of scout_thresholds.json. Returns {} on any error."""
     try:
-        from scout_agent import SCOUT_THRESHOLDS
-        return SCOUT_THRESHOLDS.get("health", {})
+        return _tm.load().get("health", {})
     except Exception as e:
         log.warning(f"[health] could not load thresholds, using fallback defaults: {e}")
         return {}
@@ -181,8 +231,7 @@ _OFFER_STALENESS_HOURS          = int(_HEALTH_CFG.get("offer_staleness_hours", 3
 def _load_signal_cfg() -> dict:
     """Load the signals section of scout_thresholds.json. Returns {} on any error."""
     try:
-        from scout_agent import SCOUT_THRESHOLDS
-        return SCOUT_THRESHOLDS.get("signals", {})
+        return _tm.load().get("signals", {})
     except Exception as e:
         log.warning(f"[signals] could not load thresholds, using fallback defaults: {e}")
         return {}
@@ -216,14 +265,6 @@ def _start_daemon(target, name: str, args: tuple = ()) -> None:
 # SCOUT_ENV=production → messages go to production channels (set in launchd plist)
 # Anything else (unset, "development") → everything goes to #scout-qa
 # force=True → always #scout-qa regardless of environment
-_SCOUT_ENV = os.getenv("SCOUT_ENV", "development")
-_PRODUCTION_CHANNELS = {
-    "pulse":    os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
-    "watchdog": os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL),          # #revenue-operations
-    "offers":   os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL),   # #scout-offers
-    "revenue":  os.getenv("REVENUE_OPS_CHANNEL", _SCOUT_HQ_CHANNEL),    # #revenue-operations
-    "qa":       _SCOUT_HQ_CHANNEL,                                      # #sidd-qa — projection autocheck etc.
-}
 
 def _route_channel(purpose: str, force: bool = False) -> str:
     """
@@ -231,9 +272,16 @@ def _route_channel(purpose: str, force: bool = False) -> str:
     Foolproof: force=True OR non-production env always routes to #scout-qa.
     Production channels require SCOUT_ENV=production (set in launchd plist only).
     """
-    if force or _SCOUT_ENV != "production":
+    if force or _BOT_CFG.scout_env != "production":
         return _SCOUT_HQ_CHANNEL
-    return _PRODUCTION_CHANNELS.get(purpose, _SCOUT_HQ_CHANNEL)
+    channels = {
+        "pulse":    _BOT_CFG.pulse_channel,     # #revenue-operations
+        "watchdog": _BOT_CFG.pulse_channel,     # #revenue-operations
+        "offers":   _BOT_CFG.scout_digest_channel,  # #scout-offers
+        "revenue":  _BOT_CFG.revenue_ops_channel,   # #revenue-operations
+        "qa":       _SCOUT_HQ_CHANNEL,          # #sidd-qa — projection autocheck etc.
+    }
+    return channels.get(purpose, _SCOUT_HQ_CHANNEL)
 
 
 # ── Feedback buttons ──────────────────────────────────────────────────────────
@@ -303,7 +351,8 @@ def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
 
         down_entries = [
             (v, v["publisher_id"], v.get("publisher_name", ""),
-             next((a for a in v.get("top_advertisers", []) if a.get("delta_ann", 0) < 0), None))
+             next((a for a in v.get("top_advertisers", [])
+                   if a.get("delta_ann", 0) < 0 and a.get("adv_name", "") != "(unattributed)"), None))
             for v in results
             if v["direction"] == "down" and v.get("publisher_id")
         ]
@@ -468,7 +517,7 @@ def _pulse_signal_fill_rate(ch, as_of_date: str | None = None) -> list:
     )
 
 
-def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None) -> tuple[str, list[dict]]:
+def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = None, alert_name: str = "") -> tuple[str, list[dict]]:
     """
     Format the proactive revenue alert message.
 
@@ -542,7 +591,12 @@ def _format_revenue_alert(total: dict, publishers: list, as_of: str | None = Non
     headline = "Revenue alert — today is tracking soft"
     body = "\n".join(items)
     card = Card(severity=Severity.CRITICAL, headline=headline, body=body)
-    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, feedback="none")
+    if alert_name:
+        card.actions = [
+            ("✓ Acknowledge", "scout_acknowledge", alert_name, "primary"),
+            ("Snooze ▾", "scout_snooze_open", alert_name, ""),
+        ]
+    _, blocks = wrap_response(card=card, surface=Surface.MONITOR_ALARM, pattern=ResponsePattern.ALERT)
     return f"🔴 {headline}", blocks
 
 
@@ -565,7 +619,6 @@ def _digest_poster(web) -> None:
     import time as _time
     import pytz
     from datetime import datetime as _dt
-    from scout_agent import SCOUT_THRESHOLDS
     from scout_state import _load_digest_post_state, _save_digest_post_date
 
     while True:
@@ -577,9 +630,9 @@ def _digest_poster(web) -> None:
                     # Re-read both knobs each tick so live config changes apply
                     # without a crash/restart (matches digest_daemon_enabled).
                     check_hour = int(
-                        SCOUT_THRESHOLDS.get("signals", {}).get("digest_post_hour_ct", 7)
+                        _tm.load().get("signals", {}).get("digest_post_hour_ct", 7)
                     )
-                    if not SCOUT_THRESHOLDS.get("signals", {}).get(
+                    if not _tm.load().get("signals", {}).get(
                         "digest_daemon_enabled", False
                     ):
                         _time.sleep(300)
@@ -602,9 +655,9 @@ def _digest_poster(web) -> None:
                     # post itself fails, revert so the next poll retries.
                     _save_digest_post_date(today_str)
                     try:
-                        _digest_source = os.getenv("DIGEST_SOURCE", "local")
+                        _digest_source = _BOT_CFG.digest_source
                         if _digest_source == "remote":
-                            _demand_url = os.getenv("DEMAND_FEED_URL", "").rstrip("/")
+                            _demand_url = _BOT_CFG.demand_feed_url
                             _used_remote = False
                             if not _demand_url:
                                 log.warning("[digest-poster] DIGEST_SOURCE=remote but DEMAND_FEED_URL is unset — falling back to local")
@@ -620,7 +673,7 @@ def _digest_poster(web) -> None:
                                     elif _r.ok:
                                         _payload = _r.json()
                                         _channel = _route_channel("offers")
-                                        _web = _WC(token=os.getenv("SLACK_BOT_TOKEN"))
+                                        _web = _WC(token=_BOT_CFG.bot_token)
                                         _gwc(_web)
                                         _resp = _web.chat_postMessage(
                                             channel=_channel,
@@ -668,7 +721,7 @@ def _digest_poster(web) -> None:
 # Alert only when there's something to act on — no "all signals nominal" digests.
 
 
-def _build_alert_response(severity: Severity, headline: str, body: str) -> tuple[str, list]:
+def _build_alert_response(severity: Severity, headline: str, body: str, alert_name: str = "") -> tuple[str, list]:
     """Shared boilerplate for all monitor alert formatters.
 
     Builds a Card, calls wrap_response on MONITOR_ALARM with the ALERT pattern,
@@ -676,10 +729,14 @@ def _build_alert_response(severity: Severity, headline: str, body: str) -> tuple
     headline/body construction stays in each formatter.
     """
     card = Card(severity=severity, headline=headline, body=body)
+    if alert_name:
+        card.actions = [
+            ("✓ Acknowledge", "scout_acknowledge", alert_name, "primary"),
+            ("Snooze ▾", "scout_snooze_open", alert_name, ""),
+        ]
     _, blocks = wrap_response(
         card=card,
         surface=Surface.MONITOR_ALARM,
-        feedback="none",
         pattern=ResponsePattern.ALERT,
     )
     return f"🟠 {headline}", blocks
@@ -692,7 +749,7 @@ def _build_alert_body(items: list[str], action_footer: str = "") -> str:
     return body or action_footer
 
 
-def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_cap_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for advertisers nearing monthly cap.
 
     Each item shows: pct of cap, MTD revenue / cap, dollar headroom at risk,
@@ -720,10 +777,10 @@ def _format_cap_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Cap alert — advertisers approaching monthly budget"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Contact advertiser or lower bid floor before cap hits"))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Contact advertiser or lower bid floor before cap hits"), alert_name=alert_name)
 
 
-def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_velocity_down_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for publishers with declining revenue velocity.
 
     Frames the drop in monthly-run-rate terms (what the publisher is on pace to miss)
@@ -754,10 +811,10 @@ def _format_velocity_down_alert(rows: list) -> tuple[str, list[dict]]:
         items.append(line)
 
     headline = "Revenue velocity — publishers tracking down"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Check publisher fill rate and CPM floor"))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Check publisher fill rate and CPM floor"), alert_name=alert_name)
 
 
-def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_ghost_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for campaigns with impressions but no revenue.
 
     Shows traffic volume in recency-first order (48h impressions first) so the reader
@@ -776,10 +833,10 @@ def _format_ghost_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Ghost campaigns — impressions without revenue"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Check tracking pixel / confirm creative is live"))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Check tracking pixel / confirm creative is live"), alert_name=alert_name)
 
 
-def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_fill_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for publishers with low fill rate.
 
     Anchors the fill rate against the 15% threshold so the gap is visible,
@@ -800,10 +857,10 @@ def _format_fill_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Low fill rate — publishers with significant unfilled sessions"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Review floor price or supply source health"))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items, "→ Review floor price or supply source health"), alert_name=alert_name)
 
 
-def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_cvr_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for publisher-campaign CVR drops."""
     items = []
     for r in rows[:6]:
@@ -820,10 +877,10 @@ def _format_cvr_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "CVR anomalies — significant conversion rate drops since yesterday"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items), alert_name=alert_name)
 
 
-def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
+def _format_expiration_alert(rows: list, alert_name: str = "") -> tuple[str, list[dict]]:
     """Return (fallback, blocks) Block Kit alert for campaigns expiring soon."""
     items = []
     for r in rows[:8]:
@@ -839,7 +896,7 @@ def _format_expiration_alert(rows: list) -> tuple[str, list[dict]]:
         )
 
     headline = "Expiring campaigns — active campaigns ending within the alert window"
-    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items))
+    return _build_alert_response(Severity.WARN, headline, _build_alert_body(items), alert_name=alert_name)
 
 
 def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
@@ -1064,7 +1121,7 @@ def _launch_watchdog(web: WebClient) -> None:
             time.sleep(3600)
 
 
-def _one_shot_monitor(web, channel: str, signal_fn, format_fn, thread_ts: str = "") -> None:
+def _one_shot_monitor(web, channel: str, signal_fn, format_fn, thread_ts: str = "", alert_name: str = "") -> None:
     """Run a monitor signal query once and post the result in-thread immediately.
     Used by the force-trigger admin commands (@Scout force cap/velocity/ghost/fill).
     """
@@ -1075,11 +1132,15 @@ def _one_shot_monitor(web, channel: str, signal_fn, format_fn, thread_ts: str = 
     if not rows:
         web.chat_postMessage(channel=channel, thread_ts=_ts, text="No active signal — nothing to report right now.")
         return
-    fallback, blocks = format_fn(rows)
+    fallback, blocks = format_fn(rows, alert_name=alert_name)
     if not fallback:
         web.chat_postMessage(channel=channel, thread_ts=_ts, text="No active signal — nothing to report right now.")
         return
-    web.chat_postMessage(channel=channel, thread_ts=_ts, text=fallback, blocks=blocks)
+    resp = web.chat_postMessage(channel=channel, thread_ts=_ts, text=fallback, blocks=blocks)
+    if alert_name and resp and resp.get("ok"):
+        from datetime import datetime, timezone
+        import alert_registry
+        alert_registry.set_post_state(alert_name, resp["ts"], channel, datetime.now(timezone.utc).isoformat())
 
 
 def _run_revenue_check_once(web, channel: str, thread_ts: str = "") -> None:
@@ -1099,8 +1160,12 @@ def _run_revenue_check_once(web, channel: str, thread_ts: str = "") -> None:
         publishers = _query_intraday_revenue_by_publisher(ch, total)
     except Exception:
         publishers = []
-    fallback, blocks = _format_revenue_alert(total, publishers)
-    web.chat_postMessage(channel=channel, thread_ts=_ts, text=fallback, blocks=blocks)
+    fallback, blocks = _format_revenue_alert(total, publishers, alert_name="revenue_tracker")
+    resp = web.chat_postMessage(channel=channel, thread_ts=_ts, text=fallback, blocks=blocks)
+    if resp and resp.get("ok"):
+        from datetime import datetime, timezone
+        import alert_registry
+        alert_registry.set_post_state("revenue_tracker", resp["ts"], channel, datetime.now(timezone.utc).isoformat())
 
 
 
@@ -1497,7 +1562,7 @@ def _check_singleton() -> None:
     import atexit, sys
 
     # Render sets RENDER=true automatically; trust the platform for single-instance.
-    if os.getenv("RENDER"):
+    if _BOT_CFG.is_render:
         log.info("[main] Running on Render — skipping singleton PID check")
         _PID_FILE.write_text(str(os.getpid()))
         atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
@@ -1522,9 +1587,8 @@ def _check_singleton() -> None:
 
 def _seed_entity_overrides() -> None:
     """Ensure Button fill-rate exclusion exists in data/entity_overrides.json on first deploy."""
-    from scout_agent import _load_entity_overrides, _save_entity_overrides
     import datetime as _dt
-    overrides = _load_entity_overrides()
+    overrides = _tm.entity_overrides()
     pubs = overrides.setdefault("publishers", {})
     if "Button" not in pubs:
         pubs["Button"] = {
@@ -1537,7 +1601,7 @@ def _seed_entity_overrides() -> None:
             "added": _dt.date.today().isoformat(),
             "added_by": "seed",
         }
-        _save_entity_overrides(overrides)
+        _tm.save_entity_overrides(overrides)
         log.info("[startup] seeded Button exclusion into data/entity_overrides.json")
 
 
@@ -1618,9 +1682,9 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         # has at least 100 non-null rows. Catches the categories-NULL class of
         # silent failure that bit us when Scout was reading a column with no data.
         try:
-            from scout_agent import _validate_schema_deps, _get_ch_client as _gcc
+            from scout_agent import _get_ch_client as _gcc
             ch = _gcc()
-            schema_result = _validate_schema_deps(ch)
+            schema_result = _tm.validate_schema_deps(ch)
             if schema_result["ok"]:
                 log.info(
                     f"[smoke] schema deps OK — {schema_result['checked']} columns validated"
@@ -1652,9 +1716,8 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         # not loaded" → the LLM recommended `@Scout refresh offers` → user had
         # to run a 2-minute scrape to fix a 2-second cache warmup. Stop that.
         try:
-            from scout_agent import _get_benchmarks
             t0 = time.time()
-            bm = _get_benchmarks()
+            bm = _tm.benchmarks()
             n_cats = len(bm.get("by_category", {})) if bm else 0
             n_advs = len(bm.get("by_adv_name", {})) if bm else 0
             log.info(
@@ -1815,16 +1878,19 @@ def _compute_health_status() -> dict:
         checks["daemon_threads"] = {"ok": True, "detail": f"{len(required)} threads alive"}
 
     # 3. NOTION_QUEUE_DB_ID — required for correct Pipeline links in Slack messages
-    queue_db_id = os.getenv("NOTION_QUEUE_DB_ID", "")
+    queue_db_id = _BOT_CFG.notion_queue_db_id
     if not queue_db_id:
         checks["notion_queue_url"] = {"ok": False, "detail": "NOTION_QUEUE_DB_ID not set — Pipeline links point to generic Notion homepage"}
     else:
         checks["notion_queue_url"] = {"ok": True, "detail": f"Pipeline DB configured ({queue_db_id[:8]}...)"}
 
     # 4. Environment
-    for env_var in ("ANTHROPIC_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"):
-        val = os.getenv(env_var, "")
-        checks[env_var] = {"ok": bool(val), "detail": "set" if val else "missing"}
+    for key, val in (
+        ("ANTHROPIC_API_KEY", _BOT_CFG.anthropic_api_key),
+        ("SLACK_BOT_TOKEN", _BOT_CFG.bot_token),
+        ("SLACK_APP_TOKEN", _BOT_CFG.app_token),
+    ):
+        checks[key] = {"ok": bool(val), "detail": "set" if val else "missing"}
 
     all_ok = all(v["ok"] for v in checks.values())
     return {"ok": all_ok, "checks": checks}
@@ -1882,12 +1948,11 @@ def _benchmarks_warmer() -> None:
     actual ClickHouse outage scenarios (which the heartbeat already alerts on).
     """
     import time as _time
-    from scout_agent import _get_benchmarks
     _time.sleep(60)  # let boot-time warm finish first
     while True:
         try:
             t0 = _time.time()
-            bm = _get_benchmarks()
+            bm = _tm.benchmarks()
             n_cats = len(bm.get("by_category", {})) if bm else 0
             log.debug(
                 f"[benchmarks-warmer] refreshed in {_time.time()-t0:.1f}s — {n_cats} categories"
@@ -1948,7 +2013,7 @@ def _on_startup(web: WebClient) -> None:
     Does NOT auto-clear maintenance — clearing is done only via /scout-maintenance off."""
     from scout_state import get_maintenance
     m = get_maintenance()
-    sidd_qa = os.getenv("SIDD_QA_CHANNEL_ID", "")
+    sidd_qa = _BOT_CFG.sidd_qa_channel_id
     if not sidd_qa:
         return
     msg = ":white_check_mark: Scout is back online."
@@ -1965,28 +2030,28 @@ def main():
     global _BOT_USER_ID
     _check_singleton()
     _seed_entity_overrides()  # ensure Button exclusion survives fresh Render deploys
-    if not BOT_TOKEN or not APP_TOKEN:
+    if not _BOT_CFG.bot_token or not _BOT_CFG.app_token:
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env")
 
-    web_client    = WebClient(token=BOT_TOKEN, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
+    web_client    = WebClient(token=_BOT_CFG.bot_token, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
     from scout_slack_safe import guard_web_client
     guard_web_client(web_client)
     _BOT_USER_ID  = web_client.auth_test()["user_id"]
     # Inject shared state into scout_handlers (avoids circular import — handlers don't import scout_bot)
     _set_bot_user_id(_BOT_USER_ID)
     _set_thread_state(_LAST_THREAD_PER_CHANNEL, _LAST_THREAD_LOCK)
-    _set_force_monitor_fn("cap",        lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_cap, _format_cap_alert, thread_ts=t))
-    _set_force_monitor_fn("velocity",   lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_velocity, _format_velocity_down_alert, thread_ts=t))
-    _set_force_monitor_fn("ghost",      lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_ghost, _format_ghost_alert, thread_ts=t))
-    _set_force_monitor_fn("fill",       lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_fill_rate, _format_fill_alert, thread_ts=t))
-    _set_force_monitor_fn("cvr",        lambda web, ch, t="": _one_shot_monitor(web, ch, _query_cvr_anomaly, _format_cvr_alert, thread_ts=t))
-    _set_force_monitor_fn("expiration", lambda web, ch, t="": _one_shot_monitor(web, ch, _query_expiring_campaigns, _format_expiration_alert, thread_ts=t))
+    _set_force_monitor_fn("cap",        lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_cap, _format_cap_alert, thread_ts=t, alert_name="cap-monitor"))
+    _set_force_monitor_fn("velocity",   lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_velocity, _format_velocity_down_alert, thread_ts=t, alert_name="velocity-down-monitor"))
+    _set_force_monitor_fn("ghost",      lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_ghost, _format_ghost_alert, thread_ts=t, alert_name="ghost-monitor"))
+    _set_force_monitor_fn("fill",       lambda web, ch, t="": _one_shot_monitor(web, ch, _pulse_signal_fill_rate, _format_fill_alert, thread_ts=t, alert_name="fill-monitor"))
+    _set_force_monitor_fn("cvr",        lambda web, ch, t="": _one_shot_monitor(web, ch, _query_cvr_anomaly, _format_cvr_alert, thread_ts=t, alert_name="cvr-anomaly-monitor"))
+    _set_force_monitor_fn("expiration", lambda web, ch, t="": _one_shot_monitor(web, ch, _query_expiring_campaigns, _format_expiration_alert, thread_ts=t, alert_name="expiration-monitor"))
     _set_force_monitor_fn("revenue",    lambda web, ch, t="": _run_revenue_check_once(web, ch, t))
     # PR-B: inject web + CH factory so the force_run_monitor agent tool can call
     # the same monitor lambdas registered above.
     from scout_agent import _set_force_monitor_ctx as _set_fmc, _get_ch_client as _ch_factory
     _set_fmc(web_client, _ch_factory)
-    socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
+    socket_client = SocketModeClient(app_token=_BOT_CFG.app_token, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
 
     # PR 16b: required daemons go through _start_daemon() — auto-registered in
@@ -2013,7 +2078,7 @@ def main():
     threading.Thread(target=_thread_watchdog, args=(web_client,), daemon=True, name="thread-watchdog").start()
 
     # Health check HTTP server — Render pings /health every 30s to verify Scout is alive
-    _start_health_server(port=int(os.getenv("PORT", "10000")))
+    _start_health_server(port=_BOT_CFG.port)
 
     log.info("Scout is online — listening for @mentions via Socket Mode")
     socket_client.connect()

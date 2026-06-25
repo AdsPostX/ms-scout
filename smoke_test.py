@@ -65,8 +65,8 @@ def test(name: str):
 @test("Entity overrides — file readable")
 def test_entity_overrides():
     try:
-        from scout_agent import _load_entity_overrides
-        overrides = _load_entity_overrides()
+        from scout_thresholds import _manager as _tm_sa
+        overrides = _tm_sa.entity_overrides()
         pubs = overrides.get("publishers", {})
         advs = overrides.get("advertisers", {})
         button_ok = "Button" in pubs
@@ -588,13 +588,11 @@ def test_dedup_count_in_meta():
 @test("scout_thresholds_json_loads_and_populates_SCOUT_THRESHOLDS")
 def test_scout_thresholds_loaded():
     try:
-        import scout_agent
-        if not hasattr(scout_agent, "SCOUT_THRESHOLDS"):
-            return False, "SCOUT_THRESHOLDS missing"
-        # Check _BASE_THRESHOLDS (JSON file only, no runtime overrides) — SCOUT_THRESHOLDS
-        # includes any live set_threshold overrides from data/threshold_overrides.json, so
+        import scout_thresholds as _st
+        # Check _BASE_THRESHOLDS (JSON file only, no runtime overrides) — active thresholds
+        # include any live set_threshold overrides from data/threshold_overrides.json, so
         # asserting a hardcoded value there would break whenever an admin adjusts a threshold.
-        cfg = scout_agent._BASE_THRESHOLDS
+        cfg = _st._manager._load_base()
         for section in ("digest", "signals", "health"):
             if section not in cfg:
                 return False, f"section missing: {section}"
@@ -603,7 +601,7 @@ def test_scout_thresholds_loaded():
         if cfg["signals"]["fill_rate_min_sessions_7d"] != 2500:
             return False, f"signals.fill_rate_min_sessions_7d expected 2500, got {cfg['signals']['fill_rate_min_sessions_7d']}"
         # Confirm fallback path works
-        fallback = scout_agent._SCOUT_THRESHOLDS_FALLBACK
+        fallback = _st._SCOUT_THRESHOLDS_FALLBACK
         if "digest" not in fallback or "signals" not in fallback or "health" not in fallback:
             return False, "_SCOUT_THRESHOLDS_FALLBACK missing required sections"
         return True, f"loaded {len(cfg)} sections; min_rpm_floor={cfg['digest']['min_rpm_floor']}"
@@ -696,21 +694,23 @@ def test_score_offer_reads_config_floor():
         except Exception:
             pass
 
-        original = scout_agent.SCOUT_THRESHOLDS
+        import scout_thresholds as _st
+        original = _st._manager._thresholds_cache
         try:
+            base = _st._manager.load()
             # Floor = $5 → 25.0 RPM passes (returns a score)
-            scout_agent.SCOUT_THRESHOLDS = {**original, "digest": {**original["digest"], "min_rpm_floor": 5}}
+            _st._manager._thresholds_cache = {**base, "digest": {**base["digest"], "min_rpm_floor": 5}}
             low_floor = scout_digest.score_offer(offer, {}, {"approved": {}, "rejected": {}}, {}, force=True)
             if low_floor is None:
                 return False, f"floor=$5 should let 25.0 RPM through, got None"
 
             # Floor = $50 → 25.0 RPM filtered (returns None)
-            scout_agent.SCOUT_THRESHOLDS = {**original, "digest": {**original["digest"], "min_rpm_floor": 50}}
+            _st._manager._thresholds_cache = {**base, "digest": {**base["digest"], "min_rpm_floor": 50}}
             high_floor = scout_digest.score_offer(offer, {}, {"approved": {}, "rejected": {}}, {}, force=True)
             if high_floor is not None:
                 return False, f"floor=$50 should reject 25.0 RPM, got {high_floor}"
         finally:
-            scout_agent.SCOUT_THRESHOLDS = original
+            _st._manager._thresholds_cache = original
             if orig_scout_score is not None:
                 scout_agent._scout_score = orig_scout_score
 
@@ -769,7 +769,8 @@ def test_supported_networks_trimmed():
 @test("_extract_real_categories filters internal-* prefix tags (case-insensitive)")
 def test_extract_categories_filters_internal():
     try:
-        from scout_agent import _extract_real_categories
+        from scout_thresholds import _manager as _tm_sa
+        _extract_real_categories = _tm_sa.extract_real_categories
         # JSON string input — production case
         result = _extract_real_categories(
             '["internal-network-impact","internal-email","rewards","technology"]'
@@ -790,7 +791,8 @@ def test_extract_categories_filters_internal():
 @test("_extract_real_categories handles missing/empty/null/invalid inputs")
 def test_extract_categories_edge_cases():
     try:
-        from scout_agent import _extract_real_categories
+        from scout_thresholds import _manager as _tm_sa
+        _extract_real_categories = _tm_sa.extract_real_categories
         cases = [
             (None,             [],  "None"),
             ("",               [],  "empty string"),
@@ -814,7 +816,8 @@ def test_extract_categories_edge_cases():
 @test("_extract_real_categories preserves tag order")
 def test_extract_categories_preserves_order():
     try:
-        from scout_agent import _extract_real_categories
+        from scout_thresholds import _manager as _tm_sa
+        _extract_real_categories = _tm_sa.extract_real_categories
         result = _extract_real_categories(
             '["technology","internal-x","rewards","pets","internal-y","financial"]'
         )
@@ -830,7 +833,9 @@ def test_extract_categories_preserves_order():
 @test("_validate_schema_deps detects missing column")
 def test_schema_deps_missing_column():
     try:
-        from scout_agent import _validate_schema_deps, _SCHEMA_DEPS
+        from scout_thresholds import _SCHEMA_DEPS
+        from scout_thresholds import _manager as _tm_st
+        _validate_schema_deps = _tm_st.validate_schema_deps
         # Mock CH client: returns columns matching all _SCHEMA_DEPS EXCEPT one
         # (simulate a column that was renamed/dropped upstream)
         target = ("from_airbyte_campaigns", "tags", True)
@@ -861,7 +866,9 @@ def test_schema_deps_missing_column():
 @test("_validate_schema_deps detects empty must-have-data column")
 def test_schema_deps_empty_column():
     try:
-        from scout_agent import _validate_schema_deps, _SCHEMA_DEPS, _SCHEMA_DEPS_MIN_ROWS
+        from scout_thresholds import _SCHEMA_DEPS, _SCHEMA_DEPS_MIN_ROWS
+        from scout_thresholds import _manager as _tm_st
+        _validate_schema_deps = _tm_st.validate_schema_deps
 
         class _FakeRows:
             def __init__(self, rows): self.result_rows = rows
@@ -904,7 +911,8 @@ def test_status_self_heals_benchmarks():
     """
     try:
         import pathlib
-        src = (pathlib.Path(__file__).parent / "scout_agent.py").read_text()
+        # Phase 13-02: get_scout_status moved to scout_tools_admin.py
+        src = (pathlib.Path(__file__).parent / "scout_tools_admin.py").read_text()
         # Find get_scout_status function body
         if "def get_scout_status" not in src:
             return False, "get_scout_status function missing"
@@ -955,8 +963,8 @@ def test_signal_thresholds_from_config():
     """
     try:
         import scout_bot
-        import scout_agent
-        sig = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+        import scout_thresholds as _st
+        sig = _st._manager.load().get("signals", {})
         checks = [
             ("_FILL_RATE_MIN_SESSIONS_7D",   scout_bot._FILL_RATE_MIN_SESSIONS_7D,   int(sig.get("fill_rate_min_sessions_7d", 5000))),
             ("_GHOST_RECENCY_HOURS",          scout_bot._GHOST_RECENCY_HOURS,          int(sig.get("ghost_recency_hours", 48))),
@@ -1001,6 +1009,7 @@ def test_ghost_recency_propagation():
     """
     try:
         import scout_agent
+        import scout_thresholds as _st
         import queries as _queries
         calls = []
         original = _queries.ghost_campaigns
@@ -1008,15 +1017,20 @@ def test_ghost_recency_propagation():
             calls.append(recency_hours)
             return []
         _queries.ghost_campaigns = _spy
+        orig_cache = _st._manager._thresholds_cache
         try:
-            original_val = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("ghost_recency_hours", 48)
+            base = _st._manager.load()
+            original_val = base.get("signals", {}).get("ghost_recency_hours", 48)
             scout_agent._query_ghost_campaigns(None)
             if not calls:
                 return False, "queries.ghost_campaigns was never called"
             if calls[0] != original_val:
                 return False, f"called with recency_hours={calls[0]}, expected {original_val}"
             # Monkey-patch config and verify propagation
-            scout_agent.SCOUT_THRESHOLDS.setdefault("signals", {})["ghost_recency_hours"] = 72
+            import copy
+            patched = copy.deepcopy(base)
+            patched.setdefault("signals", {})["ghost_recency_hours"] = 72
+            _st._manager._thresholds_cache = patched
             calls.clear()
             scout_agent._query_ghost_campaigns(None)
             if not calls or calls[0] != 72:
@@ -1024,7 +1038,7 @@ def test_ghost_recency_propagation():
             return True, f"config value propagated correctly (default={original_val}, patched=72)"
         finally:
             _queries.ghost_campaigns = original
-            scout_agent.SCOUT_THRESHOLDS.setdefault("signals", {})["ghost_recency_hours"] = original_val
+            _st._manager._thresholds_cache = orig_cache
     except Exception as e:
         return False, str(e)
 
@@ -1056,8 +1070,8 @@ def test_revenue_tracker_daemon_function_exists():
     # REVENUE_TRACKER_ENABLED=false and never ran in production).  The
     # threshold config keys must still be present because the force-run path
     # (@Scout force revenue) reads them at call time.
-    import scout_agent
-    thresholds = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+    import scout_thresholds as _st
+    thresholds = _st._manager.load().get("signals", {})
     if "revenue_tracker_check_hour_ct" not in thresholds:
         return False, "revenue_tracker_check_hour_ct missing from signals config"
     if "revenue_tracker_publisher_min_delta" not in thresholds:
@@ -1095,24 +1109,20 @@ def test_projection_autocheck_monitor_registered():
         if not hasattr(scout_state, fn) or not callable(getattr(scout_state, fn)):
             return False, f"{fn} missing/not callable on scout_state"
 
-    # Assert production-mapping directly so the dev-env fallback can't mask a
-    # missing / wrong "qa" entry. Patch _SCOUT_ENV to "production" for the call.
-    if scout_bot._PRODUCTION_CHANNELS.get("qa") != scout_bot._SCOUT_HQ_CHANNEL:
-        return False, (
-            f"_PRODUCTION_CHANNELS['qa']={scout_bot._PRODUCTION_CHANNELS.get('qa')!r}, "
-            f"expected {scout_bot._SCOUT_HQ_CHANNEL!r}"
-        )
-    _saved_env = scout_bot._SCOUT_ENV
+    # Assert production routing so the dev-env fallback can't mask a missing/wrong "qa" entry.
+    # Temporarily replace _BOT_CFG with a production-env instance (frozen dataclass — replace() is safe).
+    import dataclasses as _dc
+    _saved_cfg = scout_bot._BOT_CFG
     try:
-        scout_bot._SCOUT_ENV = "production"
+        scout_bot._BOT_CFG = _dc.replace(scout_bot._BOT_CFG, scout_env="production")
         routed = scout_bot._route_channel("qa")
     finally:
-        scout_bot._SCOUT_ENV = _saved_env
+        scout_bot._BOT_CFG = _saved_cfg
     if routed != scout_bot._SCOUT_HQ_CHANNEL:
-        return False, f"_route_channel('qa') under SCOUT_ENV=production returned {routed!r}, expected _SCOUT_HQ_CHANNEL"
+        return False, f"_route_channel('qa') under scout_env='production' returned {routed!r}, expected _SCOUT_HQ_CHANNEL"
 
-    import scout_agent
-    sig = scout_agent.SCOUT_THRESHOLDS.get("signals", {})
+    import scout_thresholds as _st
+    sig = _st._manager.load().get("signals", {})
     required_keys = [
         "projection_autocheck_monitor_enabled",
         "projection_autocheck_window_start_ct",
@@ -2325,15 +2335,17 @@ def test_cvr_anomaly_wrapper_uses_config_thresholds():
         captured["min_impressions_7d"] = min_impressions_7d
         return []
 
-    original_thresholds = scout_agent.SCOUT_THRESHOLDS
+    import scout_thresholds as _st
+    original_cache = _st._manager._thresholds_cache
     original_q = scout_ch._q
     try:
         import types
         fake_q = types.SimpleNamespace(cvr_anomaly=_fake_cvr_anomaly)
         scout_ch._q = fake_q
-        scout_agent.SCOUT_THRESHOLDS = {
-            **original_thresholds,
-            "signals": {**original_thresholds.get("signals", {}),
+        base = _st._manager.load()
+        _st._manager._thresholds_cache = {
+            **base,
+            "signals": {**base.get("signals", {}),
                         "cvr_anomaly_drop_pct": 99.0,
                         "cvr_anomaly_min_payout": 999.0,
                         "cvr_anomaly_min_impressions_7d": 12345},
@@ -2346,7 +2358,7 @@ def test_cvr_anomaly_wrapper_uses_config_thresholds():
         if captured.get("min_impressions_7d") != 12345:
             return False, f"min_impressions_7d not read from config: got {captured.get('min_impressions_7d')}"
     finally:
-        scout_agent.SCOUT_THRESHOLDS = original_thresholds
+        _st._manager._thresholds_cache = original_cache
         scout_ch._q = original_q
     return True, "cvr_anomaly wrapper passes config thresholds through to query ✓"
 
@@ -2362,21 +2374,23 @@ def test_expiration_wrapper_uses_config_thresholds():
         captured["warning_days"] = warning_days
         return []
 
-    original_thresholds = scout_agent.SCOUT_THRESHOLDS
+    import scout_thresholds as _st
+    original_cache = _st._manager._thresholds_cache
     original_q = scout_ch._q
     try:
         import types
         fake_q = types.SimpleNamespace(expiring_campaigns=_fake_expiring)
         scout_ch._q = fake_q
-        scout_agent.SCOUT_THRESHOLDS = {
-            **original_thresholds,
-            "signals": {**original_thresholds.get("signals", {}), "expiration_warning_days": 42},
+        base = _st._manager.load()
+        _st._manager._thresholds_cache = {
+            **base,
+            "signals": {**base.get("signals", {}), "expiration_warning_days": 42},
         }
         scout_ch._query_expiring_campaigns(None)
         if captured.get("warning_days") != 42:
             return False, f"warning_days not read from config: got {captured.get('warning_days')}"
     finally:
-        scout_agent.SCOUT_THRESHOLDS = original_thresholds
+        _st._manager._thresholds_cache = original_cache
         scout_ch._q = original_q
     return True, "expiration wrapper passes config warning_days through to query ✓"
 
@@ -2396,7 +2410,8 @@ def test_revenue_trend_wrappers_use_config_thresholds():
         captured["adv_min_periods"] = min_periods
         return []
 
-    original_thresholds = scout_agent.SCOUT_THRESHOLDS
+    import scout_thresholds as _st
+    original_cache = _st._manager._thresholds_cache
     original_q = scout_ch._q
     try:
         import types
@@ -2405,9 +2420,10 @@ def test_revenue_trend_wrappers_use_config_thresholds():
             advertiser_revenue_trends=_fake_adv_trends,
         )
         scout_ch._q = fake_q
-        scout_agent.SCOUT_THRESHOLDS = {
-            **original_thresholds,
-            "signals": {**original_thresholds.get("signals", {}), "revenue_trend_min_periods": 99},
+        base = _st._manager.load()
+        _st._manager._thresholds_cache = {
+            **base,
+            "signals": {**base.get("signals", {}), "revenue_trend_min_periods": 99},
         }
         scout_ch._query_publisher_revenue_trends(None)
         scout_ch._query_advertiser_revenue_trends(None)
@@ -2416,7 +2432,7 @@ def test_revenue_trend_wrappers_use_config_thresholds():
         if captured.get("adv_min_periods") != 99:
             return False, f"advertiser wrapper min_periods not from config: {captured.get('adv_min_periods')}"
     finally:
-        scout_agent.SCOUT_THRESHOLDS = original_thresholds
+        _st._manager._thresholds_cache = original_cache
         scout_ch._q = original_q
     return True, "both revenue trend wrappers pass config min_periods through to query ✓"
 
@@ -2426,10 +2442,11 @@ def test_threshold_override_layers():
     """A runtime override should win over config/scout_thresholds.json.
 
     Exercises the full three-layer merge: fallback → config → overrides.
-    set_threshold() must reload module-level SCOUT_THRESHOLDS so subsequent
+    set_threshold() must invalidate the ThresholdManager cache so subsequent
     reads see the new value without a restart.
     """
     import scout_agent, scout_state
+    import scout_thresholds as _st
 
     overrides_path = scout_state._THRESHOLD_OVERRIDES_FILE
     changelog_path = scout_state._THRESHOLD_CHANGELOG_FILE
@@ -2437,12 +2454,12 @@ def test_threshold_override_layers():
     backup_c = changelog_path.read_bytes() if changelog_path.exists() else None
 
     try:
-        # Clean slate
+        # Clean slate — clear files and invalidate cache so load() re-reads from disk
         if overrides_path.exists(): overrides_path.unlink()
         if changelog_path.exists(): changelog_path.unlink()
-        scout_agent.SCOUT_THRESHOLDS = scout_agent._load_thresholds()
+        _st._manager._thresholds_cache = None
 
-        baseline = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        baseline = _st._manager.load().get("signals", {}).get("cap_alert_pct")
         if baseline is None:
             return False, "Expected signals.cap_alert_pct in config — got None"
 
@@ -2461,7 +2478,7 @@ def test_threshold_override_layers():
         if not result.get("ok"):
             return False, f"set_threshold failed: {result}"
 
-        live = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        live = _st._manager.load().get("signals", {}).get("cap_alert_pct")
         if live != target:
             return False, f"In-process reload failed: expected {target}, got {live}"
 
@@ -2472,31 +2489,32 @@ def test_threshold_override_layers():
         if backup_c is not None: changelog_path.write_bytes(backup_c)
         elif changelog_path.exists(): changelog_path.unlink()
         try:
-            import scout_agent as _sa
-            _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
+            import scout_thresholds as _st2
+            _st2._manager._thresholds_cache = None
         except Exception as e:
-            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
+            print(f"Warning: failed to restore ThresholdManager cache: {e}")
 
 
 @test("set_threshold_denies_non_admin_callers")
 def test_set_threshold_admin_gate():
-    """Non-admin callers must be rejected; SCOUT_THRESHOLDS must not change."""
+    """Non-admin callers must be rejected; thresholds must not change."""
     import scout_agent
+    import scout_thresholds as _st
 
     admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
     os.environ["SCOUT_THRESHOLD_ADMINS"] = "UADMIN_ONLY"
     try:
-        before = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        before = _st._manager.load().get("signals", {}).get("cap_alert_pct")
         result = scout_agent.set_threshold(
             section="signals", key="cap_alert_pct", value=999,
             reason="should be denied", _caller_user_id="UNOBODY",
         )
         if result.get("ok") or result.get("error") != "not_admin":
             return False, f"Expected denial (ok=False, error=not_admin), got {result}"
-        after = scout_agent.SCOUT_THRESHOLDS.get("signals", {}).get("cap_alert_pct")
+        after = _st._manager.load().get("signals", {}).get("cap_alert_pct")
         if before != after:
             return False, f"Denied call still mutated value: {before} → {after}"
-        return True, "Non-admin caller denied; SCOUT_THRESHOLDS unchanged ✓"
+        return True, "Non-admin caller denied; thresholds unchanged ✓"
     finally:
         if admins: os.environ["SCOUT_THRESHOLD_ADMINS"] = admins
         else: os.environ.pop("SCOUT_THRESHOLD_ADMINS", None)
@@ -2506,6 +2524,7 @@ def test_set_threshold_admin_gate():
 def test_set_threshold_writes_changelog():
     """Every successful set_threshold must append a JSONL line with actor + prior + new + reason."""
     import scout_agent, scout_state
+    import scout_thresholds as _st
 
     overrides_path = scout_state._THRESHOLD_OVERRIDES_FILE
     changelog_path = scout_state._THRESHOLD_CHANGELOG_FILE
@@ -2515,7 +2534,7 @@ def test_set_threshold_writes_changelog():
     try:
         if overrides_path.exists(): overrides_path.unlink()
         if changelog_path.exists(): changelog_path.unlink()
-        scout_agent.SCOUT_THRESHOLDS = scout_agent._load_thresholds()
+        _st._manager._thresholds_cache = None  # force reload from clean files
 
         admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
         os.environ["SCOUT_THRESHOLD_ADMINS"] = "UCHANGELOG"
@@ -2549,10 +2568,10 @@ def test_set_threshold_writes_changelog():
         if backup_c is not None: changelog_path.write_bytes(backup_c)
         elif changelog_path.exists(): changelog_path.unlink()
         try:
-            import scout_agent as _sa
-            _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
+            import scout_thresholds as _st2
+            _st2._manager._thresholds_cache = None
         except Exception as e:
-            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
+            print(f"Warning: failed to reset ThresholdManager cache: {e}")
 
 
 @test("force_run_monitor_returns_not_initialized_when_context_missing")
@@ -2613,6 +2632,7 @@ def test_threshold_tools_registered():
 def test_get_scout_config_shows_overrides():
     """get_scout_config must surface override metadata so the team can see active overrides."""
     import scout_agent, scout_state
+    import scout_thresholds as _st
 
     overrides_path = scout_state._THRESHOLD_OVERRIDES_FILE
     changelog_path = scout_state._THRESHOLD_CHANGELOG_FILE
@@ -2621,7 +2641,7 @@ def test_get_scout_config_shows_overrides():
     try:
         if overrides_path.exists(): overrides_path.unlink()
         if changelog_path.exists(): changelog_path.unlink()
-        scout_agent.SCOUT_THRESHOLDS = scout_agent._load_thresholds()
+        _st._manager._thresholds_cache = None  # force reload from clean files
 
         admins = os.environ.get("SCOUT_THRESHOLD_ADMINS", "")
         os.environ["SCOUT_THRESHOLD_ADMINS"] = "UCFG"
@@ -2648,10 +2668,10 @@ def test_get_scout_config_shows_overrides():
         if backup_c is not None: changelog_path.write_bytes(backup_c)
         elif changelog_path.exists(): changelog_path.unlink()
         try:
-            import scout_agent as _sa
-            _sa.SCOUT_THRESHOLDS = _sa._load_thresholds()
+            import scout_thresholds as _st2
+            _st2._manager._thresholds_cache = None
         except Exception as e:
-            print(f"Warning: failed to restore SCOUT_THRESHOLDS: {e}")
+            print(f"Warning: failed to reset ThresholdManager cache: {e}")
 
 
 @test("cvr_expiration_revenue_force_commands_registered_in_main")
@@ -3943,6 +3963,759 @@ def test_slash_mention_format_parity():
         if field not in mention_text:
             return False, f"Missing expected field {field!r} in formatted output"
     return True, "Formatter is deterministic and contains expected fields"
+
+
+@test("Agent blocks — AgentStep dataclass validates status")
+def test_agent_step_dataclass():
+    """AgentStep dataclass instantiates correctly and rejects invalid status values."""
+    import os
+    os.environ.setdefault("SCOUT_AGENT_BLOCKS", "1")
+    from scout_ui_kit import AgentStep
+    s = AgentStep(label="Cap check", status="pass", finding="87% of cap")
+    if s.label != "Cap check":
+        return False, "label mismatch"
+    if s.status != "pass":
+        return False, "status mismatch"
+    try:
+        AgentStep(label="x", status="invalid", finding="y")  # type: ignore[arg-type]
+        return False, "Expected TypeError for invalid status"
+    except TypeError:
+        pass
+    return True, "AgentStep dataclass validates status values"
+
+
+@test("Agent blocks — _agent_plan_block renders native plan block")
+def test_agent_plan_block_renders():
+    """_agent_plan_block returns a native plan block with correct task structure and status mapping."""
+    import os
+    os.environ.setdefault("SCOUT_AGENT_BLOCKS", "1")
+    from scout_ui_kit import AgentStep, _agent_plan_block
+    steps = [
+        AgentStep(label="Revenue check", status="pass", finding="$12K MTD"),
+        AgentStep(label="Cap signal", status="warn", finding="88% of cap"),
+        AgentStep(label="Ghost check", status="skip", finding="no conversions"),
+    ]
+    blocks = _agent_plan_block(steps)
+    if not blocks:
+        return False, "_agent_plan_block returned empty list"
+    b = blocks[0]
+    if b.get("type") != "plan":
+        return False, f"Expected plan block, got {b.get('type')!r}"
+    if b.get("plan_id") != "scout_reasoning":
+        return False, f"Expected plan_id='scout_reasoning', got {b.get('plan_id')!r}"
+    tasks = b.get("tasks", [])
+    if len(tasks) != 3:
+        return False, f"Expected 3 tasks, got {len(tasks)}"
+    if "Revenue check" not in tasks[0]["title"]:
+        return False, "Step label missing from task title"
+    if "✅" not in tasks[0]["title"]:
+        return False, "Pass emoji missing from title"
+    if tasks[0]["status"] != "complete":
+        return False, f"pass should map to complete, got {tasks[0]['status']!r}"
+    if tasks[2]["status"] != "pending":
+        return False, f"skip should map to pending, got {tasks[2]['status']!r}"
+    if tasks[0].get("details", {}).get("type") != "rich_text":
+        return False, "finding should be in rich_text details block"
+    return True, "_agent_plan_block renders native plan block with correct structure"
+
+
+
+@test("Agent blocks — _synthesize_agent_steps derives steps from tool call log")
+def test_synthesize_agent_steps():
+    """_synthesize_agent_steps derives correct step labels, statuses, and findings from a tool call log."""
+    from scout_agent import _synthesize_agent_steps, _TOOL_SKIP_SYNTHESIS
+    # Normal tool call produces a step with correct label
+    log = [("get_revenue_today", {"formatted": "$14K today, 71% of daily avg.", "pubs": []})]
+    steps = _synthesize_agent_steps(log)
+    if len(steps) != 1:
+        return False, f"Expected 1 step, got {len(steps)}"
+    step = steps[0]
+    if step["label"] != "Revenue check":
+        return False, f"Wrong label: {step['label']!r}"
+    if step["status"] != "pass":
+        return False, f"Wrong status for non-empty result: {step['status']!r}"
+    # formatted key is used as finding (first line, ≤80 chars)
+    if step["finding"] != "$14K today, 71% of daily avg.":
+        return False, f"Expected formatted finding, got {step['finding']!r}"
+    # Skipped tools produce no steps
+    skip_log = [(name, {}) for name in _TOOL_SKIP_SYNTHESIS]
+    if _synthesize_agent_steps(skip_log):
+        return False, "Skipped tools should produce no steps"
+    # Error result → fail status
+    err_log = [("get_ghost_campaigns", "Error: ClickHouse timeout")]
+    err_steps = _synthesize_agent_steps(err_log)
+    if err_steps[0]["status"] != "fail":
+        return False, f"Error result should yield fail status, got {err_steps[0]['status']!r}"
+    # Empty log → empty list (falsy, so agent_steps stays None)
+    if _synthesize_agent_steps([]):
+        return False, "Empty log should return empty list"
+    # Dict with "summary" key — must use summary, not the first (list-valued) key
+    trend_log = [("get_publisher_revenue_trends", {
+        "trends": [{"publisher_id": 2666, "publisher_name": "Pinger", "rev_30d": 9272.98}],
+        "count": 1,
+        "summary": "1 publishers with velocity anomalies: 0 down, 1 up.",
+    })]
+    trend_steps = _synthesize_agent_steps(trend_log)
+    if not trend_steps[0]["finding"].startswith("1 publishers"):
+        return False, f"Should use summary key, got: {trend_steps[0]['finding']!r}"
+    # Dict with no summary but list-valued first key — must skip list, use scalar
+    mixed_log = [("get_ghost_campaigns", {"campaigns": [1, 2, 3], "count": 3})]
+    mixed_steps = _synthesize_agent_steps(mixed_log)
+    if "campaigns" in mixed_steps[0]["finding"] and "[" in mixed_steps[0]["finding"]:
+        return False, f"List-valued key should be skipped, got: {mixed_steps[0]['finding']!r}"
+    # Dict with "finding" key — must use it directly, no heuristic sniffing
+    finding_log = [("get_campaign_status", {
+        "finding": "3 active, 1 paused.",
+        "trends": [1, 2, 3],
+        "count": 3,
+    })]
+    finding_steps = _synthesize_agent_steps(finding_log)
+    if finding_steps[0]["finding"] != "3 active, 1 paused.":
+        return False, f"Should use 'finding' key directly, got: {finding_steps[0]['finding']!r}"
+    return True, "_synthesize_agent_steps produces correct steps from tool call log"
+
+
+@test("tool_result() factory enforces non-empty finding contract")
+def test_tool_result_contract():
+    """tool_result() raises ValueError on empty/blank finding and returns a dict with finding as first key."""
+    from scout_types import tool_result
+    # Raises on empty finding
+    try:
+        tool_result("")
+        return False, "Should have raised ValueError on empty finding"
+    except ValueError:
+        pass
+    # Raises on whitespace-only finding
+    try:
+        tool_result("   ")
+        return False, "Should have raised ValueError on blank finding"
+    except ValueError:
+        pass
+    # Valid call returns dict with "finding" as first key
+    result = tool_result("3 active, 1 paused.", count=4, extra="data")
+    if list(result.keys())[0] != "finding":
+        return False, f"'finding' must be first key, got: {list(result.keys())[0]!r}"
+    if result["finding"] != "3 active, 1 paused.":
+        return False, f"Wrong finding value: {result['finding']!r}"
+    if result.get("count") != 4 or result.get("extra") != "data":
+        return False, "kwargs not forwarded correctly"
+    return True, "tool_result() enforces finding contract"
+
+
+@test("Phase 3A — _build_modal_view returns correct structure")
+def test_build_modal_view_structure():
+    """_build_modal_view returns a valid modal dict with required Slack modal keys."""
+    from scout_ui_kit import _build_modal_view
+
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "Hello"}}]
+    view = _build_modal_view(blocks, title="My Modal", callback_id="test_modal")
+    assert view["type"] == "modal", f"Expected type=modal, got {view['type']!r}"
+    assert view["callback_id"] == "test_modal", "callback_id mismatch"
+    assert view["title"]["type"] == "plain_text", "title must be plain_text"
+    assert view["close"]["type"] == "plain_text", "close must be plain_text"
+    assert view["blocks"] == blocks, "blocks mismatch"
+    # Default close label
+    assert view["close"]["text"] == "Close", f"Default close label wrong: {view['close']['text']!r}"
+    # No submit key when submit_label is None
+    assert "submit" not in view, "submit key must be absent when submit_label=None"
+    return True, "_build_modal_view: required keys present, no submit key when omitted"
+
+
+@test("Phase 3A — _build_modal_view title truncated to 24 chars")
+def test_build_modal_view_title_truncation():
+    """_build_modal_view truncates title and submit_label to 24 characters."""
+    from scout_ui_kit import _build_modal_view
+
+    long_title = "A" * 40
+    view = _build_modal_view([], title=long_title, callback_id="trunc_test")
+    assert len(view["title"]["text"]) <= 24, f"Title not truncated: {len(view['title']['text'])} chars"
+    return True, "_build_modal_view: title truncated to 24 chars"
+
+
+@test("Phase 3A — _build_modal_view adds submit key when submit_label provided")
+def test_build_modal_view_with_submit():
+    """When submit_label is given, _build_modal_view includes a submit plain_text element."""
+    from scout_ui_kit import _build_modal_view
+
+    view = _build_modal_view([], title="Confirm", callback_id="confirm_modal",
+                             submit_label="Save", close_label="Cancel")
+    assert "submit" in view, "submit key must be present when submit_label is provided"
+    assert view["submit"]["type"] == "plain_text", "submit must be plain_text"
+    assert view["submit"]["text"] == "Save", f"submit text wrong: {view['submit']['text']!r}"
+    assert view["close"]["text"] == "Cancel", f"close label wrong: {view['close']['text']!r}"
+    return True, "_build_modal_view: submit key present with correct label"
+
+
+@test("Phase 3A — _build_modal_view raises ValueError for empty callback_id")
+def test_build_modal_view_empty_callback_id():
+    """_build_modal_view raises ValueError when callback_id is empty string."""
+    from scout_ui_kit import _build_modal_view
+
+    try:
+        _build_modal_view([], title="X", callback_id="")
+        return False, "Expected ValueError for empty callback_id"
+    except ValueError:
+        pass
+    return True, "_build_modal_view: ValueError raised for empty callback_id"
+
+
+@test("Phase 3A — _slack_card_block returns correct structure")
+def test_slack_card_block_structure():
+    """_slack_card_block returns a dict with type=card and title plain_text."""
+    from scout_ui_kit import _slack_card_block
+
+    # Minimal card — title only
+    card = _slack_card_block("My Title")
+    assert card["type"] == "card", f"Expected type=card, got {card['type']!r}"
+    assert card["title"]["type"] == "plain_text", "title must be plain_text"
+    assert card["title"]["text"] == "My Title", f"title text wrong: {card['title']['text']!r}"
+    # Optional fields absent when not provided
+    assert "subtitle" not in card, "subtitle must be absent when not provided"
+    assert "body" not in card, "body must be absent when not provided"
+    assert "block_id" not in card, "block_id must be absent when not provided"
+    return True, "_slack_card_block: minimal card has correct shape, optional keys absent"
+
+
+@test("Phase 3A — _slack_card_block optional fields present when provided")
+def test_slack_card_block_optional_fields():
+    """subtitle, body, and block_id appear only when non-empty."""
+    from scout_ui_kit import _slack_card_block
+
+    card = _slack_card_block("Title", body="*Bold*", subtitle="Sub", block_id="card_1")
+    assert card["subtitle"]["type"] == "plain_text", "subtitle must be plain_text"
+    assert card["subtitle"]["text"] == "Sub", f"subtitle text wrong: {card['subtitle']['text']!r}"
+    assert card["body"]["type"] == "mrkdwn", "body must be mrkdwn"
+    assert card["body"]["text"] == "*Bold*", f"body text wrong: {card['body']['text']!r}"
+    assert card["block_id"] == "card_1", f"block_id wrong: {card['block_id']!r}"
+    return True, "_slack_card_block: subtitle/body/block_id present when provided"
+
+
+@test("Phase 3A — _carousel_block empty list returns []")
+def test_carousel_block_empty():
+    """_carousel_block returns empty list for empty input."""
+    from scout_ui_kit import _carousel_block
+
+    result = _carousel_block([])
+    assert result == [], f"Expected [], got {result!r}"
+    return True, "_carousel_block: empty input → []"
+
+
+@test("Phase 3A — _carousel_block single card returned unwrapped")
+def test_carousel_block_single():
+    """_carousel_block returns [card] for a single-card list (no carousel wrapper)."""
+    from scout_ui_kit import _carousel_block
+
+    card = {"type": "card", "title": {"type": "plain_text", "text": "Solo"}}
+    result = _carousel_block([card])
+    assert len(result) == 1, f"Expected 1 item, got {len(result)}"
+    assert result[0] is card, "Single card must be returned as-is (no wrapper)"
+    assert result[0].get("type") == "card", "Unwrapped card must keep type=card"
+    return True, "_carousel_block: single card returned unwrapped"
+
+
+@test("Phase 3A — _carousel_block multiple cards wrapped in carousel")
+def test_carousel_block_multiple():
+    """_carousel_block wraps 2+ cards in a type=carousel dict."""
+    from scout_ui_kit import _carousel_block
+
+    cards = [
+        {"type": "card", "block_id": "c1", "title": {"type": "plain_text", "text": "A"}},
+        {"type": "card", "block_id": "c2", "title": {"type": "plain_text", "text": "B"}},
+        {"type": "card", "block_id": "c3", "title": {"type": "plain_text", "text": "C"}},
+    ]
+    result = _carousel_block(cards)
+    assert len(result) == 1, f"Expected 1 carousel block, got {len(result)}"
+    assert result[0]["type"] == "carousel", f"Expected type=carousel, got {result[0]['type']!r}"
+    assert result[0]["elements"] == cards, "carousel elements must equal the input cards"
+    return True, "_carousel_block: 3 cards wrapped in carousel with correct elements"
+
+
+@test("Phase 3A — _render_subheader returns correct structure and level")
+def test_render_subheader_structure():
+    """_render_subheader returns a header dict with level defaulting to 2."""
+    from scout_ui_kit import _render_subheader
+
+    block = _render_subheader("Section Header")
+    assert block["type"] == "header", f"Expected type=header, got {block['type']!r}"
+    assert block["text"]["type"] == "plain_text", "text must be plain_text"
+    assert block["text"]["text"] == "Section Header", f"text wrong: {block['text']['text']!r}"
+    assert block["level"] == 2, f"Default level should be 2, got {block['level']}"
+    return True, "_render_subheader: correct type, text, and default level=2"
+
+
+@test("Phase 3A — _render_subheader level clamped to [1, 4]")
+def test_render_subheader_level_clamping():
+    """_render_subheader clamps level below 1 to 1 and above 4 to 4."""
+    from scout_ui_kit import _render_subheader
+
+    # Below minimum
+    b0 = _render_subheader("Title", level=0)
+    assert b0["level"] == 1, f"level=0 should clamp to 1, got {b0['level']}"
+
+    b_neg = _render_subheader("Title", level=-5)
+    assert b_neg["level"] == 1, f"level=-5 should clamp to 1, got {b_neg['level']}"
+
+    # Above maximum
+    b5 = _render_subheader("Title", level=5)
+    assert b5["level"] == 4, f"level=5 should clamp to 4, got {b5['level']}"
+
+    b_big = _render_subheader("Title", level=99)
+    assert b_big["level"] == 4, f"level=99 should clamp to 4, got {b_big['level']}"
+
+    # Valid boundary values
+    assert _render_subheader("T", level=1)["level"] == 1, "level=1 should stay 1"
+    assert _render_subheader("T", level=4)["level"] == 4, "level=4 should stay 4"
+
+    return True, "_render_subheader: level clamped — 0→1, -5→1, 5→4, 99→4, boundaries intact"
+
+
+@test("Phase 3A — _build_home_view scoreboard header appears exactly once")
+def test_build_home_view_no_duplicate_header():
+    """_build_home_view with a rollup must produce exactly one header block (double-enforce fix)."""
+    import types
+    from scout_ui_kit import _build_home_view
+
+    # Minimal stub with the fields _build_home_scoreboard_blocks reads
+    rollup = types.SimpleNamespace(
+        revenue_today_cents=150000,
+        revenue_yesterday_same_time_cents=120000,
+        revenue_7d_avg_cents=130000,
+        revenue_eod_projection_cents=0,
+        revenue_7d_series=[],
+        generated_at=None,
+        revenue_mtd_cents=0,
+    )
+    view = _build_home_view(rollup=rollup, alerts=None)
+    blocks = view["blocks"]
+    header_blocks = [b for b in blocks if b.get("type") == "header"]
+    assert len(header_blocks) == 1, (
+        f"Expected exactly 1 header block, got {len(header_blocks)}: {header_blocks}"
+    )
+    return True, f"_build_home_view: scoreboard header appears exactly once ({len(blocks)} total blocks)"
+
+
+@test("Phase 4 — _build_maintenance_home_view returns valid home view")
+def test_build_maintenance_home_view():
+    """_build_maintenance_home_view returns a valid home view with maintenance message."""
+    from scout_ui_kit import _build_maintenance_home_view
+    view = _build_maintenance_home_view()
+    assert view["type"] == "home", f"Expected type=home, got {view['type']}"
+    blocks = view["blocks"]
+    assert len(blocks) >= 1, "Expected at least one block"
+    text = blocks[0].get("text", {}).get("text", "")
+    assert "maintenance" in text.lower(), f"Expected maintenance text, got: {text!r}"
+    return True, "_build_maintenance_home_view: returns home view with maintenance block"
+
+
+@test("Phase 12 — ScoutResponse importable with correct validation")
+def test_scout_response_importable():
+    """ScoutResponse imports cleanly, validates status on construction, and derives confidence correctly."""
+    from scout_response import ScoutResponse, Metric, Item
+    r = ScoutResponse(
+        status="warn", subject_type="publisher",
+        subject_id="pub-1", headline="Test", projection_n=6
+    )
+    assert r.confidence == "high", f"Expected high, got {r.confidence}"
+    try:
+        ScoutResponse(status="bad", subject_type="publisher",
+                     subject_id=None, headline="x")
+        return False, "Should have raised ValueError for bad status"
+    except ValueError:
+        pass
+    return True, "ScoutResponse: import clean, validation fires, confidence derived correctly"
+
+
+@test("Phase 12 — alert_registry post-state functions present")
+def test_alert_registry_post_state_functions():
+    """alert_registry exports all five post-state functions required by the Phase 12 contract."""
+    import alert_registry as ar
+    for fn_name in ("set_post_state", "get_post_state", "snooze_alert",
+                    "clear_snooze", "acknowledge_alert"):
+        assert callable(getattr(ar, fn_name, None)), f"Missing: {fn_name}"
+    return True, "alert_registry: all 5 post-state functions present"
+
+
+@test("Phase 12 — scout_handlers uses eyes reaction (not thinking_face)")
+def test_scout_handlers_eyes_reaction():
+    """scout_handlers.py uses the eyes reaction in at least 4 places and contains no thinking_face reference."""
+    import ast, pathlib
+    src = pathlib.Path("scout_handlers.py").read_text()
+    assert "thinking_face" not in src, "thinking_face still present in scout_handlers.py"
+    assert src.count('"eyes"') >= 4, "expected ≥4 'eyes' reaction references in scout_handlers.py"
+    return True, "scout_handlers: eyes reaction wired, thinking_face removed"
+
+
+@test("Phase 12 — demand_feed_main wires set_post_state after mark_firing")
+def test_demand_feed_set_post_state_wired():
+    """demand_feed_main.py calls set_post_state at both alert post sites."""
+    import pathlib
+    src = pathlib.Path("demand_feed_main.py").read_text()
+    assert "set_post_state" in src, "set_post_state not found in demand_feed_main.py"
+    assert src.count("set_post_state") >= 2, "expected set_post_state at both mark_firing sites"
+    return True, "demand_feed_main: set_post_state wired at both alert post sites"
+
+
+@test("Phase 12 — scout_acknowledge in _BLOCK_ACTION_DISPATCH")
+def test_acknowledge_in_dispatch():
+    """scout_acknowledge action_id and _handle_acknowledge handler are both present in scout_handlers.py."""
+    import pathlib
+    src = pathlib.Path("scout_handlers.py").read_text()
+    assert '"scout_acknowledge"' in src, "scout_acknowledge not in dispatch table"
+    assert "_handle_acknowledge" in src, "_handle_acknowledge not defined"
+    return True, "scout_handlers: scout_acknowledge wired in _BLOCK_ACTION_DISPATCH"
+
+
+@test("Phase 12 — scout_snooze_open in _BLOCK_ACTION_DISPATCH")
+def test_snooze_in_dispatch():
+    """scout_snooze_open, _SNOOZE_DURATIONS, and scout_snooze_submit are all wired in scout_handlers.py."""
+    import pathlib
+    src = pathlib.Path("scout_handlers.py").read_text()
+    assert '"scout_snooze_open"' in src, "scout_snooze_open not in dispatch table"
+    assert "_SNOOZE_DURATIONS" in src, "_SNOOZE_DURATIONS constant missing"
+    assert "scout_snooze_submit" in src, "scout_snooze_submit callback not wired"
+    return True, "scout_handlers: snooze handler + durations config + submission wired"
+
+
+@test("Phase 12 — _refire_context_block is a pure function")
+def test_refire_context_block():
+    """_refire_context_block is a pure function that returns a context block containing the user mention."""
+    from scout_ui_kit import _refire_context_block
+    b = _refire_context_block("U123", "2026-06-16T14:00:00+00:00")
+    assert b["type"] == "context"
+    assert "<@U123>" in b["elements"][0]["text"]
+    assert "re-firing now" in b["elements"][0]["text"]
+    assert _refire_context_block("U123", "2026-06-16T14:00:00+00:00") == b
+    return True, "_refire_context_block: pure function, correct output"
+
+
+@test("Phase 12 — scout_drill_publisher in _BLOCK_ACTION_DISPATCH")
+def test_drill_publisher_in_dispatch():
+    """scout_drill_publisher action, _handle_drill_publisher handler, and daemonized thread are all present."""
+    import pathlib
+    src = pathlib.Path("scout_handlers.py").read_text()
+    assert '"scout_drill_publisher"' in src, "scout_drill_publisher not in dispatch table"
+    assert "_handle_drill_publisher" in src, "_handle_drill_publisher not defined"
+    assert "daemon=True" in src, "thread not daemonized"
+    return True, "scout_handlers: scout_drill_publisher wired, thread daemonized"
+
+
+@test("Phase 12 — _drill_loading_modal is a pure function")
+def test_drill_loading_modal():
+    """_drill_loading_modal, _drill_data_modal, and _drill_error_modal are pure functions returning valid modal dicts."""
+    from scout_ui_kit import _drill_loading_modal, _drill_data_modal, _drill_error_modal
+    lm = _drill_loading_modal()
+    assert lm["type"] == "modal"
+    assert _drill_loading_modal() == lm
+    summary = {"pub_id": "x", "pub_name": "X", "rev_7d": 0.0, "conv_7d": 0,
+               "rev_yesterday": 0.0, "conv_yesterday": 0, "top_offer": None, "as_of": ""}
+    dm = _drill_data_modal(summary)
+    assert dm["type"] == "modal"
+    em = _drill_error_modal()
+    assert "warning" in em["blocks"][0]["text"]["text"]
+    return True, "drill modals: all three pure, correct shapes"
+
+
+@test("Phase 12 — acknowledge+snooze buttons rendered on alert cards")
+def test_alert_card_buttons():
+    """All five alert card formatters render acknowledge and snooze buttons when alert_name is provided."""
+    from scout_bot import _format_cap_alert, _format_velocity_down_alert, _format_ghost_alert
+    from scout_bot import _format_fill_alert, _format_cvr_alert, _format_expiration_alert
+    from scout_bot import _format_revenue_alert
+
+    def _has_ack_snooze(blocks: list, alert_name: str) -> bool:
+        for b in blocks:
+            if b.get("type") == "actions":
+                ids = {e.get("action_id") for e in b.get("elements", [])}
+                vals = {e.get("value") for e in b.get("elements", [])}
+                if "scout_acknowledge" in ids and "scout_snooze_open" in ids and alert_name in vals:
+                    return True
+        return False
+
+    # cap
+    cap_rows = [{"adv_name": "Acme", "cap_pct": 90, "revenue_mtd": 9000, "monthly_cap": 10000,
+                 "days_to_cap": 1, "days_remaining": 3}]
+    _, cap_blocks = _format_cap_alert(cap_rows, alert_name="cap-monitor")
+    assert _has_ack_snooze(cap_blocks, "cap-monitor"), "cap: missing ack/snooze buttons"
+
+    # velocity_down
+    vel_rows = [{"publisher_name": "Pub1", "direction": "down", "revenue_30d": 30000,
+                 "revenue_7d_ann": 20000, "pct_delta": -33}]
+    _, vel_blocks = _format_velocity_down_alert(vel_rows, alert_name="velocity-down-monitor")
+    assert _has_ack_snooze(vel_blocks, "velocity-down-monitor"), "velocity: missing ack/snooze buttons"
+
+    # ghost
+    ghost_rows = [{"adv_name": "Acme", "impressions_7d": 5000, "impressions_2d": 1000}]
+    _, ghost_blocks = _format_ghost_alert(ghost_rows, alert_name="ghost-monitor")
+    assert _has_ack_snooze(ghost_blocks, "ghost-monitor"), "ghost: missing ack/snooze buttons"
+
+    # fill
+    fill_rows = [{"publisher_name": "Pub1", "fill_rate_pct": 5, "missed_sessions": 100, "sessions_7d": 105}]
+    _, fill_blocks = _format_fill_alert(fill_rows, alert_name="fill-monitor")
+    assert _has_ack_snooze(fill_blocks, "fill-monitor"), "fill: missing ack/snooze buttons"
+
+    # revenue_tracker
+    total = {"pct_of_expected": 60, "today_revenue": 6000, "projected_full_day": 8000,
+             "dow_median": 10000, "weekday": "Mon", "sample_days": 4}
+    _, rev_blocks = _format_revenue_alert(total, [], alert_name="revenue_tracker")
+    assert _has_ack_snooze(rev_blocks, "revenue_tracker"), "revenue: missing ack/snooze buttons"
+
+    # no alert_name → no buttons (backward-compat)
+    _, no_btn_blocks = _format_cap_alert(cap_rows)
+    for b in no_btn_blocks:
+        if b.get("type") == "actions":
+            ids = {e.get("action_id") for e in b.get("elements", [])}
+            assert "scout_acknowledge" not in ids, "cap: unexpected ack button without alert_name"
+
+    return True, "ack/snooze buttons present on all 5 alert card types; absent without alert_name"
+
+
+@test("chart_url threads: AskResult → Card → image block")
+def test_chart_url_threads_through_ask_result():
+    """chart_url on AskResult flows from tool result dict → Card.chart_url."""
+    from scout_agent import AskResult
+    from scout_ui_kit import Card, Severity, Surface, wrap_response
+
+    # AskResult carries chart_url
+    r = AskResult(text="Revenue today: $10K", chart_url="https://quickchart.io/chart?c=test")
+    if r.chart_url != "https://quickchart.io/chart?c=test":
+        return False, "AskResult did not preserve chart_url"
+
+    # Card carries chart_url → image block appears in wrap_response output
+    card = Card(Severity.INFO, "Revenue", body="$10K today", chart_url="https://quickchart.io/chart?c=test")
+    _, blocks = wrap_response(card=card, surface=Surface.CHANNEL_ROOT)
+    img_blocks = [b for b in blocks if b.get("type") == "image"]
+    if not img_blocks:
+        return False, "wrap_response did not emit image block when chart_url is set"
+    if img_blocks[0].get("image_url") != "https://quickchart.io/chart?c=test":
+        return False, f"image_url mismatch: {img_blocks[0].get('image_url')!r}"
+
+    # No chart_url → no image block
+    card_no_chart = Card(Severity.INFO, "Revenue", body="$10K today")
+    _, blocks_no_chart = wrap_response(card=card_no_chart, surface=Surface.CHANNEL_ROOT)
+    if any(b.get("type") == "image" for b in blocks_no_chart):
+        return False, "wrap_response emitted unexpected image block when chart_url is empty"
+
+    return True, "chart_url threads correctly: AskResult → Card → image block"
+
+
+@test("last_thread_lock_is_initialized")
+def test_last_thread_lock_is_initialized():
+    """Verify _LAST_THREAD_LOCK is a live threading.Lock at import time, not None."""
+    import threading, scout_handlers
+    assert scout_handlers._LAST_THREAD_LOCK is not None
+    assert isinstance(scout_handlers._LAST_THREAD_LOCK, type(threading.Lock()))
+    acquired = scout_handlers._LAST_THREAD_LOCK.acquire(blocking=False)
+    if acquired:
+        scout_handlers._LAST_THREAD_LOCK.release()
+    return True, "_LAST_THREAD_LOCK is a live threading.Lock at import time"
+
+
+@test("shareasale_hmac_secret_not_in_message")
+def test_shareasale_hmac_secret_not_in_message():
+    """Assert the ShareASale HMAC sig_str does not include the secret as a message component."""
+    import inspect, offer_scraper as m
+    src = inspect.getsource(m)
+    for line in src.splitlines():
+        if "sig_str" in line and "sig = " not in line and ':{secret}"' in line:
+            raise AssertionError(f"SECURITY: secret in sig_str: {line!r}")
+    return True, "ShareASale HMAC sig_str does not include the secret"
+
+
+@test("dm_launched_offer_variable_always_defined")
+def test_dm_launched_offer_variable_always_defined():
+    """Confirm launched_offer_dm = None sentinel exists in DM path to prevent NameError."""
+    import inspect, scout_handlers
+    src = inspect.getsource(scout_handlers)
+    assert "launched_offer_dm = None" in src, "launched_offer_dm = None sentinel missing"
+    return True, "launched_offer_dm = None sentinel present in DM path"
+
+
+@test("fill_rate_publishers GROUP BY must not include sessions_with_imps")
+def test_fill_rate_group_by_no_sessions_with_imps():
+    """Confirm fill_rate_publishers GROUP BY does not fan rows via sessions_with_imps."""
+    import inspect, queries_monitor
+    src = inspect.getsource(queries_monitor.fill_rate_publishers)
+    gb = src.upper()
+    gb_start = gb.find("GROUP BY")
+    having = gb.find("HAVING", gb_start)
+    clause = gb[gb_start:having if having != -1 else gb_start + 200]
+    assert "SESSIONS_WITH_IMPS" not in clause, "sessions_with_imps in GROUP BY fans publisher rows"
+    return True, "GROUP BY contains only s.user_id — no sessions_with_imps fan-out"
+
+
+@test("velocity_alerts Phase 2 gate must use down_threshold_pct, not hardcoded 100")
+def test_velocity_phase2_gate_not_hardcoded():
+    """Assert velocity Phase 2 enrichment gate uses the configured threshold, not a hardcoded 100."""
+    import inspect, queries_monitor
+    src = inspect.getsource(queries_monitor.velocity_alerts)
+    assert ">= 100" not in src and ">=100" not in src, \
+        "Phase 2 gate hardcoded >=100 — enrichment skips 25-99% swings"
+    assert "down_threshold_pct" in src, "Phase 2 gate must reference down_threshold_pct"
+    return True, "Phase 2 enrichment gate uses abs(down_threshold_pct) — no hardcoded 100"
+
+
+@test("worry list populated with fewer than 3 publishers")
+def test_worry_list_populated_with_two_publishers():
+    """Verify worry list is non-empty when only 2 publishers exist.
+
+    Calls scoreboard_rollup() directly with a stubbed ClickHouse client so the
+    test exercises the actual winner/worry dedup path, not a local simulation.
+    """
+    from queries_revenue import scoreboard_rollup
+
+    _call_idx = [0]
+
+    class FakeCH:
+        def query(self, _sql):
+            class R:
+                pass
+            r = R()
+            idx = _call_idx[0]
+            _call_idx[0] += 1
+            if idx == 0:
+                # totals: (rev_today, rev_yest, rev_7d_avg, conv_today, conv_yest, conv_7d_avg, rev_mtd)
+                r.result_rows = [(500.0, 400.0, 350.0, 10, 8, 7.0, 500.0)]
+            elif idx == 1:
+                # publishers: (uid, name, rev_today, rev_baseline) — both exceed $50 noise floor
+                r.result_rows = [(1, "Pub A", 500.0, 200.0), (2, "Pub B", 100.0, 400.0)]
+            else:
+                r.result_rows = []
+            return r
+
+    rollup = scoreboard_rollup(FakeCH())
+    if not rollup.worry:
+        return False, "worry list empty for 2-publisher set — overlap dedup still fires unconditionally"
+    if rollup.worry[0].publisher_id != 2:
+        return False, f"worst performer should be pub 2, got {rollup.worry[0].publisher_id}"
+    return True, "worry list non-empty for 2 publishers — dedup guard working"
+
+
+@test("ghost_campaigns as_of_date substitutes now() and today()")
+def test_ghost_campaigns_as_of_date_replaces_now():
+    """Asserts that passing as_of_date to ghost_campaigns substitutes both now() and today() in the emitted SQL."""
+    import queries_campaign
+    captured = {}
+    class FakeResult:
+        result_rows = []
+    class FakeCH:
+        def query(self, sql, parameters=None):
+            captured["sql"] = sql
+            return FakeResult()
+    queries_campaign.ghost_campaigns(FakeCH(), as_of_date="2025-01-15")
+    if not captured.get("sql"):
+        return False, "ghost_campaigns never called ch.query — SQL substitution could not be verified"
+    assert "now()" not in captured["sql"], "as_of_date did not substitute now()"
+    assert "today()" not in captured["sql"], "as_of_date did not substitute today()"
+    return True, "as_of_date substitutes both now() and today() in ghost_campaigns SQL"
+
+
+@test("queries_publisher — publisher_campaign_rpms accepts pub_pid parameter")
+def test_publisher_campaign_rpms_accepts_pub_pid():
+    """Assert that publisher_campaign_rpms accepts a pub_pid parameter."""
+    import inspect, queries_publisher
+    sig = inspect.signature(queries_publisher.publisher_campaign_rpms)
+    assert "pub_pid" in sig.parameters, "publisher_campaign_rpms missing pub_pid parameter"
+    return True, "publisher_campaign_rpms has pub_pid parameter"
+
+
+@test("queries_publisher — supply_gap_opportunities excludes provisioned campaigns")
+def test_supply_gap_excludes_provisioned():
+    """Assert that supply_gap_opportunities excludes already-provisioned campaigns via NOT IN."""
+    import inspect, queries_publisher
+    src = inspect.getsource(queries_publisher.supply_gap_opportunities)
+    assert "NOT IN" in src.upper(), "supply_gap missing NOT IN exclusion for provisioned campaigns"
+    return True, "supply_gap_opportunities contains NOT IN exclusion for provisioned campaigns"
+
+
+@test("_fetch_baseline returns named dicts — no positional r[N] access")
+def test_fetch_baseline_no_positional_access():
+    """get_advertiser_revenue_projection uses named dict keys for baseline_rows access, not positional r[N] indices."""
+    import inspect, re
+    import scout_tools_revenue
+    src = inspect.getsource(scout_tools_revenue.get_advertiser_revenue_projection)
+    # Old pattern: r[2], r[3], r[4], r[5], r[6], r[7]
+    hits = re.findall(r'baseline_rows[^\n]*r\[\d+\]', src)
+    if hits:
+        return False, f"Positional baseline_rows access still present: {hits}"
+    if 'r["revenue_30d"]' not in src and "r['revenue_30d']" not in src:
+        return False, "Named access r[\"revenue_30d\"] not found in source"
+    return True, "baseline_rows uses named dict keys throughout"
+
+
+@test("normalize_geo — 5 countries is Global")
+def test_normalize_geo_five_countries_is_global():
+    """Asserts that a geo string with 5 distinct non-US/CA countries maps to 'Global'."""
+    from offer_scraper import normalize_geo
+    # normalize_geo splits on commas; 5 distinct non-US/CA/NA countries must be Global
+    result = normalize_geo("DE, FR, IT, ES, PT")
+    assert result == "Global", f"5 countries returned {result!r}, expected 'Global'"
+    return True, f"normalize_geo 5-country set → {result!r}"
+
+
+@test("normalize_geo — 4 countries is not Global")
+def test_normalize_geo_four_countries_not_global():
+    """Asserts that a geo string with only 4 countries does not map to 'Global'."""
+    from offer_scraper import normalize_geo
+    result = normalize_geo("DE, FR, IT, ES")
+    assert result != "Global", "4 countries should not be Global"
+    return True, f"normalize_geo 4-country set → {result!r}"
+
+
+@test("_trim_to_limit helper exists, no inline trim pattern outside it")
+def test_trim_to_limit_helper_exists():
+    """Asserts that _trim_to_limit exists in scout_attachments and no inline trim pattern remains outside it."""
+    import inspect, scout_attachments
+    assert hasattr(scout_attachments, "_trim_to_limit"), "_trim_to_limit not found"
+    # No inline pattern should remain outside the helper
+    src = inspect.getsource(scout_attachments)
+    helper_src = inspect.getsource(scout_attachments._trim_to_limit)
+    remaining = src.replace(helper_src, "")
+    # Check for the inline pattern variant
+    assert "[trimmed]" not in remaining or remaining.count("[trimmed]") == 0, \
+        "Inline trim pattern still present outside helper"
+    return True, "_trim_to_limit present; no inline trim pattern outside helper"
+
+
+@test("handler_config_loads_from_env")
+def test_handler_config_loads_from_env():
+    """_HandlerConfig frozen dataclass exists, is instantiated as _CFG singleton."""
+    import scout_handlers
+    if not hasattr(scout_handlers, "_HandlerConfig"):
+        return False, "_HandlerConfig class not found in scout_handlers"
+    if not hasattr(scout_handlers, "_CFG"):
+        return False, "_CFG singleton not found in scout_handlers"
+    cfg = scout_handlers._CFG
+    if not isinstance(cfg, scout_handlers._HandlerConfig):
+        return False, f"_CFG is {type(cfg)!r}, expected _HandlerConfig"
+    # Must be frozen — mutation must raise
+    try:
+        cfg.adops_notify_user_id = "mutate"
+        return False, "_HandlerConfig is not frozen — mutation succeeded"
+    except Exception as exc:
+        if "mutate" in str(exc):
+            # The mutation value leaked into the error message — unexpected
+            return False, f"Unexpected mutation error: {exc}"
+    return True, "_HandlerConfig frozen dataclass and _CFG singleton verified"
+
+
+@test("_ch_busy_message — channel adds @mention, DM/modal omits it")
+def test_ch_busy_message():
+    try:
+        import scout_handlers
+        if not hasattr(scout_handlers, "_ch_busy_message"):
+            return False, "_ch_busy_message not found in scout_handlers"
+        fn = scout_handlers._ch_busy_message
+        channel_msg = fn("U12345")
+        if "<@U12345>" not in channel_msg:
+            return False, f"channel path missing @mention: {channel_msg!r}"
+        dm_msg = fn()
+        if "<@" in dm_msg:
+            return False, f"DM path should not contain @mention: {dm_msg!r}"
+        if "On it" not in dm_msg:
+            return False, f"unexpected message copy: {dm_msg!r}"
+        return True, "channel @mention present, DM/modal clean"
+    except Exception as e:
+        return False, str(e)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,12 @@ These are type hints only — no runtime enforcement. They exist to surface
 field drift at the type-checker level and document the expected shape of
 the dicts that flow between modules.
 
+All classes use `total=False` (all fields optional). This is intentional:
+Scout dicts are assembled incrementally (scraper → formatter → handler) and
+no single stage owns every field. Callers must guard against missing fields
+at use-site (`.get()` / explicit `None` checks) — not at construction.
+Runtime validation lives in Card.__post_init__ (scout_ui_kit.py), not here.
+
 Import with:
     from scout_types import Offer, Brief, FormattedOffer, PulseSignal
 
@@ -137,3 +143,23 @@ class PulseSignal(TypedDict, total=False):
     body: str
     urgency: str         # "high" | "medium" | "low"
     data: list           # list[dict] — raw signal rows, shape varies by signal_type
+
+
+# ── Tool result contract ───────────────────────────────────────────────────────
+# Every TOOL_MAP function that returns a dict MUST call tool_result() instead of
+# returning a bare dict. This guarantees a non-empty "finding" key that
+# _synthesize_agent_steps reads directly — no heuristic sniffing.
+#
+# Tools that already return "formatted" or "summary" are exempt; those keys have
+# their own synthesis branches. Error returns (dicts with "error" key) are also
+# exempt — synthesizer extracts the error message directly.
+
+def tool_result(finding: str, **kwargs) -> dict:
+    """Build a TOOL_MAP return dict with a guaranteed non-empty finding.
+
+    The 'finding' is a ≤80-char human-readable string summarising the result
+    for the Scout Reasoning chain. Raises ValueError at call time if empty.
+    """
+    if not finding or not finding.strip():
+        raise ValueError("tool_result() requires a non-empty finding")
+    return {"finding": finding, **kwargs}

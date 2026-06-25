@@ -70,6 +70,13 @@ class PublisherDelta:
     revenue_baseline_cents: int  # 7-day same-time-of-day average
     delta_pct: float             # signed percentage Δ vs baseline
 
+    def __post_init__(self):
+        if self.revenue_today_cents < 0 or self.revenue_baseline_cents < 0:
+            raise ValueError(
+                f"PublisherDelta revenue fields must be non-negative, "
+                f"got today={self.revenue_today_cents}, baseline={self.revenue_baseline_cents}"
+            )
+
 
 @dataclass
 class ScoreboardRollup:
@@ -88,6 +95,13 @@ class ScoreboardRollup:
     revenue_eod_diagnostic:            Optional[str] = None      # one of: "efficiency", "traffic", "traffic_upside", "on_track", or None
     revenue_mtd_cents: int = 0                                    # month-to-date revenue in cents
     generated_at: datetime = field(default_factory=datetime.utcnow)
+
+    def __post_init__(self):
+        for _f in ("revenue_today_cents", "revenue_yesterday_same_time_cents",
+                   "revenue_7d_avg_cents", "revenue_mtd_cents"):
+            _v = getattr(self, _f)
+            if _v < 0:
+                raise ValueError(f"ScoreboardRollup.{_f} must be non-negative, got {_v}")
 
 
 def scoreboard_rollup(ch) -> ScoreboardRollup:
@@ -194,11 +208,13 @@ HAVING rev_today >= 50 OR rev_baseline >= 50
 
     deltas.sort(key=lambda d: d.delta_pct, reverse=True)
     winners = deltas[:3]
-    worry   = list(reversed(deltas[-3:])) if len(deltas) >= 3 else []
+    worry   = list(reversed(deltas[-3:]))
     # If winners and worry overlap (very few publishers), prefer winners as-is
-    # and trim worry to non-overlapping tail.
-    win_ids = {d.publisher_id for d in winners}
-    worry = [d for d in worry if d.publisher_id not in win_ids][:3]
+    # and trim worry to non-overlapping tail — only when enough publishers exist
+    # to guarantee non-empty worry after dedup.
+    if len(deltas) > 3:
+        win_ids = {d.publisher_id for d in winners}
+        worry = [d for d in worry if d.publisher_id not in win_ids][:3]
 
     # ── 7-day daily revenue series (sparkline data) ──
     # Fetches one row per completed day (D-7 through D-1); fills missing days
@@ -830,8 +846,8 @@ def earnings_breakdown(
         rev_rows = ch.query(
             f"""
             SELECT
-                coalesce(sum(toFloat64OrZero(revenue)), 0) AS gross_rev,
-                coalesce(sum(toFloat64OrZero(payout)), 0)  AS partner_rev
+                coalesce(sum(toFloat64OrNull(revenue)), 0) AS gross_rev,
+                coalesce(sum(toFloat64OrNull(payout)), 0)  AS partner_rev
             FROM adpx_conversionsdetails
             WHERE toDate(created_at) BETWEEN {{start_date: String}} AND {{end_date: String}}
               {pub_filter_cv}
@@ -863,4 +879,64 @@ def earnings_breakdown(
         "partner_rev": round(partner_rev, 4),
         "partner_cost": round(partner_cost, 4),
         "earnings": round(earnings, 4),
+    }
+
+
+def get_publisher_drill_summary(pub_id: str) -> dict:
+    # Output shape: {pub_id, pub_name, rev_7d, conv_7d, rev_yesterday,
+    #                conv_yesterday, top_offer, as_of}
+    # Table: adpx_conversionsdetails — user_id column = publisher ID (UInt64)
+    from scout_ch import _get_ch_client
+
+    sql = """
+SELECT
+    toDate(cv.created_at)                           AS day,
+    coalesce(any(u.organization), '')               AS pub_name,
+    coalesce(any(c.adv_name), '')                   AS adv_name,
+    round(sum(toFloat64OrNull(cv.revenue)), 4)      AS rev,
+    count()                                         AS convs
+FROM adpx_conversionsdetails cv
+LEFT JOIN mv_adpx_users u ON u.id = toInt64(cv.user_id)
+LEFT JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = c.id
+WHERE cv.user_id = {pub_id: UInt64}
+  AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 7 DAY)
+  AND cv.created_at >= today() - INTERVAL 7 DAY
+GROUP BY day, adv_name
+ORDER BY day DESC
+""".strip()
+
+    ch = _get_ch_client()
+    rows = ch.query(sql, parameters={"pub_id": int(pub_id)}).result_rows
+
+    rev_7d = 0.0
+    conv_7d = 0
+    rev_yesterday = 0.0
+    conv_yesterday = 0
+    pub_name = str(pub_id)
+    adv_rev: dict[str, float] = {}
+    yesterday = date.today() - timedelta(days=1)
+
+    for row in rows:
+        day, p_name, adv_name, rev, convs = row
+        if p_name:
+            pub_name = p_name
+        rev_7d += float(rev or 0)
+        conv_7d += int(convs or 0)
+        if isinstance(day, date) and day == yesterday:
+            rev_yesterday += float(rev or 0)
+            conv_yesterday += int(convs or 0)
+        if adv_name:
+            adv_rev[adv_name] = adv_rev.get(adv_name, 0.0) + float(rev or 0)
+
+    top_offer = max(adv_rev, key=lambda k: adv_rev[k]) if adv_rev else None
+
+    return {
+        "pub_id": str(pub_id),
+        "pub_name": pub_name,
+        "rev_7d": round(rev_7d, 4),
+        "conv_7d": conv_7d,
+        "rev_yesterday": round(rev_yesterday, 4),
+        "conv_yesterday": conv_yesterday,
+        "top_offer": top_offer,
+        "as_of": datetime.now(timezone.utc).isoformat(),
     }

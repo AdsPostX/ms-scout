@@ -13,6 +13,11 @@ services:
     envVars:
       - key: SCOUT_ENV
         value: production
+      # Phase 11 Block Kit visual upgrade — enable rich_text body + agent reasoning chain
+      - key: SCOUT_MARKDOWN_BLOCKS
+        value: "true"
+      - key: SCOUT_AGENT_BLOCKS
+        value: "true"
       - key: PULSE_CHANNEL
         value: C06F1RPPVBL      # #revenue-operations
       - key: SCOUT_DIGEST_CHANNEL
