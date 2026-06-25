@@ -3349,6 +3349,20 @@ def get_advertiser_revenue_projection(
     return result
 
 
+def _safe_parse_json(data_str: str) -> dict:
+    """
+    Pure helper: safely parse JSON string, return empty dict on error.
+    Logs failures at debug level.
+    """
+    if not data_str:
+        return {}
+    try:
+        return json.loads(data_str)
+    except Exception as e:
+        log.debug("JSON parse failed: %s", e)
+        return {}
+
+
 def _build_competitor_list(prov_rows: list, serving_map: dict, rpm_map: dict) -> list:
     """
     Pure helper: build competitor list from provisioned campaigns with serving data.
@@ -3593,7 +3607,6 @@ def get_campaign_status(advertiser_name: str) -> dict:
     Check if an advertiser's campaigns are active/paused and show recent changes from audit log.
     """
     try:
-        import json as _json
         ch = _get_ch_client()
 
         # ── Queries 1 + 2 run in parallel — both depend only on advertiser_name ─
@@ -3665,16 +3678,8 @@ def get_campaign_status(advertiser_name: str) -> dict:
         recent_changes = []
         for row in q2_rows:
             entity, change_type_raw, old_data_str, new_data_str, created_at, user_type, user_role = row
-            try:
-                old_data = _json.loads(old_data_str) if old_data_str else {}
-            except Exception as e:
-                log.debug("get_campaign_status old_data parse swallowed: %s", e)
-                old_data = {}
-            try:
-                new_data = _json.loads(new_data_str) if new_data_str else {}
-            except Exception as e:
-                log.debug("get_campaign_status new_data parse swallowed: %s", e)
-                new_data = {}
+            old_data = _safe_parse_json(old_data_str)
+            new_data = _safe_parse_json(new_data_str)
 
             # Determine change type
             old_active = old_data.get("is_active")
