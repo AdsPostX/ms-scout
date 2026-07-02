@@ -26,6 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 from scout_log import log_event
+from scout_ui_kit import _carousel_block, _slack_card_block
 
 load_dotenv()  # plist env vars (SCOUT_ENV, SCOUT_DIGEST_CHANNEL, etc.) take precedence over .env
 
@@ -711,6 +712,7 @@ def build_digest_blocks(
     run_date:          str,
     offer_images:      dict | None = None,
     sel_meta:          dict | None = None,
+    native_cards:      bool = False,
 ) -> list:
     all_offers = _load_offers()
     total_screened = len(all_offers)
@@ -764,6 +766,8 @@ def build_digest_blocks(
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"_{screened} offers screened · top {len(scored_offers)} surfaced_"}],
         })
+
+        network_cards: list[dict] = []
 
         for _score, offer in scored_offers:
             offer_id     = str(offer.get("offer_id", ""))
@@ -819,15 +823,30 @@ def build_digest_blocks(
 
             img_url    = (offer_images or {}).get(offer_id, "")
             portal_url = _portal_url(network, offer_id)
-            blocks    += _build_offer_card_blocks(
-                advertiser, offer_summary, payout_str, geo,
-                tier_badge="", img_url=img_url,
-                why=why, action_value=action_value,
-                network_portal_url=portal_url,
-                fit_tier=offer.get("fit_tier", ""),
-                rpm=_score,
-                view_url=tracking_url,
-            )
+
+            if native_cards:
+                network_cards.append(_build_offer_native_card(
+                    advertiser, offer_summary, payout_str, geo,
+                    why=why, action_value=action_value, offer_id=offer_id,
+                    img_url=img_url, network_portal_url=portal_url,
+                    fit_tier=offer.get("fit_tier", ""),
+                    rpm=_score,
+                    view_url=tracking_url,
+                ))
+            else:
+                blocks += _build_offer_card_blocks(
+                    advertiser, offer_summary, payout_str, geo,
+                    tier_badge="", img_url=img_url,
+                    why=why, action_value=action_value,
+                    network_portal_url=portal_url,
+                    fit_tier=offer.get("fit_tier", ""),
+                    rpm=_score,
+                    view_url=tracking_url,
+                )
+
+        if native_cards and network_cards:
+            blocks += _carousel_block(network_cards)
+            blocks.append({"type": "divider"})
 
     return blocks
 
@@ -838,6 +857,43 @@ _FIT_TIER_BADGE = {
     "STANDARD": "⚪",
     "WEAK":     "🔴",
 }
+
+
+def _offer_action_elements(
+    action_value:       str,
+    view_url:           str = "",
+    network_portal_url: str = "",
+) -> list[dict]:
+    """Build the approve/reject/view button elements shared by every offer card renderer.
+
+    Slack's card block caps actions at 3 — this always returns 2 or 3 elements,
+    safely under that limit for both the classic (actions block) and native
+    (card block) renderers.
+    """
+    action_elements = [
+        {
+            "type":      "button",
+            "text":      {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
+            "style":     "primary",
+            "action_id": "scout_approve",
+            "value":     action_value,
+        },
+        {
+            "type":      "button",
+            "text":      {"type": "plain_text", "text": "✕  Skip"},
+            "action_id": "scout_reject",
+            "value":     action_value,
+        },
+    ]
+    _view_target = view_url or network_portal_url
+    if _view_target:
+        action_elements.append({
+            "type":      "button",
+            "text":      {"type": "plain_text", "text": "↗ View"},
+            "url":       _view_target,
+            "action_id": "scout_view_offer",
+        })
+    return action_elements
 
 
 def _build_offer_card_blocks(
@@ -880,29 +936,7 @@ def _build_offer_card_blocks(
         "text": {"type": "mrkdwn", "text": f">{why}"},
     }
 
-    action_elements = [
-        {
-            "type":      "button",
-            "text":      {"type": "plain_text", "text": "✓  Add to Queue", "emoji": True},
-            "style":     "primary",
-            "action_id": "scout_approve",
-            "value":     action_value,
-        },
-        {
-            "type":      "button",
-            "text":      {"type": "plain_text", "text": "✕  Skip"},
-            "action_id": "scout_reject",
-            "value":     action_value,
-        },
-    ]
-    _view_target = view_url or network_portal_url
-    if _view_target:
-        action_elements.append({
-            "type":      "button",
-            "text":      {"type": "plain_text", "text": "↗ View"},
-            "url":       _view_target,
-            "action_id": "scout_view_offer",
-        })
+    action_elements = _offer_action_elements(action_value, view_url, network_portal_url)
 
     return [
         offer_block,
@@ -910,6 +944,46 @@ def _build_offer_card_blocks(
         {"type": "actions", "elements": action_elements},
         {"type": "divider"},
     ]
+
+
+def _build_offer_native_card(
+    advertiser:         str,
+    offer_summary:      str,
+    payout_str:         str,
+    geo:                str,
+    why:                str,
+    action_value:       str,
+    offer_id:           str,
+    img_url:            str = "",
+    network_portal_url: str = "",
+    fit_tier:           str = "",
+    rpm:                float = 0.0,
+    view_url:           str = "",
+) -> dict:
+    """Native Slack card block for one offer — meant to sit inside a per-network carousel.
+
+    Mirrors _build_offer_card_blocks' data mapping but respects the card block's
+    tighter limits (title/subtitle: 150-char plain_text, body: 200-char mrkdwn) —
+    _slack_card_block already truncates, this just picks sensible field boundaries.
+    """
+    tier_key = (fit_tier or "").upper()
+    badge    = _FIT_TIER_BADGE.get(tier_key, "⚫")
+    rpm_text = f"  ·  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
+
+    title    = f"{badge} {advertiser}"
+    subtitle = f"{payout_str}{rpm_text}{'  ·  ' + geo if geo else ''}"
+    body     = f"{offer_summary}\n{why}" if offer_summary else why
+
+    action_elements = _offer_action_elements(action_value, view_url, network_portal_url)
+
+    return _slack_card_block(
+        title=title,
+        subtitle=subtitle,
+        body=body,
+        block_id=f"offer_card_{offer_id}",
+        hero_image_url=img_url if img_url.startswith("http") else "",
+        actions=action_elements,
+    )
 
 
 # ── Sourcing intelligence signals ──────────────────────────────────────────────
@@ -1575,7 +1649,9 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     payout_cache = json.loads(PAYOUT_CACHE.read_text()) if PAYOUT_CACHE.exists() else {}
     ms_campaigns = get_active_ms_campaigns()
     benchmarks   = _tm.benchmarks()
-    _offers_per_network = int(_tm.load().get("digest", {}).get("offers_per_network", 3))
+    _digest_cfg = _tm.load().get("digest", {})
+    _offers_per_network = int(_digest_cfg.get("offers_per_network", 3))
+    _native_cards_enabled = bool(_digest_cfg.get("native_cards_enabled", False))
     offers_by_network, sel_meta = select_offers(
         n_per_network=_offers_per_network, ms_campaigns=ms_campaigns,
         benchmarks=benchmarks, force=is_force,
@@ -1637,6 +1713,7 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     blocks = build_digest_blocks(
         offers_by_network, payout_cache, ms_campaigns, benchmarks,
         run_date, offer_images=offer_images, sel_meta=sel_meta,
+        native_cards=_native_cards_enabled,
     )
 
     # Prepend NEW THIS WEEK section

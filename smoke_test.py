@@ -4230,6 +4230,155 @@ def test_carousel_block_multiple():
     return True, "_carousel_block: 3 cards wrapped in carousel with correct elements"
 
 
+@test("Phase 4 — _slack_card_block icon/hero_image/actions fields present when provided")
+def test_slack_card_block_native_fields():
+    """icon, hero_image, and actions render with the correct Slack wire shape."""
+    from scout_ui_kit import _slack_card_block
+
+    actions = [{"type": "button", "text": {"type": "plain_text", "text": "Go"}, "action_id": "a"}]
+    card = _slack_card_block(
+        "Title",
+        hero_image_url="https://example.com/hero.png",
+        icon_url="https://example.com/icon.png",
+        icon_alt="icon alt",
+        actions=actions,
+    )
+    assert card["hero_image"] == {
+        "type": "image", "image_url": "https://example.com/hero.png", "alt_text": "Title",
+    }, f"hero_image wrong shape: {card.get('hero_image')!r}"
+    assert card["icon"] == {
+        "type": "image", "image_url": "https://example.com/icon.png", "alt_text": "icon alt",
+    }, f"icon wrong shape: {card.get('icon')!r}"
+    assert card["actions"] == {"type": "actions", "elements": actions}, f"actions wrong shape: {card.get('actions')!r}"
+    return True, "_slack_card_block: icon/hero_image/actions render with correct Slack shape"
+
+
+@test("Phase 4 — _slack_card_block raises ValueError over Slack's 3-button card limit")
+def test_slack_card_block_actions_limit():
+    """actions exceeding Slack's 3-button card cap raises ValueError, not silent truncation."""
+    from scout_ui_kit import _slack_card_block
+
+    four_buttons = [{"type": "button", "text": {"type": "plain_text", "text": str(i)}, "action_id": f"a{i}"} for i in range(4)]
+    try:
+        _slack_card_block("Title", actions=four_buttons)
+        return False, "Expected ValueError for actions exceeding 3-button card limit"
+    except ValueError:
+        return True, "_slack_card_block: raises ValueError for >3 actions, no silent truncation"
+
+
+@test("Phase 4 — _carousel_block logs a warning when truncating over 10 cards")
+def test_carousel_block_over_limit_logs_warning():
+    """>10 cards still truncates to Slack's limit but must log, not fail silently."""
+    import logging
+    from scout_ui_kit import _carousel_block
+
+    cards = [{"type": "card", "block_id": f"c{i}", "title": {"type": "plain_text", "text": str(i)}} for i in range(12)]
+
+    class _CaptureHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    handler = _CaptureHandler()
+    logger = logging.getLogger("scout_ui_kit")
+    logger.addHandler(handler)
+    try:
+        result = _carousel_block(cards)
+    finally:
+        logger.removeHandler(handler)
+
+    assert len(result[0]["elements"]) == 10, f"Expected 10 elements after truncation, got {len(result[0]['elements'])}"
+    assert any(r.levelno == logging.WARNING for r in handler.records), "Expected a WARNING log on >10-card truncation"
+    return True, "_carousel_block: truncates to 10 and logs a warning (no silent drop)"
+
+
+@test("Phase 4 — _offer_action_elements shared helper matches inline convention")
+def test_offer_action_elements_shared_helper():
+    """Extracted helper preserves approve/reject/view button shape used by _build_offer_card_blocks."""
+    from scout_digest import _offer_action_elements
+
+    elements = _offer_action_elements("val123", view_url="https://track.example.com/x")
+    assert len(elements) == 3, f"Expected 3 buttons (approve/reject/view), got {len(elements)}"
+    assert elements[0]["action_id"] == "scout_approve" and elements[0]["value"] == "val123"
+    assert elements[1]["action_id"] == "scout_reject" and elements[1]["value"] == "val123"
+    assert elements[2]["action_id"] == "scout_view_offer" and elements[2]["url"] == "https://track.example.com/x"
+
+    no_view = _offer_action_elements("val456")
+    assert len(no_view) == 2, "view button must be absent when no view_url/network_portal_url given"
+    return True, "_offer_action_elements: approve/reject always present, view button conditional on url"
+
+
+@test("Phase 5 — _build_offer_native_card renders a valid Slack card")
+def test_build_offer_native_card_shape():
+    """_build_offer_native_card must return a card dict with correct title/block_id/hero_image and shared action buttons."""
+    from scout_digest import _build_offer_native_card
+
+    card = _build_offer_native_card(
+        "TestAdv", "A short summary", "$5.00 CPL", "US",
+        why="Strong RPM vs benchmark", action_value='{"offer_id": "123"}',
+        offer_id="123", img_url="https://example.com/img.png",
+        network_portal_url="https://portal.example.com/123",
+        fit_tier="PRIME", rpm=4.5, view_url="",
+    )
+    assert card["type"] == "card", f"Expected type=card, got {card.get('type')!r}"
+    assert "TestAdv" in card["title"]["text"], f"Advertiser missing from title: {card['title']}"
+    assert "🔵" in card["title"]["text"], f"PRIME fit-tier badge missing from title: {card['title']}"
+    assert card["block_id"] == "offer_card_123", f"block_id wrong: {card.get('block_id')!r}"
+    assert card["hero_image"]["image_url"] == "https://example.com/img.png", f"hero_image wrong: {card.get('hero_image')!r}"
+    assert "$5.00 CPL" in card["subtitle"]["text"], f"payout_str missing from subtitle: {card['subtitle']}"
+    assert "US" in card["subtitle"]["text"], f"geo missing from subtitle: {card['subtitle']}"
+    assert "Strong RPM vs benchmark" in card["body"]["text"], f"why text missing from body: {card['body']}"
+    action_elements = card["actions"]["elements"]
+    assert len(action_elements) == 3, f"Expected 3 buttons (approve/reject/view via portal url), got {len(action_elements)}"
+    assert action_elements[0]["action_id"] == "scout_approve", f"first button wrong: {action_elements[0]}"
+    assert action_elements[2]["url"] == "https://portal.example.com/123", f"view button should fall back to portal url: {action_elements[2]}"
+    return True, "_build_offer_native_card: valid card shape with shared action buttons"
+
+
+@test("Phase 5 — build_digest_blocks(native_cards=True) renders a per-network carousel")
+def test_build_digest_blocks_native_cards_carousel():
+    """native_cards=True must wrap each network's offers in one carousel block; default (False) path stays classic and untouched."""
+    import datetime as _datetime
+    import scout_digest
+
+    offers = [
+        (5.0, {
+            "offer_id": "1", "advertiser": "Adv One", "network": "maxbounty",
+            "category": "Finance", "geo": "US", "payout": "5.00",
+            "payout_type": "CPL", "tracking_url": "", "description": "", "fit_tier": "PRIME",
+        }),
+        (4.0, {
+            "offer_id": "2", "advertiser": "Adv Two", "network": "maxbounty",
+            "category": "Finance", "geo": "US", "payout": "4.00",
+            "payout_type": "CPL", "tracking_url": "", "description": "", "fit_tier": "STRONG",
+        }),
+    ]
+    offers_by_network = {"maxbounty": offers}
+    run_date = _datetime.date.today().isoformat()
+
+    native_blocks = scout_digest.build_digest_blocks(
+        offers_by_network, {}, [], {}, run_date, native_cards=True,
+    )
+    carousels = [b for b in native_blocks if b.get("type") == "carousel"]
+    if not carousels:
+        return False, "Expected at least one carousel block when native_cards=True"
+    if len(carousels[0]["elements"]) != 2:
+        return False, f"Expected 2 cards in the maxbounty carousel, got {len(carousels[0]['elements'])}"
+
+    # Regression guard: default (native_cards=False) path must stay classic — no carousel block.
+    classic_blocks = scout_digest.build_digest_blocks(
+        offers_by_network, {}, [], {}, run_date,
+    )
+    if any(b.get("type") == "carousel" for b in classic_blocks):
+        return False, "native_cards defaults to False — no carousel block should appear"
+    if not any(b.get("type") == "actions" for b in classic_blocks):
+        return False, "Classic renderer should still emit an actions block per offer when native_cards=False"
+    return True, "build_digest_blocks: native_cards=True renders a per-network carousel; default (False) path unaffected"
+
+
 @test("Phase 3A — _render_subheader returns correct structure and level")
 def test_render_subheader_structure():
     """_render_subheader returns a header dict with level defaulting to 2."""

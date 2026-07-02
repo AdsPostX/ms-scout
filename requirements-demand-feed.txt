@@ -2,5 +2,5 @@ requests
 python-dotenv
 clickhouse-connect
 anthropic~=0.97
-slack-sdk~=3.41
+slack-sdk~=3.43
 pytz
