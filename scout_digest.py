@@ -25,6 +25,8 @@ from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
+from scout_log import log_event
+
 load_dotenv()  # plist env vars (SCOUT_ENV, SCOUT_DIGEST_CHANNEL, etc.) take precedence over .env
 
 log = logging.getLogger("scout_digest")
@@ -1532,18 +1534,14 @@ def select_offers(
         s = per_net_stats.get(net)
         if not s:
             continue
-        log.info(
-            "[digest] %s: total=%d in_ms=%d no_score=%d scored=%d selected=%d",
-            net, s["total"], s["in_ms"], s["no_score"], s["scored"], len(result.get(net, [])),
-        )
-        # Reason breakdown only when there's actually something to diagnose,
-        # sorted desc so the dominant gate is the first thing in the log line.
+        log_event("digest_network_stats", f"{net} scoring breakdown", "scout_digest.select_offers",
+                   net=net, total=s["total"], in_ms=s["in_ms"], no_score=s["no_score"],
+                   scored=s["scored"], selected=len(result.get(net, [])))
+        # Reason breakdown only when there's actually something to diagnose.
         reasons = no_score_reasons.get(net) or {}
         if reasons:
-            breakdown = ", ".join(
-                f"{k}={v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])
-            )
-            log.info("[digest] %s no_score_reasons: %s", net, breakdown)
+            log_event("digest_no_score_reasons", f"{net} no-score reasons", "scout_digest.select_offers",
+                       net=net, reasons=reasons)
     meta["per_network"] = per_net_stats
     meta["no_score_reasons"] = no_score_reasons
     return result, meta

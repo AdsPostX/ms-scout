@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from scout_log import log_event
+
 log = logging.getLogger(__name__)
 
 _REDIS_KEY = "scout:alert_registry"
@@ -135,6 +137,25 @@ def _load_registry_from_state() -> None:
 # Lock ordering: _LOCK is always acquired before _PULSE_STATE_LOCK (inside
 # _persist_registry_state → _save_pulse_state). Never reverse this order.
 
+# log_event()'s own parameter names — a caller-supplied context dict that
+# happens to use one of these as a key would crash the log_event() call
+# itself (Python raises "got multiple values for argument") since they're
+# bound via **fields, not read out of a plain dict.
+_LOG_EVENT_RESERVED_KEYS = frozenset({"event", "message", "location", "level"})
+
+
+def _sanitize_log_fields(context: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a copy of context safe to splat into log_event(**fields).
+
+    Monitor-supplied context keys are arbitrary; rename any that collide
+    with log_event()'s own parameter names instead of letting the call crash.
+    """
+    fields = dict(context or {})
+    for key in _LOG_EVENT_RESERVED_KEYS & fields.keys():
+        fields[f"context_{key}"] = fields.pop(key)
+    return fields
+
+
 def mark_firing(alert_name: str, context: dict[str, Any] | None = None) -> None:
     """Record that `alert_name` is firing. Idempotent — repeated calls are harmless."""
     if not alert_name:
@@ -158,6 +179,9 @@ def mark_firing(alert_name: str, context: dict[str, Any] | None = None) -> None:
                     last_change=now,
                 )
                 _persist_registry_state()
+        fields = _sanitize_log_fields(context)
+        fields["alert_name"] = alert_name
+        log_event("alert_fired", f"{alert_name} is firing", "alert_registry.mark_firing", **fields)
     except Exception:
         log.exception("alert_registry.mark_firing failed (alert=%s)", alert_name)
 
@@ -174,6 +198,8 @@ def mark_cleared(alert_name: str) -> None:
             with _LOCK:
                 _STATE.pop(alert_name, None)
                 _persist_registry_state()
+        log_event("alert_cleared", f"{alert_name} cleared", "alert_registry.mark_cleared",
+                   alert_name=alert_name)
     except Exception:
         log.exception("alert_registry.mark_cleared failed (alert=%s)", alert_name)
 
