@@ -29,6 +29,15 @@ Audit Status: Complete (engineering audit) — see [VAMSEE_AUDIT.md](VAMSEE_AUDI
 
 **To regenerate the feature map:** `python3 scripts/generate_feature_map.py` (auto-syncs TOOL_MAP changes).
 
+## Branch Cleanup
+
+Claude Code leaves `worktree-agent-*` and `claude/*` branches behind after every session — they don't get pruned on merge. Run `scripts/branch_cleanup.sh` after any PR merges to clear them before they pile up:
+
+- `scripts/branch_cleanup.sh` — dry run, prints what it would delete and what needs a human look
+- `scripts/branch_cleanup.sh --apply` — deletes only branches proven safe (already merged into main, or byte-identical diff against main)
+
+Anything with an open PR, a closed PR with a real unmerged diff, orphan/no-merge-base history, or a `backup/*` name is never auto-deleted — it prints under "needs human review" instead.
+
 ## Scout Quickstart
 
 **First session:**
