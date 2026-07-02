@@ -160,8 +160,9 @@ def mark_firing(alert_name: str, context: dict[str, Any] | None = None) -> None:
                     last_change=now,
                 )
                 _persist_registry_state()
-        log_event("alert_fired", f"{alert_name} is firing", "alert_registry.mark_firing",
-                   alert_name=alert_name, **(context or {}))
+        fields = dict(context or {})
+        fields["alert_name"] = alert_name
+        log_event("alert_fired", f"{alert_name} is firing", "alert_registry.mark_firing", **fields)
     except Exception:
         log.exception("alert_registry.mark_firing failed (alert=%s)", alert_name)
 

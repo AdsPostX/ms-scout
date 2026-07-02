@@ -11,8 +11,12 @@ ordinary log.info()/log.warning() calls.
     log_event("alert_fired", "ghost campaign detected", "alert_registry.mark_firing",
                alert_name=alert_name, publisher=pub)
 
-Emits through the caller's own logger so existing handlers/levels/routing
-are unaffected — this only changes what gets put on the line.
+Emits on its own logger with a bare-message formatter, so the line is raw
+JSON on stdout regardless of any `logging.basicConfig()` prefix format the
+calling entry point (offer_scraper, demand_feed_main, scout_digest) has set
+on the root logger — a prefixed line like `2026-... [INFO] {...}` would not
+parse as JSON and Better Stack could not promote `event`/`location` as
+top-level fields.
 """
 
 from __future__ import annotations
@@ -20,10 +24,21 @@ from __future__ import annotations
 import json
 import logging
 
+_LOGGER_NAME = "scout.structured"
+
+
+def _get_json_logger() -> logging.Logger:
+    logger = logging.getLogger(_LOGGER_NAME)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+        logger.propagate = False
+    return logger
+
 
 def log_event(event: str, message: str, location: str, *, level: int = logging.INFO, **fields) -> None:
-    logger = logging.getLogger(location.split(".")[0])
-    logger.log(level, json.dumps({
+    _get_json_logger().log(level, json.dumps({
         "event": event,
         "message": message,
         "location": location,
