@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from scout_log import log_event
+
 log = logging.getLogger(__name__)
 
 _REDIS_KEY = "scout:alert_registry"
@@ -158,6 +160,8 @@ def mark_firing(alert_name: str, context: dict[str, Any] | None = None) -> None:
                     last_change=now,
                 )
                 _persist_registry_state()
+        log_event("alert_fired", f"{alert_name} is firing", "alert_registry.mark_firing",
+                   alert_name=alert_name, **(context or {}))
     except Exception:
         log.exception("alert_registry.mark_firing failed (alert=%s)", alert_name)
 
@@ -174,6 +178,8 @@ def mark_cleared(alert_name: str) -> None:
             with _LOCK:
                 _STATE.pop(alert_name, None)
                 _persist_registry_state()
+        log_event("alert_cleared", f"{alert_name} cleared", "alert_registry.mark_cleared",
+                   alert_name=alert_name)
     except Exception:
         log.exception("alert_registry.mark_cleared failed (alert=%s)", alert_name)
 
