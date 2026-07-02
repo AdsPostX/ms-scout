@@ -318,6 +318,7 @@ _BENCHMARKS_LOADED_AT: float = 0.0
 _BENCHMARKS_TTL = 3600  # 1 hour
 assert _BENCHMARKS_TTL > 0, "Benchmark TTL must be > 0 seconds"
 _BENCHMARKS_LOCK = threading.Lock()
+_BENCHMARKS_REFRESH_LOCK = threading.Lock()  # serializes reload I/O — see _get_benchmarks()
 
 # ── Data quality tier helper ──────────────────────────────────────────────────
 
@@ -664,13 +665,23 @@ def _load_performance_benchmarks() -> dict:
 
 
 def _get_benchmarks() -> dict:
+    """Refresh from ClickHouse if stale; _BENCHMARKS_REFRESH_LOCK keeps the I/O
+    off _BENCHMARKS_LOCK so a slow reload can't block other readers."""
     global _BENCHMARKS, _BENCHMARKS_LOADED_AT
     with _BENCHMARKS_LOCK:
-        if not _BENCHMARKS or (time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL:
-            _BENCHMARKS = _load_performance_benchmarks()
+        stale = not _BENCHMARKS or (time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL
+        cached = copy.deepcopy(_BENCHMARKS)
+    if not stale or not _BENCHMARKS_REFRESH_LOCK.acquire(blocking=False):
+        return cached  # fresh, or a refresh is already in flight elsewhere
+    try:
+        fresh = _load_performance_benchmarks()
+        with _BENCHMARKS_LOCK:
+            _BENCHMARKS = fresh
             _merge_learned_benchmarks()  # overlay actuals from 14-day recaps
             _BENCHMARKS_LOADED_AT = time.time()
-        return copy.deepcopy(_BENCHMARKS)
+            return copy.deepcopy(_BENCHMARKS)
+    finally:
+        _BENCHMARKS_REFRESH_LOCK.release()
 
 
 # Compiled once at module level — strips <<<SUGGESTIONS [...]  SUGGESTIONS>>> blocks from responses

@@ -54,6 +54,15 @@ _CH_MAX_CONCURRENT = _env_int("CH_MAX_CONCURRENT", 4, minimum=1)
 _CH_ACQUIRE_TIMEOUT_S = _env_float("CH_ACQUIRE_TIMEOUT_S", 10.0, minimum=0.1)
 _CH_QUERY_SEMAPHORE = threading.BoundedSemaphore(_CH_MAX_CONCURRENT)
 
+# Bound the network I/O itself, not just the wait for a semaphore slot.
+# clickhouse_connect defaults to connect_timeout=10s, send_receive_timeout=300s —
+# a degraded connection can hang a single .query() call for 5 minutes, holding
+# both a _CH_QUERY_SEMAPHORE slot and (via _ask_with_timeout) an _ASK_SEMAPHORE
+# slot the whole time. Keep this well under _CFG.ask_timeout_s (90s default)
+# so a hung query fails fast enough for ask()'s own timeout to mean anything.
+_CH_CONNECT_TIMEOUT_S = _env_float("CH_CONNECT_TIMEOUT_S", 10.0, minimum=1.0)
+_CH_SEND_RECEIVE_TIMEOUT_S = _env_float("CH_SEND_RECEIVE_TIMEOUT_S", 45.0, minimum=1.0)
+
 # Revenue deviation threshold used by the intraday diagnostic classifier.
 # A projected or actual revenue deviation beyond this fraction triggers
 # a "traffic" or "efficiency" diagnostic label.
@@ -87,6 +96,8 @@ def _get_ch_client():
         password=os.getenv("CH_PASSWORD", ""),
         database=os.getenv("CH_DATABASE", "default"),
         secure=True,
+        connect_timeout=_CH_CONNECT_TIMEOUT_S,
+        send_receive_timeout=_CH_SEND_RECEIVE_TIMEOUT_S,
     )
     return _LoggingCHClient(client)
 

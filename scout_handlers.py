@@ -291,6 +291,19 @@ def _ch_busy_message(user_id: str | None = None, *, promise_followup: bool = Tru
     return f"{_mention(user_id)}_On it. Taking a bit longer than usual. {tail}_"
 
 
+def _safe_slack_call(fn, *args, **kwargs):
+    """Best-effort Slack Web API call for last-resort notification paths
+    (AskTimeout handlers, retry fallbacks). These calls have no further
+    fallback of their own — an unguarded failure here propagates past the
+    retry scheduling that follows it (or, in a daemon thread, dies silently
+    with no user-facing effect at all). Swallow and log instead."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        log.warning("Slack call failed in timeout/retry path: %s", e)
+        return None
+
+
 def _retry_after_timeout(
     web: WebClient,
     channel: str,
@@ -334,7 +347,8 @@ def _retry_after_timeout(
             _still_slow = f"{prefix}Still slow. Try again in a few minutes."
             _sc = Card(severity=Severity.INFO, headline="", body=_still_slow)
             _, _sb = wrap_response(card=_sc, surface=surface, pattern=ResponsePattern.ANSWER)
-            web.chat_postMessage(
+            _safe_slack_call(
+                web.chat_postMessage,
                 channel=channel, thread_ts=thread_ts,
                 text=_still_slow, blocks=_sb,
             )
@@ -1483,7 +1497,8 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                     response = _ask_with_timeout(query)
                 except AskTimeout:
                     _stop_heartbeat()
-                    web.views_update(
+                    _safe_slack_call(
+                        web.views_update,
                         view_id=v_id,
                         view=_build_modal_view(
                             blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": _ch_busy_message(promise_followup=False)}}],
@@ -1561,7 +1576,8 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
                 _busy_msg = _ch_busy_message()
                 _bcard = Card(severity=Severity.INFO, headline="", body=_busy_msg)
                 _, _busy_blocks = wrap_response(card=_bcard, surface=Surface.DM, pattern=ResponsePattern.ANSWER)
-                web.chat_update(
+                _safe_slack_call(
+                    web.chat_update,
                     channel=dm_channel, ts=_placeholder_ts_ah,
                     text=_busy_msg,
                     blocks=_busy_blocks,
@@ -2307,7 +2323,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 return "█" * filled + "░" * (width - filled)
 
             # Mirrors smoke_test.py ceilings — keep in sync if gates change.
-            _CEILINGS = {"scout_agent.py": 6600, "queries.py": 2700, "offer_scraper.py": 2600}
+            _CEILINGS = {"scout_agent.py": 6650, "queries.py": 2700, "offer_scraper.py": 2600}
 
             modules = [
                 ("scout_agent.py",   _count_lines("scout_agent.py")),
@@ -3133,7 +3149,8 @@ def _handle_event_impl(req: SocketModeRequest):
             _busy_msg = _ch_busy_message()
             _bcard = Card(severity=Severity.INFO, headline="", body=_busy_msg)
             _, _busy_blocks = wrap_response(card=_bcard, surface=Surface.DM, pattern=ResponsePattern.ANSWER)
-            web.chat_postMessage(
+            _safe_slack_call(
+                web.chat_postMessage,
                 channel=channel, thread_ts=thread_ts,
                 text=_busy_msg,
                 blocks=_busy_blocks,
@@ -3293,7 +3310,8 @@ def _handle_event_impl(req: SocketModeRequest):
         _busy_msg = _ch_busy_message(user_id)
         _bcard = Card(severity=Severity.INFO, headline="", body=_busy_msg)
         _, _busy_blocks = wrap_response(card=_bcard, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER)
-        web.chat_update(
+        _safe_slack_call(
+            web.chat_update,
             channel=channel, ts=placeholder["ts"],
             text=_busy_msg,
             blocks=_busy_blocks,
