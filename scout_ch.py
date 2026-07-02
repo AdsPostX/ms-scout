@@ -35,7 +35,7 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
-def _env_float(name: str, default: float, minimum: float = 0.1) -> float:
+def _env_float(name: str, default: float, minimum: float = 0.1, maximum: float | None = None) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
         return default
@@ -47,6 +47,9 @@ def _env_float(name: str, default: float, minimum: float = 0.1) -> float:
     if value < minimum:
         log.warning("[CH] %s=%s below minimum %s — using %s", name, value, minimum, minimum)
         return minimum
+    if maximum is not None and value > maximum:
+        log.warning("[CH] %s=%s above maximum %s — using %s", name, value, maximum, maximum)
+        return maximum
     return value
 
 
@@ -60,8 +63,10 @@ _CH_QUERY_SEMAPHORE = threading.BoundedSemaphore(_CH_MAX_CONCURRENT)
 # both a _CH_QUERY_SEMAPHORE slot and (via _ask_with_timeout) an _ASK_SEMAPHORE
 # slot the whole time. Keep this well under _CFG.ask_timeout_s (90s default)
 # so a hung query fails fast enough for ask()'s own timeout to mean anything.
-_CH_CONNECT_TIMEOUT_S = _env_float("CH_CONNECT_TIMEOUT_S", 10.0, minimum=1.0)
-_CH_SEND_RECEIVE_TIMEOUT_S = _env_float("CH_SEND_RECEIVE_TIMEOUT_S", 45.0, minimum=1.0)
+# Capped at the same ceiling — an env misconfiguration (e.g. 600s) must not be
+# able to silently defeat that bound.
+_CH_CONNECT_TIMEOUT_S = _env_float("CH_CONNECT_TIMEOUT_S", 10.0, minimum=1.0, maximum=30.0)
+_CH_SEND_RECEIVE_TIMEOUT_S = _env_float("CH_SEND_RECEIVE_TIMEOUT_S", 45.0, minimum=1.0, maximum=60.0)
 
 # Revenue deviation threshold used by the intraday diagnostic classifier.
 # A projected or actual revenue deviation beyond this fraction triggers

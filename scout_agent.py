@@ -319,6 +319,8 @@ _BENCHMARKS_TTL = 3600  # 1 hour
 assert _BENCHMARKS_TTL > 0, "Benchmark TTL must be > 0 seconds"
 _BENCHMARKS_LOCK = threading.Lock()
 _BENCHMARKS_REFRESH_LOCK = threading.Lock()  # serializes reload I/O — see _get_benchmarks()
+_BENCHMARKS_FIRST_LOAD_WAIT_S = 15.0  # first-ever caller waits for an in-flight refresh instead of seeing {}
+assert _BENCHMARKS_FIRST_LOAD_WAIT_S > 0, "Benchmark first-load wait must be > 0 seconds"
 
 # ── Data quality tier helper ──────────────────────────────────────────────────
 
@@ -666,22 +668,38 @@ def _load_performance_benchmarks() -> dict:
 
 def _get_benchmarks() -> dict:
     """Refresh from ClickHouse if stale; _BENCHMARKS_REFRESH_LOCK keeps the I/O
-    off _BENCHMARKS_LOCK so a slow reload can't block other readers."""
+    off _BENCHMARKS_LOCK so a slow reload can't block other readers.
+
+    The very first load blocks (up to _BENCHMARKS_FIRST_LOAD_WAIT_S) on an
+    in-flight refresh instead of returning {} — an empty cache here reads to
+    every caller as "no benchmarks exist", not "still loading".
+    """
     global _BENCHMARKS, _BENCHMARKS_LOADED_AT
     with _BENCHMARKS_LOCK:
         stale = not _BENCHMARKS or (time.time() - _BENCHMARKS_LOADED_AT) > _BENCHMARKS_TTL
+        is_first_load = not _BENCHMARKS
         cached = copy.deepcopy(_BENCHMARKS)
-    if not stale or not _BENCHMARKS_REFRESH_LOCK.acquire(blocking=False):
-        return cached  # fresh, or a refresh is already in flight elsewhere
-    try:
-        fresh = _load_performance_benchmarks()
-        with _BENCHMARKS_LOCK:
-            _BENCHMARKS = fresh
-            _merge_learned_benchmarks()  # overlay actuals from 14-day recaps
-            _BENCHMARKS_LOADED_AT = time.time()
-            return copy.deepcopy(_BENCHMARKS)
-    finally:
+    if not stale:
+        return cached
+    if _BENCHMARKS_REFRESH_LOCK.acquire(blocking=False):
+        try:
+            fresh = _load_performance_benchmarks()
+            with _BENCHMARKS_LOCK:
+                _BENCHMARKS = fresh
+                _merge_learned_benchmarks()  # overlay actuals from 14-day recaps
+                _BENCHMARKS_LOADED_AT = time.time()
+                return copy.deepcopy(_BENCHMARKS)
+        finally:
+            _BENCHMARKS_REFRESH_LOCK.release()
+    if not is_first_load:
+        return cached  # stale-but-populated cache is a fine fallback
+    # First load ever, and another thread is already fetching it — wait for
+    # that refresh to land rather than doing a second, redundant ClickHouse
+    # fetch (the whole point of _BENCHMARKS_REFRESH_LOCK).
+    if _BENCHMARKS_REFRESH_LOCK.acquire(blocking=True, timeout=_BENCHMARKS_FIRST_LOAD_WAIT_S):
         _BENCHMARKS_REFRESH_LOCK.release()
+    with _BENCHMARKS_LOCK:
+        return copy.deepcopy(_BENCHMARKS)
 
 
 # Compiled once at module level — strips <<<SUGGESTIONS [...]  SUGGESTIONS>>> blocks from responses
