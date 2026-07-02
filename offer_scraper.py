@@ -20,6 +20,7 @@ import os
 import pathlib
 import re
 import json
+import inspect
 import logging
 import argparse
 import requests
@@ -41,6 +42,13 @@ class PayoutResult:
 
 from dotenv import load_dotenv
 load_dotenv()
+
+
+def _log_network_issue(event: str, message: str, network: str, **fields) -> None:
+    """log_event() wrapper for network fetch/auth/config failures — derives
+    `location` from the calling function so it can't drift on rename."""
+    caller = inspect.stack()[1].function
+    log_event(event, message, f"offer_scraper.{caller}", network=network, **fields)
 
 # ---------------------------------------------------------------------------
 # CONFIG — loaded from .env file (see .env.example) or environment variables
@@ -413,8 +421,8 @@ def _fetch_impact_ads_data() -> tuple:
         )
         if not resp.ok:
             log.warning(f"Impact Ads endpoint returned {resp.status_code} — ads data unavailable")
-            log_event("network_fetch_failed", "Impact Ads endpoint unavailable",
-                      "offer_scraper._fetch_impact_ads_data", network="impact", status_code=resp.status_code)
+            _log_network_issue("network_fetch_failed", "Impact Ads endpoint unavailable",
+                               "impact", status_code=resp.status_code)
             break
 
         data = resp.json()
@@ -606,8 +614,8 @@ def fetch_flexoffers() -> list:
         resp = requests.get(url, headers=headers, params=params, timeout=30)
         if resp.status_code in (401, 403):
             log.error(f"FlexOffers: auth failed ({resp.status_code}) — check FLEXOFFERS_API_KEY")
-            log_event("network_auth_failed", "FlexOffers auth failed", "offer_scraper.fetch_flexoffers",
-                      network="flexoffers", status_code=resp.status_code)
+            _log_network_issue("network_auth_failed", "FlexOffers auth failed",
+                               "flexoffers", status_code=resp.status_code)
             break
         resp.raise_for_status()
 
@@ -700,15 +708,15 @@ def fetch_maxbounty() -> list:
         auth_data = auth_resp.json()
     except Exception as e:
         log.error(f"MaxBounty: auth failed — {e}")
-        log_event("network_auth_failed", "MaxBounty auth failed", "offer_scraper.fetch_maxbounty",
-                  network="maxbounty", error=str(e))
+        _log_network_issue("network_auth_failed", "MaxBounty auth failed",
+                           "maxbounty", error=str(e))
         return []
 
     token = auth_data.get("mb-api-token", "")
     if not token:
         log.error(f"MaxBounty: no token in auth response — {auth_data}")
-        log_event("network_auth_failed", "MaxBounty auth response missing token",
-                  "offer_scraper.fetch_maxbounty", network="maxbounty")
+        _log_network_issue("network_auth_failed", "MaxBounty auth response missing token",
+                           "maxbounty")
         return []
 
     headers = {"x-access-token": token}
@@ -1411,7 +1419,7 @@ def fetch_cj() -> list:
 
     if not CJ_API_KEY:
         log.warning("CJ: CJ_API_KEY not set — skipping")
-        log_event("network_config_missing", "CJ_API_KEY not set", "offer_scraper.fetch_cj", network="cj")
+        _log_network_issue("network_config_missing", "CJ_API_KEY not set", "cj")
         return []
 
     HEADERS     = {"Authorization": f"Bearer {CJ_API_KEY}"}
@@ -1636,8 +1644,8 @@ def fetch_shareasale() -> list:
 
     if not SHAREASALE_API_TOKEN or not SHAREASALE_API_SECRET:
         log.warning("ShareASale: SHAREASALE_API_TOKEN or SHAREASALE_API_SECRET not set — skipping")
-        log_event("network_config_missing", "ShareASale credentials not set",
-                  "offer_scraper.fetch_shareasale", network="shareasale")
+        _log_network_issue("network_config_missing", "ShareASale credentials not set",
+                           "shareasale")
         return []
 
     aff_id   = SHAREASALE_AFFILIATE_ID
@@ -1761,8 +1769,7 @@ def fetch_rakuten() -> list:
     """
     if not RAKUTEN_API_TOKEN:
         log.warning("Rakuten: RAKUTEN_API_TOKEN not set — skipping")
-        log_event("network_config_missing", "RAKUTEN_API_TOKEN not set", "offer_scraper.fetch_rakuten",
-                  network="rakuten")
+        _log_network_issue("network_config_missing", "RAKUTEN_API_TOKEN not set", "rakuten")
         return []
 
     headers = {
@@ -1783,8 +1790,8 @@ def fetch_rakuten() -> list:
             )
             if resp.status_code == 401:
                 log.warning("Rakuten: 401 Unauthorized — check RAKUTEN_API_TOKEN")
-                log_event("network_auth_failed", "Rakuten 401 Unauthorized", "offer_scraper.fetch_rakuten",
-                          network="rakuten", status_code=401)
+                _log_network_issue("network_auth_failed", "Rakuten 401 Unauthorized",
+                                   "rakuten", status_code=401)
                 break
             if not resp.ok:
                 log.warning(f"Rakuten: API {resp.status_code} — {resp.text[:200]}")

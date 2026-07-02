@@ -23,17 +23,23 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 
 _LOGGER_NAME = "scout.structured"
+_init_lock = threading.Lock()  # guards handler attachment against concurrent first-callers
 
 
 def _get_json_logger() -> logging.Logger:
     logger = logging.getLogger(_LOGGER_NAME)
     if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        logger.addHandler(handler)
-        logger.propagate = False
+        with _init_lock:
+            # Re-check inside the lock — another thread may have attached the
+            # handler while we were waiting.
+            if not logger.handlers:
+                handler = logging.StreamHandler()
+                handler.setFormatter(logging.Formatter("%(message)s"))
+                logger.addHandler(handler)
+                logger.propagate = False
     return logger
 
 
