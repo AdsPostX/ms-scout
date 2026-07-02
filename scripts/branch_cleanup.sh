@@ -5,12 +5,16 @@
 #
 # Classification (in order of certainty, cheapest check first):
 #   1. ANCESTOR_OF_MAIN — tip commit already reachable from origin/main
-#   2. MERGED_PR        — gh pr list shows a MERGED PR for this branch
+#   2. MERGED_PR        — gh pr list shows a MERGED PR into $BASE_BRANCH for
+#                          this branch, AND the branch tip still matches the
+#                          exact commit that PR merged (headRefOid). A branch
+#                          reused after merge (new commits added post-merge)
+#                          fails this check and falls to NEEDS_REVIEW instead.
 #   3. EMPTY_DIFF       — no PR, but diff against origin/main is empty (content
 #                          already landed under a different commit hash)
 #   4. NEEDS_REVIEW      — everything else: open PR, closed/no PR with a real
-#                          diff, or no merge-base at all (orphan history).
-#                          Never auto-deleted.
+#                          diff, MERGED_PR with a diverged tip, or no merge-base
+#                          at all (orphan history). Never auto-deleted.
 #
 # Scope:
 #   Local branches are always scanned. Remote-only branches on origin are
@@ -43,7 +47,14 @@ for arg in "$@"; do
 done
 
 cd "$(git rev-parse --show-toplevel)"
-git fetch origin --quiet --prune
+# --prune deletes stale remote-tracking refs, so it's gated on --apply — a
+# dry run still fetches (to classify against current state) but must not
+# delete any ref metadata.
+if [[ "$APPLY" == true ]]; then
+  git fetch origin --quiet --prune
+else
+  git fetch origin --quiet
+fi
 
 is_protected() {
   local branch="$1"
@@ -54,19 +65,62 @@ is_protected() {
   return 1
 }
 
+delete_local_branch() { git branch -D "$1"; }
+delete_remote_branch() { git push origin --delete "$1"; }
+
+# Deletes each "$name  [reason]" entry via $delete_fn, tracks per-branch
+# success/failure, and prints a summary. Sets HAD_FAILURES=true on any
+# failure — shared by both the local and remote deletion passes below.
+# $1 = label for the summary line (e.g. "local branches")
+# $2 = name of a delete_*_branch function to invoke per entry
+# $3.. = entries to delete
+delete_tracked() {
+  local label="$1" delete_fn="$2"
+  shift 2
+  local entry name
+  local deleted=() failed=()
+  for entry in "$@"; do
+    name="${entry%%  *}"
+    if "$delete_fn" "$name"; then
+      deleted+=("$name")
+    else
+      failed+=("$name")
+    fi
+  done
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    HAD_FAILURES=true
+    echo "Deleted ${#deleted[@]} $label, failed ${#failed[@]}: ${failed[*]}"
+  else
+    echo "Deleted ${#deleted[@]} $label."
+  fi
+}
+
 # Classifies one branch against $BASE_REF. Prints exactly one line:
 #   TIER<TAB>reason
 # $1 = git ref to run merge-base/diff against (e.g. "foo" or "origin/foo")
 # $2 = bare branch name to look up in PR_JSON (e.g. "foo")
 classify_branch() {
-  local gitref="$1" prname="$2" pr_state
+  local gitref="$1" prname="$2" pr_state pr_head_oid
+  local current_oid
+  current_oid="$(git rev-parse "$gitref" 2>/dev/null || echo '-')"
 
-  pr_state=$(python3 -c "
+  # A branch name can be reused across multiple PRs (old merged one, new open
+  # one) — prefer any OPEN match so a reused name never masks a live PR, then
+  # a MERGED match whose head actually matches this tip, before falling back.
+  read -r pr_state pr_head_oid <<< "$(python3 -c "
 import json, sys
 prs = json.load(sys.stdin)
-match = [p for p in prs if p['headRefName'] == sys.argv[1]]
-print(match[0]['state'] if match else 'NONE')
-" "$prname" <<< "$PR_JSON")
+head_name, base_name, cur_oid = sys.argv[1], sys.argv[2], sys.argv[3]
+matches = [p for p in prs if p['headRefName'] == head_name and p['baseRefName'] == base_name]
+chosen = next((p for p in matches if p['state'] == 'OPEN'), None)
+if chosen is None:
+    merged = [p for p in matches if p['state'] == 'MERGED']
+    chosen = next((p for p in merged if p['headRefOid'] == cur_oid), None) or (merged[0] if merged else None)
+if chosen is None and matches:
+    chosen = matches[0]
+state, oid = (chosen['state'], chosen['headRefOid']) if chosen else ('NONE', '-')
+print(state, oid)
+" "$prname" "$BASE_BRANCH" "$current_oid" <<< "$PR_JSON")"
 
   if [[ "$pr_state" == "OPEN" ]]; then
     printf 'REVIEW\t%s\n' "OPEN PR — never auto-delete"
@@ -79,7 +133,11 @@ print(match[0]['state'] if match else 'NONE')
   fi
 
   if [[ "$pr_state" == "MERGED" ]]; then
-    printf 'DELETE\t%s\n' "MERGED_PR"
+    if [[ "$current_oid" == "$pr_head_oid" ]]; then
+      printf 'DELETE\t%s\n' "MERGED_PR"
+      return
+    fi
+    printf 'REVIEW\t%s\n' "MERGED_PR_DIVERGED — branch tip no longer matches the merged PR head, needs manual look"
     return
   fi
 
@@ -100,8 +158,9 @@ print(match[0]['state'] if match else 'NONE')
 }
 
 BASE_REF="origin/main"
+BASE_BRANCH="${BASE_REF#origin/}"
 CURRENT_BRANCH=$(git branch --show-current)
-PR_JSON=$(gh pr list --state all --limit 1000 --json number,state,headRefName)
+PR_JSON=$(gh pr list --state all --limit 1000 --json number,state,headRefName,headRefOid,baseRefName)
 
 # --- local scope ----------------------------------------------------------
 to_delete_local=()
@@ -128,12 +187,12 @@ echo
 echo "=== Local: needs human review — not touched (${#to_review_local[@]}) ==="
 printf '%s\n' "${to_review_local[@]:-}"
 
+HAD_FAILURES=false
+
 if [[ "$APPLY" == true && ${#to_delete_local[@]} -gt 0 ]]; then
   echo
   echo "Deleting ${#to_delete_local[@]} local branches..."
-  for entry in "${to_delete_local[@]}"; do
-    git branch -D "${entry%%  *}"
-  done
+  delete_tracked "local branches" delete_local_branch "${to_delete_local[@]}"
 elif [[ ${#to_delete_local[@]} -gt 0 ]]; then
   echo
   echo "Dry run — re-run with --apply to delete the local branches above."
@@ -144,6 +203,7 @@ if [[ "$SCAN_REMOTE" != true ]]; then
   untouched=$(git branch -r --format='%(refname:short)' | grep -v '^origin$' | sed 's#^origin/##' | grep -vc '^main$')
   echo
   echo "Note: $untouched remote-only branches on origin were not scanned (local-only run). Re-run with --remote to include them."
+  [[ "$HAD_FAILURES" == true ]] && exit 1
   exit 0
 fi
 
@@ -176,10 +236,11 @@ printf '%s\n' "${to_review_remote[@]:-}"
 if [[ "$APPLY" == true && ${#to_delete_remote[@]} -gt 0 ]]; then
   echo
   echo "Deleting ${#to_delete_remote[@]} remote branches..."
-  for entry in "${to_delete_remote[@]}"; do
-    git push origin --delete "${entry%%  *}"
-  done
+  delete_tracked "remote branches" delete_remote_branch "${to_delete_remote[@]}"
 elif [[ ${#to_delete_remote[@]} -gt 0 ]]; then
   echo
   echo "Dry run — re-run with --apply --remote to delete the remote branches above."
 fi
+
+[[ "$HAD_FAILURES" == true ]] && exit 1
+exit 0
