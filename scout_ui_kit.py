@@ -468,10 +468,10 @@ def _slack_card_block(
         )
     card: dict = {
         "type": "card",
-        "title": {"type": "plain_text", "text": title[:150]},
+        "title": {"type": "mrkdwn", "text": title[:150], "verbatim": False},
     }
     if subtitle:
-        card["subtitle"] = {"type": "plain_text", "text": subtitle[:150]}
+        card["subtitle"] = {"type": "mrkdwn", "text": subtitle[:150], "verbatim": False}
     if body:
         card["body"] = {"type": "mrkdwn", "text": body[:200]}
     if hero_image_url:
@@ -479,10 +479,16 @@ def _slack_card_block(
     if icon_url:
         card["icon"] = {"type": "image", "image_url": icon_url, "alt_text": (icon_alt or title)[:2000]}
     if actions:
-        card["actions"] = {"type": "actions", "elements": actions}
+        card["actions"] = actions
     if block_id:
         card["block_id"] = block_id
     return card
+
+
+# Slack's hard limit on cards per carousel — callers should clamp upstream
+# (e.g. offers_per_network) against this rather than relying solely on the
+# truncate-and-log fallback below.
+_MAX_CAROUSEL_CARDS = 10
 
 
 def _carousel_block(cards: list[dict]) -> list[dict]:
@@ -490,21 +496,22 @@ def _carousel_block(cards: list[dict]) -> list[dict]:
 
     Each card must have a unique block_id. Returns [] for empty input.
     Slack carousels require ≥2 cards to render the navigation arrows —
-    a single card is returned unwrapped. Slack's hard limit is 10 cards per
-    carousel — callers should cap upstream (e.g. per-network digest caps);
-    this is a last-resort guard that logs instead of silently dropping cards.
+    a single card is returned unwrapped. Slack's hard limit is
+    _MAX_CAROUSEL_CARDS cards per carousel — callers should cap upstream
+    (e.g. per-network digest caps); this is a last-resort guard that logs
+    instead of silently dropping cards.
     """
     if not cards:
         return []
     if len(cards) == 1:
         return [cards[0]]
-    if len(cards) > 10:
+    if len(cards) > _MAX_CAROUSEL_CARDS:
         log.warning(
-            "_carousel_block: %d cards exceeds Slack's 10-card limit, truncating — "
+            "_carousel_block: %d cards exceeds Slack's %d-card limit, truncating — "
             "caller should cap the input list upstream",
-            len(cards),
+            len(cards), _MAX_CAROUSEL_CARDS,
         )
-    return [{"type": "carousel", "elements": cards[:10]}]
+    return [{"type": "carousel", "elements": cards[:_MAX_CAROUSEL_CARDS]}]
 
 
 # ---------------------------------------------------------------------------

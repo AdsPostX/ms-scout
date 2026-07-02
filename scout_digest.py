@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 from scout_log import log_event
-from scout_ui_kit import _carousel_block, _slack_card_block
+from scout_ui_kit import _MAX_CAROUSEL_CARDS, _carousel_block, _slack_card_block
 
 load_dotenv()  # plist env vars (SCOUT_ENV, SCOUT_DIGEST_CHANNEL, etc.) take precedence over .env
 
@@ -422,7 +422,45 @@ def is_already_in_ms(offer: dict, ms_campaigns: list[dict]) -> bool:
 # One model, one truth: estimated_RPM = payout × predicted_CVR × 1000 × reliability.
 # CVR is sourced from (in order): real MS ClickHouse data → category benchmark → payout-type baseline.
 
-def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, force: bool = False, reason_sink: dict | None = None) -> float | None:
+def _load_digest_config() -> dict:
+    """Single load point for config/scout_thresholds.json's "digest" block.
+
+    Validates at construction rather than trusting raw config values downstream:
+    - native_cards_enabled must be a real bool (a stray string like "false" is
+      truthy in Python and would otherwise silently enable native cards).
+    - offers_per_network is clamped to Slack's carousel limit so a human editing
+      the config can't produce a per-network count the carousel silently truncates.
+    """
+    from scout_thresholds import _manager as _tm
+
+    raw = _tm.load().get("digest", {})
+
+    native_cards_enabled = raw.get("native_cards_enabled", False)
+    if not isinstance(native_cards_enabled, bool):
+        log.warning(
+            "digest.native_cards_enabled=%r is not a bool — treating as False",
+            native_cards_enabled,
+        )
+        native_cards_enabled = False
+
+    offers_per_network = int(raw.get("offers_per_network", 3))
+    if offers_per_network > _MAX_CAROUSEL_CARDS:
+        log.warning(
+            "digest.offers_per_network=%d exceeds Slack's %d-card carousel limit, clamping",
+            offers_per_network, _MAX_CAROUSEL_CARDS,
+        )
+        offers_per_network = _MAX_CAROUSEL_CARDS
+
+    return {
+        "min_rpm_floor": float(raw.get("min_rpm_floor", 20.0)),
+        "max_per_category": int(raw.get("max_per_category", 2)),
+        "max_per_payout_type": int(raw.get("max_per_payout_type", 2)),
+        "offers_per_network": offers_per_network,
+        "native_cards_enabled": native_cards_enabled,
+    }
+
+
+def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, force: bool = False, reason_sink: dict | None = None, digest_cfg: dict | None = None) -> float | None:
     """
     Returns estimated RPM (Scout Score), or None to exclude.
 
@@ -443,7 +481,9 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     force=True bypasses approved/rejected state so test runs always surface real cards.
     """
     from scout_agent import _scout_score
-    from scout_thresholds import _manager as _tm
+
+    if digest_cfg is None:
+        digest_cfg = _load_digest_config()
 
     def _reject(reason: str) -> None:
         # Per-gate diagnostic: lets select_offers() answer "why is Impact 100% no_score?"
@@ -514,7 +554,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     # filters weak long-tail offers (e.g. $12 CPA meal kits, $15 trading platforms).
     # PR 18: read from config/scout_thresholds.json so the team can tune without
     # a code change. Falls back to 20.0 if config or key is missing.
-    _MIN_RPM = float(_tm.load().get("digest", {}).get("min_rpm_floor", 20.0))
+    _MIN_RPM = digest_cfg["min_rpm_floor"]
     if rpm < _MIN_RPM:
         return _reject("below_min_rpm")
 
@@ -1476,6 +1516,7 @@ def select_offers(
     ms_campaigns:  list[dict] | None = None,
     benchmarks:    dict | None = None,
     force:         bool = False,
+    digest_cfg:    dict | None = None,
 ) -> tuple[dict[str, list[tuple[float, dict]]], dict]:
     """
     Returns (offers_by_network, meta) where meta has skip counts.
@@ -1485,6 +1526,9 @@ def select_offers(
     force=True bypasses the is_already_in_ms filter so testing always surfaces real offers.
     """
     from scout_thresholds import _manager as _tm
+
+    if digest_cfg is None:
+        digest_cfg = _load_digest_config()
 
     state         = load_state()
     offers        = _load_offers()
@@ -1496,9 +1540,8 @@ def select_offers(
 
     # PR 18: diversity caps now come from config/scout_thresholds.json so the team
     # can tune without a code change. Defaults match prior hardcoded behavior.
-    _digest_cfg = _tm.load().get("digest", {})
-    _max_per_category = int(_digest_cfg.get("max_per_category", 2))
-    _max_per_payout_type = int(_digest_cfg.get("max_per_payout_type", 2))
+    _max_per_category = digest_cfg["max_per_category"]
+    _max_per_payout_type = digest_cfg["max_per_payout_type"]
 
     # Score all offers across all networks
     by_network: dict[str, list] = {}
@@ -1528,7 +1571,7 @@ def select_offers(
             continue
 
         reasons = no_score_reasons.setdefault(network, {})
-        s = score_offer(offer, payout_cache, state, benchmarks, force=force, reason_sink=reasons)
+        s = score_offer(offer, payout_cache, state, benchmarks, force=force, reason_sink=reasons, digest_cfg=digest_cfg)
         if s is None:
             skipped_no_score += 1
             _bump(network, "no_score")
@@ -1649,12 +1692,10 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     payout_cache = json.loads(PAYOUT_CACHE.read_text()) if PAYOUT_CACHE.exists() else {}
     ms_campaigns = get_active_ms_campaigns()
     benchmarks   = _tm.benchmarks()
-    _digest_cfg = _tm.load().get("digest", {})
-    _offers_per_network = int(_digest_cfg.get("offers_per_network", 3))
-    _native_cards_enabled = bool(_digest_cfg.get("native_cards_enabled", False))
+    digest_cfg   = _load_digest_config()
     offers_by_network, sel_meta = select_offers(
-        n_per_network=_offers_per_network, ms_campaigns=ms_campaigns,
-        benchmarks=benchmarks, force=is_force,
+        n_per_network=digest_cfg["offers_per_network"], ms_campaigns=ms_campaigns,
+        benchmarks=benchmarks, force=is_force, digest_cfg=digest_cfg,
     )
 
     total_selected = sel_meta["total_selected"]
@@ -1713,7 +1754,7 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     blocks = build_digest_blocks(
         offers_by_network, payout_cache, ms_campaigns, benchmarks,
         run_date, offer_images=offer_images, sel_meta=sel_meta,
-        native_cards=_native_cards_enabled,
+        native_cards=digest_cfg["native_cards_enabled"],
     )
 
     # Prepend NEW THIS WEEK section

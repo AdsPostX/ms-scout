@@ -719,6 +719,57 @@ def test_score_offer_reads_config_floor():
         return False, str(e)
 
 
+@test("_load_digest_config coerces non-bool native_cards_enabled to False")
+def test_load_digest_config_coerces_non_bool_native_cards():
+    """
+    A stray string like "false" is truthy in Python — _load_digest_config must
+    reject non-bool native_cards_enabled values at construction rather than
+    letting them silently enable native cards downstream.
+    """
+    import scout_digest
+    import scout_thresholds as _st
+
+    original = _st._manager._thresholds_cache
+    try:
+        base = _st._manager.load()
+        _st._manager._thresholds_cache = {
+            **base, "digest": {**base["digest"], "native_cards_enabled": "false"},
+        }
+        cfg = scout_digest._load_digest_config()
+        if cfg["native_cards_enabled"] is not False:
+            return False, f"non-bool native_cards_enabled must coerce to False, got {cfg['native_cards_enabled']!r}"
+    finally:
+        _st._manager._thresholds_cache = original
+
+    return True, "_load_digest_config: non-bool native_cards_enabled coerced to False"
+
+
+@test("_load_digest_config clamps offers_per_network to carousel limit")
+def test_load_digest_config_clamps_offers_per_network():
+    """
+    Slack carousels hard-cap at _MAX_CAROUSEL_CARDS cards — a human editing
+    config shouldn't be able to produce a per-network count the carousel
+    silently truncates later.
+    """
+    import scout_digest
+    import scout_thresholds as _st
+    from scout_ui_kit import _MAX_CAROUSEL_CARDS
+
+    original = _st._manager._thresholds_cache
+    try:
+        base = _st._manager.load()
+        _st._manager._thresholds_cache = {
+            **base, "digest": {**base["digest"], "offers_per_network": _MAX_CAROUSEL_CARDS + 5},
+        }
+        cfg = scout_digest._load_digest_config()
+        if cfg["offers_per_network"] != _MAX_CAROUSEL_CARDS:
+            return False, f"offers_per_network must clamp to {_MAX_CAROUSEL_CARDS}, got {cfg['offers_per_network']!r}"
+    finally:
+        _st._manager._thresholds_cache = original
+
+    return True, f"_load_digest_config: offers_per_network clamped to {_MAX_CAROUSEL_CARDS}"
+
+
 @test("offer_staleness_threshold_reads_from_config")
 def test_offer_staleness_from_config():
     """PR 18 invariant: scout_bot reads offer_staleness_hours from config, not hardcoded."""
@@ -4167,7 +4218,7 @@ def test_slack_card_block_structure():
     # Minimal card — title only
     card = _slack_card_block("My Title")
     assert card["type"] == "card", f"Expected type=card, got {card['type']!r}"
-    assert card["title"]["type"] == "plain_text", "title must be plain_text"
+    assert card["title"]["type"] == "mrkdwn", "title must be mrkdwn (Slack card block spec)"
     assert card["title"]["text"] == "My Title", f"title text wrong: {card['title']['text']!r}"
     # Optional fields absent when not provided
     assert "subtitle" not in card, "subtitle must be absent when not provided"
@@ -4182,7 +4233,7 @@ def test_slack_card_block_optional_fields():
     from scout_ui_kit import _slack_card_block
 
     card = _slack_card_block("Title", body="*Bold*", subtitle="Sub", block_id="card_1")
-    assert card["subtitle"]["type"] == "plain_text", "subtitle must be plain_text"
+    assert card["subtitle"]["type"] == "mrkdwn", "subtitle must be mrkdwn (Slack card block spec)"
     assert card["subtitle"]["text"] == "Sub", f"subtitle text wrong: {card['subtitle']['text']!r}"
     assert card["body"]["type"] == "mrkdwn", "body must be mrkdwn"
     assert card["body"]["text"] == "*Bold*", f"body text wrong: {card['body']['text']!r}"
@@ -4249,7 +4300,7 @@ def test_slack_card_block_native_fields():
     assert card["icon"] == {
         "type": "image", "image_url": "https://example.com/icon.png", "alt_text": "icon alt",
     }, f"icon wrong shape: {card.get('icon')!r}"
-    assert card["actions"] == {"type": "actions", "elements": actions}, f"actions wrong shape: {card.get('actions')!r}"
+    assert card["actions"] == actions, f"actions must be a raw array (Slack card block spec), got: {card.get('actions')!r}"
     return True, "_slack_card_block: icon/hero_image/actions render with correct Slack shape"
 
 
@@ -4331,7 +4382,7 @@ def test_build_offer_native_card_shape():
     assert "$5.00 CPL" in card["subtitle"]["text"], f"payout_str missing from subtitle: {card['subtitle']}"
     assert "US" in card["subtitle"]["text"], f"geo missing from subtitle: {card['subtitle']}"
     assert "Strong RPM vs benchmark" in card["body"]["text"], f"why text missing from body: {card['body']}"
-    action_elements = card["actions"]["elements"]
+    action_elements = card["actions"]
     assert len(action_elements) == 3, f"Expected 3 buttons (approve/reject/view via portal url), got {len(action_elements)}"
     assert action_elements[0]["action_id"] == "scout_approve", f"first button wrong: {action_elements[0]}"
     assert action_elements[2]["url"] == "https://portal.example.com/123", f"view button should fall back to portal url: {action_elements[2]}"
