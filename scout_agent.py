@@ -29,21 +29,15 @@ from typing import Mapping, Optional
 import anthropic
 from scout_types import FormattedOffer, Brief  # type: ignore[import]  # noqa: F401
 
-# ---------------------------------------------------------------------------
-# Anthropic client singleton — avoids constructing a new httpx session on
-# every ask() / ask_with_attachment() call.  Thread-safe: GIL protects the
-# None-check; the constructor is idempotent if races occur during startup.
-# ---------------------------------------------------------------------------
+# Singleton — avoids a new httpx session per ask() call. GIL-safe None-check.
 _ANTHROPIC_CLIENT: "anthropic.Anthropic | None" = None
-
 
 def _get_anthropic_client() -> "anthropic.Anthropic":
     global _ANTHROPIC_CLIENT
     if _ANTHROPIC_CLIENT is None:
         _ANTHROPIC_CLIENT = anthropic.Anthropic(
             api_key=os.getenv("ANTHROPIC_API_KEY"),
-            default_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
-        )
+            default_headers={"anthropic-beta": "prompt-caching-2024-07-31"})
     return _ANTHROPIC_CLIENT
 from dotenv import load_dotenv
 import queries as _q
@@ -6087,21 +6081,9 @@ def _run_tool_loop(
 ) -> AskResult:
     """Run the bounded tool-use loop and synthesize the final AskResult.
 
-    All previously-closure-scoped state from ask() is passed explicitly. Mutable
-    accumulators default to None (instantiated locally) so callers can supply
-    pre-seeded lists or rely on per-call lists.
-
-    Mutation contract (caller-owned accumulators):
-      _tools_called  — APPENDED in-place each time a tool block fires (str name).
-                       Caller declares an empty list before calling this function
-                       and reads it back via the returned AskResult.tools_called.
-                       Do NOT pass a shared/global list — each ask() invocation
-                       must supply a fresh list.
-
-    Locally-owned accumulators (instantiated here when caller passes None):
-      _brief_results, _opportunity_offers, _all_tool_results — collected per-call
-      and never returned to the caller directly; their contents drive payload
-      construction inside the loop.
+    State from ask() is passed explicitly. _tools_called is caller-owned —
+    pass a fresh list per call, never shared/global. Other accumulators are
+    locally-owned when None and never returned to the caller.
     """
     def _dur() -> int:
         return int((time.monotonic() - _start_ms) * 1000)
