@@ -47,8 +47,9 @@ for arg in "$@"; do
 done
 
 cd "$(git rev-parse --show-toplevel)"
-# --prune mutates local remote-tracking refs, so it's gated on --apply — a
-# dry run must not touch anything, even ref metadata.
+# --prune deletes stale remote-tracking refs, so it's gated on --apply — a
+# dry run still fetches (to classify against current state) but must not
+# delete any ref metadata.
 if [[ "$APPLY" == true ]]; then
   git fetch origin --quiet --prune
 else
@@ -100,14 +101,26 @@ delete_tracked() {
 # $2 = bare branch name to look up in PR_JSON (e.g. "foo")
 classify_branch() {
   local gitref="$1" prname="$2" pr_state pr_head_oid
+  local current_oid
+  current_oid="$(git rev-parse "$gitref" 2>/dev/null || echo '-')"
 
+  # A branch name can be reused across multiple PRs (old merged one, new open
+  # one) — prefer any OPEN match so a reused name never masks a live PR, then
+  # a MERGED match whose head actually matches this tip, before falling back.
   read -r pr_state pr_head_oid <<< "$(python3 -c "
 import json, sys
 prs = json.load(sys.stdin)
-match = [p for p in prs if p['headRefName'] == sys.argv[1] and p['baseRefName'] == sys.argv[2]]
-state, oid = (match[0]['state'], match[0]['headRefOid']) if match else ('NONE', '-')
+head_name, base_name, cur_oid = sys.argv[1], sys.argv[2], sys.argv[3]
+matches = [p for p in prs if p['headRefName'] == head_name and p['baseRefName'] == base_name]
+chosen = next((p for p in matches if p['state'] == 'OPEN'), None)
+if chosen is None:
+    merged = [p for p in matches if p['state'] == 'MERGED']
+    chosen = next((p for p in merged if p['headRefOid'] == cur_oid), None) or (merged[0] if merged else None)
+if chosen is None and matches:
+    chosen = matches[0]
+state, oid = (chosen['state'], chosen['headRefOid']) if chosen else ('NONE', '-')
 print(state, oid)
-" "$prname" "$BASE_BRANCH" <<< "$PR_JSON")"
+" "$prname" "$BASE_BRANCH" "$current_oid" <<< "$PR_JSON")"
 
   if [[ "$pr_state" == "OPEN" ]]; then
     printf 'REVIEW\t%s\n' "OPEN PR — never auto-delete"
@@ -120,7 +133,7 @@ print(state, oid)
   fi
 
   if [[ "$pr_state" == "MERGED" ]]; then
-    if [[ "$(git rev-parse "$gitref" 2>/dev/null)" == "$pr_head_oid" ]]; then
+    if [[ "$current_oid" == "$pr_head_oid" ]]; then
       printf 'DELETE\t%s\n' "MERGED_PR"
       return
     fi
