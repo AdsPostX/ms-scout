@@ -33,8 +33,12 @@ Audit Status: Complete (engineering audit) — see [VAMSEE_AUDIT.md](VAMSEE_AUDI
 
 Claude Code leaves `worktree-agent-*` and `claude/*` branches behind after every session — they don't get pruned on merge. Run `scripts/branch_cleanup.sh` after any PR merges to clear them before they pile up:
 
-- `scripts/branch_cleanup.sh` — dry run, prints what it would delete and what needs a human look
-- `scripts/branch_cleanup.sh --apply` — deletes only branches proven safe (already merged into main, or byte-identical diff against main)
+- `scripts/branch_cleanup.sh` — dry run, local branches only, prints what it would delete and what needs a human look
+- `scripts/branch_cleanup.sh --remote` (or `--all`) — dry run, also scans remote-only branches on `origin`
+- `scripts/branch_cleanup.sh --apply` — deletes local branches proven safe (already merged into main, or byte-identical diff against main)
+- `scripts/branch_cleanup.sh --apply --remote` — same, plus deletes safe remote-only branches via `git push origin --delete`
+
+Local-only runs print a note with the count of unscanned remote-only branches — the remote backlog is never silently skipped.
 
 Anything with an open PR, a closed PR with a real unmerged diff, orphan/no-merge-base history, or a `backup/*` name is never auto-deleted — it prints under "needs human review" instead.
 
