@@ -319,7 +319,7 @@ _BENCHMARKS_TTL = 3600  # 1 hour
 assert _BENCHMARKS_TTL > 0, "Benchmark TTL must be > 0 seconds"
 _BENCHMARKS_LOCK = threading.Lock()
 _BENCHMARKS_REFRESH_LOCK = threading.Lock()  # serializes reload I/O — see _get_benchmarks()
-_BENCHMARKS_FIRST_LOAD_WAIT_S = 15.0  # first-ever caller waits for an in-flight refresh instead of seeing {}
+_BENCHMARKS_FIRST_LOAD_WAIT_S = 120.0  # first-ever caller waits for an in-flight refresh instead of seeing {}
 assert _BENCHMARKS_FIRST_LOAD_WAIT_S > 0, "Benchmark first-load wait must be > 0 seconds"
 
 # ── Data quality tier helper ──────────────────────────────────────────────────

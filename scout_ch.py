@@ -54,7 +54,9 @@ def _env_float(name: str, default: float, minimum: float = 0.1, maximum: float |
 
 
 _CH_MAX_CONCURRENT = _env_int("CH_MAX_CONCURRENT", 4, minimum=1)
-_CH_ACQUIRE_TIMEOUT_S = _env_float("CH_ACQUIRE_TIMEOUT_S", 10.0, minimum=0.1)
+# Capped at 30s — like the timeouts below, an env misconfiguration must not be
+# able to let a single acquire wait outlast ask_timeout_s on its own.
+_CH_ACQUIRE_TIMEOUT_S = _env_float("CH_ACQUIRE_TIMEOUT_S", 10.0, minimum=0.1, maximum=30.0)
 _CH_QUERY_SEMAPHORE = threading.BoundedSemaphore(_CH_MAX_CONCURRENT)
 
 # Bound the network I/O itself, not just the wait for a semaphore slot.
@@ -67,6 +69,28 @@ _CH_QUERY_SEMAPHORE = threading.BoundedSemaphore(_CH_MAX_CONCURRENT)
 # able to silently defeat that bound.
 _CH_CONNECT_TIMEOUT_S = _env_float("CH_CONNECT_TIMEOUT_S", 10.0, minimum=1.0, maximum=30.0)
 _CH_SEND_RECEIVE_TIMEOUT_S = _env_float("CH_SEND_RECEIVE_TIMEOUT_S", 45.0, minimum=1.0, maximum=60.0)
+
+
+def _validate_ch_timeout_budget() -> None:
+    """Warn if acquire+connect+send_receive can outlast ask()'s own timeout.
+
+    Each piece is individually clamped above, but nothing previously checked
+    their sum against _CFG.ask_timeout_s — a hung query could still fail
+    later than ask()'s own timeout, defeating the point of bounding it.
+    Warns instead of raising: a single bad env var must not crash the
+    process. Local import avoids a circular import (scout_handlers imports
+    scout_ch, not the reverse).
+    """
+    from scout_handlers import _CFG as _handlers_cfg
+    budget = _CH_ACQUIRE_TIMEOUT_S + _CH_CONNECT_TIMEOUT_S + _CH_SEND_RECEIVE_TIMEOUT_S
+    if budget >= _handlers_cfg.ask_timeout_s:
+        log.warning(
+            "[CH] timeout budget %.1fs (acquire=%.1f + connect=%.1f + send_receive=%.1f) "
+            ">= ask_timeout_s %ds — a hung query can outlast ask()'s own timeout",
+            budget, _CH_ACQUIRE_TIMEOUT_S, _CH_CONNECT_TIMEOUT_S, _CH_SEND_RECEIVE_TIMEOUT_S,
+            _handlers_cfg.ask_timeout_s,
+        )
+
 
 # Revenue deviation threshold used by the intraday diagnostic classifier.
 # A projected or actual revenue deviation beyond this fraction triggers

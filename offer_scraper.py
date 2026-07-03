@@ -963,11 +963,8 @@ def fetch_ms_campaign_index() -> dict:
         return {"by_impact_id": {}, "by_name": {}}
 
     try:
-        import clickhouse_connect
-        client = clickhouse_connect.get_client(
-            host=CH_HOST, user=CH_USER, password=CH_PASSWORD,
-            database=CH_DATABASE, secure=True,
-        )
+        from scout_ch import _get_ch_client
+        client = _get_ch_client()
 
         query = """
             SELECT

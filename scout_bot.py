@@ -2029,6 +2029,8 @@ def _on_startup(web: WebClient) -> None:
 def main():
     global _BOT_USER_ID
     _check_singleton()
+    from scout_ch import _validate_ch_timeout_budget
+    _validate_ch_timeout_budget()
     _seed_entity_overrides()  # ensure Button exclusion survives fresh Render deploys
     if not _BOT_CFG.bot_token or not _BOT_CFG.app_token:
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env")
