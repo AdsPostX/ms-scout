@@ -178,9 +178,6 @@ NOTION_TOKEN        = os.environ.get("NOTION_TOKEN", "")
 NOTION_DB_ID        = os.environ.get("NOTION_DB_ID", "")
 
 # ClickHouse Cloud — for MS campaign matching
-CH_HOST             = os.environ.get("CH_HOST", "")
-CH_USER             = os.environ.get("CH_USER", "")
-CH_PASSWORD         = os.environ.get("CH_PASSWORD", "")
 CH_DATABASE         = os.environ.get("CH_DATABASE", "default")
 
 DEBUG = False  # set to True via --debug flag at runtime
@@ -958,12 +955,13 @@ def fetch_ms_campaign_index() -> dict:
 
     Returns empty dicts (graceful degradation) if CH credentials are missing or query fails.
     """
-    if not CH_HOST or not CH_USER or not CH_PASSWORD:
+    from scout_ch import _ch_credentials_configured, _get_ch_client
+
+    if not _ch_credentials_configured():
         log.warning("ClickHouse credentials not configured — skipping MS campaign matching")
         return {"by_impact_id": {}, "by_name": {}}
 
     try:
-        from scout_ch import _get_ch_client
         client = _get_ch_client()
 
         query = """

@@ -116,6 +116,11 @@ def _run_parallel(fns: list):
     return [fn() for fn in fns]
 
 
+def _ch_credentials_configured() -> bool:
+    """True if CH_HOST/CH_USER/CH_PASSWORD are all set — no defaults applied."""
+    return bool(os.getenv("CH_HOST")) and bool(os.getenv("CH_USER")) and bool(os.getenv("CH_PASSWORD"))
+
+
 def _get_ch_client():
     """Create a ClickHouse client from env vars. Import is local so startup never fails."""
     import clickhouse_connect
