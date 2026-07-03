@@ -40,7 +40,7 @@ from scout_ch import (  # noqa: F401 — backward compat re-exports
     _query_publisher_revenue_trends, _query_advertiser_revenue_trends,
 )
 from scout_images import (  # noqa: F401 — backward compat re-exports
-    _scrape_og_image, _clearbit_domain, _google_favicon, _app_store_icon,
+    _clearbit_domain, _google_favicon, _app_store_icon,
     _validate_image_url, _load_image_cache, _save_image_cache,
     _cached_external_images, _store_image_cache, _ms_cdn_image,
 )
