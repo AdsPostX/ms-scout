@@ -4717,6 +4717,91 @@ def test_ch_busy_message():
         return False, str(e)
 
 
+@test("scout_image_resolve — _is_icon_url accepts square logos, rejects creatives")
+def test_is_icon_url_gating():
+    try:
+        from scout_image_resolve import _is_icon_url
+        accept = "https://flexlinks.com/x/programsquarelogo/foo.png"
+        reject_creative = "https://cdn.mb1-content.com/creative/lp/foo.jpg"
+        reject_unknown = "https://example.com/og-image.jpg"
+        if not _is_icon_url(accept):
+            return False, f"expected accept for known square-logo URL: {accept!r}"
+        if _is_icon_url(reject_creative):
+            return False, f"expected reject for landing-page creative: {reject_creative!r}"
+        if _is_icon_url(reject_unknown):
+            return False, f"expected reject for unknown CDN (no guessing): {reject_unknown!r}"
+        if _is_icon_url(""):
+            return False, "expected reject for empty URL"
+        return True, "accept/reject/unknown-CDN gating all correct"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("scout_image_resolve — _advertiser_favicon_url derives root domain")
+def test_advertiser_favicon_url():
+    try:
+        from scout_image_resolve import _advertiser_favicon_url
+        url = _advertiser_favicon_url({"preview_url": "https://rec.lifelinescreening.com/offer?x=1"})
+        if "lifelinescreening.com" not in url or "google.com/s2/favicons" not in url:
+            return False, f"unexpected favicon URL: {url!r}"
+        empty = _advertiser_favicon_url({})
+        if empty != "":
+            return False, f"expected empty string with no preview_url/tracking_url, got {empty!r}"
+        return True, f"favicon URL derives root domain — {url}"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("scout_image_resolve — resolve_icon_image priority: icon > hero > extra > favicon")
+def test_resolve_icon_image_priority():
+    try:
+        from scout_image_resolve import resolve_icon_image
+        icon = "https://flexlinks.com/x/programsquarelogo/a.png"
+        hero_banner = "https://cdn.mb1-content.com/creative/lp/b.jpg"
+        offer_with_icon = {"icon_url": icon, "hero_url": hero_banner, "preview_url": "https://x.example.com"}
+        if resolve_icon_image(offer_with_icon) != icon:
+            return False, "expected icon_url to win when it's a valid square logo"
+
+        offer_favicon_fallback = {"icon_url": hero_banner, "hero_url": "", "preview_url": "https://rec.example.com"}
+        resolved = resolve_icon_image(offer_favicon_fallback)
+        if "google.com/s2/favicons" not in resolved:
+            return False, f"expected favicon fallback when no candidate is a valid icon, got {resolved!r}"
+
+        extra_icon = "https://ui.awin.com/merchant/profile/123"
+        offer_extra_candidate = {"icon_url": "", "hero_url": "", "preview_url": ""}
+        resolved_extra = resolve_icon_image(offer_extra_candidate, extra_candidates=(extra_icon,))
+        if resolved_extra != extra_icon:
+            return False, f"expected extra_candidates icon to be used, got {resolved_extra!r}"
+
+        return True, "icon > hero > extra_candidates > favicon priority verified"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("scout_ui_kit — _build_opportunity_cards gates icon via resolve_icon_image")
+def test_build_opportunity_cards_uses_resolve_icon_image():
+    try:
+        from scout_ui_kit import _build_opportunity_cards
+        banner = "https://cdn.mb1-content.com/creative/lp/banner.jpg"
+        icon = "https://flexlinks.com/x/programsquarelogo/a.png"
+
+        offers_reject = [{"advertiser": "Acme", "icon_url": banner, "hero_url": "", "payout": "$5"}]
+        blocks = _build_opportunity_cards(offers_reject)
+        section = next(b for b in blocks if b.get("type") == "section")
+        if "accessory" in section and section["accessory"]["image_url"] == banner:
+            return False, "banner/creative URL leaked into accessory image_url unfiltered"
+
+        offers_accept = [{"advertiser": "Acme", "icon_url": icon, "hero_url": "", "payout": "$5"}]
+        blocks2 = _build_opportunity_cards(offers_accept)
+        section2 = next(b for b in blocks2 if b.get("type") == "section")
+        if section2.get("accessory", {}).get("image_url") != icon:
+            return False, f"expected valid square-logo icon in accessory, got {section2.get('accessory')!r}"
+
+        return True, "_build_opportunity_cards routes through resolve_icon_image gating"
+    except Exception as e:
+        return False, str(e)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
