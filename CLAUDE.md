@@ -130,7 +130,7 @@ All `/scout-cap/vel/ghost/fill` commands route to `_FORCE_MONITOR_FNS` — same 
 
 Before ANY commit on Scout:
 
-1. **Run smoke tests** — always, no exceptions: `python3 smoke_test.py 2>&1 | tail -5`. All deterministic checks must pass. If it fails, fix before committing. Post the result inline: `✅ N/N` or `🔴 N/N — [failing test name]`.
+1. **Run smoke tests** — always, no exceptions: `python3 smoke_test.py 2>&1 | tail -5; test ${PIPESTATUS[0]} -eq 0`. Check the exit code, not just the printed summary — `tail` alone masks a nonzero exit from `python3`. All deterministic checks must pass. If it fails, fix before committing. Post the result inline: `✅ N/N` or `🔴 N/N — [failing test name]`.
 2. **For queries.py / queries_*.py changes** — verify SQL locally before committing (see SQL Hygiene below).
 3. **For scout_agent.py handler changes** — import check: `python3 -c "from scout_agent import TOOL_MAP; print('OK')"`.
 4. **Preview before PR** — for any web tool or demo, run a local server and screenshot via Claude Preview MCP before asking for review. No screenshot = no merge.
@@ -165,4 +165,4 @@ Before any change to a `queries_*.py` WHERE clause, JOIN type, or column referen
 
 ## Worktree Hygiene
 
-After every PR merges: `git worktree remove --force <path>` for that branch's worktree. Rule: **never leave more than 3 active worktrees** (main + current session + 1 parallel). If `git worktree list` grows beyond that, prune before starting new work — a stale worktree pile silently accumulates unmerged/unshipped diffs that become expensive to audit later.
+After every PR merges: `git worktree remove <path>` for that branch's worktree — it refuses safely if uncommitted changes remain, so never add `--force` to bypass that check without first inspecting what's uncommitted. Run `git worktree prune` afterward to clear stale metadata for worktrees already deleted on disk. Rule: **never leave more than 3 active worktrees** (main + current session + 1 parallel). If `git worktree list` grows beyond that, prune before starting new work — a stale worktree pile silently accumulates unmerged/unshipped diffs that become expensive to audit later.
