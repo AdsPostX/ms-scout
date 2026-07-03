@@ -468,10 +468,10 @@ def _slack_card_block(
         )
     card: dict = {
         "type": "card",
-        "title": {"type": "mrkdwn", "text": title[:150], "verbatim": False},
+        "title": {"type": "plain_text", "text": title[:150], "emoji": True},
     }
     if subtitle:
-        card["subtitle"] = {"type": "mrkdwn", "text": subtitle[:150], "verbatim": False}
+        card["subtitle"] = {"type": "plain_text", "text": subtitle[:150], "emoji": True}
     if body:
         card["body"] = {"type": "mrkdwn", "text": body[:200]}
     if hero_image_url:

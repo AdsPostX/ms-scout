@@ -4218,7 +4218,7 @@ def test_slack_card_block_structure():
     # Minimal card — title only
     card = _slack_card_block("My Title")
     assert card["type"] == "card", f"Expected type=card, got {card['type']!r}"
-    assert card["title"]["type"] == "mrkdwn", "title must be mrkdwn (Slack card block spec)"
+    assert card["title"]["type"] == "plain_text", "title must be plain_text (Slack card block spec)"
     assert card["title"]["text"] == "My Title", f"title text wrong: {card['title']['text']!r}"
     # Optional fields absent when not provided
     assert "subtitle" not in card, "subtitle must be absent when not provided"
@@ -4233,7 +4233,7 @@ def test_slack_card_block_optional_fields():
     from scout_ui_kit import _slack_card_block
 
     card = _slack_card_block("Title", body="*Bold*", subtitle="Sub", block_id="card_1")
-    assert card["subtitle"]["type"] == "mrkdwn", "subtitle must be mrkdwn (Slack card block spec)"
+    assert card["subtitle"]["type"] == "plain_text", "subtitle must be plain_text (Slack card block spec)"
     assert card["subtitle"]["text"] == "Sub", f"subtitle text wrong: {card['subtitle']['text']!r}"
     assert card["body"]["type"] == "mrkdwn", "body must be mrkdwn"
     assert card["body"]["text"] == "*Bold*", f"body text wrong: {card['body']['text']!r}"
