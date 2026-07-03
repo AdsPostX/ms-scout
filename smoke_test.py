@@ -5038,6 +5038,7 @@ def test_anthropic_client_singleton_thread_safe():
         nonlocal construct_count
         with construct_lock:
             construct_count += 1
+            time.sleep(0.01)  # widen the window so a missing lock reliably races
         return object()
 
     scout_agent._ANTHROPIC_CLIENT = None
