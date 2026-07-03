@@ -868,6 +868,7 @@ def build_digest_blocks(
                 network_cards.append(_build_offer_native_card(
                     advertiser, offer_summary, payout_str, geo,
                     why=why, action_value=action_value, offer_id=offer_id,
+                    network=network,
                     img_url=img_url, network_portal_url=portal_url,
                     fit_tier=offer.get("fit_tier", ""),
                     rpm=_score,
@@ -994,6 +995,7 @@ def _build_offer_native_card(
     why:                str,
     action_value:       str,
     offer_id:           str,
+    network:            str = "",
     img_url:            str = "",
     network_portal_url: str = "",
     fit_tier:           str = "",
@@ -1005,6 +1007,8 @@ def _build_offer_native_card(
     Mirrors _build_offer_card_blocks' data mapping but respects the card block's
     tighter limits (title/subtitle: 150-char plain_text, body: 200-char mrkdwn) —
     _slack_card_block already truncates, this just picks sensible field boundaries.
+    block_id is prefixed with network because offer_id is only unique within a
+    single network's feed, and carousel cards from multiple networks can collide.
     """
     tier_key = (fit_tier or "").upper()
     badge    = _FIT_TIER_BADGE.get(tier_key, "⚫")
@@ -1020,7 +1024,7 @@ def _build_offer_native_card(
         title=title,
         subtitle=subtitle,
         body=body,
-        block_id=f"offer_card_{offer_id}",
+        block_id=f"offer_card_{network}_{offer_id}",
         hero_image_url=img_url if img_url.startswith("http") else "",
         actions=action_elements,
     )

@@ -4370,14 +4370,14 @@ def test_build_offer_native_card_shape():
     card = _build_offer_native_card(
         "TestAdv", "A short summary", "$5.00 CPL", "US",
         why="Strong RPM vs benchmark", action_value='{"offer_id": "123"}',
-        offer_id="123", img_url="https://example.com/img.png",
+        offer_id="123", network="impact", img_url="https://example.com/img.png",
         network_portal_url="https://portal.example.com/123",
         fit_tier="PRIME", rpm=4.5, view_url="",
     )
     assert card["type"] == "card", f"Expected type=card, got {card.get('type')!r}"
     assert "TestAdv" in card["title"]["text"], f"Advertiser missing from title: {card['title']}"
     assert "🔵" in card["title"]["text"], f"PRIME fit-tier badge missing from title: {card['title']}"
-    assert card["block_id"] == "offer_card_123", f"block_id wrong: {card.get('block_id')!r}"
+    assert card["block_id"] == "offer_card_impact_123", f"block_id wrong: {card.get('block_id')!r}"
     assert card["hero_image"]["image_url"] == "https://example.com/img.png", f"hero_image wrong: {card.get('hero_image')!r}"
     assert "$5.00 CPL" in card["subtitle"]["text"], f"payout_str missing from subtitle: {card['subtitle']}"
     assert "US" in card["subtitle"]["text"], f"geo missing from subtitle: {card['subtitle']}"
