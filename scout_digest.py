@@ -900,6 +900,11 @@ _FIT_TIER_BADGE = {
 }
 
 
+def _fit_tier_badge(fit_tier: str) -> str:
+    """Bare badge emoji for a fit tier — callers add their own spacing/formatting."""
+    return _FIT_TIER_BADGE.get((fit_tier or "").upper(), "⚫")
+
+
 def _offer_action_elements(
     action_value:       str,
     view_url:           str = "",
@@ -952,8 +957,7 @@ def _build_offer_card_blocks(
     view_url:           str = "",
 ) -> list[dict]:
     """Shared card renderer — returns [offer_block, rationale_block, actions_block, divider]."""
-    tier_key   = (fit_tier or "").upper()
-    badge      = f"{_FIT_TIER_BADGE.get(tier_key, '⚫')} "
+    badge      = f"{_fit_tier_badge(fit_tier)} "
     rpm_text   = f"  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
     left_text  = f"{badge}*{advertiser}*\n_{offer_summary}_" if offer_summary else f"{badge}*{advertiser}*"
     right_text = f"*{payout_str}*{tier_badge}{rpm_text}\n{geo}" if geo else f"*{payout_str}*{tier_badge}{rpm_text}"
@@ -1010,8 +1014,7 @@ def _build_offer_native_card(
     block_id is prefixed with network because offer_id is only unique within a
     single network's feed, and carousel cards from multiple networks can collide.
     """
-    tier_key = (fit_tier or "").upper()
-    badge    = _FIT_TIER_BADGE.get(tier_key, "⚫")
+    badge    = _fit_tier_badge(fit_tier)
     rpm_text = f"  ·  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
 
     title    = f"{badge} {advertiser}"
