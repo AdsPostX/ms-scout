@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 
 from scout_image_resolve import resolve_icon_image
 from scout_log import log_event
+from scout_ui_kit import _MAX_CAROUSEL_CARDS, _carousel_block, _slack_card_block
 
 load_dotenv()  # plist env vars (SCOUT_ENV, SCOUT_DIGEST_CHANNEL, etc.) take precedence over .env
 
@@ -422,7 +423,45 @@ def is_already_in_ms(offer: dict, ms_campaigns: list[dict]) -> bool:
 # One model, one truth: estimated_RPM = payout × predicted_CVR × 1000 × reliability.
 # CVR is sourced from (in order): real MS ClickHouse data → category benchmark → payout-type baseline.
 
-def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, force: bool = False, reason_sink: dict | None = None) -> float | None:
+def _load_digest_config() -> dict:
+    """Single load point for config/scout_thresholds.json's "digest" block.
+
+    Validates at construction rather than trusting raw config values downstream:
+    - native_cards_enabled must be a real bool (a stray string like "false" is
+      truthy in Python and would otherwise silently enable native cards).
+    - offers_per_network is clamped to Slack's carousel limit so a human editing
+      the config can't produce a per-network count the carousel silently truncates.
+    """
+    from scout_thresholds import _manager as _tm
+
+    raw = _tm.load().get("digest", {})
+
+    native_cards_enabled = raw.get("native_cards_enabled", False)
+    if not isinstance(native_cards_enabled, bool):
+        log.warning(
+            "digest.native_cards_enabled=%r is not a bool — treating as False",
+            native_cards_enabled,
+        )
+        native_cards_enabled = False
+
+    offers_per_network = int(raw.get("offers_per_network", 3))
+    if offers_per_network > _MAX_CAROUSEL_CARDS:
+        log.warning(
+            "digest.offers_per_network=%d exceeds Slack's %d-card carousel limit, clamping",
+            offers_per_network, _MAX_CAROUSEL_CARDS,
+        )
+        offers_per_network = _MAX_CAROUSEL_CARDS
+
+    return {
+        "min_rpm_floor": float(raw.get("min_rpm_floor", 20.0)),
+        "max_per_category": int(raw.get("max_per_category", 2)),
+        "max_per_payout_type": int(raw.get("max_per_payout_type", 2)),
+        "offers_per_network": offers_per_network,
+        "native_cards_enabled": native_cards_enabled,
+    }
+
+
+def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, force: bool = False, reason_sink: dict | None = None, digest_cfg: dict | None = None) -> float | None:
     """
     Returns estimated RPM (Scout Score), or None to exclude.
 
@@ -443,7 +482,9 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     force=True bypasses approved/rejected state so test runs always surface real cards.
     """
     from scout_agent import _scout_score
-    from scout_thresholds import _manager as _tm
+
+    if digest_cfg is None:
+        digest_cfg = _load_digest_config()
 
     def _reject(reason: str) -> None:
         # Per-gate diagnostic: lets select_offers() answer "why is Impact 100% no_score?"
@@ -514,7 +555,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     # filters weak long-tail offers (e.g. $12 CPA meal kits, $15 trading platforms).
     # PR 18: read from config/scout_thresholds.json so the team can tune without
     # a code change. Falls back to 20.0 if config or key is missing.
-    _MIN_RPM = float(_tm.load().get("digest", {}).get("min_rpm_floor", 20.0))
+    _MIN_RPM = digest_cfg["min_rpm_floor"]
     if rpm < _MIN_RPM:
         return _reject("below_min_rpm")
 
@@ -640,6 +681,7 @@ def build_digest_blocks(
     run_date:          str,
     offer_images:      dict | None = None,
     sel_meta:          dict | None = None,
+    native_cards:      bool = False,
 ) -> list:
     all_offers = _load_offers()
     total_screened = len(all_offers)
@@ -693,6 +735,8 @@ def build_digest_blocks(
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"_{screened} offers screened · top {len(scored_offers)} surfaced_"}],
         })
+
+        network_cards: list[dict] = []
 
         for _score, offer in scored_offers:
             offer_id     = str(offer.get("offer_id", ""))
@@ -748,15 +792,31 @@ def build_digest_blocks(
 
             img_url    = (offer_images or {}).get(offer_id, "")
             portal_url = _portal_url(network, offer_id)
-            blocks    += _build_offer_card_blocks(
-                advertiser, offer_summary, payout_str, geo,
-                tier_badge="", img_url=img_url,
-                why=why, action_value=action_value,
-                network_portal_url=portal_url,
-                fit_tier=offer.get("fit_tier", ""),
-                rpm=_score,
-                view_url=tracking_url,
-            )
+
+            if native_cards:
+                network_cards.append(_build_offer_native_card(
+                    advertiser, offer_summary, payout_str, geo,
+                    why=why, action_value=action_value, offer_id=offer_id,
+                    network=network,
+                    img_url=img_url, network_portal_url=portal_url,
+                    fit_tier=offer.get("fit_tier", ""),
+                    rpm=_score,
+                    view_url=tracking_url,
+                ))
+            else:
+                blocks += _build_offer_card_blocks(
+                    advertiser, offer_summary, payout_str, geo,
+                    tier_badge="", img_url=img_url,
+                    why=why, action_value=action_value,
+                    network_portal_url=portal_url,
+                    fit_tier=offer.get("fit_tier", ""),
+                    rpm=_score,
+                    view_url=tracking_url,
+                )
+
+        if native_cards and network_cards:
+            blocks += _carousel_block(network_cards)
+            blocks.append({"type": "divider"})
 
     return blocks
 
@@ -769,46 +829,22 @@ _FIT_TIER_BADGE = {
 }
 
 
-def _build_offer_card_blocks(
-    advertiser:         str,
-    offer_summary:      str,
-    payout_str:         str,
-    geo:                str,
-    tier_badge:         str,
-    img_url:            str,
-    why:                str,
+def _fit_tier_badge(fit_tier: str) -> str:
+    """Bare badge emoji for a fit tier — callers add their own spacing/formatting."""
+    return _FIT_TIER_BADGE.get((fit_tier or "").upper(), "⚫")
+
+
+def _offer_action_elements(
     action_value:       str,
-    network_portal_url: str = "",
-    fit_tier:           str = "",
-    rpm:                float = 0.0,
     view_url:           str = "",
+    network_portal_url: str = "",
 ) -> list[dict]:
-    """Shared card renderer — returns [offer_block, rationale_block, actions_block, divider]."""
-    tier_key   = (fit_tier or "").upper()
-    badge      = f"{_FIT_TIER_BADGE.get(tier_key, '⚫')} "
-    rpm_text   = f"  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
-    left_text  = f"{badge}*{advertiser}*\n_{offer_summary}_" if offer_summary else f"{badge}*{advertiser}*"
-    right_text = f"*{payout_str}*{tier_badge}{rpm_text}\n{geo}" if geo else f"*{payout_str}*{tier_badge}{rpm_text}"
+    """Build the approve/reject/view button elements shared by every offer card renderer.
 
-    offer_block: dict = {
-        "type": "section",
-        "fields": [
-            {"type": "mrkdwn", "text": left_text},
-            {"type": "mrkdwn", "text": right_text},
-        ],
-    }
-    if img_url and img_url.startswith("http"):
-        offer_block["accessory"] = {
-            "type":      "image",
-            "image_url": img_url,
-            "alt_text":  advertiser,
-        }
-
-    rationale_block = {
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": f">{why}"},
-    }
-
+    Slack's card block caps actions at 3 — this always returns 2 or 3 elements,
+    safely under that limit for both the classic (actions block) and native
+    (card block) renderers.
+    """
     action_elements = [
         {
             "type":      "button",
@@ -832,6 +868,49 @@ def _build_offer_card_blocks(
             "url":       _view_target,
             "action_id": "scout_view_offer",
         })
+    return action_elements
+
+
+def _build_offer_card_blocks(
+    advertiser:         str,
+    offer_summary:      str,
+    payout_str:         str,
+    geo:                str,
+    tier_badge:         str,
+    img_url:            str,
+    why:                str,
+    action_value:       str,
+    network_portal_url: str = "",
+    fit_tier:           str = "",
+    rpm:                float = 0.0,
+    view_url:           str = "",
+) -> list[dict]:
+    """Shared card renderer — returns [offer_block, rationale_block, actions_block, divider]."""
+    badge      = f"{_fit_tier_badge(fit_tier)} "
+    rpm_text   = f"  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
+    left_text  = f"{badge}*{advertiser}*\n_{offer_summary}_" if offer_summary else f"{badge}*{advertiser}*"
+    right_text = f"*{payout_str}*{tier_badge}{rpm_text}\n{geo}" if geo else f"*{payout_str}*{tier_badge}{rpm_text}"
+
+    offer_block: dict = {
+        "type": "section",
+        "fields": [
+            {"type": "mrkdwn", "text": left_text},
+            {"type": "mrkdwn", "text": right_text},
+        ],
+    }
+    if img_url and img_url.startswith("http"):
+        offer_block["accessory"] = {
+            "type":      "image",
+            "image_url": img_url,
+            "alt_text":  advertiser,
+        }
+
+    rationale_block = {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f">{why}"},
+    }
+
+    action_elements = _offer_action_elements(action_value, view_url, network_portal_url)
 
     return [
         offer_block,
@@ -839,6 +918,48 @@ def _build_offer_card_blocks(
         {"type": "actions", "elements": action_elements},
         {"type": "divider"},
     ]
+
+
+def _build_offer_native_card(
+    advertiser:         str,
+    offer_summary:      str,
+    payout_str:         str,
+    geo:                str,
+    why:                str,
+    action_value:       str,
+    offer_id:           str,
+    network:            str = "",
+    img_url:            str = "",
+    network_portal_url: str = "",
+    fit_tier:           str = "",
+    rpm:                float = 0.0,
+    view_url:           str = "",
+) -> dict:
+    """Native Slack card block for one offer — meant to sit inside a per-network carousel.
+
+    Mirrors _build_offer_card_blocks' data mapping but respects the card block's
+    tighter limits (title/subtitle: 150-char plain_text, body: 200-char mrkdwn) —
+    _slack_card_block already truncates, this just picks sensible field boundaries.
+    block_id is prefixed with network because offer_id is only unique within a
+    single network's feed, and carousel cards from multiple networks can collide.
+    """
+    badge    = _fit_tier_badge(fit_tier)
+    rpm_text = f"  ·  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
+
+    title    = f"{badge} {advertiser}"
+    subtitle = f"{payout_str}{rpm_text}{'  ·  ' + geo if geo else ''}"
+    body     = f"{offer_summary}\n{why}" if offer_summary else why
+
+    action_elements = _offer_action_elements(action_value, view_url, network_portal_url)
+
+    return _slack_card_block(
+        title=title,
+        subtitle=subtitle,
+        body=body,
+        block_id=f"offer_card_{network}_{offer_id}",
+        hero_image_url=img_url if img_url.startswith("http") else "",
+        actions=action_elements,
+    )
 
 
 # ── Sourcing intelligence signals ──────────────────────────────────────────────
@@ -1328,6 +1449,7 @@ def select_offers(
     ms_campaigns:  list[dict] | None = None,
     benchmarks:    dict | None = None,
     force:         bool = False,
+    digest_cfg:    dict | None = None,
 ) -> tuple[dict[str, list[tuple[float, dict]]], dict]:
     """
     Returns (offers_by_network, meta) where meta has skip counts.
@@ -1337,6 +1459,9 @@ def select_offers(
     force=True bypasses the is_already_in_ms filter so testing always surfaces real offers.
     """
     from scout_thresholds import _manager as _tm
+
+    if digest_cfg is None:
+        digest_cfg = _load_digest_config()
 
     state         = load_state()
     offers        = _load_offers()
@@ -1348,9 +1473,8 @@ def select_offers(
 
     # PR 18: diversity caps now come from config/scout_thresholds.json so the team
     # can tune without a code change. Defaults match prior hardcoded behavior.
-    _digest_cfg = _tm.load().get("digest", {})
-    _max_per_category = int(_digest_cfg.get("max_per_category", 2))
-    _max_per_payout_type = int(_digest_cfg.get("max_per_payout_type", 2))
+    _max_per_category = digest_cfg["max_per_category"]
+    _max_per_payout_type = digest_cfg["max_per_payout_type"]
 
     # Score all offers across all networks
     by_network: dict[str, list] = {}
@@ -1380,7 +1504,7 @@ def select_offers(
             continue
 
         reasons = no_score_reasons.setdefault(network, {})
-        s = score_offer(offer, payout_cache, state, benchmarks, force=force, reason_sink=reasons)
+        s = score_offer(offer, payout_cache, state, benchmarks, force=force, reason_sink=reasons, digest_cfg=digest_cfg)
         if s is None:
             skipped_no_score += 1
             _bump(network, "no_score")
@@ -1501,10 +1625,10 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     payout_cache = json.loads(PAYOUT_CACHE.read_text()) if PAYOUT_CACHE.exists() else {}
     ms_campaigns = get_active_ms_campaigns()
     benchmarks   = _tm.benchmarks()
-    _offers_per_network = int(_tm.load().get("digest", {}).get("offers_per_network", 3))
+    digest_cfg   = _load_digest_config()
     offers_by_network, sel_meta = select_offers(
-        n_per_network=_offers_per_network, ms_campaigns=ms_campaigns,
-        benchmarks=benchmarks, force=is_force,
+        n_per_network=digest_cfg["offers_per_network"], ms_campaigns=ms_campaigns,
+        benchmarks=benchmarks, force=is_force, digest_cfg=digest_cfg,
     )
 
     total_selected = sel_meta["total_selected"]
@@ -1563,6 +1687,7 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     blocks = build_digest_blocks(
         offers_by_network, payout_cache, ms_campaigns, benchmarks,
         run_date, offer_images=offer_images, sel_meta=sel_meta,
+        native_cards=digest_cfg["native_cards_enabled"],
     )
 
     # Prepend NEW THIS WEEK section
