@@ -141,7 +141,7 @@ Before ANY commit on Scout:
 
 Before any change to a `queries_*.py` WHERE clause, JOIN type, or column reference on `mv_adpx_users` or `from_airbyte_*`:
 
-1. **Check the column type first** — via ClickHouse MCP, never assume. Ask: is this column Nullable? If yes, use `(col = false OR col IS NULL)` — never `NOT col` or `col = false` alone.
+1. **Check the column type first** — via ClickHouse MCP, never assume. Ask: is this column Nullable? If yes AND it's a boolean/UInt8 flag column, use `(col = false OR col IS NULL)` — never `NOT col` or `col = false` alone. This pattern only applies to boolean/UInt8 flags — a Nullable String or numeric column isn't compared with `= false`; use `col IS NULL` (or `IS NOT NULL`) directly instead.
 2. **Known traps (learned from prod failures):**
    - `mv_adpx_users.is_test` → `Nullable(UInt8)` → use `(is_test = false OR is_test IS NULL)`
    - `mv_adpx_users.organization` → `LowCardinality(String)` → `endsWith()` may throw — filter in Python instead
