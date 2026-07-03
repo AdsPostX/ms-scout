@@ -29,16 +29,16 @@ from typing import Mapping, Optional
 import anthropic
 from scout_types import FormattedOffer, Brief  # type: ignore[import]  # noqa: F401
 
-# Singleton — avoids a new httpx session per ask() call. GIL-safe None-check.
+# Singleton — avoids a new httpx session per ask(); lock-guarded against _ASK_SEMAPHORE(3) races.
 _ANTHROPIC_CLIENT: "anthropic.Anthropic | None" = None
-
-def _get_anthropic_client() -> "anthropic.Anthropic":
+_ANTHROPIC_CLIENT_LOCK = threading.Lock()
+def _get_anthropic_client(api_key: str) -> "anthropic.Anthropic":
     global _ANTHROPIC_CLIENT
-    if _ANTHROPIC_CLIENT is None:
-        _ANTHROPIC_CLIENT = anthropic.Anthropic(
-            api_key=os.getenv("ANTHROPIC_API_KEY"),
-            default_headers={"anthropic-beta": "prompt-caching-2024-07-31"})
-    return _ANTHROPIC_CLIENT
+    with _ANTHROPIC_CLIENT_LOCK:
+        if _ANTHROPIC_CLIENT is None:
+            _ANTHROPIC_CLIENT = anthropic.Anthropic(
+                api_key=api_key, default_headers={"anthropic-beta": "prompt-caching-2024-07-31"})
+        return _ANTHROPIC_CLIENT
 from dotenv import load_dotenv
 import queries as _q
 from scout_ch import (  # noqa: F401 — backward compat re-exports
@@ -6484,7 +6484,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
             tools_called=[], duration_ms=_dur(),
         )
 
-    client = _get_anthropic_client()
+    client = _get_anthropic_client(api_key)
     prefix = _build_prefix_context(user_id, user_tz)
     # Intent classification — narrow tool surface and prepend focused context.
     # Runs once per ask() call, outside the retry loop.
@@ -6563,7 +6563,7 @@ def ask_with_attachment(
             duration_ms=int((time.monotonic() - _start_ms) * 1000),
         )
 
-    client = _get_anthropic_client()
+    client = _get_anthropic_client(api_key)
     prefix = _build_prefix_context(user_id, user_tz)
     _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
     _ask_tools = TOOLS
