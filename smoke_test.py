@@ -2190,7 +2190,7 @@ def test_export_surface_importable_from_scout_agent():
 
     Before scout_agent.py is split into smaller modules, this test pins the
     exact set of symbols that downstream callers (e.g. scout_digest's deferred
-    in-function imports of _scrape_og_image) rely on being importable from
+    in-function imports of _google_favicon) rely on being importable from
     `scout_agent`. If any symbol disappears or is renamed during the split,
     this test fails with a clear name — catching what unit tests miss because
     those deferred imports only fire at call time.
@@ -2211,7 +2211,6 @@ def test_export_surface_importable_from_scout_agent():
         "_query_publisher_revenue_trends",
         "_query_advertiser_revenue_trends",
         # Image helpers
-        "_scrape_og_image",
         "_clearbit_domain",
         "_google_favicon",
         "_app_store_icon",

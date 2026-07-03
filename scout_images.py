@@ -7,7 +7,6 @@ import pathlib
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
-from html.parser import HTMLParser
 
 from scout_ch import _get_ch_client
 
@@ -17,32 +16,6 @@ _IMAGE_CACHE_PATH = pathlib.Path(__file__).parent / "data" / "image_cache.json"
 _IMAGE_CACHE_TTL_DAYS = 7
 _image_cache_mem: dict = {}  # in-memory layer to avoid file reads on every brief
 _image_cache_loaded = False
-
-
-def _scrape_og_image(url: str) -> str:
-    """Scrape og:image from a landing page. Used for FlexOffers/MaxBounty offers."""
-    if not url or not url.startswith("http"):
-        return ""
-    try:
-        class _OGParser(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.og_image = ""
-            def handle_starttag(self, tag, attrs):
-                if tag == "meta" and not self.og_image:
-                    d = dict(attrs)
-                    if d.get("property") == "og:image" or d.get("name") == "og:image":
-                        self.og_image = d.get("content", "")
-
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            html = resp.read(20000).decode("utf-8", errors="ignore")
-        parser = _OGParser()
-        parser.feed(html)
-        return parser.og_image
-    except Exception as e:
-        log.debug("_scrape_og_image swallowed: %s", e)
-        return ""
 
 
 def _clearbit_domain(advertiser_name: str) -> str:
