@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
+from scout_image_resolve import resolve_icon_image
 from scout_log import log_event
 
 load_dotenv()  # plist env vars (SCOUT_ENV, SCOUT_DIGEST_CHANNEL, etc.) take precedence over .env
@@ -617,88 +618,16 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
 # ── Icon image selection ───────────────────────────────────────────────────────
 # Slack's section `accessory` image renders at ~75×75 px — suitable only for
 # square logos/icons.  OG images and landing-page thumbnails are wide marketing
-# banners that look wrong at that size, so we reject them here.
-#
-# Accepted patterns (known sources that serve genuine square logos):
-#   flexlinks.com …programsquarelogo…     ← FlexOffers square logos
-#   ui.awin.com …merchant/profile/…       ← Awin merchant profile icons
-# Rejected patterns:
-#   cdn.mb1-content.com …creative/lp…    ← MaxBounty landing-page thumbnails
-#   anything that looks like a banner/hero/promo creative
-
-_ICON_ACCEPT_RE = re.compile(
-    r"(programsquarelogo|merchant/profile/|/icon[s/_]|[/_]logo[s/_.-]|square.?logo)",
-    re.IGNORECASE,
-)
-_ICON_REJECT_RE = re.compile(
-    r"(creative/lp|/banner|/hero|/promo|/creative)",
-    re.IGNORECASE,
-)
-
-
-def _is_icon_url(url: str) -> bool:
-    """Return True only if the URL is likely a square logo suitable for a 75px card thumbnail."""
-    if not url or not url.startswith("http"):
-        return False
-    if _ICON_REJECT_RE.search(url):
-        return False
-    if _ICON_ACCEPT_RE.search(url):
-        return True
-    # Unknown CDN — reject rather than guess wrong.
-    # OG images from tracking URLs land here and are filtered out.
-    return False
-
-
-def _advertiser_favicon_url(offer: dict) -> str:
-    """
-    Return a Google Favicon API URL for the offer's advertiser domain.
-    Extracts the root domain from preview_url (available on CJ, Impact, MaxBounty).
-    Google's favicon API always returns a valid image (fallback globe icon when
-    no favicon is found), so Slack never shows a broken-image placeholder.
-    Returns "" when no usable domain can be found.
-    """
-    import urllib.parse
-    raw = offer.get("preview_url") or offer.get("tracking_url") or ""
-    if not raw or not raw.startswith("http"):
-        return ""
-    try:
-        host = urllib.parse.urlparse(raw).hostname or ""
-        # Strip leading www. / rec. / discover. / static. etc.
-        parts = host.split(".")
-        # Take last two segments as root domain (e.g. lifelinescreening.com)
-        domain = ".".join(parts[-2:]) if len(parts) >= 2 else host
-        if not domain or "." not in domain:
-            return ""
-        return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-    except Exception:
-        return ""
+# banners that look wrong at that size, so resolution is delegated to
+# scout_image_resolve, which rejects those and falls back to a favicon.
 
 
 def _prefetch_offer_images(scored_offers: list[tuple[float, dict]]) -> dict[str, str]:
-    """
-    Resolve a square logo URL for each offer.  Returns {offer_id: image_url}.
-
-    Priority:
-      1. icon_url / hero_url if _is_icon_url() confirms it's a genuine square logo
-         (FlexOffers programsquarelogo, Awin merchant/profile — NOT MaxBounty lp thumbnails)
-      2. Google Favicon API derived from preview_url domain — always returns a valid
-         image (never 404s), so Slack never shows a broken-image placeholder.
-
-    No OG-image scraping: og:image is a wide social-preview banner, wrong shape
-    for a 75 px square Slack accessory slot.
-    """
-    results = {}
-    for _, o in scored_offers:
-        offer_id = str(o.get("offer_id", ""))
-        icon     = o.get("icon_url") or ""
-        hero     = o.get("hero_url") or ""
-        chosen   = (
-            icon if _is_icon_url(icon)
-            else hero if _is_icon_url(hero)
-            else _advertiser_favicon_url(o)
-        )
-        results[offer_id] = chosen
-    return results
+    """Resolve a square logo URL for each offer. Returns {offer_id: image_url}."""
+    return {
+        str(o.get("offer_id", "")): resolve_icon_image(o)
+        for _, o in scored_offers
+    }
 
 
 # ── Slack Block Kit digest ─────────────────────────────────────────────────────
@@ -1342,10 +1271,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             payout_type = _normalize_payout_type(o.get("payout_type") or "")
             payout_str  = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
             geo         = o.get("geo") or o.get("country") or ""
-            # Same priority as _prefetch_offer_images: icon/hero if square logo,
-            # otherwise Google favicon (always returns valid image, never 404).
-            _icon_candidates = [o.get("icon_url") or "", o.get("hero_url") or "", o.get("banner_url") or ""]
-            img_url = next((u for u in _icon_candidates if _is_icon_url(u)), _advertiser_favicon_url(o))
+            img_url     = resolve_icon_image(o, extra_candidates=(o.get("banner_url") or "",))
             tier        = o.get("fit_tier") or ""
             tier_badge  = f"  _{tier}_" if tier else ""
             why         = context_fn(o) if context_fn else ""
