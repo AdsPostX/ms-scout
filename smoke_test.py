@@ -5012,10 +5012,10 @@ def test_anthropic_client_not_constructed_multiple_times():
 
     src = inspect.getsource(scout_agent)
     hits = re.findall(r"anthropic\.Anthropic\(", src)
-    if len(hits) > 1:
+    if len(hits) != 1:
         return False, (
-            f"Anthropic client constructed {len(hits)} times — should be a singleton factory; "
-            f"replace extra calls with _get_anthropic_client()"
+            f"Found {len(hits)} inline anthropic.Anthropic( construction sites — expected exactly "
+            f"1 (inside _get_anthropic_client); other call sites should use _get_anthropic_client()"
         )
     return True, f"Anthropic client constructed {len(hits)} time(s) — singleton factory in use"
 
