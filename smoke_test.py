@@ -32,6 +32,7 @@ import os
 import pathlib
 import re
 import sys
+import threading
 import time
 import types
 from unittest.mock import patch
@@ -5000,6 +5001,72 @@ def test_build_opportunity_cards_uses_resolve_icon_image():
         return True, "_build_opportunity_cards routes through resolve_icon_image gating"
     except Exception as e:
         return False, str(e)
+
+
+@test("Anthropic client constructed once — singleton factory in place")
+def test_anthropic_client_not_constructed_multiple_times():
+    """Inline anthropic.Anthropic() calls must be replaced by _get_anthropic_client()."""
+    import inspect
+    import re
+    import scout_agent
+
+    src = inspect.getsource(scout_agent)
+    hits = re.findall(r"anthropic\.Anthropic\(", src)
+    if len(hits) != 1:
+        return False, (
+            f"Found {len(hits)} inline anthropic.Anthropic( construction sites — expected exactly "
+            f"1 (inside _get_anthropic_client); other call sites should use _get_anthropic_client()"
+        )
+    return True, f"Anthropic client constructed {len(hits)} time(s) — singleton factory in use"
+
+
+@test("Anthropic client singleton — race-safe under concurrent first callers")
+def test_anthropic_client_singleton_thread_safe():
+    """The lock-guarded singleton must prevent duplicate construction when multiple
+    threads call _get_anthropic_client() before the singleton is populated —
+    the exact race _ASK_SEMAPHORE(3) makes reachable in production."""
+    import scout_agent
+
+    original_client = scout_agent._ANTHROPIC_CLIENT
+    original_ctor = scout_agent.anthropic.Anthropic
+    construct_count = 0
+    construct_lock = threading.Lock()
+    n_threads = 8
+    barrier = threading.Barrier(n_threads)
+
+    def fake_ctor(*args, **kwargs):
+        nonlocal construct_count
+        with construct_lock:
+            construct_count += 1
+            time.sleep(0.01)  # widen the window so a missing lock reliably races
+        return object()
+
+    scout_agent._ANTHROPIC_CLIENT = None
+    scout_agent.anthropic.Anthropic = fake_ctor
+    try:
+        results = [None] * n_threads
+
+        def worker(i):
+            barrier.wait()
+            results[i] = scout_agent._get_anthropic_client("fake-key")
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        if construct_count != 1:
+            return False, (
+                f"anthropic.Anthropic() constructed {construct_count} times across "
+                f"{n_threads} racing threads — lock failed to serialize construction"
+            )
+        if len({id(r) for r in results}) != 1:
+            return False, "threads received different client instances despite single construction"
+        return True, f"{n_threads} racing threads → 1 construction, shared instance"
+    finally:
+        scout_agent.anthropic.Anthropic = original_ctor
+        scout_agent._ANTHROPIC_CLIENT = original_client
 
 
 if __name__ == "__main__":
