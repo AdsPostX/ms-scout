@@ -515,13 +515,11 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
 
     # Build enriched offer: use payout_cache amount (Impact API, more accurate)
     # over scraper-normalised _payout_num where available.
-    # MaxBounty/FlexOffers won't be in payout_cache — fall back to offer fields directly.
-    payout_data = payout_cache.get(offer_id, {})
-    cache_payout = _parse_payout(payout_data.get("payout"))
+    resolved_payout, payout_type = _resolve_payout(offer_id, offer, payout_cache)
 
     enriched = dict(offer)
-    if cache_payout > 0:
-        enriched["_payout_num"] = cache_payout
+    if resolved_payout > 0:
+        enriched["_payout_num"] = resolved_payout
 
     if not enriched.get("_payout_num"):
         return _reject("no_payout")
@@ -541,10 +539,8 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     rpm *= _context_fit(enriched)
 
     # Conversion complexity — CPL structurally easier than CPS post-transaction.
-    # Normalize raw network type strings ("$ per Lead") to canonical keys ("CPL")
+    # payout_type is already normalized ("$ per Lead" → "CPL") by _resolve_payout,
     # so MaxBounty/FlexOffers get the same multipliers as Impact.
-    raw_payout_type = payout_data.get("payout_type", "") or offer.get("_payout_type_norm", "")
-    payout_type = _normalize_payout_type(raw_payout_type)
     rpm *= _CONVERSION_COMPLEXITY.get(payout_type, 1.0)
 
     if rpm <= 0:
@@ -579,19 +575,10 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
     from scout_agent import _scout_score
 
     offer_id    = str(offer.get("offer_id", ""))
-    payout_data = payout_cache.get(offer_id, {})
     category    = (offer.get("category") or "").strip()
     geo         = offer.get("geo", "")
 
-    cache_payout = _parse_payout(payout_data.get("payout"))
-
-    # Fall back to offer's own _payout_num for networks not in payout_cache (MaxBounty, FlexOffers)
-    if cache_payout == 0:
-        cache_payout = _parse_payout(offer.get("_payout_num"))
-
-    # Normalize payout type from cache or offer fields
-    raw_ptype   = payout_data.get("payout_type", "") or offer.get("_payout_type_norm", "")
-    payout_type = _normalize_payout_type(raw_ptype)
+    cache_payout, payout_type = _resolve_payout(offer_id, offer, payout_cache)
 
     enriched = dict(offer)
     if cache_payout > 0:
@@ -995,6 +982,22 @@ def _parse_payout(val) -> float:
         return float(str(val).strip().lstrip("$").strip())
     except (ValueError, TypeError):
         return 0.0
+
+
+def _resolve_payout(offer_id: str, offer: dict, payout_cache: dict) -> tuple[float, str]:
+    """
+    Resolve payout amount + normalized payout type for an offer.
+    Prefers payout_cache (Impact API, more accurate) over the scraper-normalised
+    offer fields — MaxBounty/FlexOffers aren't in payout_cache, so fall back
+    to the offer's own fields there.
+    """
+    payout_data = payout_cache.get(offer_id, {})
+    payout = _parse_payout(payout_data.get("payout"))
+    if payout == 0:
+        payout = _parse_payout(offer.get("_payout_num"))
+    raw_payout_type = payout_data.get("payout_type", "") or offer.get("_payout_type_norm", "")
+    payout_type = _normalize_payout_type(raw_payout_type)
+    return payout, payout_type
 
 
 def _nth_weekday(year: int, month: int, n: int, weekday: int) -> date:
