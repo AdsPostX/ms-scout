@@ -138,3 +138,44 @@ Registered at api.slack.com/apps — each must be added to the Slack app manifes
 | `/scout-help` | Full reference card (ephemeral) |
 
 All `/scout-cap/vel/ghost/fill` commands route to `_FORCE_MONITOR_FNS` — same path as `@Scout force <signal>`. Requires the demand-feed service running with monitors initialized.
+
+## Pre-Commit Checklist (non-negotiable)
+
+Before ANY commit on Scout:
+
+1. **Run smoke tests** — always, no exceptions: `python3 smoke_test.py 2>&1 | tail -5; test ${PIPESTATUS[0]} -eq 0`. Check the exit code, not just the printed summary — `tail` alone masks a nonzero exit from `python3`. All deterministic checks must pass. If it fails, fix before committing. Post the result inline: `✅ N/N` or `🔴 N/N — [failing test name]`.
+2. **For queries.py / queries_*.py changes** — verify SQL locally before committing (see SQL Hygiene below).
+3. **For scout_agent.py handler changes** — import check: `python3 -c "from scout_agent import TOOL_MAP; print('OK')"`.
+4. **Preview before PR** — for any web tool or demo, run a local server and screenshot via Claude Preview MCP before asking for review. No screenshot = no merge.
+
+**Never commit debug patches.** If a commit message starts with `debug(`, it must NOT merge to main. Diagnose locally, fix, then commit the fix only.
+
+## SQL Hygiene
+
+Before any change to a `queries_*.py` WHERE clause, JOIN type, or column reference on `mv_adpx_users` or `from_airbyte_*`:
+
+1. **Check the column type first** — via ClickHouse MCP, never assume. Ask: is this column Nullable? If yes AND it's a boolean/UInt8 flag column, use `(col = false OR col IS NULL)` — never `NOT col` or `col = false` alone. This pattern only applies to boolean/UInt8 flags — a Nullable String or numeric column isn't compared with `= false`; use `col IS NULL` (or `IS NOT NULL`) directly instead.
+2. **Known traps (learned from prod failures):**
+   - `mv_adpx_users.is_test` → `Nullable(UInt8)` → use `(is_test = false OR is_test IS NULL)`
+   - `mv_adpx_users.organization` → `LowCardinality(String)` → `endsWith()` may throw — filter in Python instead
+   - `adpx_conversionsdetails.pid` → NOT the publisher user_id — always filter on `user_id`
+   - `revenue`, `payout` → String columns — always cast: `toFloat64OrNull(revenue)`
+3. **When in doubt, filter in Python, not SQL.** SQL type errors silently kill queries in production; Python errors surface immediately in smoke tests.
+4. **Document the column type in the commit message** when adding a new column reference.
+
+## PR Discipline
+
+**One PR = one concern.**
+
+- New tool port → its own PR (separate from routing changes)
+- Routing/intent change → its own PR
+- Bug fix found while building a feature → separate commit, ideally separate PR
+- Config change → its own PR (never buried in a feature PR)
+
+**If the PR description contains "also" or "additionally" → split it.** If it breaks, do you want both things rolled back together? If no → split.
+
+**Debug patches never merge to main.** Surface the error locally, fix it, commit the fix only.
+
+## Worktree Hygiene
+
+After every PR merges: `git worktree remove <path>` for that branch's worktree — it refuses safely if uncommitted changes remain, so never add `--force` to bypass that check without first inspecting what's uncommitted. Run `git worktree prune` afterward to clear stale metadata for worktrees already deleted on disk. Rule: **never leave more than 3 active worktrees** (main + current session + 1 parallel). If `git worktree list` grows beyond that, prune before starting new work — a stale worktree pile silently accumulates unmerged/unshipped diffs that become expensive to audit later.
