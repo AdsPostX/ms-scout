@@ -35,7 +35,7 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
-def _env_float(name: str, default: float, minimum: float = 0.1) -> float:
+def _env_float(name: str, default: float, minimum: float = 0.1, maximum: float | None = None) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
         return default
@@ -47,12 +47,50 @@ def _env_float(name: str, default: float, minimum: float = 0.1) -> float:
     if value < minimum:
         log.warning("[CH] %s=%s below minimum %s — using %s", name, value, minimum, minimum)
         return minimum
+    if maximum is not None and value > maximum:
+        log.warning("[CH] %s=%s above maximum %s — using %s", name, value, maximum, maximum)
+        return maximum
     return value
 
 
 _CH_MAX_CONCURRENT = _env_int("CH_MAX_CONCURRENT", 4, minimum=1)
-_CH_ACQUIRE_TIMEOUT_S = _env_float("CH_ACQUIRE_TIMEOUT_S", 10.0, minimum=0.1)
+# Capped at 30s — like the timeouts below, an env misconfiguration must not be
+# able to let a single acquire wait outlast ask_timeout_s on its own.
+_CH_ACQUIRE_TIMEOUT_S = _env_float("CH_ACQUIRE_TIMEOUT_S", 10.0, minimum=0.1, maximum=30.0)
 _CH_QUERY_SEMAPHORE = threading.BoundedSemaphore(_CH_MAX_CONCURRENT)
+
+# Bound the network I/O itself, not just the wait for a semaphore slot.
+# clickhouse_connect defaults to connect_timeout=10s, send_receive_timeout=300s —
+# a degraded connection can hang a single .query() call for 5 minutes, holding
+# both a _CH_QUERY_SEMAPHORE slot and (via _ask_with_timeout) an _ASK_SEMAPHORE
+# slot the whole time. Keep this well under _CFG.ask_timeout_s (90s default)
+# so a hung query fails fast enough for ask()'s own timeout to mean anything.
+# Capped at the same ceiling — an env misconfiguration (e.g. 600s) must not be
+# able to silently defeat that bound.
+_CH_CONNECT_TIMEOUT_S = _env_float("CH_CONNECT_TIMEOUT_S", 10.0, minimum=1.0, maximum=30.0)
+_CH_SEND_RECEIVE_TIMEOUT_S = _env_float("CH_SEND_RECEIVE_TIMEOUT_S", 45.0, minimum=1.0, maximum=60.0)
+
+
+def _validate_ch_timeout_budget() -> None:
+    """Warn if acquire+connect+send_receive can outlast ask()'s own timeout.
+
+    Each piece is individually clamped above, but nothing previously checked
+    their sum against _CFG.ask_timeout_s — a hung query could still fail
+    later than ask()'s own timeout, defeating the point of bounding it.
+    Warns instead of raising: a single bad env var must not crash the
+    process. Local import avoids a circular import (scout_handlers imports
+    scout_ch, not the reverse).
+    """
+    from scout_handlers import _CFG as _handlers_cfg
+    budget = _CH_ACQUIRE_TIMEOUT_S + _CH_CONNECT_TIMEOUT_S + _CH_SEND_RECEIVE_TIMEOUT_S
+    if budget >= _handlers_cfg.ask_timeout_s:
+        log.warning(
+            "[CH] timeout budget %.1fs (acquire=%.1f + connect=%.1f + send_receive=%.1f) "
+            ">= ask_timeout_s %ds — a hung query can outlast ask()'s own timeout",
+            budget, _CH_ACQUIRE_TIMEOUT_S, _CH_CONNECT_TIMEOUT_S, _CH_SEND_RECEIVE_TIMEOUT_S,
+            _handlers_cfg.ask_timeout_s,
+        )
+
 
 # Revenue deviation threshold used by the intraday diagnostic classifier.
 # A projected or actual revenue deviation beyond this fraction triggers
@@ -78,6 +116,11 @@ def _run_parallel(fns: list):
     return [fn() for fn in fns]
 
 
+def _ch_credentials_configured() -> bool:
+    """True if CH_HOST/CH_USER/CH_PASSWORD are all set — no defaults applied."""
+    return bool(os.getenv("CH_HOST")) and bool(os.getenv("CH_USER")) and bool(os.getenv("CH_PASSWORD"))
+
+
 def _get_ch_client():
     """Create a ClickHouse client from env vars. Import is local so startup never fails."""
     import clickhouse_connect
@@ -87,6 +130,8 @@ def _get_ch_client():
         password=os.getenv("CH_PASSWORD", ""),
         database=os.getenv("CH_DATABASE", "default"),
         secure=True,
+        connect_timeout=_CH_CONNECT_TIMEOUT_S,
+        send_receive_timeout=_CH_SEND_RECEIVE_TIMEOUT_S,
     )
     return _LoggingCHClient(client)
 
