@@ -728,19 +728,12 @@ def build_digest_blocks(
         for _score, offer in scored_offers:
             offer_id     = str(offer.get("offer_id", ""))
             advertiser   = _clean_advertiser_name(offer.get("advertiser", "Unknown"), network)
-            payout_data  = payout_cache.get(offer_id, {})
-            # Normalize payout type — MaxBounty/FlexOffers use raw strings
-            raw_ptype   = payout_data.get("payout_type", "") or offer.get("_payout_type_norm", "")
-            payout_type = _normalize_payout_type(raw_ptype)
+            payout_num, payout_type = _resolve_payout(offer_id, offer, payout_cache)
             category     = (offer.get("category") or "Uncategorized").strip()
             geo_raw      = (offer.get("geo") or "").strip()
             geo          = geo_raw if geo_raw.lower() not in _NON_GEO_VALUES else ""
             tracking_url = offer.get("tracking_url", "")
 
-            payout_num = (
-                _parse_payout(payout_data.get("payout"))
-                or _parse_payout(offer.get("_payout_num"))
-            )
             payout_str = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
 
             raw_desc   = " ".join((offer.get("description") or "").strip().split())
@@ -766,7 +759,7 @@ def build_digest_blocks(
             action_value = json.dumps({
                 "offer_id":     offer_id,
                 "advertiser":   advertiser,
-                "payout":       str(payout_data.get("payout", "") or offer.get("_payout_num", "")),
+                "payout":       str(payout_num) if payout_num else "",
                 "payout_type":  payout_type,
                 "category":     category,
                 "geo":          geo,
