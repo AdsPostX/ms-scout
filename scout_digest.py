@@ -505,11 +505,8 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     rejected = state.get("rejected", {})
     if not force and offer_id in rejected:
         payout_data = payout_cache.get(offer_id, {})
-        try:
-            current = _parse_payout(payout_data.get("payout"))
-            old     = _parse_payout(rejected[offer_id].get("payout_at_action"))
-        except (ValueError, TypeError):
-            return _reject("rejected_parse_error")
+        current = _parse_payout(payout_data.get("payout"))
+        old     = _parse_payout(rejected[offer_id].get("payout_at_action"))
         if old <= 0 or (current - old) / old < 0.15:
             return _reject("rejected_no_lift")
 
@@ -564,7 +561,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
 
 # ── "Why this offer" — RPM-first, colleague voice ─────────────────────────────
 
-def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], benchmarks: dict, adjusted_rpm: float | None = None) -> str:
+def build_why_text(offer: dict, payout_num: float, payout_type: str, ms_campaigns: list[dict], benchmarks: dict, adjusted_rpm: float | None = None) -> str:
     """
     Lead with the revenue signal (RPM), qualify the confidence level, add the inventory gap.
     Three tiers of confidence, each with honest framing:
@@ -578,11 +575,9 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
     category    = (offer.get("category") or "").strip()
     geo         = offer.get("geo", "")
 
-    cache_payout, payout_type = _resolve_payout(offer_id, offer, payout_cache)
-
     enriched = dict(offer)
-    if cache_payout > 0:
-        enriched["_payout_num"] = cache_payout
+    if payout_num > 0:
+        enriched["_payout_num"] = payout_num
 
     by_offer = benchmarks.get("by_offer_impact_id", {})
     by_cat   = benchmarks.get("by_category", {})
@@ -604,7 +599,7 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
     elif category in by_cat:
         cat_perf = by_cat[category]
         cvr_pct  = cat_perf.get("avg_cvr_pct", 0)
-        payout_display = _format_payout(cache_payout, payout_type) if cache_payout else payout_type
+        payout_display = _format_payout(payout_num, payout_type) if payout_num else payout_type
         parts.append(
             f"{category} converts at *{cvr_pct:.2f}% CVR* on MS — {payout_display} payout"
         )
@@ -618,7 +613,7 @@ def build_why_text(offer: dict, payout_cache: dict, ms_campaigns: list[dict], be
             fit_reason = " · low-friction conversion type"
         elif payout_type == "CPS":
             fit_reason = " · requires purchase — higher post-transaction friction"
-        payout_display = _format_payout(cache_payout, payout_type) if cache_payout else _display_payout_type(payout_type)
+        payout_display = _format_payout(payout_num, payout_type) if payout_num else _display_payout_type(payout_type)
         parts.append(fit_reason.lstrip(" ·") if fit_reason else "New offer — no MS history yet")
 
     # ── Inventory gap — only surface when category is genuinely empty ────────
@@ -746,7 +741,7 @@ def build_digest_blocks(
                 first_sent = category
             offer_summary = first_sent[:_SUMMARY_TRUNCATE_LEN].rsplit(" ", 1)[0] + "…" if len(first_sent) > _SUMMARY_TRUNCATE_LEN else first_sent
 
-            why = build_why_text(offer, payout_cache, ms_campaigns, benchmarks, adjusted_rpm=_score)
+            why = build_why_text(offer, payout_num, payout_type, ms_campaigns, benchmarks, adjusted_rpm=_score)
 
             # Action value — minimal payload so we stay well under Slack's 2000-char
             # button-value limit. Long descriptions + tracking URLs (Impact/Affise
