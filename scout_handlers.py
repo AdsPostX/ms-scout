@@ -327,6 +327,20 @@ def _safe_slack_call(fn, *args, **kwargs):
         return None
 
 
+def _post_retry_fallback(
+    web: WebClient, channel: str, thread_ts: str | None, text: str, surface: Surface,
+) -> None:
+    """Post a degraded-path message for a failed or timed-out retry.
+    Shared by every terminal branch of _retry_after_timeout's _run()."""
+    card = Card(severity=Severity.INFO, headline="", body=text)
+    _, blocks = wrap_response(card=card, surface=surface, pattern=ResponsePattern.ANSWER)
+    _safe_slack_call(
+        web.chat_postMessage,
+        channel=channel, thread_ts=thread_ts,
+        text=text, blocks=blocks,
+    )
+
+
 def _retry_after_timeout(
     web: WebClient,
     channel: str,
@@ -367,23 +381,15 @@ def _retry_after_timeout(
             )
         except AskTimeout:
             log.warning("[CH] retry also timed out; query=%r", query[:80])
-            _still_slow = f"{prefix}Still slow. Try again in a few minutes."
-            _sc = Card(severity=Severity.INFO, headline="", body=_still_slow)
-            _, _sb = wrap_response(card=_sc, surface=surface, pattern=ResponsePattern.ANSWER)
-            _safe_slack_call(
-                web.chat_postMessage,
-                channel=channel, thread_ts=thread_ts,
-                text=_still_slow, blocks=_sb,
+            _post_retry_fallback(
+                web, channel, thread_ts,
+                f"{prefix}Still slow. Try again in a few minutes.", surface,
             )
         except Exception as exc:
             log.error("[CH] async retry failed: %s", exc)
-            _failed = f"{prefix}Something went wrong on that retry. Try again in a moment."
-            _fc = Card(severity=Severity.INFO, headline="", body=_failed)
-            _, _fb = wrap_response(card=_fc, surface=surface, pattern=ResponsePattern.ANSWER)
-            _safe_slack_call(
-                web.chat_postMessage,
-                channel=channel, thread_ts=thread_ts,
-                text=_failed, blocks=_fb,
+            _post_retry_fallback(
+                web, channel, thread_ts,
+                f"{prefix}Something went wrong on that retry. Try again in a moment.", surface,
             )
     threading.Thread(target=_run, daemon=True, name="ask-retry").start()
 
