@@ -193,11 +193,12 @@ _ASK_SEMAPHORE = threading.BoundedSemaphore(3)
 
 class _BoundedRateLimitRetryHandler(RateLimitErrorRetryHandler):
     """RateLimitErrorRetryHandler caps its sleep at Slack's Retry-After
-    header value, which is uncapped by app code. A 429 storm on chat_update
-    (e.g. concurrent heartbeat ticks against the same channel) can then
-    stall a thread — and any other caller sharing its WebClient — for
-    minutes per retry, up to max_retry_count times. Cap the sleep so a
-    rate-limit event degrades instead of silently hanging."""
+    header value, which is uncapped by app code. slack_sdk builds a fresh
+    RetryState per call, so this only blocks the thread making that call
+    (e.g. a heartbeat tick) — not other threads sharing the same WebClient.
+    But that one thread can still sleep for minutes per retry, up to
+    max_retry_count times, with nothing surfaced while it does. Cap the
+    sleep so a rate-limit event degrades instead of silently hanging."""
 
     MAX_SLEEP_S = 10
 
