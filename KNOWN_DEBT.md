@@ -1,5 +1,11 @@
 # Scout — Known Debt
 
+## _BoundedRateLimitRetryHandler duplicated in scout_bot.py and scout_handlers.py
+
+Same 15-line class exists verbatim in both files (`scout_handlers.py` from PR #329, `scout_bot.py` from PR #330) — each module constructs its own `WebClient` and needed the same uncapped-retry-sleep fix. Not unified at the time because `scout_slack_safe.py` (the module both files already share for `guard_web_client`) is scoped to response-emission invariants, not HTTP retry behavior, and unifying via `scout_handlers.py` would have required editing a file that was part of the still-open #329.
+
+Fix once both #329 and #330 have merged: extract `_BoundedRateLimitRetryHandler` into a new small module (e.g. `scout_slack_retry.py`) and point both `WebClient` construction sites at it. Do this as its own PR, not bundled with unrelated work.
+
 ## demand_feed_main.py — MS Platform Feed (NOT live)
 
 5 MS_PLATFORM_TODO items must be resolved before flipping live. Contact the platform team for the webhook endpoint.
