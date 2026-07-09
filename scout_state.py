@@ -721,8 +721,11 @@ def _rotating_status(
                     channel=channel, ts=ts, text=update_text,
                     blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": update_text}}],
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(
+                    "Heartbeat chat_update failed (channel=%s ts=%s elapsed=%ss): %s",
+                    channel, ts, elapsed, e,
+                )
 
     _t = threading.Thread(target=_run, daemon=True)
     _t.start()

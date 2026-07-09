@@ -191,6 +191,30 @@ def _set_force_monitor_fn(name: str, fn) -> None:
 _ASK_SEMAPHORE = threading.BoundedSemaphore(3)
 
 
+class _BoundedRateLimitRetryHandler(RateLimitErrorRetryHandler):
+    """RateLimitErrorRetryHandler caps its sleep at Slack's Retry-After
+    header value, which is uncapped by app code. slack_sdk builds a fresh
+    RetryState per call, so this only blocks the thread making that call
+    (e.g. a heartbeat tick) — not other threads sharing the same WebClient.
+    But that one thread can still sleep for minutes per retry, up to
+    max_retry_count times, with nothing surfaced while it does. Cap the
+    sleep so a rate-limit event degrades instead of silently hanging."""
+
+    MAX_SLEEP_S = 10
+
+    def prepare_for_next_attempt(self, *, state, request, response=None, error=None):
+        if response is None:
+            raise error
+        state.next_attempt_requested = True
+        duration = 1.0
+        for k in response.headers.keys():
+            if k.lower() == "retry-after":
+                duration = float(response.headers.get(k)[0])
+                break
+        time.sleep(min(duration, self.MAX_SLEEP_S) + random.random())
+        state.increment_current_attempt()
+
+
 class AskTimeout(Exception):
     """ask() exceeded the wall-clock timeout. Caller should render a
     degraded message — typically 'ClickHouse is under pressure — try
@@ -304,6 +328,20 @@ def _safe_slack_call(fn, *args, **kwargs):
         return None
 
 
+def _post_retry_fallback(
+    web: WebClient, channel: str, thread_ts: str | None, text: str, surface: Surface,
+) -> None:
+    """Post a degraded-path message for a failed or timed-out retry.
+    Shared by every terminal branch of _retry_after_timeout's _run()."""
+    card = Card(severity=Severity.INFO, headline="", body=text)
+    _, blocks = wrap_response(card=card, surface=surface, pattern=ResponsePattern.ANSWER)
+    _safe_slack_call(
+        web.chat_postMessage,
+        channel=channel, thread_ts=thread_ts,
+        text=text, blocks=blocks,
+    )
+
+
 def _retry_after_timeout(
     web: WebClient,
     channel: str,
@@ -344,16 +382,16 @@ def _retry_after_timeout(
             )
         except AskTimeout:
             log.warning("[CH] retry also timed out; query=%r", query[:80])
-            _still_slow = f"{prefix}Still slow. Try again in a few minutes."
-            _sc = Card(severity=Severity.INFO, headline="", body=_still_slow)
-            _, _sb = wrap_response(card=_sc, surface=surface, pattern=ResponsePattern.ANSWER)
-            _safe_slack_call(
-                web.chat_postMessage,
-                channel=channel, thread_ts=thread_ts,
-                text=_still_slow, blocks=_sb,
+            _post_retry_fallback(
+                web, channel, thread_ts,
+                f"{prefix}Still slow. Try again in a few minutes.", surface,
             )
         except Exception as exc:
             log.error("[CH] async retry failed: %s", exc)
+            _post_retry_fallback(
+                web, channel, thread_ts,
+                f"{prefix}Something went wrong on that retry. Try again in a moment.", surface,
+            )
     threading.Thread(target=_run, daemon=True, name="ask-retry").start()
 
 
@@ -2481,7 +2519,7 @@ def _handle_event_impl(req: SocketModeRequest):
     Split from handle_event so the broad crash guard in the outer function
     catches failures here without wrapping the ack call.
     """
-    web = WebClient(token=_CFG.slack_bot_token, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
+    web = WebClient(token=_CFG.slack_bot_token, retry_handlers=[_BoundedRateLimitRetryHandler(max_retry_count=3)])
     from scout_slack_safe import guard_web_client
     guard_web_client(web)
 
