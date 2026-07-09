@@ -4698,6 +4698,60 @@ def test_chart_url_threads_through_ask_result():
     return True, "chart_url threads correctly: AskResult → Card → image block"
 
 
+@test("agent_steps threads: _synthesize_agent_steps → AskResult → AgentStep blocks")
+def test_agent_steps_thread_through_ask_result():
+    """Regression for the 2026-07-09 outage: PR #314 dropped AskResult.agent_steps
+    while scout_handlers kept dereferencing response.agent_steps — every channel/DM
+    plain-text answer died with AttributeError inside the broad crash guard.
+    Guards the full producer → consumer chain."""
+    from scout_agent import AskResult, _synthesize_agent_steps
+    from scout_ui_kit import AgentStep
+
+    steps = _synthesize_agent_steps([
+        ("get_revenue_today", {"finding": "Revenue $12K, pacing +8%"}),
+        ("get_publisher_health", "ClickHouse error: timeout"),
+    ])
+    if not steps:
+        return False, "_synthesize_agent_steps returned no steps for a 2-tool log"
+
+    r = AskResult(text="answer", agent_steps=steps)
+    if not isinstance(r.agent_steps, tuple):
+        return False, f"agent_steps not coerced to tuple: {type(r.agent_steps).__name__}"
+    if AskResult(text="x").agent_steps is not None:
+        return False, "agent_steps default is not None"
+
+    # Exact consumption shape from scout_handlers (channel + DM plain-text paths)
+    consumed = [
+        AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
+        for s in (r.agent_steps or [])
+        if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
+    ]
+    if len(consumed) != 2:
+        return False, f"handler consumption built {len(consumed)}/2 AgentSteps — dict shape drifted"
+    return True, "agent_steps flow intact: synthesizer → AskResult(tuple) → AgentStep blocks"
+
+
+@test("AskResult field contract: handlers only dereference fields that exist")
+def test_handlers_askresult_field_contract():
+    """Every `response.<attr>` in scout_handlers.py must be a real AskResult field.
+    A refactor that drops a field while handlers still read it crashes at final
+    render — invisibly, inside handle_event's broad crash guard (root cause of
+    the 2026-07-09 silent-hang outage)."""
+    import re
+    from scout_agent import AskResult
+
+    # `response` in _BoundedRateLimitRetryHandler is an HTTP response, not AskResult.
+    _NOT_ASK_RESULT = {"headers"}
+
+    src = open(os.path.join(os.path.dirname(__file__), "scout_handlers.py")).read()
+    derefed = set(re.findall(r"\bresponse\.([A-Za-z_][A-Za-z0-9_]*)", src)) - _NOT_ASK_RESULT
+    fields = set(AskResult.__dataclass_fields__)
+    missing = sorted(derefed - fields)
+    if missing:
+        return False, f"handlers dereference response.{missing} but AskResult has no such field(s)"
+    return True, f"all {len(derefed)} response.<attr> dereferences exist on AskResult"
+
+
 @test("last_thread_lock_is_initialized")
 def test_last_thread_lock_is_initialized():
     """Verify _LAST_THREAD_LOCK is a live threading.Lock at import time, not None."""

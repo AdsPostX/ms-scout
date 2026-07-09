@@ -106,6 +106,10 @@ class AskResult:
     duration_ms: int = 0
     payload: Optional[Mapping] = None
     chart_url: Optional[str] = None
+    # Reasoning-chain steps ({label, status, finding} dicts) consumed by the
+    # channel/DM plain-text render paths in scout_handlers.py. Entries stay
+    # plain dicts (not frozen) — handlers filter on isinstance(s, dict).
+    agent_steps: Optional[tuple] = None
 
     def __post_init__(self) -> None:
         # Defense-in-depth: callers may pass a list; coerce to tuple so handlers
@@ -115,6 +119,8 @@ class AskResult:
             object.__setattr__(self, "tools_called", tuple(self.tools_called))
         if self.payload is not None and not isinstance(self.payload, MappingProxyType):
             object.__setattr__(self, "payload", _freeze(dict(self.payload)))
+        if self.agent_steps is not None and not isinstance(self.agent_steps, tuple):
+            object.__setattr__(self, "agent_steps", tuple(self.agent_steps))
 
 
 @dataclass
@@ -6094,6 +6100,10 @@ def _run_tool_loop(
         _opportunity_offers = []
     if _all_tool_results is None:
         _all_tool_results = []
+    # (tool_name, result) tuples in call order — feeds _synthesize_agent_steps
+    # at every final-response return so the reasoning chain reaches the UI.
+    # Locally-owned, passed as a value to a pure function — never escapes.
+    _tool_call_log: list = []
 
     # user_message is the RAW pre-prefix string — passed explicitly so the
     # MAX_ROUNDS warning log line matches pre-refactor behavior (logging the
@@ -6211,6 +6221,7 @@ def _run_tool_loop(
                         # even if Block Kit rendering fails
                         "fallback_text": _fallback_text,
                     },
+                    agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
                 )
 
             # Parse and strip <<<SUGGESTIONS [...]  SUGGESTIONS>>> block from text.
@@ -6238,6 +6249,7 @@ def _run_tool_loop(
                         "offers": _opportunity_offers,
                         "suggestions": suggestions,
                     },
+                    agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
                 )
 
             # General entity extraction — runs over all tool results from this turn.
@@ -6257,12 +6269,14 @@ def _run_tool_loop(
                             "extracted_context": extracted,
                             "suggestions": suggestions,
                         },
+                        agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
                     )
 
             return AskResult(
                 text=text or "(no response)",
                 tools_called=_tools_called,
                 duration_ms=_dur(),
+                agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
             )
 
         # Process tool calls
@@ -6301,6 +6315,7 @@ def _run_tool_loop(
                 for i, _ in sorted(tool_blocks, key=lambda x: x[0]):
                     block, result = results_map[i]
                     _tools_called.append(block.name)
+                    _tool_call_log.append((block.name, result))
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
                     if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
@@ -6318,6 +6333,7 @@ def _run_tool_loop(
                 for i, block in tool_blocks:
                     _tools_called.append(block.name)
                     result = _run_tool(block.name, block.input, user_id, permalink)
+                    _tool_call_log.append((block.name, result))
                     if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                         _brief_results.append(result)
                     _all_tool_results.append(result)
@@ -6331,6 +6347,7 @@ def _run_tool_loop(
             for i, block in tool_blocks:
                 _tools_called.append(block.name)
                 result = _run_tool(block.name, block.input, user_id, permalink)
+                _tool_call_log.append((block.name, result))
                 if block.name == "draft_campaign_brief" and isinstance(result, dict) and "advertiser" in result:
                     _brief_results.append(result)  # collect all, use first for primary
                 if block.name == "get_top_opportunities" and isinstance(result, list) and not _opportunity_offers:
@@ -6351,8 +6368,10 @@ def _run_tool_loop(
                         text=block.text,
                         tools_called=_tools_called,
                         duration_ms=_dur(),
+                        agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
                     )
-            return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur())
+            return AskResult(text="(no response)", tools_called=_tools_called, duration_ms=_dur(),
+                             agent_steps=_synthesize_agent_steps(_tool_call_log) or None)
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
@@ -6367,6 +6386,7 @@ def _run_tool_loop(
         ),
         tools_called=_tools_called,
         duration_ms=_dur(),
+        agent_steps=_synthesize_agent_steps(_tool_call_log) or None,
     )
 
 
