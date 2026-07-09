@@ -64,6 +64,7 @@ load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 # own this wiring — scout_core stays unaware of offer_scraper to keep the
 # contracts layer import-cheap and dependency-free.
 from scout_core.contracts import set_geo_normalizer as _set_geo_normalizer
+from scout_tools_offers import _dedupe_by_advertiser
 from offer_scraper import normalize_geo as _normalize_geo
 _set_geo_normalizer(_normalize_geo)
 
@@ -2132,7 +2133,7 @@ def get_top_opportunities(category: str = None, geo: str = None, limit: int = 5)
         results.append(o)
 
     results.sort(key=lambda x: _scout_score(x, benchmarks), reverse=True)
-    return _format_offers(results[:limit], benchmarks)
+    return _format_offers(_dedupe_by_advertiser(results)[:limit], benchmarks)
 
 
 def get_running_offers(category: str = None) -> list:
@@ -4920,14 +4921,14 @@ def get_offers_for_publisher(publisher_name: str) -> dict:  # returns dict since
     # Split: confirmed rate (score > 0, has real payout) vs uncontracted (Rate TBD)
     confirmed = [(o, s) for o, s in scored_all if s > 0]
     confirmed.sort(key=lambda x: x[1], reverse=True)
-    confirmed_top = confirmed[:8]
+    confirmed_top = [(o, _scout_score(o, benchmarks)) for o in _dedupe_by_advertiser([o for o, _ in confirmed])[:8]]  # score-sorted → dedupe keeps each advertiser's best
 
     # Uncontracted = active, net-new, no payout confirmed yet — show top 5 by category fit
     uncontracted = [
         o for o, s in scored_all if s == 0
         and (o.get("_raw_payout") or "").lower() in ("rate tbd", "tbd", "", "?")
     ]
-    uncontracted = uncontracted[:5]
+    uncontracted = _dedupe_by_advertiser(uncontracted)[:5]
 
     if not confirmed_top and not uncontracted:
         return (
