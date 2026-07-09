@@ -1329,85 +1329,92 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     finally:
         stop_rotating()
 
-    with _LAST_THREAD_LOCK:
-        _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
+    # Guarded: a render/post failure past this point otherwise propagates to
+    # handle_event's broad crash guard and the user stares at the frozen
+    # placeholder forever (2026-07-09 outage class).
+    try:
+        with _LAST_THREAD_LOCK:
+            _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
 
-    if response.payload and response.payload.get("type") == "brief":
-        brief_data = response.payload["brief_data"]
-        copy       = response.payload["copy"]
-        _store_brief(thread_ts, brief_data, copy)
-        _merge_thread_context(thread_ts, {
-            "offer":       brief_data.get("advertiser"),
-            "payout":      brief_data.get("payout_num"),
-            "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
-        })
-        blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
-        web.chat_update(channel=channel, ts=placeholder["ts"],
-                        text=response.payload.get("fallback_text", "Campaign Brief ready."), blocks=blocks)
-        return
+        if response.payload and response.payload.get("type") == "brief":
+            brief_data = response.payload["brief_data"]
+            copy       = response.payload["copy"]
+            _store_brief(thread_ts, brief_data, copy)
+            _merge_thread_context(thread_ts, {
+                "offer":       brief_data.get("advertiser"),
+                "payout":      brief_data.get("payout_num"),
+                "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
+            })
+            blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
+            web.chat_update(channel=channel, ts=placeholder["ts"],
+                            text=response.payload.get("fallback_text", "Campaign Brief ready."), blocks=blocks)
+            return
 
-    if response.payload and response.payload.get("type") == "opportunities":
-        header_text       = _sanitize_slack(response.text)
-        offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-        _sg_card = _opportunities_card(header_text)
-        _sg_fallback, _sg_blocks = wrap_response(
-            card=_sg_card, surface=Surface.THREAD, pattern=ResponsePattern.ANSWER,
-            suggestions=list(response.payload.get("suggestions", [])),
+        if response.payload and response.payload.get("type") == "opportunities":
+            header_text       = _sanitize_slack(response.text)
+            offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+            _sg_card = _opportunities_card(header_text)
+            _sg_fallback, _sg_blocks = wrap_response(
+                card=_sg_card, surface=Surface.THREAD, pattern=ResponsePattern.ANSWER,
+                suggestions=list(response.payload.get("suggestions", [])),
+                elapsed_seconds=_elapsed,
+            )
+            _sg_final = [*_sg_blocks[:1], *offer_cards, *_sg_blocks[1:]] if offer_cards else _sg_blocks
+            web.chat_update(
+                channel=channel, ts=_placeholder_ts_sg,
+                text=_sg_fallback, blocks=_sg_final,
+            )
+            log.info(f"Suggestion answered (opportunities) in {channel} (thread {thread_ts}): {query!r}")
+            return
+
+        sugg: list = []
+        launched_offer_sg: dict | None = None
+        if response.payload and response.payload.get("type") == "text_with_context":
+            extracted = response.payload.get("extracted_context", {})
+            if extracted:
+                extracted = dict(extracted)  # unfreeze nested MappingProxy for local pop
+                launched_offer_sg = extracted.pop("launched_offer", None)
+                _merge_thread_context(thread_ts, extracted)
+            sugg = response.payload.get("suggestions", [])
+        response_text = response.text
+
+        # Launch notification (same logic as handle_event)
+        if launched_offer_sg:
+            adops_uid   = _CFG.adops_notify_user_id
+            approved_by = launched_offer_sg.get("approved_by", "")
+            advertiser  = launched_offer_sg.get("advertiser", "")
+            payout      = launched_offer_sg.get("payout", "")
+            network     = launched_offer_sg.get("network", "")
+            t_url       = launched_offer_sg.get("thread_url", "")
+            tags = f"<@{approved_by}>" if approved_by else ""
+            if adops_uid and adops_uid != approved_by:
+                tags += f" <@{adops_uid}>"
+            brief_link = f" · <{t_url}|brief>" if t_url else ""
+            msg = f":rocket: *{advertiser}* is live. {payout} · {network}{brief_link}"
+            if tags:
+                msg += f"\n{tags}"
+            web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+
+        response_text = response_text[:3000]  # cap for Slack text= limit
+        _sg2_card = Card(Severity.INFO, "", body=response_text)
+        _sg2_fallback, _sg2_blocks = wrap_response(
+            card=_sg2_card, surface=Surface.THREAD, pattern=ResponsePattern.ANSWER,
+            suggestions=list(sugg),
             elapsed_seconds=_elapsed,
         )
-        _sg_final = [*_sg_blocks[:1], *offer_cards, *_sg_blocks[1:]] if offer_cards else _sg_blocks
+        _sg2_period = (
+            (response.payload or {}).get("extracted_context", {}).get("period")
+            if response.payload else None
+        )
+        _sg2_blocks = [*_sg2_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_sg2_period)]
         web.chat_update(
             channel=channel, ts=_placeholder_ts_sg,
-            text=_sg_fallback, blocks=_sg_final,
+            text=_sg2_fallback, blocks=_sg2_blocks,
         )
-        log.info(f"Suggestion answered (opportunities) in {channel} (thread {thread_ts}): {query!r}")
-        return
-
-    sugg: list = []
-    launched_offer_sg: dict | None = None
-    if response.payload and response.payload.get("type") == "text_with_context":
-        extracted = response.payload.get("extracted_context", {})
-        if extracted:
-            extracted = dict(extracted)  # unfreeze nested MappingProxy for local pop
-            launched_offer_sg = extracted.pop("launched_offer", None)
-            _merge_thread_context(thread_ts, extracted)
-        sugg = response.payload.get("suggestions", [])
-    response_text = response.text
-
-    # Launch notification (same logic as handle_event)
-    if launched_offer_sg:
-        adops_uid   = _CFG.adops_notify_user_id
-        approved_by = launched_offer_sg.get("approved_by", "")
-        advertiser  = launched_offer_sg.get("advertiser", "")
-        payout      = launched_offer_sg.get("payout", "")
-        network     = launched_offer_sg.get("network", "")
-        t_url       = launched_offer_sg.get("thread_url", "")
-        tags = f"<@{approved_by}>" if approved_by else ""
-        if adops_uid and adops_uid != approved_by:
-            tags += f" <@{adops_uid}>"
-        brief_link = f" · <{t_url}|brief>" if t_url else ""
-        msg = f":rocket: *{advertiser}* is live. {payout} · {network}{brief_link}"
-        if tags:
-            msg += f"\n{tags}"
-        web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
-
-    response_text = response_text[:3000]  # cap for Slack text= limit
-    _sg2_card = Card(Severity.INFO, "", body=response_text)
-    _sg2_fallback, _sg2_blocks = wrap_response(
-        card=_sg2_card, surface=Surface.THREAD, pattern=ResponsePattern.ANSWER,
-        suggestions=list(sugg),
-        elapsed_seconds=_elapsed,
-    )
-    _sg2_period = (
-        (response.payload or {}).get("extracted_context", {}).get("period")
-        if response.payload else None
-    )
-    _sg2_blocks = [*_sg2_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_sg2_period)]
-    web.chat_update(
-        channel=channel, ts=_placeholder_ts_sg,
-        text=_sg2_fallback, blocks=_sg2_blocks,
-    )
-    log.info(f"Suggestion answered in {channel} (thread {thread_ts}): {query!r}")
+        log.info(f"Suggestion answered in {channel} (thread {thread_ts}): {query!r}")
+    except Exception as e:
+        log.error(f"Suggestion response routing failed after ask(): {e}", exc_info=True)
+        _post_error_update(web, channel, _placeholder_ts_sg, e)
 
 # ── Pulse button dispatch ─────────────────────────────────────────────────────
 # Maps static pulse action_ids to the query Scout runs. Dynamic ones (pub-scoped)
