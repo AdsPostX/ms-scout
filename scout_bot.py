@@ -2026,6 +2026,35 @@ def _on_startup(web: WebClient) -> None:
         log.warning(f"[startup] sidd-qa post failed: {e}")
 
 
+class _BoundedRateLimitRetryHandler(RateLimitErrorRetryHandler):
+    """RateLimitErrorRetryHandler caps its sleep at Slack's Retry-After
+    header value, which is uncapped by app code. slack_sdk builds a fresh
+    RetryState per call, so this only blocks the thread making that call
+    — but that one thread can still sleep for minutes per retry, up to
+    max_retry_count times, with nothing surfaced while it does. Cap the
+    sleep so a rate-limit event degrades instead of silently hanging.
+
+    Same fix as scout_handlers._BoundedRateLimitRetryHandler, applied to
+    this module's separate WebClient. Not yet unified into a shared
+    module — scout_slack_safe.py is scoped to response-emission
+    invariants, not HTTP retry behavior, so duplicating here beats
+    misplacing it there."""
+
+    MAX_SLEEP_S = 10
+
+    def prepare_for_next_attempt(self, *, state, request, response=None, error=None):
+        if response is None:
+            raise error
+        state.next_attempt_requested = True
+        duration = 1.0
+        for k in response.headers.keys():
+            if k.lower() == "retry-after":
+                duration = float(response.headers.get(k)[0])
+                break
+        time.sleep(min(duration, self.MAX_SLEEP_S) + random.random())
+        state.increment_current_attempt()
+
+
 def main():
     global _BOT_USER_ID
     _check_singleton()
@@ -2035,7 +2064,7 @@ def main():
     if not _BOT_CFG.bot_token or not _BOT_CFG.app_token:
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env")
 
-    web_client    = WebClient(token=_BOT_CFG.bot_token, retry_handlers=[RateLimitErrorRetryHandler(max_retry_count=3)])
+    web_client    = WebClient(token=_BOT_CFG.bot_token, retry_handlers=[_BoundedRateLimitRetryHandler(max_retry_count=3)])
     from scout_slack_safe import guard_web_client
     guard_web_client(web_client)
     _BOT_USER_ID  = web_client.auth_test()["user_id"]
