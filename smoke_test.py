@@ -4754,35 +4754,36 @@ def test_handlers_askresult_field_contract():
 
 @test("handle_event response routing is exception-guarded")
 def test_handle_event_response_routing_guarded():
-    """Every `response` reference in _handle_event_impl must sit inside a try
-    block. The post-ask routing sections (DM + channel) render and post the
-    final answer — an unguarded exception there dies in handle_event's broad
-    crash guard and the user stares at a frozen placeholder forever (the
+    """Every `response` reference in _handle_event_impl and _handle_suggestion
+    must sit inside a try block. The post-ask routing sections render and post
+    the final answer — an unguarded exception there dies in handle_event's
+    broad crash guard and the user stares at a frozen placeholder forever (the
     2026-07-09 outage class)."""
     import ast, pathlib
+    _GUARDED_FNS = {"_handle_event_impl", "_handle_suggestion"}
     tree = ast.parse(pathlib.Path(os.path.join(os.path.dirname(__file__), "scout_handlers.py")).read_text())
-    fn = next(
-        n for n in tree.body
-        if isinstance(n, ast.FunctionDef) and n.name == "_handle_event_impl"
-    )
-    parents = {}
-    for node in ast.walk(fn):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
-    unguarded = []
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Name) and node.id == "response":
-            cur = node
-            while cur in parents and not isinstance(cur, ast.Try):
-                cur = parents[cur]
-            if not isinstance(cur, ast.Try):
-                unguarded.append(node.lineno)
+    unguarded = {}
+    for fn in tree.body:
+        if not (isinstance(fn, ast.FunctionDef) and fn.name in _GUARDED_FNS):
+            continue
+        parents = {}
+        for node in ast.walk(fn):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Name) and node.id == "response":
+                cur = node
+                while cur in parents and not isinstance(cur, ast.Try):
+                    cur = parents[cur]
+                if not isinstance(cur, ast.Try):
+                    unguarded.setdefault(fn.name, set()).add(node.lineno)
     if unguarded:
+        detail = ", ".join(f"{name} lines {sorted(ls)}" for name, ls in sorted(unguarded.items()))
         return False, (
-            f"`response` used outside any try/except in _handle_event_impl at "
-            f"lines {sorted(set(unguarded))} — a render failure there is invisible to the user"
+            f"`response` used outside any try/except: {detail} — "
+            f"a render failure there is invisible to the user"
         )
-    return True, "all `response` references in _handle_event_impl are exception-guarded"
+    return True, f"all `response` references in {sorted(_GUARDED_FNS)} are exception-guarded"
 
 
 @test("last_thread_lock_is_initialized")
