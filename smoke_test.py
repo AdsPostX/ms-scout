@@ -4939,6 +4939,22 @@ def test_top_opportunities_dedupe_by_advertiser():
     return True, f"8 offers → {len(out)}: first (best-scored) offer kept per advertiser, anonymous offers preserved"
 
 
+@test("live TOOL_MAP offer tools dedupe by advertiser")
+def test_live_offer_tools_dedupe_binding():
+    """PR #314 reverted the Phase-13 split: TOOL_MAP binds scout_agent's own
+    tool copies, not the scout_tools_* modules. PR #337 fixed the shadow module
+    only — prod still returned 8 identical AT&T Business cards. Assert on the
+    functions actually bound in TOOL_MAP, not on module copies."""
+    import inspect
+    from scout_agent import TOOL_MAP
+
+    for name in ("get_top_opportunities", "get_offers_for_publisher"):
+        src = inspect.getsource(TOOL_MAP[name])
+        if "_dedupe_by_advertiser" not in src:
+            return False, f"live TOOL_MAP binding of {name} has no advertiser dedup"
+    return True, "both live offer-tool bindings apply _dedupe_by_advertiser"
+
+
 @test("_trim_to_limit helper exists, no inline trim pattern outside it")
 def test_trim_to_limit_helper_exists():
     """Asserts that _trim_to_limit exists in scout_attachments and no inline trim pattern remains outside it."""
