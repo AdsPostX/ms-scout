@@ -3236,101 +3236,109 @@ def _handle_event_impl(req: SocketModeRequest):
             except Exception:
                 pass
 
-        # Track active thread for follow-up context retention
-        with _LAST_THREAD_LOCK:
-            _LAST_THREAD_PER_CHANNEL[channel] = thread_ts or msg_ts
+        # Guarded: a render/post failure past this point otherwise propagates
+        # to handle_event's broad crash guard and the DM user never sees a
+        # reply (2026-07-09 outage class).
+        try:
+            # Track active thread for follow-up context retention
+            with _LAST_THREAD_LOCK:
+                _LAST_THREAD_PER_CHANNEL[channel] = thread_ts or msg_ts
 
-        # Extract structured context + suggestion buttons
-        launched_offer_dm = None
-        suggestions: list = []
-        if response.payload and response.payload.get("type") == "text_with_context":
-            extracted = response.payload.get("extracted_context", {})
-            if extracted:
-                extracted = dict(extracted)  # unfreeze nested MappingProxy for local pop
-                launched_offer_dm = extracted.pop("launched_offer", None)
-                _merge_thread_context(thread_ts or msg_ts, extracted)
-            suggestions = response.payload.get("suggestions", [])
+            # Extract structured context + suggestion buttons
+            launched_offer_dm = None
+            suggestions: list = []
+            if response.payload and response.payload.get("type") == "text_with_context":
+                extracted = response.payload.get("extracted_context", {})
+                if extracted:
+                    extracted = dict(extracted)  # unfreeze nested MappingProxy for local pop
+                    launched_offer_dm = extracted.pop("launched_offer", None)
+                    _merge_thread_context(thread_ts or msg_ts, extracted)
+                suggestions = response.payload.get("suggestions", [])
 
-        if launched_offer_dm:
-            adops_uid   = _CFG.adops_notify_user_id
-            approved_by = launched_offer_dm.get("approved_by", "")
-            advertiser  = launched_offer_dm.get("advertiser", "")
-            payout      = launched_offer_dm.get("payout", "")
-            network     = launched_offer_dm.get("network", "")
-            t_url       = launched_offer_dm.get("thread_url", "")
-            tags = f"<@{approved_by}>" if approved_by else ""
-            if adops_uid and adops_uid != approved_by:
-                tags += f" <@{adops_uid}>"
-            brief_link = f" · <{t_url}|brief>" if t_url else ""
-            msg = f":rocket: *{advertiser}* is live. {payout} · {network}{brief_link}"
-            if tags:
-                msg += f"\n{tags}"
-            web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
-            _notion_url = launched_offer_dm.get("notion_url", "")
-            if _notion_url:
-                threading.Thread(
-                    target=_update_notion_status,
-                    args=(_notion_url, "Live"),
-                    daemon=True,
-                ).start()
+            if launched_offer_dm:
+                adops_uid   = _CFG.adops_notify_user_id
+                approved_by = launched_offer_dm.get("approved_by", "")
+                advertiser  = launched_offer_dm.get("advertiser", "")
+                payout      = launched_offer_dm.get("payout", "")
+                network     = launched_offer_dm.get("network", "")
+                t_url       = launched_offer_dm.get("thread_url", "")
+                tags = f"<@{approved_by}>" if approved_by else ""
+                if adops_uid and adops_uid != approved_by:
+                    tags += f" <@{adops_uid}>"
+                brief_link = f" · <{t_url}|brief>" if t_url else ""
+                msg = f":rocket: *{advertiser}* is live. {payout} · {network}{brief_link}"
+                if tags:
+                    msg += f"\n{tags}"
+                web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+                _notion_url = launched_offer_dm.get("notion_url", "")
+                if _notion_url:
+                    threading.Thread(
+                        target=_update_notion_status,
+                        args=(_notion_url, "Live"),
+                        daemon=True,
+                    ).start()
 
-        # Post reply — flat DM message (thread_ts=None) or in-thread if user was already in one
-        if response.payload and response.payload.get("type") == "brief":
-            brief_data = response.payload["brief_data"]
-            copy       = response.payload["copy"]
-            _store_brief(thread_ts or msg_ts, brief_data, copy)
-            _merge_thread_context(thread_ts or msg_ts, {
-                "offer":       brief_data.get("advertiser"),
-                "payout":      brief_data.get("payout_num"),
-                "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
-            })
-            blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
-            _post = web.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=response.payload.get("fallback_text", "Campaign Brief ready."),
-                blocks=blocks,
-                unfurl_links=False,
-            )
-        elif response.payload and response.payload.get("type") == "opportunities":
-            header_text       = _sanitize_slack(response.text)
-            offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-            _dm5_card = _opportunities_card(header_text)
-            _dm5_fallback, _dm5_blocks = wrap_response(
-                card=_dm5_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
-                suggestions=list(response.payload.get("suggestions", [])),
-                elapsed_seconds=_elapsed,
-            )
-            _dm5_final = [*_dm5_blocks[:1], *offer_cards, *_dm5_blocks[1:]] if offer_cards else _dm5_blocks
-            _post = web.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=_dm5_fallback, blocks=_dm5_final,
-                unfurl_links=False,
-            )
-        else:
-            response_text  = _sanitize_slack(response.text)[:3000]
-            _dm_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
-            _dm_interp = _build_interpretation(_dm_ctx)
-            _dm6_card = Card(Severity.INFO, "", body=response_text, chart_url=response.chart_url)
-            _dm_agent_steps = [
-                AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
-                for s in (response.agent_steps or [])
-                if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
-            ] or None
-            _dm6_fallback, _dm6_blocks = wrap_response(
-                card=_dm6_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
-                suggestions=list(suggestions),
-                elapsed_seconds=_elapsed,
-                interpretation=_dm_interp,
-                agent_steps=_dm_agent_steps,
-            )
-            if not _dm_interp:
-                _dm_period = _dm_ctx.get("period") if _dm_ctx else None
-                _dm6_blocks = [*_dm6_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_dm_period)]
-            _post = web.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=_dm6_fallback, blocks=_dm6_blocks,
-                unfurl_links=False,
-            )
+            # Post reply — flat DM message (thread_ts=None) or in-thread if user was already in one
+            if response.payload and response.payload.get("type") == "brief":
+                brief_data = response.payload["brief_data"]
+                copy       = response.payload["copy"]
+                _store_brief(thread_ts or msg_ts, brief_data, copy)
+                _merge_thread_context(thread_ts or msg_ts, {
+                    "offer":       brief_data.get("advertiser"),
+                    "payout":      brief_data.get("payout_num"),
+                    "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
+                })
+                blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
+                _post = web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=response.payload.get("fallback_text", "Campaign Brief ready."),
+                    blocks=blocks,
+                    unfurl_links=False,
+                )
+            elif response.payload and response.payload.get("type") == "opportunities":
+                header_text       = _sanitize_slack(response.text)
+                offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+                _dm5_card = _opportunities_card(header_text)
+                _dm5_fallback, _dm5_blocks = wrap_response(
+                    card=_dm5_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
+                    suggestions=list(response.payload.get("suggestions", [])),
+                    elapsed_seconds=_elapsed,
+                )
+                _dm5_final = [*_dm5_blocks[:1], *offer_cards, *_dm5_blocks[1:]] if offer_cards else _dm5_blocks
+                _post = web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=_dm5_fallback, blocks=_dm5_final,
+                    unfurl_links=False,
+                )
+            else:
+                response_text  = _sanitize_slack(response.text)[:3000]
+                _dm_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
+                _dm_interp = _build_interpretation(_dm_ctx)
+                _dm6_card = Card(Severity.INFO, "", body=response_text, chart_url=response.chart_url)
+                _dm_agent_steps = [
+                    AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
+                    for s in (response.agent_steps or [])
+                    if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
+                ] or None
+                _dm6_fallback, _dm6_blocks = wrap_response(
+                    card=_dm6_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
+                    suggestions=list(suggestions),
+                    elapsed_seconds=_elapsed,
+                    interpretation=_dm_interp,
+                    agent_steps=_dm_agent_steps,
+                )
+                if not _dm_interp:
+                    _dm_period = _dm_ctx.get("period") if _dm_ctx else None
+                    _dm6_blocks = [*_dm6_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_dm_period)]
+                _post = web.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=_dm6_fallback, blocks=_dm6_blocks,
+                    unfurl_links=False,
+                )
+        except Exception as e:
+            log.error(f"DM response routing failed: {e}", exc_info=True)
+            _safe_slack_call(web.chat_postMessage, channel=channel,
+                             text=f":warning: Something went wrong — `{e}`")
         return
     # ── END DM path ──────────────────────────────────────────────────────────────
 
@@ -3399,123 +3407,130 @@ def _handle_event_impl(req: SocketModeRequest):
             pass
 
     # ── Route response: brief (Block Kit) vs text_with_context vs plain text ────
-    # Track the active thread per channel so top-level follow-ups retain context
-    with _LAST_THREAD_LOCK:
-        _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
+    # Guarded: a render/post failure past this point otherwise propagates to
+    # handle_event's broad crash guard and the user stares at the frozen
+    # placeholder forever (2026-07-09 outage class).
+    try:
+        # Track the active thread per channel so top-level follow-ups retain context
+        with _LAST_THREAD_LOCK:
+            _LAST_THREAD_PER_CHANNEL[channel] = thread_ts
 
-    # Block B: extract entities + suggestions from text_with_context responses
-    suggestions: list = []
-    launched_offer: dict | None = None
-    if response.payload and response.payload.get("type") == "text_with_context":
-        extracted = response.payload.get("extracted_context", {})
-        if extracted:
-            extracted = dict(extracted)  # unfreeze nested MappingProxy for local pop
-            launched_offer = extracted.pop("launched_offer", None)
-            _merge_thread_context(thread_ts, extracted)
-            log.info(f"Saved thread context for {thread_ts}: {list(extracted.keys())}")
-        suggestions = response.payload.get("suggestions", [])
+        # Block B: extract entities + suggestions from text_with_context responses
+        suggestions: list = []
+        launched_offer: dict | None = None
+        if response.payload and response.payload.get("type") == "text_with_context":
+            extracted = response.payload.get("extracted_context", {})
+            if extracted:
+                extracted = dict(extracted)  # unfreeze nested MappingProxy for local pop
+                launched_offer = extracted.pop("launched_offer", None)
+                _merge_thread_context(thread_ts, extracted)
+                log.info(f"Saved thread context for {thread_ts}: {list(extracted.keys())}")
+            suggestions = response.payload.get("suggestions", [])
 
-    # Launch notification — thread-only, targeted tags, no channel noise
-    if launched_offer:
-        adops_uid   = _CFG.adops_notify_user_id
-        approved_by = launched_offer.get("approved_by", "")
-        advertiser  = launched_offer.get("advertiser", "")
-        payout      = launched_offer.get("payout", "")
-        network     = launched_offer.get("network", "")
-        t_url       = launched_offer.get("thread_url", "")
+        # Launch notification — thread-only, targeted tags, no channel noise
+        if launched_offer:
+            adops_uid   = _CFG.adops_notify_user_id
+            approved_by = launched_offer.get("approved_by", "")
+            advertiser  = launched_offer.get("advertiser", "")
+            payout      = launched_offer.get("payout", "")
+            network     = launched_offer.get("network", "")
+            t_url       = launched_offer.get("thread_url", "")
 
-        tags = f"<@{approved_by}>" if approved_by else ""
-        if adops_uid and adops_uid != approved_by:
-            tags += f" <@{adops_uid}>"
+            tags = f"<@{approved_by}>" if approved_by else ""
+            if adops_uid and adops_uid != approved_by:
+                tags += f" <@{adops_uid}>"
 
-        brief_link = f" · <{t_url}|brief>" if t_url else ""
-        msg = f":rocket: *{advertiser}* is live. {payout} · {network}{brief_link}"
-        if tags:
-            msg += f"\n{tags}"
-        web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+            brief_link = f" · <{t_url}|brief>" if t_url else ""
+            msg = f":rocket: *{advertiser}* is live. {payout} · {network}{brief_link}"
+            if tags:
+                msg += f"\n{tags}"
+            web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
 
-        # Sync Notion Demand Queue page to "Live" status
-        _notion_url = launched_offer.get("notion_url", "")
-        if _notion_url:
-            threading.Thread(
-                target=_update_notion_status,
-                args=(_notion_url, "Live"),
-                daemon=True,
-            ).start()
+            # Sync Notion Demand Queue page to "Live" status
+            _notion_url = launched_offer.get("notion_url", "")
+            if _notion_url:
+                threading.Thread(
+                    target=_update_notion_status,
+                    args=(_notion_url, "Live"),
+                    daemon=True,
+                ).start()
 
-    if response.payload and response.payload.get("type") == "brief":
-        brief_data = response.payload["brief_data"]
-        copy       = response.payload["copy"]
+        if response.payload and response.payload.get("type") == "brief":
+            brief_data = response.payload["brief_data"]
+            copy       = response.payload["copy"]
 
-        # Persist brief to disk — survives Scout restarts and dual-instance races
-        _store_brief(thread_ts, brief_data, copy)
-        log.info(f"Stored pending brief for {brief_data.get('advertiser')} in thread {thread_ts}")
+            # Persist brief to disk — survives Scout restarts and dual-instance races
+            _store_brief(thread_ts, brief_data, copy)
+            log.info(f"Stored pending brief for {brief_data.get('advertiser')} in thread {thread_ts}")
 
-        # Save offer/payout entities from brief so follow-up "@Scout launch at $X" works
-        _merge_thread_context(thread_ts, {
-            "offer":       brief_data.get("advertiser"),
-            "payout":      brief_data.get("payout_num"),
-            "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
-        })
+            # Save offer/payout entities from brief so follow-up "@Scout launch at $X" works
+            _merge_thread_context(thread_ts, {
+                "offer":       brief_data.get("advertiser"),
+                "payout":      brief_data.get("payout_num"),
+                "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
+            })
 
-        blocks        = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
-        fallback_text = response.payload.get("fallback_text", "Campaign Brief ready.")
+            blocks        = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
+            fallback_text = response.payload.get("fallback_text", "Campaign Brief ready.")
 
-        web.chat_update(
-            channel=channel,
-            ts=placeholder["ts"],
-            text=fallback_text,
-            blocks=blocks,
-        )
-        log.info(f"Posted Block Kit brief for {brief_data.get('advertiser')} in {channel}")
+            web.chat_update(
+                channel=channel,
+                ts=placeholder["ts"],
+                text=fallback_text,
+                blocks=blocks,
+            )
+            log.info(f"Posted Block Kit brief for {brief_data.get('advertiser')} in {channel}")
 
-        # Async tracking URL check — fires when brief is first shown, before any queue action
-        _real_url = (brief_data.get("tracking_url", "") or "").strip()
-        if _real_url and not _real_url.startswith("Not available"):
-            _run_preflight_qa(web, channel, thread_ts, brief_data)
+            # Async tracking URL check — fires when brief is first shown, before any queue action
+            _real_url = (brief_data.get("tracking_url", "") or "").strip()
+            if _real_url and not _real_url.startswith("Not available"):
+                _run_preflight_qa(web, channel, thread_ts, brief_data)
 
-    elif response.payload and response.payload.get("type") == "opportunities":
-        header_text = _sanitize_slack(response.text)
-        offer_cards = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-        _ch7_card = _opportunities_card(header_text)
-        _ch7_fallback, _ch7_blocks = wrap_response(
-            card=_ch7_card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER,
-            suggestions=list(response.payload.get("suggestions", [])),
-            elapsed_seconds=_elapsed,
-        )
-        _ch7_final = [*_ch7_blocks[:1], *offer_cards, *_ch7_blocks[1:]] if offer_cards else _ch7_blocks
-        web.chat_update(
-            channel=channel,
-            ts=_placeholder_ts,
-            text=_ch7_fallback, blocks=_ch7_final,
-        )
-        log.info(f"Posted opportunity cards ({len(response.payload.get('offers', []))} offers) in {channel}")
+        elif response.payload and response.payload.get("type") == "opportunities":
+            header_text = _sanitize_slack(response.text)
+            offer_cards = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
+            _ch7_card = _opportunities_card(header_text)
+            _ch7_fallback, _ch7_blocks = wrap_response(
+                card=_ch7_card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER,
+                suggestions=list(response.payload.get("suggestions", [])),
+                elapsed_seconds=_elapsed,
+            )
+            _ch7_final = [*_ch7_blocks[:1], *offer_cards, *_ch7_blocks[1:]] if offer_cards else _ch7_blocks
+            web.chat_update(
+                channel=channel,
+                ts=_placeholder_ts,
+                text=_ch7_fallback, blocks=_ch7_final,
+            )
+            log.info(f"Posted opportunity cards ({len(response.payload.get('offers', []))} offers) in {channel}")
 
-    else:
-        # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
-        response_text  = _sanitize_slack(response.text)[:3000]
-        _ch_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
-        _ch_interp = _build_interpretation(_ch_ctx)
-        _ch8_card = Card(Severity.INFO, "", body=response_text, chart_url=response.chart_url)
-        _ch_agent_steps = [
-            AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
-            for s in (response.agent_steps or [])
-            if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
-        ] or None
-        _ch8_fallback, _ch8_blocks = wrap_response(
-            card=_ch8_card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER,
-            suggestions=list(suggestions),
-            elapsed_seconds=_elapsed,
-            interpretation=_ch_interp,
-            agent_steps=_ch_agent_steps,
-        )
-        if not _ch_interp:
-            _ch_period = _ch_ctx.get("period") if _ch_ctx else None
-            _ch8_blocks = [*_ch8_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_ch_period)]
-        web.chat_update(
-            channel=channel,
-            ts=_placeholder_ts,
-            text=_ch8_fallback, blocks=_ch8_blocks,
-        )
-        log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
+        else:
+            # Plain text response — clean text only at reveal, no GIF (GIF was shown during loading)
+            response_text  = _sanitize_slack(response.text)[:3000]
+            _ch_ctx = (response.payload or {}).get("extracted_context", {}) if response.payload else {}
+            _ch_interp = _build_interpretation(_ch_ctx)
+            _ch8_card = Card(Severity.INFO, "", body=response_text, chart_url=response.chart_url)
+            _ch_agent_steps = [
+                AgentStep(label=s["label"], status=s["status"], finding=s["finding"])
+                for s in (response.agent_steps or [])
+                if isinstance(s, dict) and s.get("label") and s.get("status") and s.get("finding")
+            ] or None
+            _ch8_fallback, _ch8_blocks = wrap_response(
+                card=_ch8_card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER,
+                suggestions=list(suggestions),
+                elapsed_seconds=_elapsed,
+                interpretation=_ch_interp,
+                agent_steps=_ch_agent_steps,
+            )
+            if not _ch_interp:
+                _ch_period = _ch_ctx.get("period") if _ch_ctx else None
+                _ch8_blocks = [*_ch8_blocks, context_block(queried_at=f"{_elapsed_str} ago", period=_ch_period)]
+            web.chat_update(
+                channel=channel,
+                ts=_placeholder_ts,
+                text=_ch8_fallback, blocks=_ch8_blocks,
+            )
+            log.info(f"Responded in {channel} (thread {thread_ts}), suggestions={len(suggestions)}")
+    except Exception as e:
+        log.error(f"Response routing failed after ask(): {e}", exc_info=True)
+        _post_error_update(web, channel, _placeholder_ts, e)
 

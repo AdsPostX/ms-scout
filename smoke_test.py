@@ -4752,6 +4752,39 @@ def test_handlers_askresult_field_contract():
     return True, f"all {len(derefed)} response.<attr> dereferences exist on AskResult"
 
 
+@test("handle_event response routing is exception-guarded")
+def test_handle_event_response_routing_guarded():
+    """Every `response` reference in _handle_event_impl must sit inside a try
+    block. The post-ask routing sections (DM + channel) render and post the
+    final answer — an unguarded exception there dies in handle_event's broad
+    crash guard and the user stares at a frozen placeholder forever (the
+    2026-07-09 outage class)."""
+    import ast, pathlib
+    tree = ast.parse(pathlib.Path(os.path.join(os.path.dirname(__file__), "scout_handlers.py")).read_text())
+    fn = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_handle_event_impl"
+    )
+    parents = {}
+    for node in ast.walk(fn):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    unguarded = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id == "response":
+            cur = node
+            while cur in parents and not isinstance(cur, ast.Try):
+                cur = parents[cur]
+            if not isinstance(cur, ast.Try):
+                unguarded.append(node.lineno)
+    if unguarded:
+        return False, (
+            f"`response` used outside any try/except in _handle_event_impl at "
+            f"lines {sorted(set(unguarded))} — a render failure there is invisible to the user"
+        )
+    return True, "all `response` references in _handle_event_impl are exception-guarded"
+
+
 @test("last_thread_lock_is_initialized")
 def test_last_thread_lock_is_initialized():
     """Verify _LAST_THREAD_LOCK is a live threading.Lock at import time, not None."""
