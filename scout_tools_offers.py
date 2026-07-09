@@ -336,6 +336,24 @@ def search_offers(
     return _format_offers(results[:limit], benchmarks)
 
 
+def _dedupe_by_advertiser(offers: list) -> list:
+    """One offer per advertiser, preserving input order (callers pass a
+    score-sorted list, so the first occurrence is that advertiser's best).
+    Networks list the same program under many offer IDs — 2026-07-09:
+    'top opportunities' returned 8 identical AT&T Business cards, one per
+    CJ offer ID. Offers with no advertiser name are kept as-is."""
+    seen: set = set()
+    deduped = []
+    for o in offers:
+        key = _norm(o.get("advertiser") or "")
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        deduped.append(o)
+    return deduped
+
+
 def get_top_opportunities(category: str = None, geo: str = None, limit: int = 5) -> list:
     offers = _load_offers()
     benchmarks = _tm.benchmarks()
@@ -350,7 +368,7 @@ def get_top_opportunities(category: str = None, geo: str = None, limit: int = 5)
         results.append(o)
 
     results.sort(key=lambda x: _scout_score(x, benchmarks), reverse=True)
-    return _format_offers(results[:limit], benchmarks)
+    return _format_offers(_dedupe_by_advertiser(results)[:limit], benchmarks)
 
 
 def get_running_offers(category: str = None) -> list:

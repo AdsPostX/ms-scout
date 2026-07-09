@@ -4915,6 +4915,30 @@ def test_normalize_geo_four_countries_not_global():
     return True, f"normalize_geo 4-country set → {result!r}"
 
 
+@test("_dedupe_by_advertiser — one card per advertiser, best offer kept")
+def test_top_opportunities_dedupe_by_advertiser():
+    """Regression for 2026-07-09: 'top opportunities' returned 8 identical
+    AT&T Business cards — CJ lists one program under many offer IDs and
+    get_top_opportunities had no advertiser dedup before the limit slice."""
+    from scout_tools_offers import _dedupe_by_advertiser
+
+    offers = [
+        {"advertiser": "AT&T Business", "offer_id": "cj-1"},
+        {"advertiser": "AT&T Business", "offer_id": "cj-2"},
+        {"advertiser": "at&t business", "offer_id": "cj-3"},   # case variant
+        {"advertiser": "Swagbucks", "offer_id": "imp-1"},
+        {"advertiser": "AT&T Business", "offer_id": "cj-4"},
+        {"advertiser": "", "offer_id": "anon-1"},              # no advertiser — keep
+        {"advertiser": "", "offer_id": "anon-2"},              # no advertiser — keep
+        {"advertiser": "MyPoints", "offer_id": "imp-2"},
+    ]
+    out = _dedupe_by_advertiser(offers)
+    ids = [o["offer_id"] for o in out]
+    if ids != ["cj-1", "imp-1", "anon-1", "anon-2", "imp-2"]:
+        return False, f"dedup order/content wrong: {ids}"
+    return True, f"8 offers → {len(out)}: first (best-scored) offer kept per advertiser, anonymous offers preserved"
+
+
 @test("_trim_to_limit helper exists, no inline trim pattern outside it")
 def test_trim_to_limit_helper_exists():
     """Asserts that _trim_to_limit exists in scout_attachments and no inline trim pattern remains outside it."""
