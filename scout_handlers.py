@@ -304,16 +304,33 @@ def _mention(user_id: str | None) -> str:
     return f"<@{user_id}> " if user_id else ""
 
 
-# Why-shortcut trigger: provenance questions about an entity note. The "source for"
-# branch requires a possessive/article prefix ("your/the source for") — a bare
-# "source for X" collides with Scout's demand-sourcing vocabulary ("offers we can
-# source for NextDoor") and hijacked those queries into the entity-note tool.
+# Deterministic entity-note shortcuts. Invariant (2026-07-09 NextDoor hijack):
+# these bypass the LLM entirely, so a false positive silently steals the query
+# from the agent — read-only shortcuts (why) may fuzzy-match but must not
+# collide with domain vocabulary; mutating shortcuts (remember/forget) must
+# anchor at message start like imperative commands.
+#
+# Why-shortcut: the "source for" branch requires a possessive/article prefix
+# ("your/the source for") — a bare "source for X" collides with demand-sourcing
+# vocabulary ("offers we can source for NextDoor").
 _WHY_RE = re.compile(
     r'(?:why\s+(?:do\s+you\s+(?:think|know|say)|did\s+you\s+(?:learn|get))\s+(?:that\s+)?about\s+|'
     r'where\s+did\s+you\s+(?:learn|get\s+that)\s+about\s+|'
     r'(?:what(?:\'s|\s+is)\s+)?(?:your|the)\s+source\s+for\s+|'
     r'who\s+told\s+you\s+(?:that\s+)?about\s+)'
     r'(.+)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Forget-shortcut mutates state (deletes an entity note), so it uses .match()
+# on the stripped query — "forget about the dashboard, what offers fit CJ"
+# mid-sentence must never delete anything.
+_FORGET_RE = re.compile(
+    r'(?:please\s+)?'
+    r'(?:forget\s+(?:that\s+for|(?:that\s+)?about|what\s+you\s+know\s+about)|'
+    r'drop\s+the\s+note\s+(?:on|for|about)|'
+    r'remove\s+the\s+(?:note|fact)\s+(?:on|for|about)\s*)'
+    r'\s*(.+)',
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -2742,14 +2759,7 @@ def _handle_event_impl(req: SocketModeRequest):
 
     # @Scout forget that for [entity] / drop the note on [entity]
     # Direct shortcut — same pattern as remember/why.
-    _FORGET_RE = re.compile(
-        r'(?:forget\s+(?:that\s+for|(?:that\s+)?about|what\s+you\s+know\s+about)|'
-        r'drop\s+the\s+note\s+(?:on|for|about)|'
-        r'remove\s+the\s+(?:note|fact)\s+(?:on|for|about)\s*)'
-        r'\s*(.+)',
-        re.IGNORECASE | re.DOTALL,
-    )
-    _forget_m = _FORGET_RE.search(query)
+    _forget_m = _FORGET_RE.match(query.strip())
     if _forget_m:
         _fentity = _forget_m.group(1).strip().rstrip("?").strip()
         _permalink = _permalink_for(web, channel, msg_ts)
