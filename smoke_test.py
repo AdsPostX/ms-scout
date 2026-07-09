@@ -4952,6 +4952,53 @@ def test_handler_config_loads_from_env():
     return True, "_HandlerConfig frozen dataclass and _CFG singleton verified"
 
 
+@test("entity-note shortcuts — commands match, domain queries never hijacked")
+def test_shortcut_regexes_not_greedy_on_domain_vocabulary():
+    """Regression for 2026-07-09: bare 'source for' in _WHY_RE hijacked
+    'what are some good offers we can source for NextDoor' into the
+    entity-note why-shortcut instead of the offer-sourcing agent path.
+    Guards the class: deterministic shortcuts bypass the LLM, so a false
+    positive silently steals the query — and _FORGET_RE mutates state."""
+    from scout_handlers import _WHY_RE, _FORGET_RE
+
+    why_should_match = [
+        "why do you think that about Acme",
+        "where did you learn about NextDoor",
+        "what's your source for NextDoor",
+        "what is the source for AT&T",
+        "who told you that about Rakuten",
+    ]
+    forget_should_match = [
+        "forget that for CJ",
+        "forget about NextDoor",
+        "please forget what you know about Rakuten",
+        "drop the note on AT&T",
+        "remove the fact about MaxBounty",
+    ]
+    # Realistic operator vocabulary that must reach the agent + offer tools.
+    domain_corpus = [
+        "what are some good offers we can source for NextDoor",
+        "which offers should we source for AT&T",
+        "can we source for Nextdoor this week",
+        "let's forget about the dashboard, what offers fit CJ",
+        "we should probably forget about that campaign and focus on fill rate",
+        "before you drop the note on this, what's the revenue trend",
+    ]
+    for q in why_should_match:
+        if not _WHY_RE.search(q):
+            return False, f"why-shortcut no longer matches: {q!r}"
+    for q in forget_should_match:
+        if not _FORGET_RE.match(q.strip()):
+            return False, f"forget command no longer matches: {q!r}"
+    for q in domain_corpus:
+        if _WHY_RE.search(q):
+            return False, f"domain query hijacked by why-shortcut: {q!r}"
+        if _FORGET_RE.match(q.strip()):
+            return False, f"domain query hijacked by forget-shortcut (mutates state!): {q!r}"
+    return True, (f"{len(why_should_match)}+{len(forget_should_match)} commands match; "
+                  f"{len(domain_corpus)} domain phrasings fall through both shortcuts")
+
+
 @test("_ch_busy_message — channel adds @mention, DM/modal omits it")
 def test_ch_busy_message():
     try:
