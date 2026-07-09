@@ -6,6 +6,14 @@ Same 15-line class exists verbatim in both files (`scout_handlers.py` from PR #3
 
 Fix once both #329 and #330 have merged: extract `_BoundedRateLimitRetryHandler` into a new small module (e.g. `scout_slack_retry.py`) and point both `WebClient` construction sites at it. Do this as its own PR, not bundled with unrelated work.
 
+## scout_bot.py — rate-limit retries can starve the socket-mode ack pool
+
+`SocketModeClient` (scout_bot.py:2085) dispatches every incoming Slack event to a `ThreadPoolExecutor(max_workers=10)` (slack_sdk default, unconfigured). `handle_event` — including the ack — only runs once a worker picks the queued task up. The #330 fix bounds a single rate-limit retry sleep to ~10s/attempt (~33s worst case for 3 attempts), but that sleep still occupies a pool worker for its full duration. If enough concurrent `chat_postMessage` calls get rate-limited at once (plausible during a digest fan-out or alert burst — the same traffic spike that trips Slack's rate limiter is exactly when many workers are active), all 10 workers can be asleep simultaneously. Any event past the 10th queues in the executor unstarted — not slow to ack, un-acked — for up to the worst-case sleep duration. Verified via `inspect.getsource` on `slack_sdk.socket_mode.builtin.client.SocketModeClient` and `BaseSocketModeClient.process_message`/`run_message_listeners`; `send_socket_mode_response` itself goes over the websocket, not the rate-limited `WebClient`, so this isn't an ack-mechanism bug — it's pool-saturation via a shared retry-sleep resource.
+
+Lowering the retry cap further is a bandaid — it shrinks the window, not the coupling. The structural fix: route `chat_postMessage`/`chat_update` calls made from event handlers through a dedicated executor separate from `message_workers`, so a stuck retry consumes a slot in a pool whose only job is slow Slack calls, never the pool responsible for acking new events — same shape as the existing `_retry_after_timeout` background-handoff pattern in `scout_handlers.py`.
+
+Fix: introduce a small dedicated executor for outbound Slack calls in event-handler paths, migrate `scout_bot.py`'s `web.chat_postMessage`/`chat_update` call sites onto it, add a smoke test that simulates worker saturation. Left as debt rather than fixed inline because it's a concurrency-architecture change (new executor + call-site migration across the file), not a mechanical fix, and #329/#330 are still open — do it as its own PR once both merge.
+
 ## demand_feed_main.py — MS Platform Feed (NOT live)
 
 5 MS_PLATFORM_TODO items must be resolved before flipping live. Contact the platform team for the webhook endpoint.
