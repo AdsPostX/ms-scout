@@ -1,5 +1,11 @@
 # Scout — Known Debt
 
+## scout_handlers.py — final response routing triplicated (DM path, channel path, _handle_suggestion)
+
+The post-ask routing chain — brief / opportunities / plain-text rendering plus the `launched_offer` rocket-notification block — exists in three near-identical copies: the DM path (~L3215) and channel path (~L3380) inside `_handle_event_impl`, and `_handle_suggestion` (~L1290). The cost is no longer theoretical: PR #332 (frozen-placeholder guard for the 2026-07-09 outage class) had to write the same try/except twice, and `_handle_suggestion` still needed a third copy in its own follow-up PR because it's a separate transcription of the same logic. When a safety fix must be applied N times and the Nth copy gets missed, the duplication is the bug.
+
+Fix: extract a shared renderer (e.g. `_render_and_post_response(web, response, *, surface, channel, thread_ts, placeholder_ts, elapsed, ...)`) and point all three call sites at it — the exception guard and the routing-guarded AST smoke test then live in exactly one place, and any future entry point is covered by construction. Left as debt rather than fixed inline because it's a careful refactor of the exact hot path behind the 2026-07-09 outage — do it as its own unhurried PR once #332 and the `_handle_suggestion` guard follow-up have merged, not bundled with either.
+
 ## _BoundedRateLimitRetryHandler duplicated in scout_bot.py and scout_handlers.py
 
 Same 15-line class exists verbatim in both files (`scout_handlers.py` from PR #329, `scout_bot.py` from PR #330) — each module constructs its own `WebClient` and needed the same uncapped-retry-sleep fix. Not unified at the time because `scout_slack_safe.py` (the module both files already share for `guard_web_client`) is scoped to response-emission invariants, not HTTP retry behavior, and unifying via `scout_handlers.py` would have required editing a file that was part of the still-open #329.
