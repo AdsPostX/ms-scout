@@ -4999,6 +4999,35 @@ def test_shortcut_regexes_not_greedy_on_domain_vocabulary():
                   f"{len(domain_corpus)} domain phrasings fall through both shortcuts")
 
 
+@test("_opportunities_card — long intro prose moves to body, never raises")
+def test_opportunities_card_headline_overflow():
+    """Regression for 2026-07-09: opportunities paths put response.text into
+    Card.headline (capped at 150). A 1,658-char intro raised ValueError inside
+    handle_event's crash guard — frozen placeholder, no user-visible error."""
+    import scout_handlers
+
+    short = scout_handlers._opportunities_card("Here are 3 offers worth a look")
+    if short.headline != "Here are 3 offers worth a look" or short.body:
+        return False, f"short intro mishandled: headline={short.headline!r} body={short.body!r}"
+
+    long_text = "AT&T offer landscape: " + "x" * 1700
+    long = scout_handlers._opportunities_card(long_text)
+    if long.headline != "Top opportunities":
+        return False, f"long intro headline not stabilized: {long.headline!r}"
+    if not long.body.startswith("AT&T offer landscape:") or len(long.body) > 3000:
+        return False, f"long intro body wrong: len={len(long.body)}"
+
+    empty = scout_handlers._opportunities_card("")
+    if empty.headline != "Top opportunities":
+        return False, f"empty intro fallback broken: {empty.headline!r}"
+
+    # No remaining inline headline-overflow pattern outside the helper
+    src = open(os.path.join(os.path.dirname(__file__), "scout_handlers.py")).read()
+    if 'Card(Severity.INFO, header_text or "Top opportunities"' in src:
+        return False, "inline Card(header_text...) pattern still present — use _opportunities_card"
+    return True, "long/short/empty intros all render; no inline pattern remains"
+
+
 @test("_ch_busy_message — channel adds @mention, DM/modal omits it")
 def test_ch_busy_message():
     try:

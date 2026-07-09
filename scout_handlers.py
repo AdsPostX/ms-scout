@@ -346,6 +346,18 @@ def _ch_busy_message(user_id: str | None = None, *, promise_followup: bool = Tru
     return f"{_mention(user_id)}_On it. Taking a bit longer than usual. {tail}_"
 
 
+def _opportunities_card(header_text: str) -> Card:
+    """Card for opportunities responses. Claude's intro prose becomes the
+    headline only when it fits Card's 150-char cap; longer intros move to
+    body under a stable headline so this constructor can never raise.
+    (2026-07-09: a 1,658-char intro hit the headline cap's ValueError in the
+    channel path — swallowed by handle_event's crash guard, frozen placeholder.)"""
+    text = (header_text or "").strip()
+    if len(text) <= 150:
+        return Card(Severity.INFO, text or "Top opportunities", body="")
+    return Card(Severity.INFO, "Top opportunities", body=text[:3000])
+
+
 def _safe_slack_call(fn, *args, **kwargs):
     """Best-effort Slack Web API call for last-resort notification paths
     (AskTimeout handlers, retry fallbacks). These calls have no further
@@ -1337,7 +1349,7 @@ def _handle_suggestion(action: dict, payload: dict, web: WebClient):
     if response.payload and response.payload.get("type") == "opportunities":
         header_text       = _sanitize_slack(response.text)
         offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-        _sg_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
+        _sg_card = _opportunities_card(header_text)
         _sg_fallback, _sg_blocks = wrap_response(
             card=_sg_card, surface=Surface.THREAD, pattern=ResponsePattern.ANSWER,
             suggestions=list(response.payload.get("suggestions", [])),
@@ -1670,7 +1682,7 @@ def _handle_home_try_query(web: WebClient, user_id: str, query: str, trigger_id:
         elif response.payload and response.payload.get("type") == "opportunities":
             header_text       = _sanitize_slack(response.text)
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-            _ah3_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
+            _ah3_card = _opportunities_card(header_text)
             _ah3_fallback, _ah3_blocks = wrap_response(
                 card=_ah3_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(response.payload.get("suggestions", [])),
@@ -3282,7 +3294,7 @@ def _handle_event_impl(req: SocketModeRequest):
         elif response.payload and response.payload.get("type") == "opportunities":
             header_text       = _sanitize_slack(response.text)
             offer_cards       = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-            _dm5_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
+            _dm5_card = _opportunities_card(header_text)
             _dm5_fallback, _dm5_blocks = wrap_response(
                 card=_dm5_card, surface=Surface.DM, pattern=ResponsePattern.ANSWER,
                 suggestions=list(response.payload.get("suggestions", [])),
@@ -3465,7 +3477,7 @@ def _handle_event_impl(req: SocketModeRequest):
     elif response.payload and response.payload.get("type") == "opportunities":
         header_text = _sanitize_slack(response.text)
         offer_cards = _build_opportunity_cards(response.payload.get("offers", []), thread_ts=thread_ts)
-        _ch7_card = Card(Severity.INFO, header_text or "Top opportunities", body="")
+        _ch7_card = _opportunities_card(header_text)
         _ch7_fallback, _ch7_blocks = wrap_response(
             card=_ch7_card, surface=Surface.CHANNEL_ROOT, pattern=ResponsePattern.ANSWER,
             suggestions=list(response.payload.get("suggestions", [])),
