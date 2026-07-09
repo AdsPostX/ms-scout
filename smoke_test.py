@@ -4952,6 +4952,34 @@ def test_handler_config_loads_from_env():
     return True, "_HandlerConfig frozen dataclass and _CFG singleton verified"
 
 
+@test("_WHY_RE — provenance questions match, sourcing queries fall through")
+def test_why_shortcut_not_greedy_on_sourcing():
+    """Regression for 2026-07-09: bare 'source for' in _WHY_RE hijacked
+    'what are some good offers we can source for NextDoor' into the
+    entity-note why-shortcut instead of the offer-sourcing agent path."""
+    from scout_handlers import _WHY_RE
+
+    should_match = [
+        "why do you think that about Acme",
+        "where did you learn about NextDoor",
+        "what's your source for NextDoor",
+        "what is the source for AT&T",
+        "who told you that about Rakuten",
+    ]
+    should_fall_through = [
+        "what are some good offers we can source for NextDoor",
+        "which offers should we source for AT&T",
+        "can we source for Nextdoor this week",
+    ]
+    for q in should_match:
+        if not _WHY_RE.search(q):
+            return False, f"provenance question no longer matches: {q!r}"
+    for q in should_fall_through:
+        if _WHY_RE.search(q):
+            return False, f"sourcing query still hijacked by why-shortcut: {q!r}"
+    return True, f"{len(should_match)} provenance phrasings match; {len(should_fall_through)} sourcing phrasings fall through"
+
+
 @test("_ch_busy_message — channel adds @mention, DM/modal omits it")
 def test_ch_busy_message():
     try:

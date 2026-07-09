@@ -304,6 +304,20 @@ def _mention(user_id: str | None) -> str:
     return f"<@{user_id}> " if user_id else ""
 
 
+# Why-shortcut trigger: provenance questions about an entity note. The "source for"
+# branch requires a possessive/article prefix ("your/the source for") — a bare
+# "source for X" collides with Scout's demand-sourcing vocabulary ("offers we can
+# source for NextDoor") and hijacked those queries into the entity-note tool.
+_WHY_RE = re.compile(
+    r'(?:why\s+(?:do\s+you\s+(?:think|know|say)|did\s+you\s+(?:learn|get))\s+(?:that\s+)?about\s+|'
+    r'where\s+did\s+you\s+(?:learn|get\s+that)\s+about\s+|'
+    r'(?:what(?:\'s|\s+is)\s+)?(?:your|the)\s+source\s+for\s+|'
+    r'who\s+told\s+you\s+(?:that\s+)?about\s+)'
+    r'(.+)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 def _ch_busy_message(user_id: str | None = None, *, promise_followup: bool = True) -> str:
     """Timeout fallback text. Adds @mention prefix for channel paths where
     a reply does not generate a notification without it. Pass None for DMs
@@ -2711,14 +2725,6 @@ def _handle_event_impl(req: SocketModeRequest):
 
     # @Scout why do you think that about [entity] / where did you learn about [entity]
     # Direct shortcut — bypasses LLM so it cannot answer from conversation context.
-    _WHY_RE = re.compile(
-        r'(?:why\s+(?:do\s+you\s+(?:think|know|say)|did\s+you\s+(?:learn|get))\s+(?:that\s+)?about\s+|'
-        r'where\s+did\s+you\s+(?:learn|get\s+that)\s+about\s+|'
-        r'source\s+for\s+|'
-        r'who\s+told\s+you\s+(?:that\s+)?about\s+)'
-        r'(.+)',
-        re.IGNORECASE | re.DOTALL,
-    )
     _why_m = _WHY_RE.search(query)
     if _why_m:
         _wentity = _why_m.group(1).strip().rstrip("?").strip()
