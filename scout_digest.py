@@ -593,7 +593,7 @@ def build_why_text(offer: dict, payout_num: float, payout_type: str, ms_campaign
         perf    = by_offer[offer_id]
         cvr_pct = perf.get("cvr_pct", 0)
         rpm_val = perf.get("rpm", 0)
-        parts.append(f"*We've run this* — ${rpm_val:.2f} RPM at {cvr_pct:.2f}% CVR on MS")
+        parts.append(f"*We've run this* - ${rpm_val:.2f} RPM at {cvr_pct:.2f}% CVR on MS")
 
     # ── Tier 2: category benchmark — show category signal, not invented RPM ──
     elif category in by_cat:
@@ -601,7 +601,7 @@ def build_why_text(offer: dict, payout_num: float, payout_type: str, ms_campaign
         cvr_pct  = cat_perf.get("avg_cvr_pct", 0)
         payout_display = _format_payout(payout_num, payout_type) if payout_num else payout_type
         parts.append(
-            f"{category} converts at *{cvr_pct:.2f}% CVR* on MS — {payout_display} payout"
+            f"{category} converts at *{cvr_pct:.2f}% CVR* on MS - {payout_display} payout"
         )
 
     # ── Tier 3: no data — lead with what we do know, skip the system status ──
@@ -612,9 +612,9 @@ def build_why_text(offer: dict, payout_num: float, payout_type: str, ms_campaign
         elif payout_type in ("CPL", "MOBILE_APP", "APP_INSTALL"):
             fit_reason = " · low-friction conversion type"
         elif payout_type == "CPS":
-            fit_reason = " · requires purchase — higher post-transaction friction"
+            fit_reason = " · requires purchase - higher post-transaction friction"
         payout_display = _format_payout(payout_num, payout_type) if payout_num else _display_payout_type(payout_type)
-        parts.append(fit_reason.lstrip(" ·") if fit_reason else "New offer — no MS history yet")
+        parts.append(fit_reason.lstrip(" ·") if fit_reason else "New offer - no MS history yet")
 
     # ── Inventory gap — only surface when category is genuinely empty ────────
     # "complements X in the Y slot" is too noisy — word-overlap matching is loose
@@ -1306,7 +1306,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
         lines = [":moneybag: *Payout upgrades worth checking* _(est. net after ~30% margin)_"]
         for u in signals["payout_upgrades"]:
             lines.append(
-                f">  {u['advertiser']} — running ${u['current_net_payout']:.2f} {u['payout_type']} net"
+                f">  {u['advertiser']} - running ${u['current_net_payout']:.2f} {u['payout_type']} net"
                 f" · {u['network']} has ${u['inventory_gross_payout']:.2f} gross"
                 f" (est. ~${u['inventory_net_est']:.2f} net, +${u['delta_net_est']:.2f})"
             )
@@ -1701,12 +1701,12 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
         ]
     elif is_force:
         new_block = [
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": "_Forced digest — showing all pipeline offers_"}]},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": "_Forced digest - showing all pipeline offers_"}]},
             {"type": "divider"},
         ]
     else:
         new_block = [
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": "No new offers this week — all offers already in your pipeline."}]},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": "No new offers this week - all offers already in your pipeline."}]},
             {"type": "divider"},
         ]
     blocks = new_block + blocks
@@ -1719,7 +1719,7 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
         if sourcing_blocks:
             sourcing_intro = [
                 {"type": "divider"},
-                {"type": "context", "elements": [{"type": "mrkdwn", "text": ":bulb: *Sourcing Intelligence* — proactive signals from Scout"}]},
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": ":bulb: *Sourcing Intelligence* - proactive signals from Scout"}]},
             ]
             blocks = blocks + sourcing_intro + sourcing_blocks
     except Exception as _e:
@@ -1731,13 +1731,13 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     if _impact_no_payout > 0:
         blocks = blocks + [
             {"type": "context", "elements": [{"type": "mrkdwn",
-                "text": f":warning: {_impact_no_payout} Impact offer{'s' if _impact_no_payout != 1 else ''} excluded — payout enrichment failed"}]},
+                "text": f":warning: {_impact_no_payout} Impact offer{'s' if _impact_no_payout != 1 else ''} excluded - payout enrichment failed"}]},
         ]
 
     fallback = (
-        f"🎯 Scout Signal — {run_date} (forced): {total_selected} offers across {len(offers_by_network)} networks"
+        f"🎯 Scout Signal - {run_date} (forced): {total_selected} offers across {len(offers_by_network)} networks"
         if is_force else
-        f"🎯 Scout Signal — {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
+        f"🎯 Scout Signal - {run_date}: {total_selected} new offers across {len(offers_by_network)} networks"
     )
 
     return {
