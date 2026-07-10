@@ -18,8 +18,7 @@ import unittest.mock
 # scout_agent.py lives one level up from tests/
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from scout_agent import AskResult, ask  # noqa: E402
-from scout_tools_admin import _validate_sql_query  # noqa: E402
+from scout_agent import AskResult, ask, _validate_sql_query  # noqa: E402
 
 
 class TestAskContract(unittest.TestCase):
