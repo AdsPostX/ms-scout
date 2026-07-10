@@ -606,8 +606,8 @@ def _render_body(card: "Card", surface: Surface) -> list[dict]:
 # Hard-coded at the wrap_response() chokepoint rather than fixed per call site:
 # every ask()/alert/status reply funnels through here before hitting Slack.
 # ---------------------------------------------------------------------------
-_SPACED_DASH_RE = re.compile(r"[ \t]+[–—][ \t]+")
-_BARE_DASH_RE = re.compile(r"[–—]")
+_SPACED_DASH_RE = re.compile(r"[ \t]+[\u2013\u2014][ \t]+")
+_BARE_DASH_RE = re.compile(r"[\u2013\u2014]")
 
 
 def normalize_typography(text: str) -> str:
