@@ -606,15 +606,16 @@ def _render_body(card: "Card", surface: Surface) -> list[dict]:
 # Hard-coded at the wrap_response() chokepoint rather than fixed per call site:
 # every ask()/alert/status reply funnels through here before hitting Slack.
 # ---------------------------------------------------------------------------
-_SPACED_DASH_RE = re.compile(r"\s+[–—]\s+")
+_SPACED_DASH_RE = re.compile(r"[ \t]+[–—][ \t]+")
 _BARE_DASH_RE = re.compile(r"[–—]")
 
 
 def normalize_typography(text: str) -> str:
-    """Replace em (—) and en (–) dashes with plain hyphens.
+    """Replace em and en dashes with plain hyphens.
 
     Spaced dashes (sentence breaks) become " - "; bare dashes (ranges,
-    compounds) collapse to "-". No other typography is touched.
+    compounds) collapse to "-". Only horizontal whitespace counts as
+    "spaced" so line breaks around a dash are preserved.
     """
     if not text:
         return text
@@ -624,11 +625,15 @@ def normalize_typography(text: str) -> str:
 
 
 def sanitize_blocks(node):
-    """Recursively apply normalize_typography() to every "text" string in a
+    """Recursively apply normalize_typography() to every "text"/"alt_text" string in a
     Block Kit tree (blocks/fields/elements/accessory all nest arbitrarily)."""
     if isinstance(node, dict):
         return {
-            k: (normalize_typography(v) if k == "text" and isinstance(v, str) else sanitize_blocks(v))
+            k: (
+                normalize_typography(v)
+                if k in {"text", "alt_text"} and isinstance(v, str)
+                else sanitize_blocks(v)
+            )
             for k, v in node.items()
         }
     if isinstance(node, list):
