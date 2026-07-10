@@ -963,8 +963,8 @@ def test_status_self_heals_benchmarks():
     """
     try:
         import pathlib
-        # Phase 13-02: get_scout_status moved to scout_tools_admin.py
-        src = (pathlib.Path(__file__).parent / "scout_tools_admin.py").read_text()
+        # get_scout_status lives in scout_agent.py
+        src = (pathlib.Path(__file__).parent / "scout_agent.py").read_text()
         # Find get_scout_status function body
         if "def get_scout_status" not in src:
             return False, "get_scout_status function missing"

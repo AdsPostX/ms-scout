@@ -28,10 +28,10 @@ class TestEntityNoteProvenance(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.data_dir = pathlib.Path(self.tmp.name)
         self.overrides_path = self.data_dir / "entity_overrides.json"
-        # Patch scout_tools_admin helpers (entity_overrides now lives there)
-        import scout_tools_admin
-        self._orig_load = scout_tools_admin._load_entity_overrides
-        self._orig_save = scout_tools_admin._save_entity_overrides
+        # Patch scout_agent helpers (entity_overrides lives there — see scout_agent.py:372,382)
+        import scout_agent
+        self._orig_load = scout_agent._load_entity_overrides
+        self._orig_save = scout_agent._save_entity_overrides
 
         def _load():
             if not self.overrides_path.exists():
@@ -41,19 +41,18 @@ class TestEntityNoteProvenance(unittest.TestCase):
         def _save(data):
             self.overrides_path.write_text(json.dumps(data, indent=2))
 
-        scout_tools_admin._load_entity_overrides = _load
-        scout_tools_admin._save_entity_overrides = _save
-        # forget_entity_note writes audit under <scout_tools_admin file>/data/
-        import scout_agent
+        scout_agent._load_entity_overrides = _load
+        scout_agent._save_entity_overrides = _save
+        # forget_entity_note writes audit under <scout_agent file>/data/
         self._audit_patch = unittest.mock.patch.object(
             scout_agent.pathlib.Path, "__truediv__",
             new=pathlib.Path.__truediv__,  # noop — we just need to redirect via tmp
         )
 
     def tearDown(self):
-        import scout_tools_admin
-        scout_tools_admin._load_entity_overrides = self._orig_load
-        scout_tools_admin._save_entity_overrides = self._orig_save
+        import scout_agent
+        scout_agent._load_entity_overrides = self._orig_load
+        scout_agent._save_entity_overrides = self._orig_save
         self.tmp.cleanup()
 
     def test_record_entity_note_writes_user_id_and_permalink(self):
