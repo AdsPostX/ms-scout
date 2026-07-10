@@ -43,16 +43,17 @@ class TestEntityNoteProvenance(unittest.TestCase):
 
         scout_agent._load_entity_overrides = _load
         scout_agent._save_entity_overrides = _save
-        # forget_entity_note writes audit under <scout_agent file>/data/
-        self._audit_patch = unittest.mock.patch.object(
-            scout_agent.pathlib.Path, "__truediv__",
-            new=pathlib.Path.__truediv__,  # noop — we just need to redirect via tmp
-        )
+        # forget_entity_note derives its audit path from pathlib.Path(__file__).parent,
+        # which reads scout_agent's own __file__ global — redirect that into the tmp
+        # dir so the audit jsonl never lands under the real repo's data/ directory.
+        self._orig_dunder_file = scout_agent.__file__
+        scout_agent.__file__ = str(self.data_dir / "scout_agent.py")
 
     def tearDown(self):
         import scout_agent
         scout_agent._load_entity_overrides = self._orig_load
         scout_agent._save_entity_overrides = self._orig_save
+        scout_agent.__file__ = self._orig_dunder_file
         self.tmp.cleanup()
 
     def test_record_entity_note_writes_user_id_and_permalink(self):
