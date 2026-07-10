@@ -29,9 +29,8 @@ def _make_ch_mock(today_rows, avg_rows):
 def _run(today_rows, avg_rows):
     """Helper: patch dependencies and call get_revenue_today()."""
     import scout_agent
-    import scout_tools_revenue
     mock_ch = _make_ch_mock(today_rows, avg_rows)
-    with unittest.mock.patch.object(scout_tools_revenue, "_get_ch_client", return_value=mock_ch):
+    with unittest.mock.patch.object(scout_agent, "_get_ch_client", return_value=mock_ch):
         return scout_agent.get_revenue_today()
 
 

@@ -564,7 +564,7 @@ class TestNLVelocityHandler(unittest.TestCase):
         ])
         mock_ch.query.return_value = velocity_row
 
-        with patch("scout_tools_revenue._get_ch_client", return_value=mock_ch):
+        with patch("scout_agent._get_ch_client", return_value=mock_ch):
             result = _get_trends()
             self.assertIsInstance(result, dict,
                                   "get_publisher_revenue_trends must return a dict")

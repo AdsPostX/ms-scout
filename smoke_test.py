@@ -4915,21 +4915,6 @@ def test_supply_gap_excludes_provisioned():
     return True, "supply_gap_opportunities contains NOT IN exclusion for provisioned campaigns"
 
 
-@test("_fetch_baseline returns named dicts — no positional r[N] access")
-def test_fetch_baseline_no_positional_access():
-    """get_advertiser_revenue_projection uses named dict keys for baseline_rows access, not positional r[N] indices."""
-    import inspect, re
-    import scout_tools_revenue
-    src = inspect.getsource(scout_tools_revenue.get_advertiser_revenue_projection)
-    # Old pattern: r[2], r[3], r[4], r[5], r[6], r[7]
-    hits = re.findall(r'baseline_rows[^\n]*r\[\d+\]', src)
-    if hits:
-        return False, f"Positional baseline_rows access still present: {hits}"
-    if 'r["revenue_30d"]' not in src and "r['revenue_30d']" not in src:
-        return False, "Named access r[\"revenue_30d\"] not found in source"
-    return True, "baseline_rows uses named dict keys throughout"
-
-
 @test("normalize_geo — 5 countries is Global")
 def test_normalize_geo_five_countries_is_global():
     """Asserts that a geo string with 5 distinct non-US/CA countries maps to 'Global'."""
