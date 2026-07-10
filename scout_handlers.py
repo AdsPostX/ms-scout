@@ -37,7 +37,7 @@ from scout_notion import (
     _fetch_notion_queue_items,
 )
 from scout_ui_kit import (
-    Card, Severity, Surface, ResponsePattern, wrap_response, context_block,
+    Card, Severity, Surface, ResponsePattern, wrap_response, context_block, enforce,
     _build_brief_blocks, _queue_confirm_blocks, _build_opportunity_cards,
     _build_help_blocks,
     _build_home_view, _build_queue_card, _is_help_query,
@@ -1338,7 +1338,7 @@ def _render_and_post_response(
             msg = f":rocket: *{advertiser}* is live. {payout} · {network}{brief_link}"
             if tags:
                 msg += f"\n{tags}"
-            web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+            _safe_slack_call(web.chat_postMessage, channel=channel, thread_ts=thread_ts, text=msg)
             _notion_url = launched_offer.get("notion_url", "")
             if _notion_url:
                 threading.Thread(
@@ -1364,14 +1364,17 @@ def _render_and_post_response(
                     "payout":      brief_data.get("payout_num"),
                     "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
                 })
-            blocks = _build_brief_blocks(brief_data, copy, thread_ts=thread_ts)
+            blocks = enforce(_build_brief_blocks(brief_data, copy, thread_ts=thread_ts), surface, thread_ts=thread_ts)
             fallback_text = brief_fallback_text_override or response.payload.get("fallback_text", "Campaign Brief ready.")
             _post_or_update(fallback_text, blocks)
 
             if run_preflight_qa:
-                _real_url = (brief_data.get("tracking_url", "") or "").strip()
-                if _real_url and not _real_url.startswith("Not available"):
-                    _run_preflight_qa(web, channel, thread_ts, brief_data)
+                try:
+                    _real_url = (brief_data.get("tracking_url", "") or "").strip()
+                    if _real_url and not _real_url.startswith("Not available"):
+                        _run_preflight_qa(web, channel, thread_ts, brief_data)
+                except Exception as e:
+                    log.warning(f"Preflight QA launch failed after brief post (surface={surface}): {e}")
 
         elif response.payload and response.payload.get("type") == "opportunities":
             header_text = _sanitize_slack(response.text)
@@ -1379,7 +1382,7 @@ def _render_and_post_response(
             _opp_card = _opportunities_card(header_text)
             _opp_fallback, _opp_blocks = wrap_response(
                 card=_opp_card, surface=surface, pattern=ResponsePattern.ANSWER,
-                suggestions=list(response.payload.get("suggestions", [])),
+                suggestions=list(response.payload.get("suggestions") or []),
                 elapsed_seconds=elapsed,
             )
             _opp_final = [*_opp_blocks[:1], *offer_cards, *_opp_blocks[1:]] if offer_cards else _opp_blocks
@@ -1407,7 +1410,7 @@ def _render_and_post_response(
                     _period = _ctx.get("period") if _ctx else None
                     _blocks = [*_blocks, context_block(queried_at=f"{elapsed_str} ago", period=_period)]
             else:
-                response_text = response.text[:3000]
+                response_text = _sanitize_slack(response.text)[:3000]
                 _card = Card(Severity.INFO, "", body=response_text)
                 _fallback, _blocks = wrap_response(
                     card=_card, surface=surface, pattern=ResponsePattern.ANSWER,
