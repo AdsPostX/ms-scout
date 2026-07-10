@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from scout_image_resolve import resolve_icon_image
 from scout_log import log_event
-from scout_ui_kit import _MAX_CAROUSEL_CARDS, _carousel_block, _slack_card_block
+from scout_ui_kit import _MAX_CAROUSEL_CARDS, _carousel_block, _slack_card_block, normalize_typography, sanitize_blocks
 
 load_dotenv()  # plist env vars (SCOUT_ENV, SCOUT_DIGEST_CHANNEL, etc.) take precedence over .env
 
@@ -863,7 +863,7 @@ def _build_offer_card_blocks(
     """Shared card renderer — returns [offer_block, rationale_block, actions_block, divider]."""
     badge      = f"{_fit_tier_badge(fit_tier)} "
     rpm_text   = f"  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
-    left_text  = f"{badge}*{advertiser}*\n_{offer_summary}_" if offer_summary else f"{badge}*{advertiser}*"
+    left_text  = f"{badge}*{advertiser}*\n{offer_summary}" if offer_summary else f"{badge}*{advertiser}*"
     right_text = f"*{payout_str}*{tier_badge}{rpm_text}\n{geo}" if geo else f"*{payout_str}*{tier_badge}{rpm_text}"
 
     offer_block: dict = {
@@ -1741,8 +1741,8 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     )
 
     return {
-        "blocks":          blocks,
-        "fallback":        fallback,
+        "blocks":          sanitize_blocks(blocks),
+        "fallback":        normalize_typography(fallback),
         "total_selected":  total_selected,
         "new_offer_count": len(new_offer_keys),
         "networks_active": len(offers_by_network),

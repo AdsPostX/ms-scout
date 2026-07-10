@@ -601,6 +601,41 @@ def _render_body(card: "Card", surface: Surface) -> list[dict]:
 # ---------------------------------------------------------------------------
 # wrap_response — single mobile-tuned chokepoint for all ask() exits
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Typography sanitizer — em/en dashes banned from all Scout Slack output.
+# Hard-coded at the wrap_response() chokepoint rather than fixed per call site:
+# every ask()/alert/status reply funnels through here before hitting Slack.
+# ---------------------------------------------------------------------------
+_SPACED_DASH_RE = re.compile(r"\s+[–—]\s+")
+_BARE_DASH_RE = re.compile(r"[–—]")
+
+
+def normalize_typography(text: str) -> str:
+    """Replace em (—) and en (–) dashes with plain hyphens.
+
+    Spaced dashes (sentence breaks) become " - "; bare dashes (ranges,
+    compounds) collapse to "-". No other typography is touched.
+    """
+    if not text:
+        return text
+    text = _SPACED_DASH_RE.sub(" - ", text)
+    text = _BARE_DASH_RE.sub("-", text)
+    return text
+
+
+def sanitize_blocks(node):
+    """Recursively apply normalize_typography() to every "text" string in a
+    Block Kit tree (blocks/fields/elements/accessory all nest arbitrarily)."""
+    if isinstance(node, dict):
+        return {
+            k: (normalize_typography(v) if k == "text" and isinstance(v, str) else sanitize_blocks(v))
+            for k, v in node.items()
+        }
+    if isinstance(node, list):
+        return [sanitize_blocks(item) for item in node]
+    return node
+
+
 def wrap_response(
     *,
     card: "Card",
@@ -711,9 +746,10 @@ def wrap_response(
         blocks.append({"type": "divider"})
 
     blocks = enforce(blocks, surface)
+    blocks = sanitize_blocks(blocks)
 
     _raw_fallback = card.headline or card.body or f"{card.severity.emoji} Scout update"
-    fallback = _raw_fallback[:200].strip() or f"{card.severity.emoji} Scout update"
+    fallback = normalize_typography(_raw_fallback[:200].strip()) or f"{card.severity.emoji} Scout update"
     return fallback, blocks
 
 
