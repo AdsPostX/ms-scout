@@ -193,6 +193,17 @@ class Card:
 # ---------------------------------------------------------------------------
 # enforce() — hard block budget enforcement
 # ---------------------------------------------------------------------------
+def _overflow_context_block(shown: int, total: int, thread_ts: Optional[str]) -> dict:
+    if thread_ts:
+        overflow_text = f"Showing {shown} of {total} items. Rest is in the thread above."
+    else:
+        overflow_text = f"Too long for this view ({total} items). Narrow the query or ask in a thread."
+    return {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": overflow_text}],
+    }
+
+
 def enforce(
     blocks: list[dict],
     surface: Surface,
@@ -215,19 +226,32 @@ def enforce(
 
     # Reserve 1 slot for the overflow indicator
     truncated = blocks[: limit - 1]
-    shown = limit - 1
-    total = len(blocks)
-
-    if thread_ts:
-        overflow_text = f"Showing {shown} of {total} items. Rest is in the thread above."
-    else:
-        overflow_text = f"Too long for this view ({total} items). Narrow the query or ask in a thread."
-
-    truncated.append({
-        "type": "context",
-        "elements": [{"type": "mrkdwn", "text": overflow_text}],
-    })
+    truncated.append(_overflow_context_block(limit - 1, len(blocks), thread_ts))
     return truncated
+
+
+def enforce_with_reserved_tail(
+    blocks: list[dict],
+    reserved_tail: list[dict],
+    surface: Surface,
+    thread_ts: Optional[str] = None,
+) -> list[dict]:
+    """
+    Like enforce(), but keeps reserved_tail (e.g. a brief's queue-CTA button)
+    outside the truncation path — the surface budget is enforced on `blocks`
+    only, and reserved_tail is always appended last, exactly once.
+    """
+    if not reserved_tail:
+        return enforce(blocks, surface, thread_ts=thread_ts)
+
+    limit = BUDGETS.get(surface, 8)
+    content_limit = max(limit - len(reserved_tail), 1)
+    if len(blocks) <= content_limit:
+        return [*blocks, *reserved_tail]
+
+    truncated = blocks[: content_limit - 1]
+    truncated.append(_overflow_context_block(content_limit - 1, len(blocks), thread_ts))
+    return [*truncated, *reserved_tail]
 
 
 # ---------------------------------------------------------------------------
@@ -1144,17 +1168,29 @@ def _build_brief_queue_button(
 # ---------------------------------------------------------------------------
 # Campaign brief blocks — orchestrator
 # ---------------------------------------------------------------------------
-def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:
-    """Build a Slack Block Kit message for a campaign brief."""
+def _build_brief_content_and_cta(
+    brief_data: dict, copy: dict, thread_ts: str = ""
+) -> tuple[list, list]:
+    """
+    Split a brief into (content_blocks, cta_blocks) so callers can enforce the
+    surface budget on content only while keeping the queue CTA — always the
+    last block(s) — outside the truncation path.
+    """
     f = _brief_extract_fields(brief_data, copy)
-    return (
+    content = (
         _build_brief_header(f)
         + _build_brief_stats(f)
         + _build_brief_risk(f)
         + _build_brief_copy(f)
         + _build_brief_footer(f)
-        + _build_brief_queue_button(f, copy, brief_data, thread_ts)
     )
+    cta = _build_brief_queue_button(f, copy, brief_data, thread_ts)
+    return content, cta
+
+
+def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:
+    content, cta = _build_brief_content_and_cta(brief_data, copy, thread_ts)
+    return content + cta
 
 
 # ---------------------------------------------------------------------------
