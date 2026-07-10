@@ -4754,36 +4754,34 @@ def test_handlers_askresult_field_contract():
 
 @test("handle_event response routing is exception-guarded")
 def test_handle_event_response_routing_guarded():
-    """Every `response` reference in _handle_event_impl and _handle_suggestion
-    must sit inside a try block. The post-ask routing sections render and post
-    the final answer — an unguarded exception there dies in handle_event's
-    broad crash guard and the user stares at a frozen placeholder forever (the
-    2026-07-09 outage class)."""
+    """`_render_and_post_response` is the single shared renderer for all four
+    post-ask entry points (DM, channel, suggestion, App Home try-it). Every
+    `response` reference inside it must sit inside a try block — a render
+    failure there dies invisibly and the user stares at a frozen placeholder
+    forever (the 2026-07-09 outage class). Previously this walked three/four
+    separate call sites; the extraction means one function, one guard."""
     import ast, pathlib
-    _GUARDED_FNS = {"_handle_event_impl", "_handle_suggestion"}
     tree = ast.parse(pathlib.Path(os.path.join(os.path.dirname(__file__), "scout_handlers.py")).read_text())
-    unguarded = {}
-    for fn in tree.body:
-        if not (isinstance(fn, ast.FunctionDef) and fn.name in _GUARDED_FNS):
-            continue
-        parents = {}
-        for node in ast.walk(fn):
-            for child in ast.iter_child_nodes(node):
-                parents[child] = node
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Name) and node.id == "response":
-                cur = node
-                while cur in parents and not isinstance(cur, ast.Try):
-                    cur = parents[cur]
-                if not isinstance(cur, ast.Try):
-                    unguarded.setdefault(fn.name, set()).add(node.lineno)
+    fn = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_render_and_post_response"), None)
+    assert fn is not None, "_render_and_post_response not found at module level in scout_handlers.py"
+    parents = {}
+    for node in ast.walk(fn):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    unguarded = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id == "response":
+            cur = node
+            while cur in parents and not isinstance(cur, ast.Try):
+                cur = parents[cur]
+            if not isinstance(cur, ast.Try):
+                unguarded.add(node.lineno)
     if unguarded:
-        detail = ", ".join(f"{name} lines {sorted(ls)}" for name, ls in sorted(unguarded.items()))
         return False, (
-            f"`response` used outside any try/except: {detail} — "
-            f"a render failure there is invisible to the user"
+            f"`response` used outside any try/except in _render_and_post_response: "
+            f"lines {sorted(unguarded)} — a render failure there is invisible to the user"
         )
-    return True, f"all `response` references in {sorted(_GUARDED_FNS)} are exception-guarded"
+    return True, "all `response` references in _render_and_post_response are exception-guarded"
 
 
 @test("last_thread_lock_is_initialized")
@@ -4809,13 +4807,23 @@ def test_shareasale_hmac_secret_not_in_message():
     return True, "ShareASale HMAC sig_str does not include the secret"
 
 
-@test("dm_launched_offer_variable_always_defined")
-def test_dm_launched_offer_variable_always_defined():
-    """Confirm launched_offer_dm = None sentinel exists in DM path to prevent NameError."""
-    import inspect, scout_handlers
-    src = inspect.getsource(scout_handlers)
-    assert "launched_offer_dm = None" in src, "launched_offer_dm = None sentinel missing"
-    return True, "launched_offer_dm = None sentinel present in DM path"
+@test("launched_offer_variable_always_defined")
+def test_launched_offer_variable_always_defined():
+    """Confirm a launched_offer = None sentinel exists in the shared renderer
+    before any conditional use, preventing a NameError-class bug (the
+    2026-06-20 fix this test originally guarded per-call-site, now unified
+    into _render_and_post_response by the response-routing extraction)."""
+    import ast, pathlib
+    path = pathlib.Path(os.path.join(os.path.dirname(__file__), "scout_handlers.py"))
+    tree = ast.parse(path.read_text())
+    fn = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_render_and_post_response"), None)
+    assert fn is not None, "_render_and_post_response not found at module level in scout_handlers.py"
+    src_lines = path.read_text().splitlines()
+    fn_src = "\n".join(src_lines[fn.lineno - 1: fn.end_lineno])
+    assert "launched_offer" in fn_src, "launched_offer variable missing from _render_and_post_response"
+    assert "launched_offer: dict | None = None" in fn_src or "launched_offer = None" in fn_src, \
+        "launched_offer must be initialized to None before any conditional use to prevent NameError"
+    return True, "launched_offer sentinel present in _render_and_post_response"
 
 
 @test("fill_rate_publishers GROUP BY must not include sessions_with_imps")
