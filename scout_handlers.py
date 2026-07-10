@@ -38,7 +38,8 @@ from scout_notion import (
 )
 from scout_ui_kit import (
     Card, Severity, Surface, ResponsePattern, wrap_response, context_block, enforce,
-    _build_brief_blocks, _queue_confirm_blocks, _build_opportunity_cards,
+    enforce_with_reserved_tail, _build_brief_content_and_cta,
+    _queue_confirm_blocks, _build_opportunity_cards,
     _build_help_blocks,
     _build_home_view, _build_queue_card, _is_help_query,
     _build_advertiser_rpm_context_blocks,
@@ -1364,7 +1365,8 @@ def _render_and_post_response(
                     "payout":      brief_data.get("payout_num"),
                     "payout_type": (brief_data.get("payout_type") or "CPA").upper(),
                 })
-            blocks = enforce(_build_brief_blocks(brief_data, copy, thread_ts=thread_ts), surface, thread_ts=thread_ts)
+            _brief_content, _brief_cta = _build_brief_content_and_cta(brief_data, copy, thread_ts=thread_ts)
+            blocks = enforce_with_reserved_tail(_brief_content, _brief_cta, surface, thread_ts=thread_ts)
             fallback_text = brief_fallback_text_override or response.payload.get("fallback_text", "Campaign Brief ready.")
             _post_or_update(fallback_text, blocks)
 
