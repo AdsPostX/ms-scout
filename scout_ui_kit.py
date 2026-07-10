@@ -194,7 +194,6 @@ class Card:
 # enforce() — hard block budget enforcement
 # ---------------------------------------------------------------------------
 def _overflow_context_block(shown: int, total: int, thread_ts: Optional[str]) -> dict:
-    """Build the context block enforce() appends when truncating for budget."""
     if thread_ts:
         overflow_text = f"Showing {shown} of {total} items. Rest is in the thread above."
     else:
@@ -1190,7 +1189,6 @@ def _build_brief_content_and_cta(
 
 
 def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:
-    """Build a Slack Block Kit message for a campaign brief."""
     content, cta = _build_brief_content_and_cta(brief_data, copy, thread_ts)
     return content + cta
 
