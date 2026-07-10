@@ -1420,7 +1420,7 @@ def _render_and_post_response(
                     elapsed_seconds=elapsed,
                 )
                 if context_block_mode == "always":
-                    _period = (response.payload or {}).get("extracted_context", {}).get("period") if response.payload else None
+                    _period = ((response.payload or {}).get("extracted_context") or {}).get("period") if response.payload else None
                     _blocks = [*_blocks, context_block(queried_at=f"{elapsed_str} ago", period=_period)]
             _post_or_update(_fallback, _blocks)
     except Exception as e:
