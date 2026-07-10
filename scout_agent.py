@@ -64,7 +64,7 @@ load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 # own this wiring — scout_core stays unaware of offer_scraper to keep the
 # contracts layer import-cheap and dependency-free.
 from scout_core.contracts import set_geo_normalizer as _set_geo_normalizer
-from scout_tools_offers import _dedupe_by_advertiser
+from scout_tools_offers import _dedupe_by_advertiser, _norm, _scout_score, _format_offers, _get_risk_flag
 from offer_scraper import normalize_geo as _normalize_geo
 _set_geo_normalizer(_normalize_geo)
 
@@ -722,91 +722,6 @@ def _get_benchmarks() -> dict:
 
 # Compiled once at module level — strips <<<SUGGESTIONS [...]  SUGGESTIONS>>> blocks from responses
 _SUGG_RE = re.compile(r'<<<SUGGESTIONS\s*(\[.*?\])\s*SUGGESTIONS>>>', re.DOTALL)
-
-# ── Scout Score ───────────────────────────────────────────────────────────────
-
-def _scout_score(offer: dict, benchmarks: dict) -> float:
-    """
-    Estimated RPM = payout × context_cvr × 1000 × confidence_weight.
-
-    CVR is sourced from real MS conversion data in four tiers (never hardcoded):
-      1. Exact offer match        — real CVR for this specific offer (500+ impressions)
-      2. Same advertiser          — real CVR for other offers from same brand
-      3. Category × payout type   — real avg CVR for e.g. "Finance CPL" offers on MS
-      4. Payout type only         — real avg CVR for all CPL / CPS / etc. offers on MS
-
-    If the offer is flagged as high-friction (B2B, loan, medical, biz-opp), returns 0
-    so the caller displays "Not estimated" rather than an inflated number.
-    """
-    payout = offer.get("_payout_num") or 0
-    if payout == 0:
-        return 0.0
-
-    # High-friction offers: suppress score entirely rather than mislead.
-    # B2B, loan, medical, and biz-opp convert 50-70% below consumer post-transaction.
-    # Better to show "Not estimated" than anchor on a number that will disappoint.
-    risk = _get_risk_flag(
-        offer.get("advertiser", ""),
-        offer.get("category", ""),
-        offer.get("description", ""),
-    )
-    _HIGH_FRICTION = ("B2B intent", "Loan/credit", "Medical program", "Biz-opp", "Insurance")
-    if any(tag in risk for tag in _HIGH_FRICTION):
-        return 0.0
-
-    offer_id     = str(offer.get("offer_id", ""))
-    payout_type  = _norm(offer.get("_payout_type_norm", ""))
-    category     = (offer.get("category") or "").strip()
-    adv_name     = _norm(offer.get("advertiser", ""))
-
-    by_offer     = benchmarks.get("by_offer_impact_id", {})
-    by_adv       = benchmarks.get("by_adv_name", {})
-    by_cat       = benchmarks.get("by_category", {})
-
-    # ── Tier 1: exact offer ───────────────────────────────────────────────────
-    if offer_id in by_offer:
-        bench = by_offer[offer_id]
-        cvr   = bench["cvr_pct"] / 100
-        confidence = 1.0
-        source = f"Real MS data ({bench['impressions']:,} impressions)"
-
-    # ── Tier 2: same advertiser, different offer ──────────────────────────────
-    elif adv_name in by_adv:
-        bench = by_adv[adv_name]
-        cvr   = bench["cvr_pct"] / 100
-        confidence = 0.85
-        source = f"Same advertiser benchmark ({bench['impressions']:,} impressions)"
-
-    # ── Tier 3: category average — real CVR across this category on MS ────────
-    elif category and category in by_cat:
-        bench = by_cat[category]
-        cvr   = bench["avg_cvr_pct"] / 100
-        confidence = 0.65
-        source = f"{category} category benchmark ({bench['sample_campaigns']} offers)"
-
-    # ── Tier 4: overall MS CVR baseline — covers all non-MS-run networks ─────
-    # MaxBounty / FlexOffers / ShareASale / Rakuten / Awin advertisers have no
-    # offer/advertiser/category match. Use the aggregate CVR across 670+ MS campaigns
-    # as a low-confidence prior so they rank against each other (and below real-data offers).
-    elif benchmarks.get("by_payout_type", {}).get("_all"):
-        base = benchmarks["by_payout_type"]["_all"]
-        cvr  = base["cvr_pct"] / 100
-        confidence = 0.35
-        source = f"MS overall baseline ({base['campaigns']} campaigns, low confidence)"
-
-    else:
-        # No real data at any tier — return 0 so caller shows "Not estimated"
-        return 0.0
-
-    # Payout reliability: CPS (% of sale) payout is uncertain because the sale
-    # amount varies; apply a discount to avoid overconfident RPM estimates
-    if "sale" in payout_type or "%" in payout_type:
-        confidence *= 0.8
-
-    estimated_rpm = payout * cvr * 1000 * confidence
-    log.debug(f"Scout Score [{offer.get('advertiser')}]: ${estimated_rpm:.0f} RPM | {source} | confidence={confidence:.2f}")
-    return round(estimated_rpm, 4)
-
 
 _PROMPT_PATH = pathlib.Path(__file__).parent / "prompts" / "scout_system.md"
 
@@ -2079,10 +1994,6 @@ def _load_offers() -> list:
     return offers
 
 
-def _norm(s: str) -> str:
-    return s.lower().strip() if s else ""
-
-
 # ── Tool implementations ─────────────────────────────────────────────────────
 
 def search_offers(
@@ -2290,49 +2201,6 @@ def _accumulate_offer_dimensions(offers: list, benchmarks: dict) -> tuple[dict, 
     return by_network, by_category, by_ms_status
 
 
-def _format_offers(offers: list, benchmarks: dict) -> list[FormattedOffer]:
-    """Return a compact, readable version of each offer for the LLM, including Scout Score context."""
-    by_offer = benchmarks.get("by_offer_impact_id", {})
-    by_cat = benchmarks.get("by_category", {})
-    out = []
-    for o in offers:
-        offer_id = str(o.get("offer_id", ""))
-        category = o.get("category", "")
-        score = _scout_score(o, benchmarks)
-
-        # Performance context
-        if offer_id in by_offer:
-            perf = by_offer[offer_id]
-            perf_note = f"Real MS data: {perf['cvr_pct']}% CVR, ${perf['rpm']} RPM"
-        elif category in by_cat:
-            cat_perf = by_cat[category]
-            perf_note = f"Category benchmark: {cat_perf['avg_cvr_pct']}% CVR avg, ${cat_perf['avg_rpm']} RPM avg"
-        else:
-            perf_note = "No MS performance data for this category yet"
-
-        advertiser = o.get("advertiser", "")
-        out.append({
-            "advertiser": advertiser,
-            "network": o.get("network", ""),
-            "offer_id": offer_id,
-            "payout": o.get("_raw_payout") or o.get("payout") or "Rate TBD",
-            "payout_num": o.get("_payout_num"),
-            "payout_type": o.get("_payout_type_norm") or o.get("payout_type", ""),
-            "category": category,
-            "geo": o.get("geo", ""),
-            "ms_status": o.get("_ms_status", ""),
-            "ms_internal_name": o.get("_ms_internal_name", ""),
-            "fit_tier": o.get("fit_tier", "STANDARD"),
-            "last_verified": o.get("last_verified"),
-            "scout_score_rpm": score,
-            "performance_context": perf_note,
-            "risk_flag": _get_risk_flag(advertiser, category, o.get("description", "")),
-            "icon_url":  o.get("icon_url", ""),
-            "hero_url":  o.get("hero_url", ""),
-        })
-    return out
-
-
 def _format_payout(payout_num, payout_type_norm: str, raw_payout: str) -> str:
     """Normalize payout display: '$300 / lead' not '300 $ per lead'."""
     if not payout_num:
@@ -2351,31 +2219,6 @@ def _format_payout(payout_num, payout_type_norm: str, raw_payout: str) -> str:
     elif "impression" in ptype or "cpm" in ptype:
         return f"${fmt} CPM"
     return f"${fmt}"
-
-
-# Risk flags: keyed by trigger keyword lists.
-# Shown on the brief to flag post-transaction fit issues before launch.
-_RISK_PATTERNS = [
-    (["employer", "hiring", "recruitment", "recruiter", "payroll", "crm", "erp", "b2b", "business banking"],
-     "B2B intent — post-transaction CVR typically 50-70% lower than consumer offers; test conservatively"),
-    (["loan", "lending", "mortgage", "refinance", "credit repair", "debt consolidation"],
-     "Loan/credit offers are high-friction; monitor CVR closely and verify compliance"),
-    (["glp-1", "weight loss program", "prescription", "telehealth", "medical weight"],
-     "Medical program — high-intent required; verify geo/age compliance before launch"),
-    (["insurance", "life insurance", "auto insurance", "home insurance"],
-     "Insurance sign-ups are high-friction; expect below-category CVR post-transaction"),
-    (["work from home", "earn from home", "make money online", "business opportunity", "profit scaling"],
-     "Biz-opp offer — elevated brand risk; evaluate publisher fit carefully"),
-]
-
-
-def _get_risk_flag(advertiser: str, category: str, description: str) -> str:
-    """Return a one-line risk warning if the offer is a poor post-transaction fit."""
-    combined = f"{advertiser} {category} {description}".lower()
-    for keywords, flag in _RISK_PATTERNS:
-        if any(kw in combined for kw in keywords):
-            return flag
-    return ""
 
 
 def _network_portal_url(network: str, offer_id: str) -> str:

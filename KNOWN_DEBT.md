@@ -76,6 +76,31 @@ Not a drop-in swap: `_build_sourcing_intel_blocks(signals: dict)` has no `payout
 
 Fix: decide cache-threading vs. cache-less variant, then unify. Left as debt rather than fixed inline because it's a different code path (sourcing-signal cards, not the main network digest) touched by an unrelated PR — do it as its own small PR.
 
+## scout_tools_offers.py vs. scout_agent.py — 4 duplicated functions, one already drifted — RESOLVED
+
+**Resolved** by having `scout_agent.py` import `_norm`, `_scout_score`, `_format_offers`, and `_get_risk_flag` from `scout_tools_offers.py` (same pattern already used for `_dedupe_by_advertiser`) instead of carrying its own copies. The `_scout_score` divergence was reconciled by switching `scout_tools_offers.py`'s copy to call `_norm()` for `payout_type`/`adv_name`, matching what `scout_agent.py`'s copy already did; `scout_tools_offers.py`'s more defensive `_norm()` (coerces non-string input via `str()`) is now the single canonical version, so the `AttributeError`-on-non-string landmine described below no longer exists. All four inline defs were deleted from `scout_agent.py`; `python3 smoke_test.py` and the `TOOL_MAP` import check both pass.
+
+Note: `draft_campaign_brief` (scout_tools_offers.py:612-614) has its own separate inline `.lower().strip()` normalization on local variables — a different, unrelated pattern instance, not one of the four functions unified here. Left untouched; not part of this fix's scope.
+
+Original text for history: `scout_tools_offers.py` is live — `scout_agent.py:67` imports `_dedupe_by_advertiser` from it directly, and `tests/test_demand_feed_http.py` imports the module itself to exercise `_load_offers()`. But `scout_agent.py` also carries its own inline copies of four other functions that exist in `scout_tools_offers.py`, verified via direct `diff -u` on each pair (not inferred from a prior report):
+
+- `_format_offers` (scout_tools_offers.py:465 / scout_agent.py:2293, 44 lines) — byte-identical
+- `_get_risk_flag` (scout_tools_offers.py:528 / scout_agent.py:2372, 9 lines) — byte-identical
+- `_scout_score` (scout_tools_offers.py:74 / scout_agent.py:728, ~79 lines) — **not** byte-identical: `scout_agent.py`'s copy normalizes `payout_type`/`adv_name` through a local `_norm()` helper, `scout_tools_offers.py`'s copy still inlines `.lower().strip()`. Same runtime result today, but it means the two functions have already been edited independently once — which is exactly how these things drift further.
+- `_norm` (scout_tools_offers.py:299 / scout_agent.py:2082) — duplicated **and already behaviorally diverged**:
+  ```python
+  # scout_tools_offers.py
+  def _norm(s) -> str:
+      return str(s or "").strip().lower()
+
+  # scout_agent.py
+  def _norm(s: str) -> str:
+      return s.lower().strip() if s else ""
+  ```
+  Both agree on string/empty/None input. `scout_agent.py`'s version raises `AttributeError` on a truthy non-string input (e.g. an int payout-type code); `scout_tools_offers.py`'s coerces via `str()` first. No call site currently passes a non-string value, so this hasn't fired in prod — but it's a live landmine, not a cosmetic difference.
+
+`_dedupe_by_advertiser` is correctly shared (imported, not duplicated) — this entry is only about the four functions above.
+
 ## scout_bot.py:1661,1781 — raw `anthropic.Anthropic()` bypasses the scout_agent.py singleton
 
 Both call sites do `import anthropic as _anthropic; _anth_client = _anthropic.Anthropic()` inline instead of going through `scout_agent._get_anthropic_client()`. This PR (Anthropic-client-construction race fix) only hardened the singleton in `scout_agent.py` — these two are a separate, lower-traffic path (not gated by `_ASK_SEMAPHORE`) and each construction opens its own httpx session, same inefficiency the singleton was built to avoid.

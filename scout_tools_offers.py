@@ -101,9 +101,9 @@ def _scout_score(offer: dict, benchmarks: dict) -> float:
         return 0.0
 
     offer_id     = str(offer.get("offer_id", ""))
-    payout_type  = (offer.get("_payout_type_norm") or "").lower().strip()
+    payout_type  = _norm(offer.get("_payout_type_norm", ""))
     category     = (offer.get("category") or "").strip()
-    adv_name     = (offer.get("advertiser") or "").lower().strip()
+    adv_name     = _norm(offer.get("advertiser", ""))
 
     by_offer     = benchmarks.get("by_offer_impact_id", {})
     by_adv       = benchmarks.get("by_adv_name", {})
