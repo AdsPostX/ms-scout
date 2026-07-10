@@ -609,11 +609,15 @@ def _strip_mention(text: str) -> str:
 
 
 def _sanitize_slack(text: str) -> str:
-    """Convert markdown to Slack-compatible formatting."""
+    """Convert markdown to Slack-compatible formatting.
+
+    Divider markers (\\n---\\n) are intentionally left intact here — the
+    scout_slack_safe chokepoint owns converting them to real divider blocks
+    right before the Slack API call, so they must survive this step.
+    """
     text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
     text = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', r'<\2|\1>', text)
     text = re.sub(r'^#{1,3} (.+)$', r'*\1*', text, flags=re.MULTILINE)
-    text = re.sub(r'^---+$', '', text, flags=re.MULTILINE)
     return text
 
 
