@@ -308,9 +308,7 @@ def _save_expiration_alert_date(date_str: str) -> None:
 
 def _save_revenue_alert_slot(slot: str) -> None:
     """Persist 'YYYY-MM-DDTHH' as last revenue alert slot."""
-    state = _load_pulse_state()
-    state["last_revenue_alert_slot"] = slot
-    _save_pulse_state(state)
+    _update_pulse_state("last_revenue_alert_slot", slot)
 
 
 def _load_revenue_alert_slot() -> str | None:
@@ -320,9 +318,7 @@ def _load_revenue_alert_slot() -> str | None:
 
 def _save_revenue_alert_context(pct: float) -> None:
     """Persist the last-alerted revenue deviation pct for re-fire comparison."""
-    state = _load_pulse_state()
-    state["last_revenue_alert_pct"] = round(float(pct), 1)
-    _save_pulse_state(state)
+    _update_pulse_state("last_revenue_alert_pct", round(float(pct), 1))
 
 
 def _load_revenue_alert_context() -> float | None:
@@ -333,9 +329,11 @@ def _load_revenue_alert_context() -> float | None:
 
 def _clear_revenue_alert_context() -> None:
     """Remove the persisted revenue alert pct (revenue returned to normal)."""
-    state = _load_pulse_state()
-    state.pop("last_revenue_alert_pct", None)
-    _save_pulse_state(state)
+    with _PULSE_STATE_LOCK:
+        state = _load_pulse_state()
+        state.pop("last_revenue_alert_pct", None)
+        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(_PULSE_STATE_FILE, state)
 
 
 # ── Cap alert hourly slot + context (Phase 2) ─────────────────────────────────
@@ -345,9 +343,7 @@ def _clear_revenue_alert_context() -> None:
 
 def _save_cap_alert_slot(slot: str) -> None:
     """Persist 'YYYY-MM-DDTHH' as last cap alert slot (hourly mode)."""
-    state = _load_pulse_state()
-    state["last_cap_alert_slot"] = slot
-    _save_pulse_state(state)
+    _update_pulse_state("last_cap_alert_slot", slot)
 
 
 def _load_cap_alert_slot() -> str | None:
@@ -368,9 +364,7 @@ def _save_cap_alert_context(advertisers: list[dict]) -> None:
         }
         for adv in advertisers
     ]
-    state = _load_pulse_state()
-    state["last_cap_alert_advertisers"] = normalized  # replace, not append
-    _save_pulse_state(state)
+    _update_pulse_state("last_cap_alert_advertisers", normalized)  # replace, not append
 
 
 def _load_cap_alert_context() -> list[dict]:
@@ -505,7 +499,8 @@ def _load_watchdog_state() -> dict:
 
 
 def _save_watchdog_state(state: dict) -> None:
-    _WATCHDOG_STATE_PATH.write_text(json.dumps(state, indent=2))
+    _WATCHDOG_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(_WATCHDOG_STATE_PATH, state)
 
 
 # ── Learnings store ────────────────────────────────────────────────────────────
