@@ -299,6 +299,28 @@ class NetworkCredentialConfig:
 _NETWORK_CRED_CONFIG = NetworkCredentialConfig.from_env()
 
 
+@dataclass(frozen=True)
+class _ScoutCfg:
+    demand_feed_url: str
+
+    @classmethod
+    def from_env(cls) -> "_ScoutCfg":
+        raw = os.getenv("DEMAND_FEED_URL", "").rstrip("/")
+        url = ""
+        if raw:
+            try:
+                parsed = urllib.parse.urlparse(raw)
+                if parsed.scheme in ("http", "https") and parsed.hostname:
+                    url = raw
+                else:
+                    log.warning("DEMAND_FEED_URL missing valid scheme or hostname — using disk")
+            except Exception:
+                log.warning("DEMAND_FEED_URL could not be parsed — using disk")
+        return cls(demand_feed_url=url)
+
+_CFG = _ScoutCfg.from_env()
+
+
 def _is_admin(user_id: str) -> bool:
     """True if user_id is in SCOUT_THRESHOLD_ADMINS (comma-separated allowlist).
 
@@ -1962,7 +1984,7 @@ def _load_offers() -> list:
     Logs source + offer count so the P1.2 cutover is verifiable from Render
     logs without grepping for stale-file timestamps.
     """
-    url = os.getenv("DEMAND_FEED_URL")
+    url = _CFG.demand_feed_url
     if url:
         endpoint = f"{url.rstrip('/')}/offers"
         # Strip userinfo/query/fragment before logging — endpoint may contain
