@@ -3885,7 +3885,7 @@ def test_digest_footer_appended():
         if _impact_no_payout > 0:
             return base_blocks + [
                 {"type": "context", "elements": [{"type": "mrkdwn",
-                    "text": f":warning: {_impact_no_payout} Impact offer{'s' if _impact_no_payout != 1 else ''} excluded — payout enrichment failed"}]},
+                    "text": f":warning: {_impact_no_payout} Impact offer{'s' if _impact_no_payout != 1 else ''} excluded - payout enrichment failed"}]},
             ]
         return base_blocks
 
@@ -3910,6 +3910,145 @@ def test_digest_footer_appended():
     assert "1 Impact offer excluded" in result_one[-1]["elements"][0]["text"], "singular form wrong"
 
     return True, "4 cases: appended, zero-clean, None-safe, singular/plural"
+
+
+@test("scout_digest — no em/en dash in Slack-facing strings")
+def test_digest_no_em_en_dash():
+    """
+    Typography rule: no em (—, U+2014) or en (–, U+2013) dash may reach Slack.
+    scout_ui_kit.sanitize_blocks()/normalize_typography() strip these at the
+    wrap_response() chokepoint as a last-resort safety net, but the source
+    strings in scout_digest.py must not contain them in the first place —
+    the chokepoint is a net, not a fix.
+
+    Part 1 (static): AST-scans scout_digest.py for string literals (including
+    f-string constant parts) containing a bad dash, excluding:
+      - docstrings (never rendered to Slack)
+      - log.<level>(...) call arguments (Render logs only, not Slack)
+      - argparse.ArgumentParser(description=...) (CLI --help text, not Slack)
+
+    Part 2 (dynamic): calls build_why_text() across all three confidence
+    tiers, and _build_sourcing_intel_blocks() for both the payout_upgrades
+    (plain mrkdwn) and new_offers (card) shapes, and scans the real return
+    values for bad dashes.
+    """
+    import ast
+    _BAD_DASH_CHARS = ("—", "–")  # em, en
+
+    def _has_bad_dash(s: str) -> bool:
+        return any(ch in s for ch in _BAD_DASH_CHARS)
+
+    # ── Part 1: static source scan ────────────────────────────────────────────
+    src_path = _ROOT / "scout_digest.py"
+    tree = ast.parse(src_path.read_text(encoding="utf-8"), filename=str(src_path))
+
+    excluded_ids: set = set()
+
+    def _mark_subtree(node):
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                excluded_ids.add(id(sub))
+
+    # Docstrings: first statement of module/function/class body
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                excluded_ids.add(id(body[0].value))
+
+    _LOG_LEVELS = {"info", "warning", "error", "debug", "exception", "critical"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        # log.<level>(...) — internal Render logs, never reach Slack
+        if (isinstance(f, ast.Attribute) and f.attr in _LOG_LEVELS
+                and isinstance(f.value, ast.Name) and f.value.id == "log"):
+            for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                _mark_subtree(arg)
+        # argparse.ArgumentParser(description=...) — CLI --help text, not Slack
+        if isinstance(f, ast.Attribute) and f.attr == "ArgumentParser":
+            for kw in node.keywords:
+                if kw.arg == "description":
+                    _mark_subtree(kw.value)
+
+    static_offenders = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in excluded_ids and _has_bad_dash(node.value)):
+            static_offenders.append((node.lineno, node.value[:80]))
+
+    if static_offenders:
+        detail = "; ".join(f"L{ln}: {val!r}" for ln, val in static_offenders[:5])
+        return False, f"static scan found {len(static_offenders)} bad-dash string(s): {detail}"
+
+    # ── Part 2: dynamic output scan ───────────────────────────────────────────
+    import scout_digest
+
+    def _walk_strings(obj):
+        if isinstance(obj, str):
+            yield obj
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                yield from _walk_strings(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                yield from _walk_strings(v)
+
+    benchmarks = {
+        "by_offer_impact_id": {"OFFER1": {"cvr_pct": 4.2, "rpm": 12.5}},
+        "by_category": {"Travel": {"avg_cvr_pct": 3.1}},
+    }
+    why_cases = [
+        # Tier 1: real MS data
+        {"offer_id": "OFFER1", "category": "Travel", "geo": "US", "payout_type": "CPL"},
+        # Tier 2: category benchmark, no offer-level data
+        {"offer_id": "OFFER2", "category": "Travel", "geo": "US", "payout_type": "CPL"},
+        # Tier 3: no data, CPS friction reason
+        {"offer_id": "OFFER3", "category": "Unknown", "geo": "US", "payout_type": "CPS"},
+        # Tier 3: no data, no fit reason at all → "New offer ..." fallback
+        {"offer_id": "OFFER4", "category": "Unknown", "geo": "US", "payout_type": "OTHER"},
+    ]
+    dynamic_offenders = []
+    for offer in why_cases:
+        # adjusted_rpm short-circuits the _scout_score() benchmark-shape
+        # dependency — build_why_text's real caller always supplies it too.
+        text = scout_digest.build_why_text(offer, 2.50, offer["payout_type"], [], benchmarks, adjusted_rpm=8.0)
+        if _has_bad_dash(text):
+            dynamic_offenders.append(("build_why_text", offer["offer_id"], text))
+
+    upgrades_signal = {
+        "new_offers": [], "seasonal": [],
+        "payout_upgrades": [{
+            "advertiser": "AT&T", "payout_type": "CPL", "current_net_payout": 2.00,
+            "inventory_gross_payout": 6.00, "inventory_net_est": 4.20,
+            "network": "CJ", "delta_net_est": 2.20, "offer_name": "AT&T Wireless",
+        }],
+    }
+    new_offers_signal = {
+        "new_offers": [{
+            "offer_id": "NEW1", "offer_name": "Test Offer", "advertiser": "Test Co",
+            "category": "Travel", "geo": "US", "payout": "5.00", "payout_type": "CPL",
+            "network": "impact", "first_seen": "2026-07-09", "fit_tier": "PRIME",
+        }],
+        "seasonal": [], "payout_upgrades": [],
+    }
+    for label, signal in (("payout_upgrades", upgrades_signal), ("new_offers", new_offers_signal)):
+        blocks = scout_digest._build_sourcing_intel_blocks(signal)
+        for s in _walk_strings(blocks):
+            if _has_bad_dash(s):
+                dynamic_offenders.append((f"_build_sourcing_intel_blocks[{label}]", "-", s))
+
+    if dynamic_offenders:
+        detail = "; ".join(f"{fn}({oid}): {txt!r}" for fn, oid, txt in dynamic_offenders[:5])
+        return False, f"dynamic scan found {len(dynamic_offenders)} bad-dash output(s): {detail}"
+
+    return True, (
+        f"0 bad-dash strings in scout_digest.py source (excl. docstrings/logs/argparse); "
+        f"0 in build_why_text ({len(why_cases)} tiers) + _build_sourcing_intel_blocks (2 shapes) output"
+    )
 
 
 @test("data_quality_invariants")
