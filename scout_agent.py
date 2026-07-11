@@ -305,10 +305,17 @@ class _ScoutCfg:
 
     @classmethod
     def from_env(cls) -> "_ScoutCfg":
-        url = os.getenv("DEMAND_FEED_URL", "").rstrip("/")
-        if url and not url.startswith(("http://", "https://")):
-            log.warning(f"DEMAND_FEED_URL invalid scheme: {url!r} — using disk")
-            url = ""
+        raw = os.getenv("DEMAND_FEED_URL", "").rstrip("/")
+        url = ""
+        if raw:
+            try:
+                parsed = urllib.parse.urlparse(raw)
+                if parsed.scheme in ("http", "https") and parsed.hostname:
+                    url = raw
+                else:
+                    log.warning("DEMAND_FEED_URL missing valid scheme or hostname — using disk")
+            except Exception:
+                log.warning("DEMAND_FEED_URL could not be parsed — using disk")
         return cls(demand_feed_url=url)
 
 _CFG = _ScoutCfg.from_env()
