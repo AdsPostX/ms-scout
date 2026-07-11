@@ -329,7 +329,8 @@ def cap_alert_campaigns(
             LEFT JOIN adpx_conversionsdetails cv
                 ON toInt64(cv.campaign_id) = toInt64(c.id)
                AND toYYYYMM(toDate(cv.created_at)) = toYYYYMM({date_expr})
-            WHERE c.deleted_at IS NULL
+            WHERE c.id IS NOT NULL              -- Nullable(Int64): toInt64(NULL)=0 coerces silently
+              AND c.deleted_at IS NULL
               AND c.capping_config IS NOT NULL
               AND c.capping_config != ''
               AND c.capping_config != '{{}}'

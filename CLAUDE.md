@@ -160,6 +160,7 @@ Before any change to a `queries_*.py` WHERE clause, JOIN type, or column referen
    - `mv_adpx_users.organization` → `LowCardinality(String)` → `endsWith()` may throw — filter in Python instead
    - `adpx_conversionsdetails.pid` → NOT the publisher user_id — always filter on `user_id`
    - `revenue`, `payout` → String columns — always cast: `toFloat64OrNull(revenue)`
+   - `from_airbyte_campaigns.id` → `Nullable(Int64)` → always add `AND c.id IS NOT NULL` before joining on campaign id
 3. **When in doubt, filter in Python, not SQL.** SQL type errors silently kill queries in production; Python errors surface immediately in smoke tests.
 4. **Document the column type in the commit message** when adding a new column reference.
 
