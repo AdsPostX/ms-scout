@@ -960,14 +960,20 @@ def _build_advertiser_rpm_context_blocks(ctx: dict, scout_estimate: float = 0) -
     if estimate_str:
         parts.append(estimate_str)
 
-    return [
+    # This path (called from _handle_approve's queue-confirmation flow) posts
+    # via direct web.chat_postMessage, bypassing wrap_response()'s
+    # sanitize_blocks() chokepoint -- same gap the Campaign Brief path had.
+    # rpm_str above can contain a literal en-dash ("$X–$Y platform RPM
+    # range"); sanitize_blocks() normalizes it (and any future literal) here
+    # rather than hand-rolling a second dash regex.
+    return sanitize_blocks([
         {
             "type": "context",
             "elements": [
                 {"type": "mrkdwn", "text": f":bar_chart: *{' · '.join(parts[:2])}*"},
             ] + ([{"type": "mrkdwn", "text": estimate_str}] if estimate_str else []),
         }
-    ]
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -975,33 +981,53 @@ def _build_advertiser_rpm_context_blocks(ctx: dict, scout_estimate: float = 0) -
 # ---------------------------------------------------------------------------
 
 def _brief_extract_fields(brief_data: dict, copy: dict) -> dict:
-    """Unpack brief_data and copy into a flat dict for downstream helpers."""
+    """Unpack brief_data and copy into a flat dict for downstream helpers.
+
+    Every free-text field is run through _enforce_brief_typography() here --
+    em/en dashes and stray (TM)/(R) marks are stripped at the single point
+    where brief_data/copy enter the render pipeline, so no downstream
+    _build_brief_* helper (or the queue-button payload, which round-trips
+    into a later Slack message) can ship a field Scout hasn't enforced.
+    URL/ID/status/score fields are left untouched -- they're not display
+    copy, and tracking_url's "Not available" sentinel is matched by exact
+    literal comparison in _build_brief_copy() below.
+    """
     titles = copy.get("titles", [])
     ctas   = copy.get("ctas", [])
+    cta = copy.get("cta") or (ctas[0] if ctas else None)
+    if isinstance(cta, dict):
+        cta = {
+            k: (_enforce_brief_typography(v) if isinstance(v, str) else v)
+            for k, v in cta.items()
+        }
     return {
         # from brief_data
-        "advertiser":   brief_data.get("advertiser", "Offer"),
-        "network":      brief_data.get("network", "").title(),
-        "payout":       brief_data.get("payout", "Rate TBD"),
-        "geo":          brief_data.get("geo", ""),
+        "advertiser":   _enforce_brief_typography(brief_data.get("advertiser", "Offer")),
+        "network":      _enforce_brief_typography(brief_data.get("network", "").title()),
+        "payout":       _enforce_brief_typography(brief_data.get("payout", "Rate TBD")),
+        "geo":          _enforce_brief_typography(brief_data.get("geo", "")),
         "tracking_url": brief_data.get("tracking_url", ""),
         "offer_id":     brief_data.get("offer_id", ""),
-        "performance":  brief_data.get("performance_context", ""),
+        "performance":  _enforce_brief_typography(brief_data.get("performance_context", "")),
         "hero_url":     brief_data.get("hero_url", ""),
         "icon_url":     brief_data.get("icon_url", ""),
         "ms_status":    brief_data.get("ms_status", ""),
         "score_rpm":    brief_data.get("scout_score_rpm", 0),
         "portal_url":   brief_data.get("portal_url", ""),
-        "risk_flag":    brief_data.get("risk_flag", ""),
-        "restrictions": brief_data.get("restrictions", ""),
+        "risk_flag":    _enforce_brief_typography(brief_data.get("risk_flag", "")),
+        "restrictions": _enforce_brief_typography(brief_data.get("restrictions", "")),
         # from copy
-        "title":        copy.get("title", "") or (titles[0] if titles else ""),
-        "title_backup": copy.get("title_backup", "") or (titles[1] if len(titles) > 1 else ""),
-        "description":  copy.get("description", ""),
-        "short_desc":   copy.get("short_desc", ""),
-        "cta":          copy.get("cta") or (ctas[0] if ctas else None),
-        "targeting":    copy.get("targeting", ""),
-        "bottom":       copy.get("bottom_line", ""),
+        "title":        _enforce_brief_typography(
+            copy.get("title", "") or (titles[0] if titles else "")
+        ),
+        "title_backup": _enforce_brief_typography(
+            copy.get("title_backup", "") or (titles[1] if len(titles) > 1 else "")
+        ),
+        "description":  _enforce_brief_typography(copy.get("description", "")),
+        "short_desc":   _enforce_brief_typography(copy.get("short_desc", "")),
+        "cta":          cta,
+        "targeting":    _enforce_brief_typography(copy.get("targeting", "")),
+        "bottom":       _enforce_brief_typography(copy.get("bottom_line", "")),
     }
 
 
@@ -1016,7 +1042,7 @@ def _build_brief_header(f: dict) -> list:
         "type": "header",
         "text": {
             "type":  "plain_text",
-            "text":  f"Campaign Brief — {f['advertiser']}{status_tag}",
+            "text":  f"Campaign Brief - {f['advertiser']}{status_tag}",
             "emoji": False,
         },
     }]
@@ -1069,16 +1095,42 @@ def _build_brief_risk(f: dict) -> list:
 _BRIEF_PROHIBITED_CHARS = ("—", "–", "™", "®")
 
 
-def _brief_copy_qa(text: str, max_len: int) -> str:
-    """Return a QA annotation string for a copy field."""
-    length = len(text)
-    has_prohibited = any(c in text for c in _BRIEF_PROHIBITED_CHARS)
-    if has_prohibited:
+def _enforce_brief_typography(text: str) -> str:
+    """Strip em/en dashes (via normalize_typography) and stray (TM)/(R) marks.
+
+    This is the single enforcement point for brief copy: called from
+    _brief_extract_fields() for every free-text field, and again from
+    _brief_copy_qa() as a defense-in-depth backstop for the three fields
+    that route through it directly.
+    """
+    if not text:
+        return text
+    cleaned = normalize_typography(text)
+    if "™" in cleaned or "®" in cleaned:
+        cleaned = cleaned.replace("™", "").replace("®", "")
+    return cleaned
+
+
+def _brief_copy_qa(text: str, max_len: int) -> tuple[str, str]:
+    """Enforce typography on a copy field and return (clean_text, qa_annotation).
+
+    Previously this only detected prohibited chars and returned a warning
+    annotation without ever removing them from the text that shipped to
+    Slack. It now strips violations before the brief is sent and logs when
+    a fix was applied, so a leak surfaces in Render logs instead of in
+    front of a partner.
+    """
+    cleaned = _enforce_brief_typography(text)
+    if cleaned != text:
         flagged = [c for c in _BRIEF_PROHIBITED_CHARS if c in text]
-        return f"⚠ prohibited chars: {', '.join(repr(c) for c in flagged)}"
+        log.warning(
+            "scout_ui_kit: brief copy QA stripped prohibited chars %s from field (len %d)",
+            [repr(c) for c in flagged], len(text),
+        )
+    length = len(cleaned)
     if length > max_len:
-        return f"⚠ {length} chars (max {max_len})"
-    return f"✓ {length} chars"
+        return cleaned, f"⚠ {length} chars (max {max_len})"
+    return cleaned, f"✓ {length} chars"
 
 
 def _build_brief_copy(f: dict) -> list:
@@ -1096,15 +1148,15 @@ def _build_brief_copy(f: dict) -> list:
     network      = f["network"]
 
     if title:
-        title_qa   = _brief_copy_qa(title, 58)
+        title, title_qa = _brief_copy_qa(title, 58)
         title_text = f"*Headline:* {title}  _{title_qa}_"
         if title_backup:
-            backup_qa   = _brief_copy_qa(title_backup, 58)
+            title_backup, backup_qa = _brief_copy_qa(title_backup, 58)
             title_text += f"\n_A/B: {title_backup}  {backup_qa}_"
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": title_text}})
 
     if description:
-        desc_qa = _brief_copy_qa(description, 170)
+        description, desc_qa = _brief_copy_qa(description, 170)
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": f"*Description:* {description}  _{desc_qa}_"},
@@ -1156,10 +1208,17 @@ def _build_brief_footer(f: dict) -> list:
 def _build_brief_queue_button(
     f: dict, copy: dict, brief_data: dict, thread_ts: str
 ) -> list:
-    """Return the 'Add to Queue' actions block when thread_ts is set."""
+    """Return the 'Add to Queue' actions block when thread_ts is set.
+
+    Sources copy/context fields from the already-enforced `f` dict (built by
+    _brief_extract_fields) rather than the raw `copy`/`brief_data` inputs --
+    this JSON payload round-trips through the "Add to Queue" button click
+    into Notion and a follow-up Slack confirmation, so unenforced text here
+    is a second leak path distinct from the visible brief body.
+    """
     if not thread_ts:
         return []
-    cta_obj   = copy.get("cta") or {}
+    cta_obj   = f["cta"] or {}
     _btn_json = json.dumps({
         "advertiser":   f["advertiser"],
         "offer_id":     f["offer_id"],
@@ -1167,13 +1226,13 @@ def _build_brief_queue_button(
         "network":      f["network"],
         "tracking_url": f["tracking_url"],
         "thread_ts":    thread_ts,
-        "t":   (copy.get("title", ""))[:120],
-        "d":   (copy.get("description", ""))[:200],
+        "t":   (f["title"])[:120],
+        "d":   (f["description"])[:200],
         "cy":  (cta_obj.get("yes", ""))[:60],
         "cn":  (cta_obj.get("no", ""))[:60],
         "rpm": brief_data.get("scout_score_rpm", 0),
-        "pf":  (brief_data.get("performance_context", ""))[:120],
-        "rf":  (brief_data.get("risk_flag", ""))[:80],
+        "pf":  (f["performance"])[:120],
+        "rf":  (f["risk_flag"])[:80],
         "pt":  (brief_data.get("payout_type", "CPA"))[:10],
     }, separators=(",", ":"))
     try:
@@ -1226,7 +1285,13 @@ def _build_brief_content_and_cta(
         + _build_brief_footer(f)
     )
     cta = _build_brief_queue_button(f, copy, brief_data, thread_ts)
-    return content, cta
+    # Defense-in-depth: the brief path posts via enforce_with_reserved_tail(),
+    # not wrap_response(), so it never passes through wrap_response()'s
+    # sanitize_blocks() chokepoint. Field-level enforcement happens upstream
+    # in _brief_extract_fields()/_brief_copy_qa(); this catches anything else
+    # (e.g. a literal introduced directly in a _build_brief_* string) before
+    # blocks leave this module.
+    return sanitize_blocks(content), sanitize_blocks(cta)
 
 
 def _build_brief_blocks(brief_data: dict, copy: dict, thread_ts: str = "") -> list:

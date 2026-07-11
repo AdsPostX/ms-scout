@@ -166,11 +166,19 @@ def test_scout_state_runtime():
         return False, f"scout_state runtime function failed: {e}"
 
 
-@test("_build_advertiser_rpm_context_blocks — pure function, no DB")
+@test("_build_advertiser_rpm_context_blocks — pure function, no DB, dashes enforced")
 def test_rpm_context_blocks():
     """
     Verify _build_advertiser_rpm_context_blocks is importable and returns correct
     Block Kit structure for both has_history=True and has_history=False cases.
+
+    Also a regression test: this function posts via _handle_approve's
+    queue-confirmation flow using direct web.chat_postMessage, bypassing
+    wrap_response()'s sanitize_blocks() chokepoint -- same gap as the
+    Campaign Brief bug. Its rpm_min != rpm_max branch builds
+    f"${rpm_min:.0f}–${rpm_max:.0f} platform RPM range" with a literal
+    en-dash that shipped straight to Slack until sanitize_blocks() was
+    added as a backstop on the return value.
     """
     try:
         from scout_ui_kit import _build_advertiser_rpm_context_blocks
@@ -178,7 +186,8 @@ def test_rpm_context_blocks():
         empty = _build_advertiser_rpm_context_blocks({"has_history": False}, scout_estimate=50)
         if empty != []:
             return False, f"has_history=False should return [] but got: {empty}"
-        # has_history=True → one context block
+        # has_history=True, rpm_min != rpm_max, active != 1 → exercises the
+        # "$X–$Y platform RPM range" branch that used to leak an en-dash.
         ctx = {
             "has_history":      True,
             "active_campaigns": 3,
@@ -193,7 +202,16 @@ def test_rpm_context_blocks():
             return False, f"has_history=True should return non-empty list, got: {blocks}"
         if blocks[0].get("type") != "context":
             return False, f"first block should be type=context, got: {blocks[0].get('type')}"
-        return True, f"has_history=False → [] ✓  has_history=True → context block ✓"
+
+        texts = [el.get("text", "") for el in blocks[0].get("elements", [])]
+        joined = " ".join(texts)
+        if "platform RPM range" not in joined:
+            return False, f"expected rpm-range branch text, got: {joined!r}"
+        leaked = [c for c in ("—", "–") if c in joined]
+        if leaked:
+            return False, f"em/en dash leaked into RPM context block: {leaked} in {joined!r}"
+
+        return True, f"has_history=False → [] ✓  rpm-range branch → context block, zero dashes ✓"
     except Exception as e:
         return False, f"_build_advertiser_rpm_context_blocks failed: {e}"
 
@@ -5470,6 +5488,120 @@ def test_slack_safe_sanitizes_and_splits_dividers():
         return False, f"em/en dash survived inside a block: {out_blocks!r}"
 
     return True, f"dashes stripped, {len(out_blocks)} blocks incl. real divider"
+
+
+@test("Campaign Brief — em/en dashes enforced (stripped), not just flagged, across all copy fields")
+def test_brief_copy_dashes_enforced():
+    """
+    Regression test for the #sidd-qa leak: Campaign Brief messages posted via
+    _build_brief_content_and_cta() -> enforce_with_reserved_tail() bypass the
+    wrap_response()/sanitize_blocks() chokepoint entirely, and the old
+    _brief_copy_qa() only annotated dash violations for title/description
+    instead of stripping them -- so em/en dashes shipped straight to Slack.
+
+    This seeds em/en dashes (and stray TM/(R) marks) across every free-text
+    field that reaches a brief -- including short_desc, targeting, and
+    bottom_line, which previously got zero typography enforcement of any
+    kind -- and confirms the built content+cta blocks are dash-free.
+    """
+    try:
+        from scout_ui_kit import _build_brief_content_and_cta
+
+        brief_data = {
+            "advertiser":          "Acme—Corp",
+            "network":             "impact–co",
+            "payout":              "$5–$10 CPA",
+            "geo":                 "US–CA",
+            "tracking_url":        "https://track.example.com/click?id=1",
+            "offer_id":            "12345",
+            "performance_context": "Strong CVR—trending up",
+            "hero_url":            "",
+            "icon_url":            "",
+            "ms_status":           "live",
+            "scout_score_rpm":     3.2,
+            "portal_url":          "https://portal.example.com",
+            "risk_flag":           "New advertiser—monitor closely",
+            "restrictions":        "No incent—no email",
+            "payout_type":         "CPA",
+        }
+        copy = {
+            "title":        "Save Big — Today Only™",
+            "title_backup": "Limited Time – Act Now®",
+            "description":  "Get rewards for shopping — no strings attached.",
+            "short_desc":   "Quick deal – grab it",
+            "cta":          {"yes": "Yes — Continue", "no": "No – Skip"},
+            "targeting":    "US — mobile only",
+            "bottom_line":  "Offer ends soon — don't miss out.",
+        }
+
+        content, cta = _build_brief_content_and_cta(brief_data, copy, thread_ts="123.456")
+        blocks = content + cta
+        if not blocks:
+            return False, "_build_brief_content_and_cta returned no blocks"
+
+        prohibited = ("—", "–", "™", "®")
+
+        def collect_display_strings(node):
+            """Mirror sanitize_blocks' own traversal: only 'text'/'alt_text' string
+            values are user-displayed copy; 'value' holds opaque button-click JSON."""
+            found = []
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k in {"text", "alt_text"} and isinstance(v, str):
+                        found.append(v)
+                    else:
+                        found.extend(collect_display_strings(v))
+            elif isinstance(node, list):
+                for item in node:
+                    found.extend(collect_display_strings(item))
+            return found
+
+        display_strings = collect_display_strings(blocks)
+        if not display_strings:
+            return False, "no displayable text/alt_text strings found in built blocks"
+
+        violations = [
+            (s, c) for s in display_strings for c in prohibited if c in s
+        ]
+        if violations:
+            return False, f"prohibited chars leaked into displayed brief text: {violations[:5]}"
+
+        # Confirm this didn't just strip the copy to empty strings -- the
+        # underlying content must still be present, with dashes replaced by "-".
+        full_text = " ".join(display_strings)
+        if "Save Big - Today Only" not in full_text:
+            return False, f"expected normalized headline in output, got: {full_text[:300]}"
+        if "Quick deal - grab it" not in full_text:
+            return False, "short_desc was not enforced (still missing from previous behavior)"
+
+        # targeting and bottom_line: bottom_line IS rendered (footer); targeting is
+        # extracted but not currently displayed anywhere -- verify both are clean
+        # at the _brief_extract_fields level directly, since that's the sole
+        # enforcement point for fields with no _build_brief_* renderer today.
+        from scout_ui_kit import _brief_extract_fields
+        f = _brief_extract_fields(brief_data, copy)
+        for field_name in ("short_desc", "targeting", "bottom", "risk_flag", "restrictions",
+                           "advertiser", "network", "payout", "geo", "performance",
+                           "title", "title_backup", "description"):
+            val = f[field_name]
+            leaked = [c for c in prohibited if c in val]
+            if leaked:
+                return False, f"f[{field_name!r}] still contains prohibited chars {leaked}: {val!r}"
+        cta_obj = f["cta"] or {}
+        for key in ("yes", "no"):
+            leaked = [c for c in prohibited if c in cta_obj.get(key, "")]
+            if leaked:
+                return False, f"f['cta'][{key!r}] still contains prohibited chars {leaked}"
+
+        if "Offer ends soon - don't miss out." not in full_text:
+            return False, f"bottom_line not enforced/rendered: {full_text[:300]}"
+
+        return True, (
+            f"{len(display_strings)} display strings checked across content+cta blocks, "
+            f"zero em/en dashes or TM/(R) marks leaked"
+        )
+    except Exception as e:
+        return False, f"brief copy dash enforcement test failed: {e}"
 
 
 if __name__ == "__main__":
