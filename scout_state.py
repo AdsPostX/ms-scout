@@ -332,8 +332,7 @@ def _clear_revenue_alert_context() -> None:
     with _PULSE_STATE_LOCK:
         state = _load_pulse_state()
         state.pop("last_revenue_alert_pct", None)
-        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(_PULSE_STATE_FILE, state)
+        _write_pulse_state_locked(state)
 
 
 # ── Cap alert hourly slot + context (Phase 2) ─────────────────────────────────
@@ -459,6 +458,12 @@ def _load_pulse_state() -> dict:
     return {}
 
 
+def _write_pulse_state_locked(state: dict) -> None:
+    """Write pulse state to disk. Caller must hold _PULSE_STATE_LOCK."""
+    _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(_PULSE_STATE_FILE, state)
+
+
 def _save_pulse_state(state: dict):
     """Write the full pulse state dict atomically.
 
@@ -468,8 +473,7 @@ def _save_pulse_state(state: dict):
     succeeded (fail-closed, consistent with _update_pulse_state).
     """
     with _PULSE_STATE_LOCK:
-        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(_PULSE_STATE_FILE, state)
+        _write_pulse_state_locked(state)
 
 
 def _update_pulse_state(key: str, value) -> None:
@@ -483,8 +487,7 @@ def _update_pulse_state(key: str, value) -> None:
     with _PULSE_STATE_LOCK:
         state = _load_pulse_state()
         state[key] = value
-        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(_PULSE_STATE_FILE, state)
+        _write_pulse_state_locked(state)
 
 
 # ── Watchdog state ─────────────────────────────────────────────────────────────
