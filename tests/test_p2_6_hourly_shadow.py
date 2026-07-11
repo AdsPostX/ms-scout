@@ -108,20 +108,46 @@ class TestKillSwitch(unittest.TestCase):
     def test_kill_switch_prevents_signal_fn_call(self):
         """With SCOUT_HOURLY_SHADOW_ENABLED unset, signal_fn must never be called."""
         import demand_feed_main as dm
+        import datetime as _dt_module
+        from datetime import datetime as _real_dt
+        import pytz
 
         signal_mock = MagicMock(return_value=[])
         format_mock = MagicMock(return_value=("fallback", []))
         load_state_mock = MagicMock(return_value=None)
         save_state_mock = MagicMock()
 
+        # Freeze CT time to 03:00 AM — guaranteed outside the default prod window
+        # (09:00–09:09 CT).  Without this, T2 is non-deterministic: at 09:00–09:09
+        # CT in_prod_window becomes True and signal_fn could be called despite the
+        # kill switch being off.
+        CT_TZ = pytz.timezone("America/Chicago")
+        frozen_ct = CT_TZ.localize(_real_dt(2026, 1, 15, 3, 0, 0))
+
+        class _FakeDt(_real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is not None:
+                    return frozen_ct.astimezone(tz)
+                return frozen_ct
+
         env_override = {
             "SCOUT_HOURLY_SHADOW_ENABLED": "false",
         }
 
-        # patch time.sleep to raise StopIteration after the first inner-loop sleep
-        # so the daemon exits cleanly after one cycle without actually sleeping 300s
+        # Let the first sleep pass so the inner-loop body executes and the
+        # time/kill-switch checks actually run.  Raise StopIteration on the
+        # second sleep to exit cleanly after one cycle.
+        sleep_calls = [0]
+
+        def _counting_sleep(secs):
+            sleep_calls[0] += 1
+            if sleep_calls[0] > 1:
+                raise StopIteration
+
         with patch.dict("os.environ", env_override, clear=False), \
-             patch("time.sleep", side_effect=StopIteration):
+             patch(_dt_module.__name__ + ".datetime", _FakeDt), \
+             patch("time.sleep", side_effect=_counting_sleep):
             try:
                 dm._run_shadow_monitor(
                     monitor_name="test-monitor",
