@@ -308,7 +308,9 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
     def _needs_refetch(entry: dict) -> bool:
         if entry.get("payout"):
             return False
-        if entry.get("payout_note"):  # Rate TBD — leave alone
+        if entry.get("payout_note"):  # Rate TBD, no_field — leave alone
+            return False
+        if entry.get("payout_state") == "no_field":  # field exhausted — don't re-fetch
             return False
         return bool(entry.get("payout_type"))  # had a type but empty amount = CPS bug
 
@@ -358,7 +360,19 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
                         if pct:
                             payout = f"{pct}%"
                     payout_state = parse_payout(payout, payout_type).state
-                    merged[str(cid)] = {"payout": payout, "payout_type": payout_type, "payout_state": payout_state}
+                    if payout_state == "failed":
+                        # All known payout fields exhausted — log available keys so the
+                        # correct field name becomes visible in Render logs on next scrape.
+                        available_keys = sorted(best.keys())
+                        log.info(
+                            f"  Campaign {cid} ({category}): no known pct field. "
+                            f"Available keys: {available_keys}"
+                        )
+                        payout_state = "no_field"
+                    entry = {"payout": payout, "payout_type": payout_type, "payout_state": payout_state}
+                    if payout_state == "no_field":
+                        entry["payout_note"] = "no_field"
+                    merged[str(cid)] = entry
                     if DEBUG and idx % 25 == 0:
                         log.info(f"  [{idx}/{len(missing)}] {cid}: {payout} {payout_type}")
                 else:
@@ -377,13 +391,10 @@ def _run_impact_payout_enrichment(campaign_ids: list, existing_cache: dict = Non
 
     _save_payout_cache(merged)
 
-    if os.environ.get("SCOUT_LOG_PAYOUT_FAILURES"):
-        enriched_n = sum(1 for v in merged.values() if v.get("payout_state") == "enriched")
-        failed_n = sum(1 for v in merged.values() if v.get("payout_state") == "failed")
-        no_data_n = sum(1 for v in merged.values() if v.get("payout_state") == "no_data")
-        log.info(
-            f"Payout enrichment summary: {enriched_n} enriched, {failed_n} failed, {no_data_n} no_data"
-        )
+    enriched_n = sum(1 for v in merged.values() if v.get("payout_state") == "enriched")
+    no_field_n = sum(1 for v in merged.values() if v.get("payout_state") == "no_field")
+    failed_n   = sum(1 for v in merged.values() if v.get("payout_state") == "failed")
+    log.info(f"Impact enrichment: {enriched_n} enriched, {no_field_n} no_field, {failed_n} failed")
 
     return merged
 
