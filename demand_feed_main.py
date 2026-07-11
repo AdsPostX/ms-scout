@@ -698,7 +698,7 @@ def main() -> None:
         (_expiration_monitor_daemon, "expiration-monitor"),
     ]:
         threading.Thread(target=_monitor_fn, daemon=True, name=_monitor_name).start()
-    log.info("[demand-feed] hourly-shadow monitors started (kill switch: SCOUT_HOURLY_SHADOW_ENABLED — requires redeploy to change)")
+    log.info("[demand-feed] hourly-shadow monitors started (SCOUT_HOURLY_SHADOW_ENABLED gates shadow ticks only — prod-window firing always active)")
     _wh  = _FEED_CFG.campaign_create_webhook_url
     _dry = _FEED_CFG.campaign_create_dry_run
     _cc_mode = "live" if (_wh and not _dry) else "dry_run"
@@ -1043,10 +1043,6 @@ def _run_shadow_monitor(
             while True:  # inner poll loop
                 _time.sleep(300)
                 try:
-                    # Outer kill switch — entire framework disabled by default; requires redeploy to change
-                    if not _FEED_CFG.scout_hourly_shadow_enabled:
-                        continue
-
                     # Per-monitor kill switch
                     if not _tm.load().get("signals", {}).get(f"{config_key}_monitor_enabled", False):
                         continue
@@ -1054,8 +1050,12 @@ def _run_shadow_monitor(
                     check_hour = int(_tm.load().get("signals", {}).get(f"{config_key}_monitor_check_hour_ct", 9))
                     now_ct      = _dt.now(CT_TZ)
                     today_str   = now_ct.date().isoformat()
-                    shadow_on   = _FEED_CFG.scout_hourly_shadow_enabled
+
+                    # Prod-window path: fires to SCOUT_MONITOR_CHANNEL at check_hour regardless of shadow mode.
                     in_prod_window = (now_ct.hour == check_hour and now_ct.minute < 10)
+
+                    # Shadow-tick path: hourly snapshots to #scout-qa, gated by SCOUT_HOURLY_SHADOW_ENABLED.
+                    shadow_on        = _FEED_CFG.scout_hourly_shadow_enabled
                     in_shadow_window = shadow_on
 
                     if not in_prod_window and not in_shadow_window:
