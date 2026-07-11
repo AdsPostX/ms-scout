@@ -1886,6 +1886,7 @@ def fetch_awin() -> list:
     Awin (formerly Affiliate Window) — publisher programmes.
     REST API: https://api.awin.com/publishers/{publisherId}/programmes
     API key from awin.com dashboard → API Credentials tab.
+    Paginated: loops until a partial page signals the end (matches CJ/FlexOffers pattern).
     """
     if not AWIN_API_KEY or not AWIN_PUBLISHER_ID:
         log.warning("Awin: AWIN_API_KEY or AWIN_PUBLISHER_ID not set — skipping")
@@ -1896,83 +1897,103 @@ def fetch_awin() -> list:
         "Accept": "application/json",
     }
 
+    page_size = 100
+    params = {
+        "relationship": "joined",
+        "countryCode":  "US",
+        "page":         1,
+        "pageSize":     page_size,
+    }
     offers: list[dict] = []
 
-    try:
-        resp = requests.get(
-            _NETWORK_ENDPOINTS["awin"]["programmes"].format(publisher_id=AWIN_PUBLISHER_ID),
-            headers=headers,
-            params={"relationship": "joined", "countryCode": "US"},
-            timeout=60,
-        )
-        if resp.status_code == 401:
-            log.warning("Awin: 401 — check AWIN_API_KEY")
+    while True:
+        try:
+            resp = requests.get(
+                _NETWORK_ENDPOINTS["awin"]["programmes"].format(publisher_id=AWIN_PUBLISHER_ID),
+                headers=headers,
+                params=params,
+                timeout=60,
+            )
+            if resp.status_code == 401:
+                log.warning("Awin: 401 — check AWIN_API_KEY")
+                return []
+            if not resp.ok:
+                log.warning(f"Awin: {resp.status_code} — {resp.text[:200]}")
+                return []
+        except Exception as e:
+            log.warning(f"Awin: request failed — {e}")
             return []
-        if not resp.ok:
-            log.warning(f"Awin: {resp.status_code} — {resp.text[:200]}")
+
+        try:
+            data = resp.json()
+        except Exception:
+            log.warning(f"Awin: non-JSON response — {resp.text[:200]}")
             return []
-    except Exception as e:
-        log.warning(f"Awin: request failed — {e}")
-        return []
 
-    try:
-        programmes = resp.json()
-    except Exception:
-        log.warning(f"Awin: non-JSON response — {resp.text[:200]}")
-        return []
+        if isinstance(data, dict):
+            programmes = data.get("programmes") or data.get("data") or []
+        else:
+            programmes = data
 
-    if isinstance(programmes, dict):
-        programmes = programmes.get("programmes") or programmes.get("data") or []
+        if not programmes:
+            break
 
-    for p in programmes:
-        prog_id  = str(p.get("id") or p.get("programId", ""))
-        name     = p.get("name") or p.get("programName", "")
-        category = p.get("primarySector") or p.get("category", "")
-        ctype    = p.get("commissionRange", {})
-        comm_max = ctype.get("max") if isinstance(ctype, dict) else None
-        site_url = p.get("primaryUrl") or p.get("url", "")
+        if params["page"] == 1 and len(programmes) == page_size:
+            log.info(f"Awin: first page full ({page_size}) — paginating")
 
-        if not prog_id or not name:
-            continue
+        for p in programmes:
+            prog_id  = str(p.get("id") or p.get("programId", ""))
+            name     = p.get("name") or p.get("programName", "")
+            category = p.get("primarySector") or p.get("category", "")
+            ctype    = p.get("commissionRange", {})
+            comm_max = ctype.get("max") if isinstance(ctype, dict) else None
+            site_url = p.get("primaryUrl") or p.get("url", "")
 
-        payout_str = str(comm_max or "").strip() if comm_max is not None else ""
-        ptype = "CPS"  # Awin is primarily revenue share
-        raw   = f"{payout_str}% CPS" if payout_str else "Commission varies"
+            if not prog_id or not name:
+                continue
 
-        tracking = f"{_NETWORK_ENDPOINTS['awin']['tracking']}?awinmid={prog_id}&awinaffid={AWIN_PUBLISHER_ID}&p={site_url}"
+            payout_str = str(comm_max or "").strip() if comm_max is not None else ""
+            ptype = "CPS"  # Awin is primarily revenue share
+            raw   = f"{payout_str}% CPS" if payout_str else "Commission varies"
 
-        desc_long  = p.get("longDescription") or p.get("description", "")
-        desc_short = p.get("shortDescription") or desc_long
-        logo_large = p.get("logoUrlLarge") or p.get("displayUrl", "")
-        logo_small = p.get("logoUrl") or logo_large
-        geo_raw    = p.get("primaryRegion") or p.get("countryCode", "US")
+            tracking = f"{_NETWORK_ENDPOINTS['awin']['tracking']}?awinmid={prog_id}&awinaffid={AWIN_PUBLISHER_ID}&p={site_url}"
 
-        o = empty_offer()
-        o["network"]           = "awin"
-        o["offer_id"]          = prog_id
-        o["advertiser"]        = name
-        o["title"]             = name
-        o["description"]       = desc_long[:500]
-        o["mini_description"]  = desc_short[:120]
-        o["cta"]               = ""
-        o["terms"]             = str(p.get("terms") or p.get("termsUrl", ""))[:200]
-        o["payout"]            = payout_str
-        o["payout_type"]       = ptype
-        o["_raw_payout"]       = raw[:120]
-        o["currency"]          = "USD"
-        o["category"]          = category
-        o["geo"]               = normalize_geo(str(geo_raw))
-        o["geo_raw"]           = geo_raw
-        o["os_targeting"]      = "All"
-        o["platform_targeting"] = "All"
-        o["tracking_url"]      = tracking
-        o["preview_url"]       = site_url
-        o["icon_url"]          = logo_small
-        o["hero_url"]          = logo_large
-        o["banner_url"]        = logo_large
-        o["status"]            = "Active"
-        o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
-        offers.append(o)
+            desc_long  = p.get("longDescription") or p.get("description", "")
+            desc_short = p.get("shortDescription") or desc_long
+            logo_large = p.get("logoUrlLarge") or p.get("displayUrl", "")
+            logo_small = p.get("logoUrl") or logo_large
+            geo_raw    = p.get("primaryRegion") or p.get("countryCode", "US")
+
+            o = empty_offer()
+            o["network"]           = "awin"
+            o["offer_id"]          = prog_id
+            o["advertiser"]        = name
+            o["title"]             = name
+            o["description"]       = desc_long[:500]
+            o["mini_description"]  = desc_short[:120]
+            o["cta"]               = ""
+            o["terms"]             = str(p.get("terms") or p.get("termsUrl", ""))[:200]
+            o["payout"]            = payout_str
+            o["payout_type"]       = ptype
+            o["_raw_payout"]       = raw[:120]
+            o["currency"]          = "USD"
+            o["category"]          = category
+            o["geo"]               = normalize_geo(str(geo_raw))
+            o["geo_raw"]           = geo_raw
+            o["os_targeting"]      = "All"
+            o["platform_targeting"] = "All"
+            o["tracking_url"]      = tracking
+            o["preview_url"]       = site_url
+            o["icon_url"]          = logo_small
+            o["hero_url"]          = logo_large
+            o["banner_url"]        = logo_large
+            o["status"]            = "Active"
+            o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
+            offers.append(o)
+
+        if len(programmes) < page_size:  # partial page = last page
+            break
+        params["page"] += 1
 
     log.info(f"Awin: {len(offers)} programmes fetched")
     return offers
