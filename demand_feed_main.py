@@ -479,6 +479,8 @@ def _projection_autocheck_daemon() -> None:
                 _time.sleep(60)
                 continue
             web = WebClient(token=_bot_token)
+            from scout_slack_safe import guard_web_client
+            guard_web_client(web)
 
             # Seed in-memory slot from persisted state so a mid-hour restart
             # does not re-fire the current slot.
@@ -871,6 +873,8 @@ def _revenue_tracker_daemon() -> None:
                         record_job_run("revenue_tracker", status="error", error="SLACK_BOT_TOKEN not set", duration_ms=0)
                         continue
                     web = WebClient(token=_bot_token)
+                    from scout_slack_safe import guard_web_client
+                    guard_web_client(web)
                     ch  = _get_ch_client()
 
                     _t0 = _time.monotonic()

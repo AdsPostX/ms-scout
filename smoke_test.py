@@ -5266,6 +5266,73 @@ def test_anthropic_client_singleton_thread_safe():
         scout_agent._ANTHROPIC_CLIENT = original_client
 
 
+@test("every WebClient() construction site is guarded")
+def test_all_webclients_guarded():
+    """Structural check: guard_web_client() is a chokepoint only if nothing
+    bypasses it. Every real WebClient(...) construction must be followed
+    (within a few lines) by a guard_web_client(...) call on the same file,
+    or this test should be updated to explain why not."""
+    py_files = [
+        p for p in _ROOT.glob("*.py")
+        if p.name not in {"smoke_test.py"} and not p.name.startswith("test_")
+    ]
+    ctor_re = re.compile(r"\bWebClient\(")
+    guard_re = re.compile(r"guard_web_client\(")
+    unguarded = []
+
+    for path in py_files:
+        lines = path.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if not ctor_re.search(line):
+                continue
+            if line.strip().startswith("#"):
+                continue
+            window = "\n".join(lines[i:i + 6])
+            if not guard_re.search(window):
+                unguarded.append(f"{path.name}:{i + 1}")
+
+    if unguarded:
+        return False, f"unguarded WebClient() construction at: {', '.join(unguarded)}"
+    return True, f"scanned {len(py_files)} files, all WebClient() sites guarded"
+
+
+@test("scout_slack_safe — dash sanitization + divider block conversion")
+def test_slack_safe_sanitizes_and_splits_dividers():
+    """Behavioral check on the chokepoint itself: a dirty payload (em/en dash
+    plus a \\n---\\n marker) posted through a guarded client must come out
+    with dashes stripped and the marker converted to a real divider block —
+    not just detected/flagged."""
+    import scout_slack_safe as s
+
+    class FakeClient:
+        def chat_postMessage(self, **kwargs):
+            return kwargs
+
+    web = FakeClient()
+    s.guard_web_client(web)
+
+    dirty_text = "Revenue is up — great news\n---\nNext steps here"
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": dirty_text}},
+    ]
+    out = web.chat_postMessage(channel="C123", text=dirty_text, blocks=blocks)
+
+    if "—" in out["text"] or "–" in out["text"]:
+        return False, f"em/en dash survived in fallback text: {out['text']!r}"
+
+    out_blocks = out["blocks"]
+    if not any(b.get("type") == "divider" for b in out_blocks):
+        return False, f"no divider block produced from \\n---\\n marker: {out_blocks!r}"
+    if any(
+        "—" in (b.get("text", {}) or {}).get("text", "")
+        or "–" in (b.get("text", {}) or {}).get("text", "")
+        for b in out_blocks
+    ):
+        return False, f"em/en dash survived inside a block: {out_blocks!r}"
+
+    return True, f"dashes stripped, {len(out_blocks)} blocks incl. real divider"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

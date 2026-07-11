@@ -6,6 +6,13 @@ Scout must have either non-empty blocks OR non-empty text. Blank responses
 (both empty) are substituted with a tracked incident warning so users always
 see something — never a silent blank message in #revenue-operations.
 
+This module is also the single chokepoint for outbound typography: every
+payload is run through scout_ui_kit.sanitize_blocks/normalize_typography
+(strips em/en dashes) and any \\n---\\n divider marker is converted into a
+real Block Kit divider block. Because guard_web_client wraps the WebClient
+INSTANCE, this applies regardless of which module holds the reference and
+calls it — callers cannot bypass it by forgetting a helper.
+
 Usage:
     from scout_slack_safe import guard_web_client
     web = WebClient(token=...)
@@ -19,13 +26,17 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 from typing import Any, Callable
+
+from scout_ui_kit import normalize_typography, sanitize_blocks
 
 log = logging.getLogger(__name__)
 
 _GUARDED_ATTR = "_scout_invariant_guarded"
 _GUARDED_METHODS = ("chat_postMessage", "chat_update", "chat_postEphemeral")
+_DIVIDER_RE = re.compile(r"\n-{3,}\n")
 
 
 def _is_empty(value: Any) -> bool:
@@ -56,8 +67,44 @@ def _incident_block(incident_id: str, method: str) -> tuple[str, list[dict]]:
     return text, blocks
 
 
+def _split_section_on_dividers(block: dict) -> list[dict]:
+    """Expand a section block into [section, divider, section, ...] wherever
+    its text contains a \\n---\\n marker. Non-matching blocks pass through untouched.
+    """
+    text_obj = block.get("text")
+    if block.get("type") != "section" or not isinstance(text_obj, dict):
+        return [block]
+    raw = text_obj.get("text")
+    if not isinstance(raw, str) or not _DIVIDER_RE.search(raw):
+        return [block]
+
+    parts = _DIVIDER_RE.split(raw)
+    expanded: list[dict] = []
+    for i, part in enumerate(parts):
+        part = part.strip("\n")
+        if part:
+            expanded.append({**block, "text": {**text_obj, "text": part}})
+        if i < len(parts) - 1:
+            expanded.append({"type": "divider"})
+    return expanded
+
+
+def _convert_dividers(blocks: Any) -> Any:
+    if not isinstance(blocks, list):
+        return blocks
+    expanded: list[dict] = []
+    for block in blocks:
+        expanded.extend(_split_section_on_dividers(block))
+    return expanded
+
+
 def _wrap(method_name: str, original: Callable) -> Callable:
     def guarded(*args, **kwargs):
+        if kwargs.get("blocks"):
+            kwargs["blocks"] = sanitize_blocks(_convert_dividers(kwargs["blocks"]))
+        if isinstance(kwargs.get("text"), str):
+            kwargs["text"] = normalize_typography(_DIVIDER_RE.sub("\n\n", kwargs["text"]))
+
         text = kwargs.get("text")
         blocks = kwargs.get("blocks")
         attachments = kwargs.get("attachments")
