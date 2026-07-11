@@ -4,3 +4,7 @@ clickhouse-connect
 anthropic~=0.97
 slack-sdk~=3.43
 pytz
+# scout_attachments.py is imported transitively via scout_bot → scout_handlers.
+# Its top-level `import pandas as pd` crashes every monitor thread at startup
+# if pandas is absent. Pin matches requirements.txt to avoid version skew.
+pandas==2.3.3
