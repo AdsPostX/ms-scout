@@ -1218,6 +1218,118 @@ def test_intraday_revenue_by_publisher_query_exists():
     return True, "_query_intraday_revenue_by_publisher callable"
 
 
+@test("_validate_sql_query catches fan-out joins and unpruned created_at filters (PR #357 shape)")
+def test_validate_sql_query_fanout_and_yyyymm():
+    try:
+        from scout_agent import _validate_sql_query
+
+        # Real fixed shape: publisher_health_ad_metrics (queries_publisher.py) —
+        # inline derived-subquery style, each fact table pre-aggregated with its
+        # own GROUP BY before the join. Should NOT trigger the fan-out warning.
+        fixed_publisher_health = """
+        SELECT
+            s.placement,
+            sum(i.impr_n) AS impressions,
+            coalesce(sum(cd.conv_n), 0) AS conversions
+        FROM (
+            SELECT session_id, campaign_id, count() AS impr_n
+            FROM adpx_impressions_details
+            PREWHERE pid = {pid_str: String}
+                AND toYYYYMM(created_at) >= {partition: UInt32}
+            WHERE created_at >= today() - {days: UInt32}
+            GROUP BY session_id, campaign_id
+        ) i
+        JOIN (
+            SELECT session_id, placement
+            FROM adpx_sdk_sessions
+            PREWHERE user_id = {pid: UInt64}
+                AND toYYYYMM(created_at) >= {partition: UInt32}
+            WHERE created_at >= today() - {days: UInt32}
+        ) s ON s.session_id = i.session_id
+        LEFT JOIN (
+            SELECT session_id, campaign_id,
+                   count() AS conv_n,
+                   sum(toFloat64OrNull(revenue)) AS revenue
+            FROM adpx_conversionsdetails
+            PREWHERE user_id = {pid: UInt64}
+                AND toYYYYMM(created_at) >= {extended_partition: UInt32}
+            GROUP BY session_id, campaign_id
+        ) cd ON cd.session_id = i.session_id AND cd.campaign_id = i.campaign_id
+        GROUP BY s.placement
+        LIMIT 1000
+        """
+        warnings = _validate_sql_query(fixed_publisher_health)
+        fanout_hits = [w for w in warnings if "fan-out" in w]
+        if fanout_hits:
+            return False, f"false positive fan-out warning on fixed publisher_health_ad_metrics shape: {fanout_hits}"
+        yyyymm_hits = [w for w in warnings if "toYYYYMM" in w]
+        if yyyymm_hits:
+            return False, f"false positive toYYYYMM warning on fixed publisher_health_ad_metrics shape: {yyyymm_hits}"
+
+        # Real fixed shape: get_advertiser_revenue_projection._fetch_baseline
+        # (scout_agent.py) — WITH-CTE style, same pre-aggregation pattern.
+        fixed_fetch_baseline = """
+        WITH impr AS (
+            SELECT campaign_id, count() AS impr_n
+            FROM adpx_impressions_details
+            PREWHERE toYYYYMM(created_at) >= {partition: UInt32}
+            WHERE created_at >= today() - {days: UInt32}
+            GROUP BY campaign_id
+        ),
+        conv AS (
+            SELECT campaign_id, count() AS conv_n, sum(toFloat64OrNull(revenue)) AS revenue
+            FROM adpx_conversionsdetails
+            PREWHERE toYYYYMM(created_at) >= {partition: UInt32}
+            GROUP BY campaign_id
+        )
+        SELECT impr.campaign_id, impr.impr_n, conv.conv_n, conv.revenue
+        FROM impr
+        LEFT JOIN conv ON conv.campaign_id = impr.campaign_id
+        LIMIT 1000
+        """
+        warnings = _validate_sql_query(fixed_fetch_baseline)
+        fanout_hits = [w for w in warnings if "fan-out" in w]
+        if fanout_hits:
+            return False, f"false positive fan-out warning on fixed _fetch_baseline shape: {fanout_hits}"
+        yyyymm_hits = [w for w in warnings if "toYYYYMM" in w]
+        if yyyymm_hits:
+            return False, f"false positive toYYYYMM warning on fixed _fetch_baseline shape: {yyyymm_hits}"
+
+        # Reconstructed pre-fix buggy shape: two raw event-grain fact tables
+        # joined directly with no pre-aggregation — the actual PR #357 bug shape.
+        buggy_fanout = """
+        SELECT i.campaign_id, count(i.session_id) AS impressions, count(cd.session_id) AS conversions
+        FROM adpx_impressions_details i
+        LEFT JOIN adpx_conversionsdetails cd ON cd.session_id = i.session_id
+        WHERE i.created_at >= today() - 7
+        LIMIT 1000
+        """
+        warnings = _validate_sql_query(buggy_fanout)
+        if not any("fan-out" in w for w in warnings):
+            return False, f"fan-out warning not raised on reconstructed buggy join shape: {warnings}"
+
+        # Bare created_at filter without toYYYYMM() wrap — skips partition pruning.
+        bare_created_at = """
+        SELECT count() FROM adpx_conversionsdetails
+        PREWHERE user_id = 1
+        WHERE created_at >= today() - 7
+        LIMIT 1000
+        """
+        warnings = _validate_sql_query(bare_created_at)
+        if not any("toYYYYMM" in w for w in warnings):
+            return False, f"toYYYYMM warning not raised on bare created_at filter: {warnings}"
+
+        # Clean single-table query — no fact-table join, no date filter concern.
+        clean_query = "SELECT count() FROM adpx_sdk_sessions PREWHERE toYYYYMM(created_at) >= 202601 WHERE created_at >= today() - 7 LIMIT 1000"
+        warnings = _validate_sql_query(clean_query)
+        if warnings:
+            return False, f"unexpected warnings on clean single-table query: {warnings}"
+
+        return True, "fan-out + toYYYYMM heuristics: no false positives on fixed PR #357 shapes, catch buggy fan-out and unpruned created_at"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

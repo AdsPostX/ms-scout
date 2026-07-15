@@ -3833,6 +3833,76 @@ _LARGE_TABLES = (
     "adpx_conversionsdetails",
 )
 
+# Event-grain fact tables that can carry multiple rows per (session_id, campaign_id).
+# Joining two of these directly — without pre-aggregating each side to one row per
+# join key first, in its own CTE or derived subquery — fans out and inflates
+# sums/counts. This is the bug class fixed in PR #357 (publisher_health_ad_metrics,
+# get_advertiser_revenue_projection._fetch_baseline).
+_FACT_TABLES = (
+    "adpx_conversionsdetails",
+    "adpx_impressions_details",
+    "adpx_tracked_clicks",
+)
+
+
+def _fact_table_fanout_warnings(sql: str) -> list:
+    """
+    Heuristic fan-out detector.
+
+    For each reference to a table in _FACT_TABLES, finds its innermost enclosing
+    parenthesized scope (a `WITH x AS (...)` CTE body or an inline `FROM (...)`
+    derived subquery — the codebase uses both styles) and checks whether that
+    scope contains a GROUP BY. A reference with no enclosing scope at all, or an
+    enclosing scope with no GROUP BY, is "unaggregated". Warns when 2+ distinct
+    fact tables have unaggregated references — that's the shape that fans out.
+
+    Paren-depth tracking, not a full SQL parser — a query with 2+ raw fact tables
+    still slips through if it's laid out unusually, but every real query in this
+    codebase (WITH-CTE or inline-derived-subquery style) parses correctly.
+    """
+    warnings: list = []
+    try:
+        sql_upper = sql.upper()
+        n = len(sql)
+        stack: list = []
+        enclosing_start = [None] * n
+        enclosing_end: dict = {}
+        for idx, ch in enumerate(sql):
+            if ch == "(":
+                enclosing_start[idx] = stack[-1] if stack else None
+                stack.append(idx)
+            elif ch == ")":
+                open_idx = stack.pop() if stack else None
+                enclosing_start[idx] = open_idx
+                if open_idx is not None:
+                    enclosing_end[open_idx] = idx
+            else:
+                enclosing_start[idx] = stack[-1] if stack else None
+
+        unaggregated: list = []
+        for table in _FACT_TABLES:
+            for m in re.finditer(r"\b" + table.upper() + r"\b", sql_upper):
+                open_idx = enclosing_start[m.start()]
+                if open_idx is None:
+                    unaggregated.append(table)
+                    break
+                close_idx = enclosing_end.get(open_idx, n)
+                if "GROUP BY" not in sql_upper[open_idx:close_idx]:
+                    unaggregated.append(table)
+                    break
+
+        distinct_unaggregated = sorted(set(unaggregated))
+        if len(distinct_unaggregated) >= 2:
+            warnings.append(
+                f"possible fan-out: {', '.join(distinct_unaggregated)} joined without "
+                "each side pre-aggregated (GROUP BY on the join key in its own CTE or "
+                "derived subquery) before the join — see PR #357"
+            )
+    except Exception:
+        return []
+
+    return warnings
+
 
 def _validate_sql_query(sql: str) -> list:
     """
@@ -3842,6 +3912,11 @@ def _validate_sql_query(sql: str) -> list:
     callers should log the warnings but proceed. Heuristics:
       - References a large table without PREWHERE → warn
       - References a large table without any created_at filter → warn
+      - Filters created_at without a toYYYYMM(created_at) partition-pruning wrap
+        → warn (all 4 _LARGE_TABLES are partitioned by toYYYYMM(created_at); a
+        bare created_at filter alone still forces a scan of every month partition)
+      - Joins 2+ event-grain fact tables without pre-aggregating each side first
+        → warn (fan-out risk, see PR #357 and _fact_table_fanout_warnings)
       - Lacks any LIMIT clause → warn
     """
     warnings: list = []
@@ -3855,6 +3930,12 @@ def _validate_sql_query(sql: str) -> list:
     has_created_at = bool(
         re.search(r"\b(?:PREWHERE|WHERE)\b[\s\S]*?\bCREATED_AT\b", sql_upper)
     )
+    has_yyyymm_filter = bool(
+        re.search(
+            r"\b(?:PREWHERE|WHERE)\b[\s\S]*?TOYYYYMM\s*\(\s*[\w.]*CREATED_AT",
+            sql_upper,
+        )
+    )
     has_limit = bool(re.search(r"\bLIMIT\b", sql_upper))
 
     for table in _LARGE_TABLES:
@@ -3863,6 +3944,13 @@ def _validate_sql_query(sql: str) -> list:
                 warnings.append(f"missing PREWHERE on large table: {table}")
             if not has_created_at:
                 warnings.append(f"no date filter on large table: {table}")
+            elif not has_yyyymm_filter:
+                warnings.append(
+                    f"created_at filtered without toYYYYMM() wrap on large table: "
+                    f"{table} — skips partition pruning, scans every month"
+                )
+
+    warnings.extend(_fact_table_fanout_warnings(sql))
 
     if not has_limit:
         warnings.append("no LIMIT clause")
