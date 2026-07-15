@@ -3203,37 +3203,64 @@ def get_advertiser_revenue_projection(
     def _fetch_baseline():
         return ch.query(
             """
-            SELECT
-                cast(i.pid AS String)          AS publisher_pid,
-                any(u.organization)            AS publisher_name,
-                count()                        AS impressions_30d,
-                count(DISTINCT i.session_id)   AS sessions_30d,
-                coalesce(sum(toFloat64OrNull(cd.revenue)), 0) AS revenue_30d,
-                coalesce(sum(toFloat64OrNull(cd.payout)),  0) AS payout_30d,
-                count(DISTINCT cd.id)           AS conversions_30d,
-                coalesce(any(clicks_agg.clicks_30d), 0) AS clicks_30d
-            FROM adpx_impressions_details i
-            JOIN from_airbyte_campaigns c
-                ON i.campaign_id = cast(c.id AS UInt64)
-            LEFT JOIN from_airbyte_users u
-                ON i.pid = toString(u.id)
-            LEFT JOIN adpx_conversionsdetails cd
-                ON i.session_id = cd.session_id
-                AND cd.campaign_id = i.campaign_id
-                AND toYYYYMM(cd.created_at) >= toYYYYMM(today() - 44)
-            LEFT JOIN (
+            WITH impr AS (
+                -- Pre-aggregate impressions to one row per (publisher, session, campaign)
+                -- BEFORE joining to conversions, so a session/campaign with many
+                -- conversion rows cannot fan-out against a session/campaign with many
+                -- impression rows and inflate impressions_30d/revenue_30d/payout_30d.
+                SELECT
+                    cast(i.pid AS String) AS publisher_pid,
+                    i.session_id,
+                    i.campaign_id,
+                    count() AS impressions
+                FROM adpx_impressions_details i
+                JOIN from_airbyte_campaigns c
+                    ON i.campaign_id = cast(c.id AS UInt64)
+                WHERE c.adv_name ILIKE %(adv)s
+                  AND c.deleted_at IS NULL
+                  AND i.created_at >= today() - 30
+                  AND toYYYYMM(i.created_at) >= toYYYYMM(today() - 30)
+                GROUP BY publisher_pid, i.session_id, i.campaign_id
+            ),
+            conv AS (
+                -- Pre-aggregate conversions to one row per (session, campaign) for the
+                -- same reason.
+                SELECT
+                    cd.session_id,
+                    cd.campaign_id,
+                    count()                          AS conversions,
+                    sum(toFloat64OrNull(cd.revenue)) AS revenue,
+                    sum(toFloat64OrNull(cd.payout))  AS payout
+                FROM adpx_conversionsdetails cd
+                WHERE toYYYYMM(cd.created_at) >= toYYYYMM(today() - 44)
+                GROUP BY cd.session_id, cd.campaign_id
+            ),
+            clicks_agg AS (
                 SELECT cast(tc.user_id AS String) AS pub_id, count() AS clicks_30d
                 FROM adpx_tracked_clicks tc
                 INNER JOIN from_airbyte_campaigns c2 ON tc.campaign_id = cast(c2.id AS UInt64)
                 WHERE c2.adv_name ILIKE %(adv)s
                   AND c2.deleted_at IS NULL
                   AND tc.created_at >= today() - 30
+                  AND toYYYYMM(tc.created_at) >= toYYYYMM(today() - 30)
                 GROUP BY tc.user_id
-            ) clicks_agg ON clicks_agg.pub_id = cast(i.pid AS String)
-            WHERE c.adv_name ILIKE %(adv)s
-              AND c.deleted_at IS NULL
-              AND i.created_at >= today() - 30
-              AND toYYYYMM(i.created_at) >= toYYYYMM(today() - 30)
+            )
+            SELECT
+                impr.publisher_pid                      AS publisher_pid,
+                any(u.organization)                      AS publisher_name,
+                sum(impr.impressions)                    AS impressions_30d,
+                count(DISTINCT impr.session_id)          AS sessions_30d,
+                coalesce(sum(conv.revenue), 0)            AS revenue_30d,
+                coalesce(sum(conv.payout), 0)             AS payout_30d,
+                coalesce(sum(conv.conversions), 0)        AS conversions_30d,
+                any(clicks_agg.clicks_30d)                AS clicks_30d
+            FROM impr
+            LEFT JOIN conv
+                ON conv.session_id = impr.session_id AND conv.campaign_id = impr.campaign_id
+            LEFT JOIN from_airbyte_users u
+                ON impr.publisher_pid = toString(u.id)
+            LEFT JOIN clicks_agg
+                ON clicks_agg.pub_id = impr.publisher_pid
             GROUP BY publisher_pid
             ORDER BY revenue_30d DESC
             LIMIT 30

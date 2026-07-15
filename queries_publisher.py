@@ -521,16 +521,17 @@ def publisher_health_ad_metrics(
     sql = """
     SELECT
         s.placement,
-        count(DISTINCT i.id)                                    AS impressions,
-        count(DISTINCT cd.id)                                   AS conversions,
-        coalesce(sum(toFloat64OrNull(cd.revenue)), 0)           AS revenue,
-        coalesce(sum(toFloat64OrNull(cd.payout)), 0)            AS payout
+        sum(i.impr_n)                          AS impressions,
+        coalesce(sum(cd.conv_n), 0)            AS conversions,
+        coalesce(sum(cd.revenue), 0)           AS revenue,
+        coalesce(sum(cd.payout), 0)            AS payout
     FROM (
-        SELECT session_id, id, campaign_id
+        SELECT session_id, campaign_id, count() AS impr_n
         FROM adpx_impressions_details
         PREWHERE pid = {pid_str: String}
             AND toYYYYMM(created_at) >= {partition: UInt32}
         WHERE created_at >= today() - {days: UInt32}
+        GROUP BY session_id, campaign_id
     ) i
     JOIN (
         SELECT session_id, placement
@@ -552,16 +553,19 @@ def publisher_health_ad_metrics(
     sql += """
     ) s ON s.session_id = i.session_id
     LEFT JOIN (
-        -- Deduplicate conversions so one conversion row cannot fan-out against
-        -- multiple impression rows sharing the same session_id + campaign_id,
-        -- which would cause revenue/payout to be summed multiple times.
-        SELECT session_id, id, campaign_id,
-               any(revenue) AS revenue,
-               any(payout)  AS payout
+        -- Pre-aggregate conversions to one row per (session_id, campaign_id)
+        -- BEFORE joining, so a session/campaign with many conversion rows
+        -- cannot fan-out against a session/campaign with many impression rows
+        -- and multiply revenue/payout. count()/sum() here are real conversion
+        -- counts and totals, not row-count artifacts of the join.
+        SELECT session_id, campaign_id,
+               count()                       AS conv_n,
+               sum(toFloat64OrNull(revenue)) AS revenue,
+               sum(toFloat64OrNull(payout))  AS payout
         FROM adpx_conversionsdetails
         PREWHERE user_id = {pid: UInt64}
             AND toYYYYMM(created_at) >= {extended_partition: UInt32}
-        GROUP BY session_id, id, campaign_id
+        GROUP BY session_id, campaign_id
     ) cd ON cd.session_id = i.session_id AND cd.campaign_id = i.campaign_id
     GROUP BY s.placement
     """
