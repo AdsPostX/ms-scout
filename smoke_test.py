@@ -1390,16 +1390,94 @@ def test_validate_sql_query_cross_cte_scoping():
         return False, str(e)
 
 
+@test("_fact_table_fanout_warnings catches fact tables joined then grouped in the same scope (CodeRabbit PR #359)")
+def test_fanout_detects_same_scope_post_join_aggregation():
+    try:
+        from scout_agent import _fact_table_fanout_warnings
+
+        # Both fact tables joined directly inside one CTE, GROUP BY only at the
+        # end — the join already ran at full event grain before the group-by.
+        buggy_same_scope = """
+        WITH joined AS (
+            SELECT c.campaign_id, count() AS n
+            FROM adpx_conversionsdetails c
+            JOIN adpx_tracked_clicks k ON c.click_id = k.click_id
+            GROUP BY c.campaign_id
+        )
+        SELECT * FROM joined LIMIT 100
+        """
+        warnings = _fact_table_fanout_warnings(buggy_same_scope)
+        if not any("fan-out" in w for w in warnings):
+            return False, f"expected fan-out warning for same-scope join-then-group, got: {warnings}"
+
+        # Each fact table pre-aggregated in its own CTE before the parent join —
+        # no fan-out.
+        fixed_separate_ctes = """
+        WITH c AS (
+            SELECT campaign_id, count() AS n FROM adpx_conversionsdetails GROUP BY campaign_id
+        ), k AS (
+            SELECT campaign_id, count() AS n FROM adpx_tracked_clicks GROUP BY campaign_id
+        )
+        SELECT c.campaign_id FROM c JOIN k ON c.campaign_id = k.campaign_id LIMIT 100
+        """
+        warnings = _fact_table_fanout_warnings(fixed_separate_ctes)
+        if warnings:
+            return False, f"expected no fan-out warning for pre-aggregated CTEs, got: {warnings}"
+
+        return True, "same-scope post-join GROUP BY no longer counts as pre-aggregation; separate-CTE pre-aggregation still clears"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_validate_sql_query surfaces a sentinel warning (not a raise or silent skip) on malformed parens (CodeRabbit PR #359)")
+def test_validate_sql_query_malformed_parens_sentinel():
+    try:
+        from scout_agent import _validate_sql_query
+
+        unclosed = "SELECT * FROM adpx_conversionsdetails WHERE (a = 1 LIMIT 100"
+        warnings = _validate_sql_query(unclosed)
+        if not any("could not parse parentheses" in w for w in warnings):
+            return False, f"expected 'could not parse parentheses' sentinel for unclosed paren, got: {warnings}"
+
+        stray_close = "SELECT * FROM adpx_conversionsdetails WHERE a = 1) LIMIT 100"
+        warnings = _validate_sql_query(stray_close)
+        if not any("could not parse parentheses" in w for w in warnings):
+            return False, f"expected 'could not parse parentheses' sentinel for stray ')', got: {warnings}"
+
+        return True, "_validate_sql_query never raises on malformed parens and surfaces an explicit sentinel warning instead of silently skipping scope-aware checks"
+    except Exception as e:
+        return False, str(e)
+
+
 @test("run_sql_query surfaces _validate_sql_query warnings in data_quality, not just server logs (CodeRabbit PR #359)")
 def test_run_sql_query_surfaces_validation_warnings():
     try:
-        import inspect
-        from scout_agent import run_sql_query
-        src = inspect.getsource(run_sql_query)
-        if "sql_warnings" not in src:
-            return False, "run_sql_query no longer captures _validate_sql_query's return value into a named variable"
-        if 'data_quality["warnings"]' not in src:
-            return False, "run_sql_query does not attach validation warnings to the data_quality response field — they're still log-only"
+        import scout_agent
+        stub_warnings = ["missing PREWHERE on large table: adpx_conversionsdetails"]
+        orig_validate = scout_agent._validate_sql_query
+        orig_get_ch = scout_agent._get_ch_client
+
+        class _FakeResult:
+            result_rows = [("acme", 42)]
+            column_names = ["name", "value"]
+
+        class _FakeClient:
+            def query(self, sql, settings=None):
+                return _FakeResult()
+
+        try:
+            scout_agent._validate_sql_query = lambda sql: list(stub_warnings)
+            scout_agent._get_ch_client = lambda: _FakeClient()
+            result = scout_agent.run_sql_query("SELECT name, value FROM adpx_conversionsdetails")
+        finally:
+            scout_agent._validate_sql_query = orig_validate
+            scout_agent._get_ch_client = orig_get_ch
+
+        dq = result.get("data_quality", {})
+        if dq.get("warnings") != stub_warnings:
+            return False, f"expected data_quality['warnings'] == {stub_warnings}, got: {dq.get('warnings')}"
+        if "1 validation warning" not in dq.get("note", ""):
+            return False, f"expected note to mention warning count, got: {dq.get('note')}"
         return True, "run_sql_query wires _validate_sql_query warnings into the returned data_quality block"
     except Exception as e:
         return False, str(e)
