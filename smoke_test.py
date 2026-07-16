@@ -1330,6 +1330,81 @@ def test_validate_sql_query_fanout_and_yyyymm():
         return False, str(e)
 
 
+@test("_validate_sql_query scopes toYYYYMM checks per-table, doesn't leak a CTE's filter to a sibling table (CodeRabbit PR #359)")
+def test_validate_sql_query_cross_cte_scoping():
+    try:
+        from scout_agent import _validate_sql_query, _fact_table_fanout_warnings
+        import scout_agent
+
+        # One large table correctly filtered with toYYYYMM(created_at) inside its
+        # own CTE; a second large table referenced at the top level with only a
+        # bare created_at filter. The correct CTE's filter must NOT mask the
+        # missing toYYYYMM wrap on the second table.
+        cross_cte = """
+        WITH sessions AS (
+            SELECT session_id, count() AS n
+            FROM adpx_sdk_sessions
+            PREWHERE toYYYYMM(created_at) = toYYYYMM(now())
+            GROUP BY session_id
+        )
+        SELECT s.session_id, i.impression_id
+        FROM sessions s
+        JOIN adpx_impressions_details i ON s.session_id = i.session_id
+        WHERE i.created_at >= now() - INTERVAL 1 DAY
+        LIMIT 100
+        """
+        warnings = _validate_sql_query(cross_cte)
+        if not any("toYYYYMM" in w and "adpx_impressions_details" in w for w in warnings):
+            return False, f"expected toYYYYMM warning on adpx_impressions_details, leaked from sibling CTE: {warnings}"
+        if any("adpx_sdk_sessions" in w for w in warnings):
+            return False, f"adpx_sdk_sessions is correctly filtered in its own CTE, should not warn: {warnings}"
+
+        # A plain function call at the top level, e.g. toYYYYMM(created_at) inside
+        # a top-level WHERE, must NOT be masked out by the CTE-scoping logic —
+        # only parens containing a SELECT (real subqueries/CTEs) get masked.
+        top_level_yyyymm = """
+        SELECT c.campaign_id, k.campaign_id
+        FROM adpx_conversionsdetails c
+        JOIN adpx_tracked_clicks k ON c.campaign_id = k.campaign_id
+        WHERE toYYYYMM(c.created_at) = toYYYYMM(now())
+        LIMIT 100
+        """
+        warnings = _validate_sql_query(top_level_yyyymm)
+        if any("toYYYYMM" in w for w in warnings):
+            return False, f"toYYYYMM() at the top level was incorrectly masked as if inside a CTE: {warnings}"
+
+        # A SQL string _fact_table_fanout_warnings can't parse must surface a
+        # non-silent sentinel warning, not an empty list (CodeRabbit finding:
+        # bare `except Exception: return []` hid parse failures as "clean").
+        orig_paren_scopes = scout_agent._paren_scopes
+        try:
+            scout_agent._paren_scopes = lambda sql: (_ for _ in ()).throw(ValueError("forced parse failure"))
+            forced = _fact_table_fanout_warnings("SELECT 1 FROM adpx_conversionsdetails")
+            if not forced or "unavailable" not in forced[0]:
+                return False, f"expected non-empty sentinel warning on parse failure, got: {forced}"
+        finally:
+            scout_agent._paren_scopes = orig_paren_scopes
+
+        return True, "toYYYYMM checks are scope-aware (no cross-CTE leakage), top-level function calls unaffected, parse failures surface a sentinel warning"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("run_sql_query surfaces _validate_sql_query warnings in data_quality, not just server logs (CodeRabbit PR #359)")
+def test_run_sql_query_surfaces_validation_warnings():
+    try:
+        import inspect
+        from scout_agent import run_sql_query
+        src = inspect.getsource(run_sql_query)
+        if "sql_warnings" not in src:
+            return False, "run_sql_query no longer captures _validate_sql_query's return value into a named variable"
+        if 'data_quality["warnings"]' not in src:
+            return False, "run_sql_query does not attach validation warnings to the data_quality response field — they're still log-only"
+        return True, "run_sql_query wires _validate_sql_query warnings into the returned data_quality block"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:
