@@ -337,7 +337,7 @@ class ThresholdManager:
                 )
 
             overall = _q_mod.benchmark_overall_cvr(ch)
-            if overall.get("error"):
+            if "error" in overall:
                 log.warning(
                     f"Tier 4 baseline query failed, skipping fallback benchmark: {overall['error']}"
                 )
