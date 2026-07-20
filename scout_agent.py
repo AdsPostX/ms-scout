@@ -594,6 +594,11 @@ def _load_performance_benchmarks() -> dict:
         # MaxBounty, FlexOffers, ShareASale, Rakuten, and Awin offer (MS has never run them).
         # Low confidence (0.35) so they rank below real-data offers but still surface.
         overall = _q.benchmark_overall_cvr(ch)
+        if overall.get("error"):
+            log.warning(
+                f"Tier 4 baseline query failed, skipping fallback benchmark: {overall['error']}"
+            )
+            overall = {}
         by_payout_type = {"_all": overall} if overall else {}
         if overall:
             log.info(
