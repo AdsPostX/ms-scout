@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -14,6 +15,11 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # SQL helpers (shared across all query modules — imported from here)
 # ---------------------------------------------------------------------------
+
+def _validate_as_of_date(as_of_date: str) -> None:
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', as_of_date):
+        raise ValueError(f"as_of_date must be YYYY-MM-DD, got: {as_of_date!r}")
+
 
 def _ch_date_filter(days: int) -> str:
     """Return the ClickHouse SQL fragment for filtering rows within the last *days* days.

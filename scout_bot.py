@@ -101,11 +101,11 @@ _BOT_USER_ID: str = ""  # cached at startup — never changes
 _SCOUT_HQ_CHANNEL  = "C0AQEECF800"   # #bot-qa (was #scout-qa, was #scout-hq)
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int, tag: str = "scout-bot") -> int:
     try:
         return int(os.getenv(name, str(default)))
     except (ValueError, TypeError):
-        log.warning("[scout-bot] %s is not a valid integer; using default %d", name, default)
+        log.warning("[%s] %s is not a valid integer; using default %d", tag, name, default)
         return default
 
 
