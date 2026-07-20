@@ -6,7 +6,7 @@ import os
 import pathlib
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from scout_ch import _get_ch_client
 

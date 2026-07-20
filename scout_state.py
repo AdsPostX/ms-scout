@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import pathlib
-import random
 import re
 import threading
 import time
@@ -34,7 +33,6 @@ _LAUNCHED_OFFERS_FILE    = _DATA_DIR / "launched_offers.json"
 _PULSE_STATE_FILE        = _DATA_DIR / "pulse_state.json"
 _WATCHDOG_STATE_PATH     = _DATA_DIR / "watchdog_state.json"
 _NOTION_NOTIFIED_FILE    = _DATA_DIR / "notion_notified.json"
-_LEARNINGS_FILE          = _DATA_DIR / "learnings.json"
 _LEARNED_BENCHMARKS_FILE = _DATA_DIR / "learned_benchmarks.json"
 _THRESHOLD_OVERRIDES_FILE = _DATA_DIR / "threshold_overrides.json"
 _THRESHOLD_CHANGELOG_FILE = _DATA_DIR / "threshold_changelog.jsonl"
@@ -504,25 +502,6 @@ def _load_watchdog_state() -> dict:
 def _save_watchdog_state(state: dict) -> None:
     _WATCHDOG_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(_WATCHDOG_STATE_PATH, state)
-
-
-# ── Learnings store ────────────────────────────────────────────────────────────
-
-def _load_learnings() -> dict:
-    try:
-        if _LEARNINGS_FILE.exists():
-            return json.loads(_LEARNINGS_FILE.read_text())
-    except Exception:
-        pass
-    return {"corrections": [], "positive_signals": []}
-
-
-def _save_learnings(data: dict):
-    try:
-        _LEARNINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(_LEARNINGS_FILE, data)
-    except Exception as e:
-        log.warning(f"Could not persist learnings: {e}")
 
 
 # ── Notion watcher notified state ──────────────────────────────────────────────

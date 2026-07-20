@@ -695,68 +695,6 @@ def _fetch_brief_for_approve(advertiser: str, offer_payload: dict) -> dict:
         "risk_flag":           "",
     }
 
-def _make_copy_for_brief(brief_data: dict, offer_payload: dict) -> dict:
-    """
-    Build baseline copy dict for _handle_approve / _post_offer_queue_card / _write_to_notion_queue.
-    Returns keys: title, description, cta (dict), short_headline, short_desc, bottom_line.
-
-    This is the SYNCHRONOUS fallback. AI-quality copy is generated asynchronously by
-    _generate_offer_copy() and PATCHed onto the Notion page within ~10 seconds of approval.
-    Callers must use: copy.get("title"), copy.get("cta", {}).get("yes"), etc.
-    """
-    advertiser  = brief_data.get("advertiser", "")
-    description = (brief_data.get("description") or offer_payload.get("description") or "").strip()
-    payout_type = (brief_data.get("payout_type") or offer_payload.get("payout_type", "")).upper()
-    portal_url  = brief_data.get("portal_url", "")
-    network     = brief_data.get("network", "Impact")
-
-    # Build a safe title from the first complete sentence (never truncate mid-word)
-    first_sent = description.split(".")[0].strip() if description else ""
-    if len(first_sent) > 90:
-        first_sent = first_sent[:87].rsplit(" ", 1)[0] + "..."
-    title = first_sent if first_sent else f"Exclusive offer from {advertiser}"
-
-    # Short headline: title truncated to 60 at a word boundary
-    if len(title) > 60:
-        short_headline = title[:57].rsplit(" ", 1)[0] + "..."
-    else:
-        short_headline = title
-
-    # Description and short_desc from offer description
-    desc = description[:220] if description else ""
-    if len(description) > 140:
-        short_desc = description[:137].rsplit(" ", 1)[0] + "..."
-    else:
-        short_desc = description[:140]
-
-    # CTAs: specific to commitment level, not just payout type
-    cta_map = {
-        "CPL":        {"yes": "Get my free quote", "no": "Not now"},
-        "CPS":        {"yes": "Shop now", "no": "Not now"},
-        "CPA":        {"yes": "Claim offer", "no": "Not now"},
-        "MOBILE_APP": {"yes": "Download free", "no": "Not now"},
-        "APP_INSTALL":{"yes": "Download free", "no": "Not now"},
-        "CPC":        {"yes": "Learn more", "no": "Not now"},
-    }
-    cta = cta_map.get(payout_type, {"yes": "Get started", "no": "Not now"})
-
-    if portal_url:
-        bottom_line = f"Ready to build? <{portal_url}|View on {network}> to pull creatives, then add to the MS platform."
-    else:
-        bottom_line = "Ready to build? Pull creatives from the network portal and add to the MS platform."
-
-    return {
-        "title":          title,
-        "short_headline": short_headline,
-        "description":    desc,
-        "short_desc":     short_desc,
-        "cta":            cta,          # single dict {yes: ..., no: ...}
-        "bottom_line":    bottom_line,
-        # Legacy list keys kept for _build_brief_blocks() compatibility
-        "titles":         [title],
-        "ctas":           [cta],
-        "targeting":      "",
-    }
 
 def _record_queued_offer(
     advertiser: str,
@@ -2007,23 +1945,6 @@ def _handle_snooze_submit(payload: dict, web: WebClient) -> None:
         log.warning("[snooze_submit] chat_update failed: %s", e)
 
 
-def _extract_view_submission_context(payload: dict) -> dict:
-    """Extract channel + user_id from a view_submission payload.
-
-    view_submission carries context in view.private_metadata, NOT in
-    container.channel_id (which doesn't exist on view payloads).
-    """
-    user_id = payload.get("user", {}).get("id", "")
-    view = payload.get("view", {})
-    try:
-        meta = json.loads(view.get("private_metadata", "{}"))
-        channel = meta.get("channel", "")
-    except Exception as e:
-        log.warning(f"Could not parse view.private_metadata: {e}")
-        channel = ""
-    return {"user_id": user_id, "channel": channel}
-
-
 def _handle_view_submission(req: SocketModeRequest, web: WebClient) -> None:
     """Route view_submission payloads by view.callback_id."""
     payload = req.payload
@@ -2193,7 +2114,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
     /scout-health — Codebase line-count bars + deferred test items
     /scout-help   — Ephemeral reference card (capabilities, commands, limits)
     """
-    from scout_agent import get_demand_queue_status, get_scout_status, get_publisher_competitive_landscape
+    from scout_agent import get_scout_status, get_publisher_competitive_landscape
 
     payload  = req.payload
     command  = payload.get("command", "")

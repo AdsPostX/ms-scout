@@ -20,17 +20,14 @@ import requests
 import queries as _q
 from dotenv import load_dotenv
 from slack_sdk.socket_mode import SocketModeClient
-from slack_sdk.socket_mode.request import SocketModeRequest
-from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web import WebClient
 
-from scout_agent import ask
 from scout_thresholds import _manager as _tm
 from scout_notion import (
     _copy_coalescer_loop,
     _notion_watcher_loop,
 )
-from scout_ui_kit import Card, ResponsePattern, Severity, Surface, enforce, wrap_response, context_block
+from scout_ui_kit import Card, ResponsePattern, Severity, Surface, wrap_response
 from scout_ch import _query_cvr_anomaly, _query_expiring_campaigns
 from scout_state import (
     _DATA_DIR,

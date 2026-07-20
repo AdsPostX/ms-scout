@@ -283,28 +283,6 @@ def _patch_notion_copy(notion_url: str, ai_copy: dict) -> None:
     except Exception as e:
         log.warning(f"_patch_notion_copy error: {e}")
 
-def _enrich_notion_with_ai_copy(
-    notion_url: str,
-    advertiser: str,
-    description: str,
-    payout_type: str,
-    category: str,
-    payout: str = "",
-    geo: str = "US",
-) -> None:
-    """
-    Background-thread target: generate AI copy and patch it onto a Notion queue page.
-    Safe to call from threading.Thread — never raises.
-    """
-    try:
-        ai_copy = _generate_offer_copy(advertiser, description, payout_type, category, payout, geo)
-        if ai_copy and notion_url:
-            _patch_notion_copy(notion_url, ai_copy)
-            log.info(f"AI copy enrichment complete for {advertiser}")
-        else:
-            log.info(f"AI copy skipped for {advertiser} (no copy returned)")
-    except Exception as e:
-        log.warning(f"AI copy enrichment error for {advertiser}: {e}")
 
 def _generate_offer_copy_batch(offers: list[dict]) -> list[dict | None]:
     """

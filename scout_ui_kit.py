@@ -288,22 +288,6 @@ def _markdown_block(text: str) -> dict:
     return {"type": "markdown", "text": text}
 
 
-def _rich_text_code(code: str, language: str = "") -> dict:
-    """Return a rich_text block wrapping preformatted code.
-
-    Use instead of fenced code blocks — avoids horizontal scroll on iOS
-    (Scout mobile rule 2). language hint (e.g. "sql", "python") enables
-    syntax highlighting where Slack supports it.
-    """
-    preformatted: dict = {
-        "type": "rich_text_preformatted",
-        "elements": [{"type": "text", "text": code}],
-    }
-    if language:
-        preformatted["language"] = language
-    return {"type": "rich_text", "elements": [preformatted]}
-
-
 # Surfaces where the native markdown block is valid per Block Kit spec.
 # HOME, MODAL, and EPHEMERAL do not support the markdown block type.
 _MESSAGE_SURFACES = frozenset({
@@ -1516,11 +1500,6 @@ def _build_item_card(
     return blocks
 
 
-def _build_action_row(buttons: list[dict]) -> dict:
-    """Canonical actions block. Pass pre-built button element dicts."""
-    return {"type": "actions", "elements": buttons}
-
-
 def _build_publisher_card(
     name: str,
     delta_pct: "float | int | str",
@@ -1814,7 +1793,7 @@ def _build_home_scoreboard_blocks(rollup, alerts) -> list:
         # Omits the block entirely when the key is 0, None, or missing — fail-closed.
         _monthly_target = SCOUT_THRESHOLDS.get("monthly_revenue_target") or 0
         if _monthly_target > 0:
-            from datetime import datetime as _dt2, timezone as _tz2
+            from datetime import datetime as _dt2
             from zoneinfo import ZoneInfo as _ZI
             _mtd_cents = getattr(rollup, "revenue_mtd_cents", 0) or 0
             _target_cents = int(_monthly_target * 100)
