@@ -3452,7 +3452,7 @@ def test_image_content_block_shape():
 
     with patch("scout_agent._route_deterministic", return_value=None), \
          patch("scout_agent._CFG", _fake_cfg), \
-         patch("scout_agent.anthropic.Anthropic", return_value=object()), \
+         patch("scout_agent._get_anthropic_client", return_value=object()), \
          patch("scout_agent._run_tool_loop", side_effect=_capture):
         scout_agent.ask_with_attachment(
             user_message="describe",
