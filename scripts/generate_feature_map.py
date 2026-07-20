@@ -151,6 +151,11 @@ def generate_markdown(tools, handlers, categories):
         for tool_name in sorted(domain_tools.keys()):
             desc = tools.get(tool_name, "")
             handler = handlers.get(tool_name, "?")
+            if handler == "?":
+                raise ValueError(
+                    f"'{tool_name}' has no TOOL_MAP entry in scout_agent.py -- "
+                    "add one before regenerating, rather than letting it print as Working"
+                )
             status = "✓ Working" if handler != "deferred" else "⏳ Deferred"
             lines.append(f"| `{tool_name}` | {desc} | {handler}() | {status} |")
 
