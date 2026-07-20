@@ -5695,13 +5695,15 @@ def test_campaigns_id_cast_guarded_against_null_coercion():
     )
 
 
-@test("offer_scraper — _safe_json parses well-formed JSON and returns None + warns on parse failure")
+@test("offer_scraper — _safe_json parses well-formed JSON and returns sentinel + warns on parse failure")
 def test_offer_scraper_safe_json():
     """Shared helper (extracted from 5 duplicated ShareASale/Rakuten/Awin/TUNE/Everflow
-    try/except blocks) must preserve both the success and failure contract: parsed dict
-    on success, None + a WARNING log carrying the network label on failure."""
+    try/except blocks) must preserve both the success and failure contract: parsed value
+    on success (including a legitimate JSON `null` body, which must NOT be confused with
+    a parse failure), and the _JSON_PARSE_FAILED sentinel + a WARNING log carrying the
+    network label on failure."""
     import logging
-    from offer_scraper import _safe_json
+    from offer_scraper import _safe_json, _JSON_PARSE_FAILED
 
     class _FakeResp:
         def __init__(self, json_result=None, json_exc=None, text=""):
@@ -5727,7 +5729,13 @@ def test_offer_scraper_safe_json():
     result = _safe_json(ok_resp, "ShareASale")
     assert result == {"data": [{"merchantId": "1"}]}, f"Expected parsed dict on success, got {result!r}"
 
-    # Failure path: resp.json() raising returns None and logs a WARNING with the network label.
+    # Success path: a legitimate JSON `null` body must pass through as None, not be
+    # conflated with a parse failure (that's the whole reason for the sentinel).
+    null_resp = _FakeResp(json_result=None)
+    result = _safe_json(null_resp, "Awin")
+    assert result is None, f"Expected None passthrough for a legitimate JSON null body, got {result!r}"
+
+    # Failure path: resp.json() raising returns the sentinel and logs a WARNING with the network label.
     bad_resp = _FakeResp(json_exc=ValueError("Expecting value"), text="<html>rate limited</html>")
     handler = _CaptureHandler()
     logger = logging.getLogger("offer_scraper")
@@ -5737,13 +5745,13 @@ def test_offer_scraper_safe_json():
     finally:
         logger.removeHandler(handler)
 
-    assert result is None, f"Expected None sentinel on json() failure, got {result!r}"
+    assert result is _JSON_PARSE_FAILED, f"Expected _JSON_PARSE_FAILED sentinel on json() failure, got {result!r}"
     warnings = [r for r in handler.records if r.levelno == logging.WARNING]
     assert warnings, "Expected a WARNING log on resp.json() failure"
     assert any("Rakuten" in r.getMessage() for r in warnings), (
         f"Expected network label 'Rakuten' in warning message, got: {[r.getMessage() for r in warnings]}"
     )
-    return True, "_safe_json: returns parsed JSON on success, None + labeled warning on failure"
+    return True, "_safe_json: returns parsed JSON on success (None passthrough for null body), sentinel + labeled warning on failure"
 
 
 if __name__ == "__main__":
