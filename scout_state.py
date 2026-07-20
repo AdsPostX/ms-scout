@@ -135,8 +135,8 @@ def _load_briefs() -> dict:
     try:
         if _STATE_FILE.exists():
             return json.loads(_STATE_FILE.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Could not load brief state from {_STATE_FILE}: {e}")
     return {}
 
 
@@ -174,8 +174,8 @@ def _load_thread_contexts() -> dict:
     try:
         if _THREAD_CTX_FILE.exists():
             return json.loads(_THREAD_CTX_FILE.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Could not load thread context from {_THREAD_CTX_FILE}: {e}")
     return {}
 
 
@@ -220,8 +220,8 @@ def _load_launched_offers() -> dict:
     try:
         if _LAUNCHED_OFFERS_FILE.exists():
             return json.loads(_LAUNCHED_OFFERS_FILE.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Could not load launched_offers from {_LAUNCHED_OFFERS_FILE}: {e}")
     return {}
 
 
@@ -496,8 +496,8 @@ def _load_watchdog_state() -> dict:
     try:
         if _WATCHDOG_STATE_PATH.exists():
             return json.loads(_WATCHDOG_STATE_PATH.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Could not load watchdog state from {_WATCHDOG_STATE_PATH}: {e}")
     return {}
 
 
@@ -532,8 +532,8 @@ def _load_notion_notified() -> dict:
     try:
         if _NOTION_NOTIFIED_FILE.exists():
             return json.loads(_NOTION_NOTIFIED_FILE.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Could not load Notion-notified state from {_NOTION_NOTIFIED_FILE}: {e}")
     return {}
 
 

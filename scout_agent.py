@@ -2680,7 +2680,8 @@ def get_pulse_summary() -> dict:
 
         try:
             currently_active = [s.alert_name for s in _ar.current_state()]
-        except Exception:
+        except Exception as e:
+            log.warning(f"Could not load alert_registry current_state: {e}")
             currently_active = []
 
         fired_names = [k for k, v in fired_today.items() if v]

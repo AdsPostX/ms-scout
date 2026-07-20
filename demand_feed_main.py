@@ -176,7 +176,8 @@ def _now_chicago() -> datetime:
 def _load_state() -> dict:
     try:
         return json.loads(_SCRAPER_STATE.read_text())
-    except Exception:
+    except Exception as e:
+        log.warning(f"Could not load scraper state from {_SCRAPER_STATE}: {e}")
         return {}
 
 
@@ -1329,7 +1330,8 @@ def _load_queue() -> dict:
     """Return {draft_id: draft_dict} from queue.json, or {} on any error."""
     try:
         return json.loads(_QUEUE_FILE.read_text()).get("drafts", {})
-    except Exception:
+    except Exception as e:
+        log.warning(f"Could not load demand queue from {_QUEUE_FILE}: {e}")
         return {}
 
 

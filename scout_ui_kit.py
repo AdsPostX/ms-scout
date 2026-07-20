@@ -807,7 +807,8 @@ def _load_ui_thresholds() -> dict:
     try:
         p = pathlib.Path(__file__).parent / "config" / "scout_thresholds.json"
         return json.loads(p.read_text()) if p.exists() else {}
-    except Exception:
+    except Exception as e:
+        log.warning(f"Could not load UI thresholds config: {e}")
         return {}
 
 
@@ -1579,7 +1580,8 @@ def _queue_item_context(approved_at: str) -> str:
         dt = datetime.fromisoformat(approved_at.replace("Z", "+00:00"))
         days = (datetime.now(timezone.utc) - dt).days
         return "Approved today" if days == 0 else f"Approved {days}d ago"
-    except Exception:
+    except Exception as e:
+        log.warning(f"Could not parse approved_at timestamp {approved_at!r}: {e}")
         return ""
 
 

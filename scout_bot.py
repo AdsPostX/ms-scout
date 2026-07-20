@@ -1158,7 +1158,8 @@ def _run_revenue_check_once(web, channel: str, thread_ts: str = "") -> None:
         return
     try:
         publishers = _query_intraday_revenue_by_publisher(ch, total)
-    except Exception:
+    except Exception as e:
+        log.warning(f"Could not load intraday revenue by publisher: {e}")
         publishers = []
     fallback, blocks = _format_revenue_alert(total, publishers, alert_name="revenue_tracker")
     resp = web.chat_postMessage(channel=channel, thread_ts=_ts, text=fallback, blocks=blocks)
