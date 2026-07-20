@@ -2794,9 +2794,8 @@ def _handle_event_impl(req: SocketModeRequest):
         _body = _remember_m.group(1).strip()
         _permalink = _permalink_for(web, channel, msg_ts)
         try:
-            from scout_agent import record_entity_note
-            import anthropic as _ant
-            _ant_client = _ant.Anthropic(api_key=_CFG.anthropic_api_key)
+            from scout_agent import record_entity_note, _get_anthropic_client
+            _ant_client = _get_anthropic_client(_CFG.anthropic_api_key)
             from scout_telemetry import capture as _lat_capture
             _parse_resp = _lat_capture(
                 "scout/entity-parse",

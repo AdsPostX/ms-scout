@@ -3443,11 +3443,16 @@ def test_image_content_block_shape():
         from scout_agent import AskResult
         return AskResult(text="ok", tools_called=[], duration_ms=1)
 
-    # Ensure ANTHROPIC_API_KEY appears set so ask_with_attachment doesn't early-return
-    os.environ.setdefault("ANTHROPIC_API_KEY", "smoke-fake-key")
+    # Ensure the cached _CFG.anthropic_api_key appears set so ask_with_attachment
+    # doesn't early-return. _CFG is read once at import time (_ScoutCfg.from_env()),
+    # so mutating os.environ here wouldn't be observed — patch the cached config
+    # object directly instead.
+    import dataclasses as _dc
+    _fake_cfg = _dc.replace(scout_agent._CFG, anthropic_api_key="smoke-fake-key")
 
     with patch("scout_agent._route_deterministic", return_value=None), \
-         patch("scout_agent.anthropic.Anthropic", return_value=object()), \
+         patch("scout_agent._CFG", _fake_cfg), \
+         patch("scout_agent._get_anthropic_client", return_value=object()), \
          patch("scout_agent._run_tool_loop", side_effect=_capture):
         scout_agent.ask_with_attachment(
             user_message="describe",
@@ -5359,19 +5364,30 @@ def test_build_opportunity_cards_uses_resolve_icon_image():
 
 @test("Anthropic client constructed once — singleton factory in place")
 def test_anthropic_client_not_constructed_multiple_times():
-    """Inline anthropic.Anthropic() calls must be replaced by _get_anthropic_client()."""
+    """Inline anthropic.Anthropic() calls must be replaced by _get_anthropic_client().
+    Scans scout_agent.py (where the one legitimate construction site lives, inside
+    _get_anthropic_client), plus scout_bot.py and scout_handlers.py — both of which
+    previously bypassed the guarded singleton with raw anthropic.Anthropic() calls."""
     import inspect
     import re
     import scout_agent
+    import scout_bot
+    import scout_handlers
 
-    src = inspect.getsource(scout_agent)
-    hits = re.findall(r"anthropic\.Anthropic\(", src)
-    if len(hits) != 1:
-        return False, (
-            f"Found {len(hits)} inline anthropic.Anthropic( construction sites — expected exactly "
-            f"1 (inside _get_anthropic_client); other call sites should use _get_anthropic_client()"
-        )
-    return True, f"Anthropic client constructed {len(hits)} time(s) — singleton factory in use"
+    total_hits = 0
+    details = []
+    for mod, expected in ((scout_agent, 1), (scout_bot, 0), (scout_handlers, 0)):
+        src = inspect.getsource(mod)
+        hits = re.findall(r"anthropic\.Anthropic\(", src)
+        total_hits += len(hits)
+        details.append(f"{mod.__name__}={len(hits)}")
+        if len(hits) != expected:
+            return False, (
+                f"Found {len(hits)} inline anthropic.Anthropic( construction sites in "
+                f"{mod.__name__} — expected exactly {expected}; call sites outside "
+                f"_get_anthropic_client() should route through _get_anthropic_client()"
+            )
+    return True, f"Anthropic client construction sites: {', '.join(details)} — singleton factory in use"
 
 
 @test("Anthropic client singleton — race-safe under concurrent first callers")

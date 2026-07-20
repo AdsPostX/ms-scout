@@ -11,7 +11,6 @@ import logging
 import os
 import pathlib
 from dataclasses import dataclass
-import random
 import re
 import threading
 import time
@@ -23,7 +22,6 @@ from dotenv import load_dotenv
 from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
-from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 from slack_sdk.web import WebClient
 
 from scout_agent import ask
@@ -45,6 +43,7 @@ from scout_state import (
     _update_benchmark_from_actuals,
 )
 from scout_handlers import (
+    _BoundedRateLimitRetryHandler,
     _set_bot_user_id, _set_thread_state, _set_force_monitor_fn,
     handle_event,
 )
@@ -1659,8 +1658,8 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         # deploy time would otherwise stay invisible until the first heartbeat
         # (~35 min). 1-token ping is cheap and only runs once at startup.
         try:
-            import anthropic as _anthropic
-            _anth_client = _anthropic.Anthropic()
+            from scout_agent import _get_anthropic_client
+            _anth_client = _get_anthropic_client(_BOT_CFG.anthropic_api_key)
             _anth_client.messages.create(
                 model="claude-haiku-4-5",
                 max_tokens=1,
@@ -1779,8 +1778,8 @@ def _run_health_heartbeat(web: WebClient) -> None:
             anthropic_ok = True
             anthropic_detail = "ok"
             try:
-                import anthropic as _anthropic
-                _anth_client = _anthropic.Anthropic()
+                from scout_agent import _get_anthropic_client
+                _anth_client = _get_anthropic_client(_BOT_CFG.anthropic_api_key)
                 _anth_client.messages.create(
                     model="claude-haiku-4-5",
                     max_tokens=1,
@@ -2026,35 +2025,6 @@ def _on_startup(web: WebClient) -> None:
         web.chat_postMessage(channel=sidd_qa, text=msg)
     except Exception as e:
         log.warning(f"[startup] sidd-qa post failed: {e}")
-
-
-class _BoundedRateLimitRetryHandler(RateLimitErrorRetryHandler):
-    """RateLimitErrorRetryHandler caps its sleep at Slack's Retry-After
-    header value, which is uncapped by app code. slack_sdk builds a fresh
-    RetryState per call, so this only blocks the thread making that call
-    — but that one thread can still sleep for minutes per retry, up to
-    max_retry_count times, with nothing surfaced while it does. Cap the
-    sleep so a rate-limit event degrades instead of silently hanging.
-
-    Same fix as scout_handlers._BoundedRateLimitRetryHandler, applied to
-    this module's separate WebClient. Not yet unified into a shared
-    module — scout_slack_safe.py is scoped to response-emission
-    invariants, not HTTP retry behavior, so duplicating here beats
-    misplacing it there."""
-
-    MAX_SLEEP_S = 10
-
-    def prepare_for_next_attempt(self, *, state, request, response=None, error=None):
-        if response is None:
-            raise error
-        state.next_attempt_requested = True
-        duration = 1.0
-        for k in response.headers.keys():
-            if k.lower() == "retry-after":
-                duration = float(response.headers.get(k)[0])
-                break
-        time.sleep(min(duration, self.MAX_SLEEP_S) + random.random())
-        state.increment_current_attempt()
 
 
 def main():
