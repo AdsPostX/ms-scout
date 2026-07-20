@@ -190,11 +190,7 @@ _BOT_CFG = _BotConfig.from_env()
 
 
 
-def _slack_thread_url(channel: str, thread_ts: str) -> str:
-    """Build a direct link to a Slack thread message."""
-    ts_nodot = thread_ts.replace(".", "")
-    return f"https://momentscience.slack.com/archives/{channel}/p{ts_nodot}"
-
+# _slack_thread_url lives in scout_state.py (canonical — was a verbatim duplicate here).
 
 # Fill rate exclusions are now managed dynamically via data/entity_overrides.json.
 # Use _load_entity_overrides() at pulse time (imported from scout_agent).

@@ -626,17 +626,15 @@ def _slack_thread_url(channel: str, thread_ts: str) -> str:
 
 
 # ── Environment-aware channel routing ─────────────────────────────────────────
-_SCOUT_ENV = os.getenv("SCOUT_ENV", "development")
-_SCOUT_HQ_CHANNEL = "C0AQEECF800"  # #bot-qa (renamed from #scout-qa)
-_PULSE_CHANNEL = os.getenv("PULSE_CHANNEL", _SCOUT_HQ_CHANNEL)
-_SCOUT_DIGEST_CHANNEL = os.getenv("SCOUT_DIGEST_CHANNEL", _SCOUT_HQ_CHANNEL)
-
-
+# scout_bot._route_channel is the single canonical implementation (owns the full
+# 5-purpose table and reads _BOT_CFG). Delegate here rather than keeping a second,
+# narrower routing table that silently drifts (was: pulse/watchdog/offers only,
+# missing revenue/qa). Import is deferred to call time — scout_bot imports this
+# module at load time, so a top-level import here would be circular.
 def _route_channel(purpose: str, force: bool = False) -> str:
     """Return the correct Slack channel for a given message purpose."""
-    if force or _SCOUT_ENV != "production":
-        return _SCOUT_HQ_CHANNEL
-    return _PULSE_CHANNEL if purpose in ("pulse", "watchdog") else (_SCOUT_DIGEST_CHANNEL if purpose == "offers" else _SCOUT_HQ_CHANNEL)
+    import scout_bot
+    return scout_bot._route_channel(purpose, force)
 
 
 # ── Loading messages (from scout_bot for handler use) ──────────────────────────────
