@@ -5604,6 +5604,88 @@ def test_brief_copy_dashes_enforced():
         return False, f"brief copy dash enforcement test failed: {e}"
 
 
+# ── from_airbyte_campaigns.id NULL-coercion guard ──────────────────────────────
+
+@test("from_airbyte_campaigns id casts are guarded against NULL coercion (join fan-out regression)")
+def test_campaigns_id_cast_guarded_against_null_coercion():
+    """from_airbyte_campaigns.id is Nullable(Int64). toInt64(NULL) and toUInt64(NULL)
+    both evaluate to 0 in ClickHouse, so casting the id column in a join condition
+    silently fans NULL-id campaign rows into whatever legitimately coerces to
+    campaign 0 -- unless an `id IS NOT NULL` guard sits in the same query (see
+    cap_alert_campaigns in queries_monitor.py for the canonical fixed shape).
+
+    Scans the query strings in the 5 files known to join against
+    from_airbyte_campaigns for this cast pattern and requires a nearby guard.
+    Regression guard for the fan-out fix applied across 12 sites in
+    queries_monitor.py, queries_publisher.py, queries_revenue.py, scout_bot.py,
+    and scout_ch.py.
+    """
+    files = [
+        "queries_monitor.py",
+        "queries_publisher.py",
+        "queries_revenue.py",
+        "scout_bot.py",
+        "scout_ch.py",
+    ]
+    # Words that can legitimately follow "from_airbyte_campaigns" with no alias
+    # present (bare table reference, no AS clause) -- not real alias captures.
+    _NON_ALIAS_TOKENS = {
+        "WHERE", "ON", "GROUP", "ORDER", "LIMIT", "AND", "OR", "JOIN",
+        "LEFT", "INNER", "RIGHT", "PREWHERE", "HAVING",
+    }
+    decl_re = re.compile(r"from_airbyte_campaigns\s+(?:AS\s+)?(\w+)\b")
+    bare_from_re = re.compile(r"FROM\s+(?:default\.)?from_airbyte_campaigns\s*\n")
+    window = 1400
+
+    unguarded = []
+    checked = 0
+    for fname in files:
+        src = (_ROOT / fname).read_text()
+
+        for decl in decl_re.finditer(src):
+            alias = decl.group(1)
+            if alias.upper() in _NON_ALIAS_TOKENS:
+                continue
+            segment = src[decl.end(): decl.end() + window]
+            cast_re = re.compile(rf"to(?:U?Int64)\(\s*{re.escape(alias)}\.id\s*\)")
+            if not cast_re.search(segment):
+                continue  # this alias's id is never cast here -- no coercion risk
+            checked += 1
+            guard_re = re.compile(rf"{re.escape(alias)}\.id\s+IS\s+NOT\s+NULL")
+            if not guard_re.search(segment):
+                line = src.count("\n", 0, decl.start()) + 1
+                unguarded.append(
+                    f"{fname}:{line} (alias {alias!r}) casts {alias}.id without an "
+                    f"IS NOT NULL guard nearby"
+                )
+
+        # Bare shape (no alias): `SELECT toUInt64(id) AS campaign_id FROM from_airbyte_campaigns`
+        for bare_m in bare_from_re.finditer(src):
+            pre = src[max(0, bare_m.start() - 300): bare_m.start()]
+            if not re.search(r"to(?:U?Int64)\(\s*id\s*\)", pre):
+                continue
+            checked += 1
+            segment = src[bare_m.end(): bare_m.end() + window]
+            if not re.search(r"\bid\s+IS\s+NOT\s+NULL", segment):
+                line = src.count("\n", 0, bare_m.start()) + 1
+                unguarded.append(
+                    f"{fname}:{line} bare toUInt64(id)/toInt64(id) cast without an "
+                    f"IS NOT NULL guard nearby"
+                )
+
+    if unguarded:
+        return False, "unguarded from_airbyte_campaigns id casts found:\n" + "\n".join(unguarded)
+    if checked == 0:
+        return False, (
+            "scan found zero from_airbyte_campaigns id casts across the 5 files -- "
+            "guard-detection logic is likely broken, not proof the code is clean"
+        )
+    return True, (
+        f"{checked} from_airbyte_campaigns id cast site(s) across 5 files all have "
+        f"an IS NOT NULL guard nearby"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

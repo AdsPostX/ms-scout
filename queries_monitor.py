@@ -254,7 +254,9 @@ def velocity_alerts(
                         cv.created_at >= {date_expr} - INTERVAL 7 DAY
                     ), 0)                                                   AS rev_7d
                 FROM adpx_conversionsdetails cv
-                LEFT JOIN from_airbyte_campaigns c ON toInt64(cv.campaign_id) = toInt64(c.id)
+                LEFT JOIN from_airbyte_campaigns c
+                    ON toInt64(cv.campaign_id) = toInt64(c.id)
+                   AND c.id IS NOT NULL        -- Nullable(Int64): toInt64(NULL)=0 coerces silently
                 WHERE cv.created_at >= {date_expr} - INTERVAL 30 DAY
                   AND toInt64(cv.user_id) IN ({pub_id_csv})
                 GROUP BY cv.user_id, coalesce(c.adv_name, '(unattributed)')
