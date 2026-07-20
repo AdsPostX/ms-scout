@@ -32,11 +32,6 @@ def _ch_date_filter(days: int) -> str:
     return f"today() - {days}"
 
 
-def _ct_today() -> str:
-    """SQL fragment: today's date in America/Chicago timezone."""
-    return "toDate(toTimeZone(now(), 'America/Chicago'))"
-
-
 def _ct_days_ago(n: int) -> str:
     """SQL fragment: N days ago in America/Chicago timezone."""
     return f"toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL {n} DAY"

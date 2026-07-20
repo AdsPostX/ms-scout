@@ -735,7 +735,6 @@ GROUP BY ct_day, dow, ct_hour
 
 def _revenue_at_hour(ch, target_date, max_hour: int | None) -> float:
     """Revenue for target_date up to (not including) max_hour CT; None = full day."""
-    from datetime import date as _date
     if max_hour is None:
         hour_clause = ""
     else:
@@ -1059,26 +1058,3 @@ def _query_advertiser_revenue_trends(ch, days: int = 7) -> list[dict]:
     )
 
 
-def _query_revenue_sparkline_series(ch) -> list[tuple]:
-    """
-    Return 7 days of prior daily revenue totals for sparkline rendering.
-
-    Excludes today — used to show the trailing trend behind today's intraday
-    number. Returns list of (date, rev_float) tuples ordered oldest → newest.
-    """
-    sql = """
-SELECT
-    toDate(toTimeZone(created_at, 'America/Chicago')) AS day,
-    sum(toFloat64OrNull(revenue)) AS day_rev
-FROM adpx_conversionsdetails
-PREWHERE toYYYYMM(created_at) >= toYYYYMM(
-    toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 8 DAY
-)
-WHERE toDate(toTimeZone(created_at, 'America/Chicago'))
-      >= toDate(toTimeZone(now(), 'America/Chicago')) - INTERVAL 6 DAY
-  AND toDate(toTimeZone(created_at, 'America/Chicago'))
-      < toDate(toTimeZone(now(), 'America/Chicago'))
-GROUP BY day
-ORDER BY day ASC
-"""
-    return ch.query(sql).result_rows

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from queries_revenue import _ch_date_filter, _ct_days_ago, _revenue_trend_sql, _trend
+from queries_revenue import _ch_date_filter, _revenue_trend_sql, _trend
 
 log = logging.getLogger(__name__)
 

@@ -22,7 +22,6 @@ import datetime as _dt_mod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 from types import MappingProxyType
 from typing import Mapping, Optional
@@ -5763,27 +5762,6 @@ def _split_dotted_key(dotted: str) -> tuple[str, str]:
     if len(owners) > 1:
         raise AmbiguousThresholdKey(dotted, owners)
     return "signals", dotted
-
-
-def _format_dict_response(title: str, data: dict) -> str:
-    """Slack-friendly key-value dump for control-surface tool results.
-
-    Fenced code blocks are intentionally avoided: _escape_md_code() in
-    scout_ui_kit collapses them to their first content line (the opening '{'),
-    which would render the entire dict as a lone '{' in Slack.
-    """
-    def _fmt(v: object) -> str:
-        if isinstance(v, dict):
-            return " · ".join(f"{k}: {v2}" for k, v2 in v.items())
-        if isinstance(v, list):
-            joined = ", ".join(str(x) for x in v[:8])
-            return joined + ("…" if len(v) > 8 else "")
-        return str(v)
-
-    lines = [f"*{title}*"]
-    for key, val in (data or {}).items():
-        lines.append(f"• *{key}*: {_fmt(val)}")
-    return "\n".join(lines)
 
 
 _NETWORK_DISPLAY_NAMES: dict[str, str] = {
