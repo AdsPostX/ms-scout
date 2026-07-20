@@ -992,6 +992,7 @@ def _query_advertiser_rpm_context(ch, adv_name: str) -> dict:
         LEFT JOIN conv_agg conv ON conv.campaign_id = imp.campaign_id
         JOIN from_airbyte_campaigns fc ON toUInt64(fc.id) = imp.campaign_id
         WHERE imp.impressions_30d >= 100
+          AND fc.id IS NOT NULL          -- Nullable(Int64): toUInt64(NULL)=0 coerces silently
           AND trim(fc.status) = 'active'
           AND fc.adv_name ILIKE {adv_pattern:String}
         """

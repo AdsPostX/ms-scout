@@ -585,6 +585,7 @@ def performance_benchmarks_raw(ch) -> list[tuple]:
                 GROUP BY campaign_id
             ) conv ON toInt64(c.id) = toInt64(conv.campaign_id)
             WHERE c.deleted_at IS NULL
+              AND c.id IS NOT NULL          -- Nullable(Int64): toInt64(NULL)=0 coerces silently
         )
         SELECT
             id,
@@ -644,6 +645,7 @@ def benchmark_overall_cvr(ch) -> dict:
             LEFT JOIN conv ON toInt64(c.id) = toInt64(conv.campaign_id)
             JOIN imp  ON toInt64(c.id) = toInt64(imp.campaign_id)
             WHERE c.deleted_at IS NULL
+              AND c.id IS NOT NULL          -- Nullable(Int64): toInt64(NULL)=0 coerces silently
               AND imp.impressions > 500
             """
         ).result_rows

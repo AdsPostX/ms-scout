@@ -365,7 +365,8 @@ def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
                     f"SELECT pc.user_id, c.adv_name "
                     f"FROM from_airbyte_publisher_campaigns pc "
                     f"JOIN from_airbyte_campaigns c ON toInt64(pc.campaign_id) = toInt64(c.id) "
-                    f"WHERE pc.user_id IN ({uid_csv}) AND pc.is_active = true AND pc.deleted_at IS NULL"
+                    f"WHERE pc.user_id IN ({uid_csv}) AND pc.is_active = true AND pc.deleted_at IS NULL "
+                    f"AND c.id IS NOT NULL"  # Nullable(Int64): toInt64(NULL)=0 coerces silently
                 ).result_rows
                 for uid, adv in batch_existing:
                     existing_by_pub.setdefault(int(uid), set()).add(adv)
@@ -447,6 +448,7 @@ def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
                     LEFT JOIN imp_agg ia ON toString(ia.campaign_id) = toString(pc.campaign_id)
                     LEFT JOIN conv_agg ca ON toString(ca.campaign_id) = toString(pc.campaign_id)
                     WHERE pc.is_active = true AND pc.deleted_at IS NULL
+                      AND c.id IS NOT NULL          -- Nullable(Int64): toInt64(NULL)=0 coerces silently
                       AND pc.user_id != {pub_id}
                     GROUP BY c.adv_name
                     HAVING pub_count >= 2 AND sum(ca.rev_30d) > 0
@@ -916,6 +918,7 @@ def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
                 FROM adpx_impressions_details i
                 JOIN from_airbyte_campaigns c ON i.campaign_id = toUInt64(c.id)
                 WHERE c.adv_name ILIKE %(adv)s
+                  AND c.id IS NOT NULL          -- Nullable(Int64): toUInt64(NULL)=0 coerces silently
                   AND i.created_at >= %(launched_at)s
                   AND toYYYYMM(i.created_at) >= %(partition)s
             """, parameters={"adv": adv_name, "launched_at": launched_str, "partition": int(partition)}).result_rows
@@ -927,6 +930,7 @@ def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
                 FROM adpx_tracked_clicks tc
                 JOIN from_airbyte_campaigns c ON tc.campaign_id = toUInt64(c.id)
                 WHERE c.adv_name ILIKE %(adv)s
+                  AND c.id IS NOT NULL          -- Nullable(Int64): toUInt64(NULL)=0 coerces silently
                   AND tc.created_at >= %(launched_at)s
                   AND toYYYYMM(tc.created_at) >= %(partition)s
             """, parameters={"adv": adv_name, "launched_at": launched_str, "partition": int(partition)}).result_rows
@@ -938,6 +942,7 @@ def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
                 FROM adpx_conversionsdetails cd
                 JOIN from_airbyte_campaigns c ON cd.campaign_id = toUInt64(c.id)
                 WHERE c.adv_name ILIKE %(adv)s
+                  AND c.id IS NOT NULL          -- Nullable(Int64): toUInt64(NULL)=0 coerces silently
                   AND cd.created_at >= %(launched_at)s
                   AND toYYYYMM(cd.created_at) >= %(partition)s
             """, parameters={"adv": adv_name, "launched_at": launched_str, "partition": int(partition)}).result_rows
@@ -1288,6 +1293,7 @@ def _find_campaign_for_offer(ch, adv_name: str, approved_at: str) -> list:
         SELECT toUInt64(id) AS campaign_id
         FROM from_airbyte_campaigns
         WHERE adv_name ILIKE {adv_pattern:String}
+          AND id IS NOT NULL            -- Nullable(Int64): toUInt64(NULL)=0 coerces silently
           AND trim(status) = 'active'
           AND start_date >= toDate({approved_at:String})
           AND start_date <= toDate({approved_at:String}) + INTERVAL 30 DAY

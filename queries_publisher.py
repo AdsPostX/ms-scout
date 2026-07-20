@@ -156,6 +156,7 @@ def publisher_provisioned_campaigns(ch, pub_id: int) -> list[dict]:
           AND pc.deleted_at IS NULL
           AND pc.is_active = true
           AND c.deleted_at IS NULL
+          AND c.id IS NOT NULL          -- Nullable(Int64): toInt64(NULL)=0 coerces silently
         ORDER BY pc.created_at DESC
         LIMIT 50
         """,
@@ -780,6 +781,7 @@ def publisher_top_categories(ch, pub_id: int) -> list[str]:
                   AND toYYYYMM(cv.created_at) >= toYYYYMM(today() - INTERVAL 6 MONTH)
                 WHERE cv.created_at >= today() - INTERVAL 6 MONTH
                   AND c.deleted_at IS NULL
+                  AND c.id IS NOT NULL          -- Nullable(Int64): toInt64(NULL)=0 coerces silently
                   AND c.tags IS NOT NULL
                   AND c.tags != '[]'
             )
