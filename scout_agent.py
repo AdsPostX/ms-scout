@@ -65,6 +65,7 @@ load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 from scout_core.contracts import set_geo_normalizer as _set_geo_normalizer
 from scout_tools_offers import _dedupe_by_advertiser, _norm, _scout_score, _format_offers, _get_risk_flag
 from offer_scraper import normalize_geo as _normalize_geo
+from scout_thresholds import AmbiguousThresholdKey  # noqa: F401 — re-exported for existing callers
 _set_geo_normalizer(_normalize_geo)
 
 log = logging.getLogger("scout_agent")
@@ -5733,35 +5734,13 @@ def _coerce_threshold_value(raw: str):
         return raw
 
 
-class AmbiguousThresholdKey(ValueError):
-    """Bare key matches more than one section — caller must disambiguate."""
-    def __init__(self, key: str, sections: list[str]):
-        self.key = key
-        self.sections = sections
-        super().__init__(
-            f"`{key}` exists in multiple sections ({', '.join(sections)}); "
-            f"qualify it as `<section>.{key}`."
-        )
-
-
 def _split_dotted_key(dotted: str) -> tuple[str, str]:
     """Split 'signals.cap_alert_pct' → ('signals', 'cap_alert_pct').
 
-    Bare keys are resolved by searching the base schema for a unique match
-    across sections. Raises AmbiguousThresholdKey if multiple sections own a
-    key with the same name. Falls back to ('signals', dotted) if no section
-    owns the key — `set_threshold` will then surface a proper unknown-key
-    error with a suggestion."""
-    if "." in dotted:
-        section, _, key = dotted.partition(".")
-        return section, key
-    owners = [sec for sec, body in _BASE_THRESHOLDS.items()
-              if isinstance(body, dict) and dotted in body]
-    if len(owners) == 1:
-        return owners[0], dotted
-    if len(owners) > 1:
-        raise AmbiguousThresholdKey(dotted, owners)
-    return "signals", dotted
+    Delegates to ThresholdManager._split_key — the canonical implementation in
+    scout_thresholds.py — so this module's key-splitting can't drift from it."""
+    import scout_thresholds
+    return scout_thresholds._manager._split_key(dotted)
 
 
 _NETWORK_DISPLAY_NAMES: dict[str, str] = {
@@ -6254,6 +6233,43 @@ def _cmd_status() -> tuple[str, tuple]:
     return _format_status_response(s), ("get_scout_status",)
 
 
+def _ask_setup(user_message: str, user_id: str, user_tz: str, thread_ts: str, on_stage, start_ms: float):
+    """Shared setup for ask()/ask_with_attachment() after _route_deterministic returns None.
+
+    Returns (early_result, client, prefix, intent_name, intent_dict, ask_tools).
+    early_result is an AskResult to return immediately (status command or missing
+    API key); when it is None, the other five values are populated for the caller
+    to continue with _build_initial_messages()/_run_tool_loop().
+    """
+    _cmd_name, _ = _match_command(user_message)
+    if _cmd_name == "status":
+        text, tools_called = _cmd_status()
+        return (
+            AskResult(text=text, tools_called=tools_called,
+                      duration_ms=int((time.monotonic() - start_ms) * 1000)),
+            None, "", None, None, [],
+        )
+
+    api_key = _CFG.anthropic_api_key
+    if not api_key:
+        return (
+            AskResult(text="ANTHROPIC_API_KEY not set — Scout can't respond.",
+                      tools_called=[], duration_ms=int((time.monotonic() - start_ms) * 1000)),
+            None, "", None, None, [],
+        )
+
+    client = _get_anthropic_client(api_key)
+    prefix = _build_prefix_context(user_id, user_tz)
+    intent_name, intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
+    ask_tools = TOOLS
+    if intent_dict:
+        primary = set(intent_dict["primary_tools"])
+        narrowed = [t for t in TOOLS if t["name"] in primary]
+        if narrowed:  # fall back to full TOOLS if no bucket tools found in public list
+            ask_tools = narrowed
+    return None, client, prefix, intent_name, intent_dict, ask_tools
+
+
 def ask(user_message: str, history: list | None = None, user_id: str = "",
         permalink: str = "", user_tz: str = "", thread_ts: str = "",
         on_stage=None) -> AskResult:
@@ -6288,29 +6304,11 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
     # Command registry — named operational invocations bypass LLM synthesis.
     # Runs after _route_deterministic (same raw-message requirement) and before
     # _classify_intent (which is for open queries only).
-    _cmd_name, _ = _match_command(user_message)
-    if _cmd_name == "status":
-        text, tools_called = _cmd_status()
-        return AskResult(text=text, tools_called=tools_called, duration_ms=_dur())
-
-    api_key = _CFG.anthropic_api_key
-    if not api_key:
-        return AskResult(
-            text="ANTHROPIC_API_KEY not set — Scout can't respond.",
-            tools_called=[], duration_ms=_dur(),
-        )
-
-    client = _get_anthropic_client(api_key)
-    prefix = _build_prefix_context(user_id, user_tz)
-    # Intent classification — narrow tool surface and prepend focused context.
-    # Runs once per ask() call, outside the retry loop.
-    _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
-    _ask_tools = TOOLS
-    if _intent_dict:
-        _primary = set(_intent_dict["primary_tools"])
-        _narrowed = [t for t in TOOLS if t["name"] in _primary]
-        if _narrowed:  # fall back to full TOOLS if no bucket tools found in public list
-            _ask_tools = _narrowed
+    _early, client, prefix, _intent_name, _intent_dict, _ask_tools = _ask_setup(
+        user_message, user_id, user_tz, thread_ts, on_stage, _start_ms,
+    )
+    if _early is not None:
+        return _early
     messages = _build_initial_messages(user_message, history, prefix)
     return _run_tool_loop(
         messages, client, SYSTEM_PROMPT, _intent_name, _intent_dict,
@@ -6362,32 +6360,11 @@ def ask_with_attachment(
     if _routed is not None:
         return _routed  # control-surface verbs never attach files
 
-    _cmd_name, _ = _match_command(user_message)
-    if _cmd_name == "status":
-        text, tools_called = _cmd_status()
-        return AskResult(
-            text=text,
-            tools_called=tools_called,
-            duration_ms=int((time.monotonic() - _start_ms) * 1000),
-        )
-
-    api_key = _CFG.anthropic_api_key
-    if not api_key:
-        return AskResult(
-            text="ANTHROPIC_API_KEY not set — Scout can't respond.",
-            tools_called=[],
-            duration_ms=int((time.monotonic() - _start_ms) * 1000),
-        )
-
-    client = _get_anthropic_client(api_key)
-    prefix = _build_prefix_context(user_id, user_tz)
-    _intent_name, _intent_dict = _classify_intent(user_message, thread_ts=thread_ts or None)
-    _ask_tools = TOOLS
-    if _intent_dict:
-        _primary = set(_intent_dict["primary_tools"])
-        _narrowed = [t for t in TOOLS if t["name"] in _primary]
-        if _narrowed:
-            _ask_tools = _narrowed
+    _early, client, prefix, _intent_name, _intent_dict, _ask_tools = _ask_setup(
+        user_message, user_id, user_tz, thread_ts, on_stage, _start_ms,
+    )
+    if _early is not None:
+        return _early
 
     # Cap attached_text defense-in-depth (scout_attachments also caps)
     if attached_text and len(attached_text) > 30_000:

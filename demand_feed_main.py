@@ -55,6 +55,7 @@ from offer_scraper import normalize_geo as _normalize_geo
 _set_geo_normalizer(_normalize_geo)
 
 import alert_registry
+from scout_bot import _env_int as _shared_env_int
 
 _SCRAPER_STATE = _DATA_DIR / "scraper_state.json"
 _OFFERS_FILE   = _DATA_DIR / "offers_latest.json"
@@ -72,11 +73,7 @@ except Exception:
 _RUN_HOUR_CT = 6  # 06:00 CT
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except (ValueError, TypeError):
-        log.warning("[demand-feed] %s is not a valid integer; using default %d", name, default)
-        return default
+    return _shared_env_int(name, default, tag="demand-feed")
 
 
 def _env_float(name: str, default: float) -> float:

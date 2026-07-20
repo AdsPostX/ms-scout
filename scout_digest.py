@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
+from scout_agent import _CFG
 from scout_image_resolve import resolve_icon_image
 from scout_log import log_event
 from scout_ui_kit import _MAX_CAROUSEL_CARDS, _carousel_block, _slack_card_block, normalize_typography, sanitize_blocks
@@ -1418,7 +1419,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
 
 def _load_offers() -> list:
     """Load offers from DEMAND_FEED_URL when set; fall back to disk snapshot."""
-    url = os.getenv("DEMAND_FEED_URL")
+    url = _CFG.demand_feed_url
     if url:
         try:
             with urllib.request.urlopen(f"{url.rstrip('/')}/offers", timeout=10) as resp:

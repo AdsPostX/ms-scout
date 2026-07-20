@@ -2,13 +2,8 @@
 from __future__ import annotations
 
 import logging
-import re
 
-
-def _validate_as_of_date(as_of_date: str) -> None:
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', as_of_date):
-        raise ValueError(f"as_of_date must be YYYY-MM-DD, got: {as_of_date!r}")
-
+from queries_revenue import _validate_as_of_date
 
 # ===========================================================================
 # Canonical query contracts (ghost pattern — one function, both signal + NL)
