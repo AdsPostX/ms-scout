@@ -615,7 +615,11 @@ def benchmark_overall_cvr(ch) -> dict:
     Used as Tier 4 (lowest-confidence) fallback in _scout_score() when an offer has
     no offer/advertiser/category match — e.g. every MaxBounty and FlexOffers offer.
 
-    Returns {"cvr_pct": float, "rpm": float, "campaigns": int} or {} on error.
+    Returns {"cvr_pct": float, "rpm": float, "campaigns": int} on success,
+    {} if no campaigns matched, or {"error": str} if the query itself failed.
+    Callers must check for the "error" key to distinguish a real failure from
+    a legitimate zero-match result — treating both as {} silently produces a
+    confident-looking zero-confidence benchmark on a query failure.
 
     Empirically measured 2026-05-19: 0.4514% CVR, $40.29 RPM across 670 campaigns.
     The live query keeps this fresh as MS's book of business evolves.
@@ -655,6 +659,7 @@ def benchmark_overall_cvr(ch) -> dict:
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning(f"benchmark_overall_cvr failed: {e}")
+        return {"error": str(e)}
     return {}
 
 

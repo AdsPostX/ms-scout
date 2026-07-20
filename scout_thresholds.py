@@ -337,6 +337,11 @@ class ThresholdManager:
                 )
 
             overall = _q_mod.benchmark_overall_cvr(ch)
+            if "error" in overall:
+                log.warning(
+                    f"Tier 4 baseline query failed, skipping fallback benchmark: {overall['error']}"
+                )
+                overall = {}
             by_payout_type = {"_all": overall} if overall else {}
             if overall:
                 log.info(
