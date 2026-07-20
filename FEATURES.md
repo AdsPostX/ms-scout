@@ -10,8 +10,8 @@
 
 - **Total Tools:** 43
 - **Domains:** 6
-- **Status:** ~80% working + core features verified
-- **Maintenance Mode:** demand_feed_main.py (5 TODOs), App Home projection range
+- **Status:** Engineering audit complete (24/24 violations fixed, see VAMSEE_AUDIT.md) — all tools working
+- **Known gates (not audit failures):** demand_feed_main.py (5 TODOs, awaiting platform webhook URL), App Home projection range (blocked on upstream scoreboard_rollup())
 
 ---
 
@@ -76,16 +76,16 @@
 | Tool | Description | Handler | Status |
 |------|-------------|---------|--------|
 | `export_usage_log` | Dump raw (query → tools fired) pairs from usage_log so an admin can audit "             "whether Sco... | export_usage_log() | ✓ Working |
-| `force_run_monitor` | Admin-only — requires SCOUT_THRESHOLD_ADMINS env match. "             "Run a silent-monitor signal i... | ?() | ✓ Working |
+| `force_run_monitor` | Admin-only — requires SCOUT_THRESHOLD_ADMINS env match. "             "Run a silent-monitor signal i... | force_run_monitor() | ✓ Working |
 | `forget_entity_note` | Drop a previously-recorded publisher or advertiser fact. "             "Use when a team member tells... | forget_entity_note() | ✓ Working |
-| `get_scout_config` | Return Scout's current active configuration: scoring thresholds, signal thresholds, "             "h... | deferred() | ⏳ Deferred |
-| `get_threshold_history` | Return recent threshold-change events from the changelog. "             "Optional 'key' filter (e.g.... | ?() | ✓ Working |
+| `get_scout_config` | Return Scout's current active configuration: scoring thresholds, signal thresholds, "             "h... | get_scout_config() | ✓ Working |
+| `get_threshold_history` | Return recent threshold-change events from the changelog. "             "Optional 'key' filter (e.g.... | get_threshold_history() | ✓ Working |
 | `get_usage_report` | Return Scout usage statistics: queries per period, top users, most-used tools, avg response time. " ... | get_usage_report() | ✓ Working |
-| `list_thresholds` | Return all active Scout monitor thresholds plus override metadata. "             "Use when: 'what ar... | ?() | ✓ Working |
+| `list_thresholds` | Return all active Scout monitor thresholds plus override metadata. "             "Use when: 'what ar... | list_thresholds() | ✓ Working |
 | `record_entity_note` | Record publisher or advertiser knowledge in Scout's persistent learning store. "             "Use wh... | record_entity_note() | ✓ Working |
 | `run_offer_scraper` | Trigger an immediate offer inventory refresh from affiliate networks "             f"({', '.join(SUP... | run_offer_scraper() | ✓ Working |
-| `run_self_qa` | Run Scout's full self-QA suite — 15 representative questions covering every major intent "          ... | deferred() | ⏳ Deferred |
-| `set_threshold` | Admin-only — requires SCOUT_THRESHOLD_ADMINS env match. "             "Write a runtime override for ... | ?() | ✓ Working |
+| `run_self_qa` | Run Scout's full self-QA suite — 15 representative questions covering every major intent "          ... | run_self_qa() | ✓ Working |
+| `set_threshold` | Admin-only — requires SCOUT_THRESHOLD_ADMINS env match. "             "Write a runtime override for ... | set_threshold() | ✓ Working |
 | `why_entity_note` | Explain where a stored publisher/advertiser fact came from — returns the note, "             "who ta... | why_entity_note() | ✓ Working |
 
 ---

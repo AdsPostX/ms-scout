@@ -156,11 +156,12 @@ Before any change to a `queries_*.py` WHERE clause, JOIN type, or column referen
 
 1. **Check the column type first** — via ClickHouse MCP, never assume. Ask: is this column Nullable? If yes AND it's a boolean/UInt8 flag column, use `(col = false OR col IS NULL)` — never `NOT col` or `col = false` alone. This pattern only applies to boolean/UInt8 flags — a Nullable String or numeric column isn't compared with `= false`; use `col IS NULL` (or `IS NOT NULL`) directly instead.
 2. **Known traps (learned from prod failures):**
-   - `mv_adpx_users.is_test` → `Nullable(UInt8)` → use `(is_test = false OR is_test IS NULL)`
-   - `mv_adpx_users.organization` → `LowCardinality(String)` → `endsWith()` may throw — filter in Python instead
+   - `mv_adpx_users.is_test` → verified live via ClickHouse MCP on 2026-07-19: actually `Bool` (non-nullable), NOT `Nullable(UInt8)` as previously documented here — plain `is_test = false` is safe, the `OR is_test IS NULL` guard is unnecessary for this column. Re-verify before relying on this if the column has since changed.
+   - `mv_adpx_users.organization` → verified live via ClickHouse MCP on 2026-07-19: actually `Nullable(String)`, NOT `LowCardinality(String)` as previously documented here — `endsWith()` on a Nullable String can still return NULL rather than throw; filtering in Python remains the safer default regardless.
    - `adpx_conversionsdetails.pid` → NOT the publisher user_id — always filter on `user_id`
    - `revenue`, `payout` → String columns — always cast: `toFloat64OrNull(revenue)`
    - `from_airbyte_campaigns.id` → `Nullable(Int64)` → always add `AND c.id IS NOT NULL` in the WHERE clause before joining on campaign id (even with LEFT JOIN)
+   - `from_airbyte_publisher_campaigns.id`, `.campaign_id`, `.user_id` → all `Nullable(Int64)` (verified live via ClickHouse MCP on 2026-07-19) → add explicit `IS NOT NULL` guards before joining on any of these, same pattern as `from_airbyte_campaigns.id`
 3. **When in doubt, filter in Python, not SQL.** SQL type errors silently kill queries in production; Python errors surface immediately in smoke tests.
 4. **Document the column type in the commit message** when adding a new column reference.
 
