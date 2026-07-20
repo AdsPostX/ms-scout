@@ -5637,6 +5637,15 @@ def test_campaigns_id_cast_guarded_against_null_coercion():
     bare_from_re = re.compile(r"FROM\s+(?:default\.)?from_airbyte_campaigns\s*\n")
     window = 1400
 
+    def _query_end(src, start):
+        """Cap a forward scan at the next campaigns reference, so a guard
+        belonging to a later query can't be mistaken for this one's."""
+        next_decl = decl_re.search(src, start)
+        next_bare = bare_from_re.search(src, start)
+        bounds = [m.start() for m in (next_decl, next_bare) if m]
+        end = min(bounds) if bounds else len(src)
+        return min(end, start + window)
+
     unguarded = []
     checked = 0
     for fname in files:
@@ -5646,7 +5655,7 @@ def test_campaigns_id_cast_guarded_against_null_coercion():
             alias = decl.group(1)
             if alias.upper() in _NON_ALIAS_TOKENS:
                 continue
-            segment = src[decl.end(): decl.end() + window]
+            segment = src[decl.end(): _query_end(src, decl.end())]
             cast_re = re.compile(rf"to(?:U?Int64)\(\s*{re.escape(alias)}\.id\s*\)")
             if not cast_re.search(segment):
                 continue  # this alias's id is never cast here -- no coercion risk
@@ -5665,7 +5674,7 @@ def test_campaigns_id_cast_guarded_against_null_coercion():
             if not re.search(r"to(?:U?Int64)\(\s*id\s*\)", pre):
                 continue
             checked += 1
-            segment = src[bare_m.end(): bare_m.end() + window]
+            segment = src[bare_m.end(): _query_end(src, bare_m.end())]
             if not re.search(r"\bid\s+IS\s+NOT\s+NULL", segment):
                 line = src.count("\n", 0, bare_m.start()) + 1
                 unguarded.append(
