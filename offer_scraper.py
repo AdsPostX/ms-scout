@@ -1633,6 +1633,23 @@ def fetch_cj() -> list:
     return offers
 
 
+def _safe_json(resp, network_label: str):
+    """
+    Parse resp.json(), logging a warning with network context on failure.
+
+    Returns the parsed JSON on success, or None if resp.json() raised.
+    Callers are responsible for checking for None and handling it the same
+    way they handled the parse failure before this was extracted (break out
+    of a pagination loop, return [], etc.) — this helper only centralizes
+    the try/except + log line, not the control flow around it.
+    """
+    try:
+        return resp.json()
+    except Exception:
+        log.warning(f"{network_label}: non-JSON response — {resp.text[:200]}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # ShareASale
 # ---------------------------------------------------------------------------
@@ -1693,10 +1710,8 @@ def fetch_shareasale() -> list:
             log.warning(f"ShareASale: request failed — {e}")
             break
 
-        try:
-            data = resp.json()
-        except Exception:
-            log.warning(f"ShareASale: non-JSON response — {resp.text[:200]}")
+        data = _safe_json(resp, "ShareASale")
+        if data is None:
             break
 
         merchants = data if isinstance(data, list) else data.get("data", [])
@@ -1806,10 +1821,8 @@ def fetch_rakuten() -> list:
             log.warning(f"Rakuten: request failed — {e}")
             break
 
-        try:
-            data = resp.json()
-        except Exception:
-            log.warning(f"Rakuten: non-JSON response — {resp.text[:200]}")
+        data = _safe_json(resp, "Rakuten")
+        if data is None:
             break
 
         advertisers = data.get("advertisers") or data.get("data") or (data if isinstance(data, list) else [])
@@ -1924,10 +1937,8 @@ def fetch_awin() -> list:
             log.warning(f"Awin: request failed — {e}")
             return []
 
-        try:
-            data = resp.json()
-        except Exception:
-            log.warning(f"Awin: non-JSON response — {resp.text[:200]}")
+        data = _safe_json(resp, "Awin")
+        if data is None:
             return []
 
         if isinstance(data, dict):
@@ -2037,10 +2048,8 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
             log.warning(f"TUNE/{label}: request error — {e}")
             break
 
-        try:
-            data = resp.json()
-        except Exception:
-            log.warning(f"TUNE/{label}: non-JSON response — {resp.text[:200]}")
+        data = _safe_json(resp, f"TUNE/{label}")
+        if data is None:
             break
 
         # HasOffers V3 response: {request:{}, response:{status:1, data:{count:N, data:{id: {Offer:{...}}, ...}}}}
@@ -2192,10 +2201,8 @@ def fetch_everflow_instance(label: str, api_key: str, base_url: str) -> list:
             log.warning(f"Everflow/{label}: request error — {e}")
             break
 
-        try:
-            data = resp.json()
-        except Exception:
-            log.warning(f"Everflow/{label}: non-JSON — {resp.text[:200]}")
+        data = _safe_json(resp, f"Everflow/{label}")
+        if data is None:
             break
 
         records = data.get("offers") or data.get("data") or (data if isinstance(data, list) else [])

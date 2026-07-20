@@ -5695,6 +5695,57 @@ def test_campaigns_id_cast_guarded_against_null_coercion():
     )
 
 
+@test("offer_scraper — _safe_json parses well-formed JSON and returns None + warns on parse failure")
+def test_offer_scraper_safe_json():
+    """Shared helper (extracted from 5 duplicated ShareASale/Rakuten/Awin/TUNE/Everflow
+    try/except blocks) must preserve both the success and failure contract: parsed dict
+    on success, None + a WARNING log carrying the network label on failure."""
+    import logging
+    from offer_scraper import _safe_json
+
+    class _FakeResp:
+        def __init__(self, json_result=None, json_exc=None, text=""):
+            self._json_result = json_result
+            self._json_exc = json_exc
+            self.text = text
+
+        def json(self):
+            if self._json_exc is not None:
+                raise self._json_exc
+            return self._json_result
+
+    class _CaptureHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    # Success path: well-formed response returns the parsed JSON as-is.
+    ok_resp = _FakeResp(json_result={"data": [{"merchantId": "1"}]})
+    result = _safe_json(ok_resp, "ShareASale")
+    assert result == {"data": [{"merchantId": "1"}]}, f"Expected parsed dict on success, got {result!r}"
+
+    # Failure path: resp.json() raising returns None and logs a WARNING with the network label.
+    bad_resp = _FakeResp(json_exc=ValueError("Expecting value"), text="<html>rate limited</html>")
+    handler = _CaptureHandler()
+    logger = logging.getLogger("offer_scraper")
+    logger.addHandler(handler)
+    try:
+        result = _safe_json(bad_resp, "Rakuten")
+    finally:
+        logger.removeHandler(handler)
+
+    assert result is None, f"Expected None sentinel on json() failure, got {result!r}"
+    warnings = [r for r in handler.records if r.levelno == logging.WARNING]
+    assert warnings, "Expected a WARNING log on resp.json() failure"
+    assert any("Rakuten" in r.getMessage() for r in warnings), (
+        f"Expected network label 'Rakuten' in warning message, got: {[r.getMessage() for r in warnings]}"
+    )
+    return True, "_safe_json: returns parsed JSON on success, None + labeled warning on failure"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
