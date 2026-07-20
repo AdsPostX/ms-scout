@@ -2018,7 +2018,8 @@ def _extract_view_submission_context(payload: dict) -> dict:
     try:
         meta = json.loads(view.get("private_metadata", "{}"))
         channel = meta.get("channel", "")
-    except Exception:
+    except Exception as e:
+        log.warning(f"Could not parse view.private_metadata: {e}")
         channel = ""
     return {"user_id": user_id, "channel": channel}
 
