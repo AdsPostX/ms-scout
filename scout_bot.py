@@ -1658,8 +1658,8 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         # deploy time would otherwise stay invisible until the first heartbeat
         # (~35 min). 1-token ping is cheap and only runs once at startup.
         try:
-            import anthropic as _anthropic
-            _anth_client = _anthropic.Anthropic()
+            from scout_agent import _get_anthropic_client
+            _anth_client = _get_anthropic_client(_BOT_CFG.anthropic_api_key)
             _anth_client.messages.create(
                 model="claude-haiku-4-5",
                 max_tokens=1,
@@ -1778,8 +1778,8 @@ def _run_health_heartbeat(web: WebClient) -> None:
             anthropic_ok = True
             anthropic_detail = "ok"
             try:
-                import anthropic as _anthropic
-                _anth_client = _anthropic.Anthropic()
+                from scout_agent import _get_anthropic_client
+                _anth_client = _get_anthropic_client(_BOT_CFG.anthropic_api_key)
                 _anth_client.messages.create(
                     model="claude-haiku-4-5",
                     max_tokens=1,

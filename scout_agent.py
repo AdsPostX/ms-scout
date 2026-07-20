@@ -302,6 +302,7 @@ _NETWORK_CRED_CONFIG = NetworkCredentialConfig.from_env()
 @dataclass(frozen=True)
 class _ScoutCfg:
     demand_feed_url: str
+    anthropic_api_key: str = ""
 
     @classmethod
     def from_env(cls) -> "_ScoutCfg":
@@ -316,7 +317,10 @@ class _ScoutCfg:
                     log.warning("DEMAND_FEED_URL missing valid scheme or hostname — using disk")
             except Exception:
                 log.warning("DEMAND_FEED_URL could not be parsed — using disk")
-        return cls(demand_feed_url=url)
+        return cls(
+            demand_feed_url=url,
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+        )
 
 _CFG = _ScoutCfg.from_env()
 
@@ -6305,7 +6309,7 @@ def ask(user_message: str, history: list | None = None, user_id: str = "",
         text, tools_called = _cmd_status()
         return AskResult(text=text, tools_called=tools_called, duration_ms=_dur())
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = _CFG.anthropic_api_key
     if not api_key:
         return AskResult(
             text="ANTHROPIC_API_KEY not set — Scout can't respond.",
@@ -6383,7 +6387,7 @@ def ask_with_attachment(
             duration_ms=int((time.monotonic() - _start_ms) * 1000),
         )
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = _CFG.anthropic_api_key
     if not api_key:
         return AskResult(
             text="ANTHROPIC_API_KEY not set — Scout can't respond.",
