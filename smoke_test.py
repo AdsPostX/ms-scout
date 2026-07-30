@@ -763,10 +763,10 @@ def test_score_offer_excludes_within_resurface_cooldown():
         orig_scout_score = scout_agent._scout_score
         scout_agent._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
 
-        digest_cfg = scout_digest._load_digest_config()
-        digest_cfg = {**digest_cfg, "resurface_window_days": 7}
-
         try:
+            digest_cfg = scout_digest._load_digest_config()
+            digest_cfg = {**digest_cfg, "resurface_window_days": 7}
+
             recent_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
             state = {
                 "approved": {}, "rejected": {},
@@ -810,10 +810,10 @@ def test_score_offer_resurfaces_after_cooldown_elapses():
         orig_scout_score = scout_agent._scout_score
         scout_agent._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
 
-        digest_cfg = scout_digest._load_digest_config()
-        digest_cfg = {**digest_cfg, "resurface_window_days": 7}
-
         try:
+            digest_cfg = scout_digest._load_digest_config()
+            digest_cfg = {**digest_cfg, "resurface_window_days": 7}
+
             old_iso = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
             state = {
                 "approved": {}, "rejected": {},
@@ -856,10 +856,10 @@ def test_score_offer_rejection_overrides_cooldown():
         orig_scout_score = scout_agent._scout_score
         scout_agent._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
 
-        digest_cfg = scout_digest._load_digest_config()
-        digest_cfg = {**digest_cfg, "resurface_window_days": 7}
-
         try:
+            digest_cfg = scout_digest._load_digest_config()
+            digest_cfg = {**digest_cfg, "resurface_window_days": 7}
+
             recent_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
             state = {
                 "approved": {},
