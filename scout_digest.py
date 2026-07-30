@@ -494,8 +494,12 @@ def _load_digest_config() -> dict:
     Validates at construction rather than trusting raw config values downstream:
     - native_cards_enabled must be a real bool (a stray string like "false" is
       truthy in Python and would otherwise silently enable native cards).
-    - offers_per_network is clamped to Slack's carousel limit so a human editing
-      the config can't produce a per-network count the carousel silently truncates.
+
+    offers_per_network is the business-tunable scoring/selection pool size and
+    is intentionally NOT clamped against Slack's carousel render limit here —
+    that's a rendering constraint, not a scoring one. See build_digest_blocks(),
+    which caps what actually gets rendered at _MAX_CAROUSEL_CARDS and surfaces
+    an explicit overflow indicator when the pool exceeds it.
     """
     from scout_thresholds import _manager as _tm
 
@@ -510,12 +514,6 @@ def _load_digest_config() -> dict:
         native_cards_enabled = False
 
     offers_per_network = int(raw.get("offers_per_network", 3))
-    if offers_per_network > _MAX_CAROUSEL_CARDS:
-        log.warning(
-            "digest.offers_per_network=%d exceeds Slack's %d-card carousel limit, clamping",
-            offers_per_network, _MAX_CAROUSEL_CARDS,
-        )
-        offers_per_network = _MAX_CAROUSEL_CARDS
 
     raw_resurface_window_days = raw.get("resurface_window_days", 7)
     try:
@@ -800,6 +798,16 @@ def build_digest_blocks(
         if not scored_offers:
             continue
 
+        # The scoring pool (offers_per_network) is independently configurable and
+        # can exceed Slack's carousel render limit. scored_offers is already
+        # sorted descending by Scout Score (see select_offers), so slicing here
+        # keeps the top N by score; the remainder is surfaced via an explicit
+        # overflow indicator rather than silently dropped.
+        overflow_count = 0
+        if len(scored_offers) > _MAX_CAROUSEL_CARDS:
+            overflow_count = len(scored_offers) - _MAX_CAROUSEL_CARDS
+            scored_offers = scored_offers[:_MAX_CAROUSEL_CARDS]
+
         network_label = _NETWORK_LABEL.get(network, network.title())
         emoji         = _NETWORK_EMOJI.get(network, "•")
         screened      = network_totals.get(network, 0)
@@ -881,6 +889,20 @@ def build_digest_blocks(
             })
 
         blocks += _render_network_offer_cards(render_offers, native_cards, section="digest")
+
+        if overflow_count:
+            blocks.append({
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": (
+                        f"_+{overflow_count} more {network_label} offer"
+                        f"{'s' if overflow_count != 1 else ''} scored but not shown "
+                        f"(carousel caps at {_MAX_CAROUSEL_CARDS}) · raise "
+                        f"`digest.offers_per_network` cutoff or check `/scout-queue`_"
+                    ),
+                }],
+            })
 
     return blocks
 

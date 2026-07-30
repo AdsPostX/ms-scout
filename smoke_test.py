@@ -907,12 +907,14 @@ def test_load_digest_config_coerces_non_bool_native_cards():
     return True, "_load_digest_config: non-bool native_cards_enabled coerced to False"
 
 
-@test("_load_digest_config clamps offers_per_network to carousel limit")
-def test_load_digest_config_clamps_offers_per_network():
+@test("_load_digest_config no longer clamps offers_per_network against carousel limit")
+def test_load_digest_config_does_not_clamp_offers_per_network():
     """
-    Slack carousels hard-cap at _MAX_CAROUSEL_CARDS cards — a human editing
-    config shouldn't be able to produce a per-network count the carousel
-    silently truncates later.
+    PR C: offers_per_network is the business-tunable scoring/selection pool size
+    and must NOT be re-clamped against Slack's carousel render limit at load
+    time — that conflated a rendering constraint with a business preference.
+    The render cap now lives in build_digest_blocks() instead (see the overflow
+    indicator test below).
     """
     import scout_digest
     import scout_thresholds as _st
@@ -921,16 +923,83 @@ def test_load_digest_config_clamps_offers_per_network():
     original = _st._manager._thresholds_cache
     try:
         base = _st._manager.load()
+        requested = _MAX_CAROUSEL_CARDS + 5
         _st._manager._thresholds_cache = {
-            **base, "digest": {**base["digest"], "offers_per_network": _MAX_CAROUSEL_CARDS + 5},
+            **base, "digest": {**base["digest"], "offers_per_network": requested},
         }
         cfg = scout_digest._load_digest_config()
-        if cfg["offers_per_network"] != _MAX_CAROUSEL_CARDS:
-            return False, f"offers_per_network must clamp to {_MAX_CAROUSEL_CARDS}, got {cfg['offers_per_network']!r}"
+        if cfg["offers_per_network"] != requested:
+            return False, f"offers_per_network must pass through unclamped, expected {requested}, got {cfg['offers_per_network']!r}"
     finally:
         _st._manager._thresholds_cache = original
 
-    return True, f"_load_digest_config: offers_per_network clamped to {_MAX_CAROUSEL_CARDS}"
+    return True, f"_load_digest_config: offers_per_network={requested} passes through unclamped"
+
+
+@test("_MAX_CAROUSEL_CARDS constant is unchanged (still 10)")
+def test_max_carousel_cards_unchanged():
+    """
+    PR C only decouples scoring-pool size from the render cap — it must not
+    touch Slack's actual carousel hard limit.
+    """
+    from scout_ui_kit import _MAX_CAROUSEL_CARDS
+    if _MAX_CAROUSEL_CARDS != 10:
+        return False, f"_MAX_CAROUSEL_CARDS must remain 10, got {_MAX_CAROUSEL_CARDS!r}"
+    return True, "_MAX_CAROUSEL_CARDS: unchanged at 10"
+
+
+@test("build_digest_blocks caps render at _MAX_CAROUSEL_CARDS and surfaces overflow indicator")
+def test_build_digest_blocks_caps_render_with_overflow():
+    """
+    PR C: the scoring pool can now exceed _MAX_CAROUSEL_CARDS (offers_per_network
+    is unclamped), but the carousel render must still cap at _MAX_CAROUSEL_CARDS,
+    keep the top-scored offers, and surface an explicit overflow indicator block
+    instead of silently truncating. Checked for both native_cards=True (carousel)
+    and the default classic (native_cards=False) path.
+    """
+    import datetime as _datetime
+    import scout_digest
+    from scout_ui_kit import _MAX_CAROUSEL_CARDS
+
+    pool_size = _MAX_CAROUSEL_CARDS + 2  # exceed the render cap by 2
+    offers = [
+        (float(pool_size - i), {
+            "offer_id": str(i), "advertiser": f"Adv {i}", "network": "maxbounty",
+            "category": "Finance", "geo": "US", "payout": "5.00",
+            "payout_type": "CPL", "tracking_url": "", "description": "", "fit_tier": "PRIME",
+        })
+        for i in range(pool_size)
+    ]
+    offers_by_network = {"maxbounty": offers}
+    run_date = _datetime.date.today().isoformat()
+
+    # Native (carousel) path.
+    native_blocks = scout_digest.build_digest_blocks(
+        offers_by_network, {}, [], {}, run_date, native_cards=True,
+    )
+    carousels = [b for b in native_blocks if b.get("type") == "carousel"]
+    if not carousels:
+        return False, "Expected a carousel block when native_cards=True"
+    if len(carousels[0]["elements"]) != _MAX_CAROUSEL_CARDS:
+        return False, f"Carousel must cap at {_MAX_CAROUSEL_CARDS} cards, got {len(carousels[0]['elements'])}"
+    rendered_ids = {el["block_id"].rsplit("_", 1)[-1] for el in carousels[0]["elements"]}
+    expected_top_ids = {str(i) for i in range(_MAX_CAROUSEL_CARDS)}  # highest-scored offers are ids 0..9
+    if rendered_ids != expected_top_ids:
+        return False, f"Carousel must keep the top-{_MAX_CAROUSEL_CARDS}-scored offers, got ids {rendered_ids}"
+    if not any("+2" in b_el.get("text", "") for b in native_blocks if b.get("type") == "context" for b_el in b.get("elements", [])):
+        return False, "Expected an overflow indicator context block mentioning '+2' more offers"
+
+    # Classic (non-carousel) path — same cap and overflow indicator must apply.
+    classic_blocks = scout_digest.build_digest_blocks(
+        offers_by_network, {}, [], {}, run_date,
+    )
+    actions_blocks = [b for b in classic_blocks if b.get("type") == "actions"]
+    if len(actions_blocks) != _MAX_CAROUSEL_CARDS:
+        return False, f"Classic path must render at most {_MAX_CAROUSEL_CARDS} offer action blocks, got {len(actions_blocks)}"
+    if not any("+2" in b_el.get("text", "") for b in classic_blocks if b.get("type") == "context" for b_el in b.get("elements", [])):
+        return False, "Classic path must also surface an overflow indicator mentioning '+2' more offers"
+
+    return True, f"build_digest_blocks: renders top {_MAX_CAROUSEL_CARDS} by score + overflow indicator for both native and classic paths"
 
 
 @test("offer_staleness_threshold_reads_from_config")
