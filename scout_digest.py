@@ -14,6 +14,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -40,6 +42,7 @@ OFFERS_FILE          = DATA_DIR / "offers_latest.json"
 OFFERS_PREVIOUS_FILE = DATA_DIR / "offers_previous.json"
 PAYOUT_CACHE = DATA_DIR / "payout_cache.json"
 STATE_FILE   = DATA_DIR / "digest_state.json"
+STATE_LOCK_FILE = DATA_DIR / "digest_state.lock"
 
 # ── Slack ──────────────────────────────────────────────────────────────────────
 _SCOUT_QA_CHANNEL    = "C0AQEECF800"  # #bot-qa (renamed from #scout-qa) — always used in dev/force
@@ -320,6 +323,24 @@ def _context_fit(offer: dict) -> float:
 
 # ── State management ───────────────────────────────────────────────────────────
 
+@contextlib.contextmanager
+def _state_lock():
+    """Cross-process file lock guarding the digest_state.json read-modify-write cycle.
+
+    _record_action() (Slack approve/reject) and _record_surfaced() (post-digest) both
+    read the whole file, mutate it, and write it back — without this lock two writers
+    racing (e.g. a button click during a digest post) would silently clobber each
+    other's write (last write wins).
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_LOCK_FILE, "w") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
+
 def load_state() -> dict:
     try:
         if STATE_FILE.exists():
@@ -337,14 +358,15 @@ def save_state(state: dict):
 
 
 def _record_action(action: str, offer_id: str, advertiser: str, payout: str, actioned_by: str):
-    state = load_state()
-    state.setdefault(action, {})[str(offer_id)] = {
-        "advertiser": advertiser,
-        "payout_at_action": payout,
-        "actioned_by": actioned_by,
-        "actioned_at": datetime.utcnow().isoformat(),
-    }
-    save_state(state)
+    with _state_lock():
+        state = load_state()
+        state.setdefault(action, {})[str(offer_id)] = {
+            "advertiser": advertiser,
+            "payout_at_action": payout,
+            "actioned_by": actioned_by,
+            "actioned_at": datetime.utcnow().isoformat(),
+        }
+        save_state(state)
 
 
 def record_approval(offer_id: str, advertiser: str, payout: str, actioned_by: str):
@@ -386,12 +408,13 @@ def _record_surfaced(offer_ids: list[str]) -> None:
     """
     if not offer_ids:
         return
-    state = load_state()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    surfaced = state.setdefault("surfaced", {})
-    for offer_id in offer_ids:
-        surfaced[str(offer_id)] = {"last_shown_iso": now_iso}
-    save_state(state)
+    with _state_lock():
+        state = load_state()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        surfaced = state.setdefault("surfaced", {})
+        for offer_id in offer_ids:
+            surfaced[str(offer_id)] = {"last_shown_iso": now_iso}
+        save_state(state)
 
 
 # ── ClickHouse: active MS campaigns for deduplication ─────────────────────────
@@ -493,13 +516,30 @@ def _load_digest_config() -> dict:
         )
         offers_per_network = _MAX_CAROUSEL_CARDS
 
+    try:
+        resurface_window_days = float(raw.get("resurface_window_days", 7))
+    except (TypeError, ValueError):
+        log.warning(
+            "digest.resurface_window_days=%r is not numeric — falling back to 7",
+            raw.get("resurface_window_days"),
+        )
+        resurface_window_days = 7.0
+    if resurface_window_days < 0:
+        # A negative window has no meaningful semantics; clamp to 0, which
+        # effectively disables the cooldown (elapsed_days is never < 0).
+        log.warning(
+            "digest.resurface_window_days=%r is negative — clamping to 0 (cooldown disabled)",
+            resurface_window_days,
+        )
+        resurface_window_days = 0.0
+
     return {
         "min_rpm_floor": float(raw.get("min_rpm_floor", 20.0)),
         "max_per_category": int(raw.get("max_per_category", 2)),
         "max_per_payout_type": int(raw.get("max_per_payout_type", 2)),
         "offers_per_network": offers_per_network,
         "native_cards_enabled": native_cards_enabled,
-        "resurface_window_days": int(raw.get("resurface_window_days", 7)),
+        "resurface_window_days": resurface_window_days,
     }
 
 
@@ -1846,7 +1886,15 @@ def post_digest(dry_run: bool = False, is_force: bool = False):
 
     # Write-after-send: start the resurface cooldown only once the digest is
     # confirmed posted, not at scoring time (see _record_surfaced docstring).
-    _record_surfaced(payload.get("surfaced_offer_ids", []))
+    # Scoped to real production posts only — force/QA runs go to #scout-qa and
+    # must never poison the production cooldown state. A failure here is a
+    # state-persistence problem, not a delivery failure (the Slack post above
+    # already succeeded), so it's logged rather than raised.
+    if not is_force:
+        try:
+            _record_surfaced(payload.get("surfaced_offer_ids", []))
+        except Exception as e:
+            log.warning(f"Digest posted but failed to record surfaced state: {e}")
 
 
 if __name__ == "__main__":
