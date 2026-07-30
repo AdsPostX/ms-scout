@@ -18,6 +18,7 @@ import contextlib
 import fcntl
 import json
 import logging
+import math
 import os
 import pathlib
 import re
@@ -516,12 +517,17 @@ def _load_digest_config() -> dict:
         )
         offers_per_network = _MAX_CAROUSEL_CARDS
 
+    raw_resurface_window_days = raw.get("resurface_window_days", 7)
     try:
-        resurface_window_days = float(raw.get("resurface_window_days", 7))
+        if isinstance(raw_resurface_window_days, bool):
+            raise TypeError("bool is not a valid resurface_window_days")
+        resurface_window_days = float(raw_resurface_window_days)
+        if not math.isfinite(resurface_window_days):
+            raise ValueError("resurface_window_days must be finite")
     except (TypeError, ValueError):
         log.warning(
             "digest.resurface_window_days=%r is not numeric — falling back to 7",
-            raw.get("resurface_window_days"),
+            raw_resurface_window_days,
         )
         resurface_window_days = 7.0
     if resurface_window_days < 0:
