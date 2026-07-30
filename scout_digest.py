@@ -898,8 +898,8 @@ def build_digest_blocks(
                     "text": (
                         f"_+{overflow_count} more {network_label} offer"
                         f"{'s' if overflow_count != 1 else ''} scored but not shown "
-                        f"(carousel caps at {_MAX_CAROUSEL_CARDS}) · raise "
-                        f"`digest.offers_per_network` cutoff or check `/scout-queue`_"
+                        f"(display cap is {_MAX_CAROUSEL_CARDS}) · check `/scout-queue` "
+                        f"for the full scored list_"
                     ),
                 }],
             })
