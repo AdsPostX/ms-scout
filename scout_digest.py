@@ -524,7 +524,7 @@ def _load_digest_config() -> dict:
         resurface_window_days = float(raw_resurface_window_days)
         if not math.isfinite(resurface_window_days):
             raise ValueError("resurface_window_days must be finite")
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         log.warning(
             "digest.resurface_window_days=%r is not numeric — falling back to 7",
             raw_resurface_window_days,
