@@ -64,11 +64,11 @@ Fix: swap to `from scout_ch import _get_ch_client` + `ch = _get_ch_client()`, sa
 
 **Stale as of 2026-07-29** — verified live in `config/scout_thresholds.json`: `native_cards_enabled` is now `true` and `offers_per_network` is `10`; both flags described below as unflipped have since been flipped on.
 
-PR #323 (`carousel/digest-native-cards`) shipped native Slack card/carousel rendering behind `digest.native_cards_enabled`, explicitly set to `false` by design ("classic rendering is untouched until explicitly flipped on"). No follow-up task was ever filed to turn it on — no env var exists either (`grep -rn "NATIVE_CARDS"` is empty), so the only toggle is this JSON value.
+Original text for history: PR #323 (`carousel/digest-native-cards`) shipped native Slack card/carousel rendering behind `digest.native_cards_enabled`, explicitly set to `false` by design ("classic rendering is untouched until explicitly flipped on"). No follow-up task was ever filed to turn it on — no env var exists either (`grep -rn "NATIVE_CARDS"` is empty), so the only toggle is this JSON value.
 
-`digest.offers_per_network` is also still `3`, not the intended `10` — same config block, same fix window.
+`digest.offers_per_network` was also still `3`, not the intended `10` — same config block, same fix window.
 
-Fix: flip both values in `config/scout_thresholds.json` and watch the next live digest run before calling it done. Left as debt rather than fixed inline because flipping user-facing rendering behavior warrants its own small, watched PR — not bundled with an unrelated change.
+Fix (superseded — both values are now flipped, see line 65): flip both values in `config/scout_thresholds.json` and watch the next live digest run before calling it done.
 
 ## scout_digest.py:1381-1383 — `_build_sourcing_intel_blocks` hand-rolls payout resolution instead of `_resolve_payout()` — RESOLVED
 

@@ -784,7 +784,7 @@ def build_digest_blocks(
                 "view_url":           tracking_url,
             })
 
-        blocks += _render_network_offer_cards(render_offers, native_cards)
+        blocks += _render_network_offer_cards(render_offers, native_cards, section="digest")
 
     return blocks
 
@@ -902,14 +902,16 @@ def _build_offer_native_card(
     fit_tier:           str = "",
     rpm:                float = 0.0,
     view_url:           str = "",
+    section:            str = "digest",
 ) -> dict:
     """Native Slack card block for one offer — meant to sit inside a per-network carousel.
 
     Mirrors _build_offer_card_blocks' data mapping but respects the card block's
     tighter limits (title/subtitle: 150-char plain_text, body: 200-char mrkdwn) —
     _slack_card_block already truncates, this just picks sensible field boundaries.
-    block_id is prefixed with network because offer_id is only unique within a
-    single network's feed, and carousel cards from multiple networks can collide.
+    block_id is prefixed with section + network because offer_id is only unique
+    within a single network's feed, and the same offer can appear in both the
+    main digest and sourcing-intel sections of one Slack message.
     """
     badge    = _fit_tier_badge(fit_tier)
     rpm_text = f"  ·  ~${rpm:.2f} est. RPM" if rpm and rpm > 0 else ""
@@ -924,13 +926,13 @@ def _build_offer_native_card(
         title=title,
         subtitle=subtitle,
         body=body,
-        block_id=f"offer_card_{network}_{offer_id}",
+        block_id=f"offer_card_{section}_{network}_{offer_id}",
         hero_image_url=img_url if img_url.startswith("http") else "",
         actions=action_elements,
     )
 
 
-def _render_network_offer_cards(offers: list[dict], native_cards: bool) -> list[dict]:
+def _render_network_offer_cards(offers: list[dict], native_cards: bool, section: str = "digest") -> list[dict]:
     """Render one network's offers as native carousel cards or classic section blocks.
 
     Pure function — no side effects, no I/O. Shared by build_digest_blocks() and
@@ -939,6 +941,9 @@ def _render_network_offer_cards(offers: list[dict], native_cards: bool) -> list[
     _build_offer_native_card / _build_offer_card_blocks: advertiser, offer_summary,
     payout_str, geo, why, action_value, offer_id, network, img_url,
     network_portal_url, fit_tier, rpm, view_url, and (classic-only) tier_badge.
+    `section` namespaces native-card block_ids so the same offer can appear in
+    both the main digest and sourcing-intel sections of one Slack message
+    without colliding.
     """
     if native_cards:
         cards = [
@@ -949,6 +954,7 @@ def _render_network_offer_cards(offers: list[dict], native_cards: bool) -> list[
                 img_url=o.get("img_url", ""), network_portal_url=o.get("network_portal_url", ""),
                 fit_tier=o.get("fit_tier", ""), rpm=o.get("rpm", 0.0),
                 view_url=o.get("view_url", ""),
+                section=section,
             )
             for o in offers
         ]
@@ -1467,7 +1473,7 @@ def _build_sourcing_intel_blocks(signals: dict, payout_cache: dict | None = None
                 "view_url":           o.get("tracking_url") or o.get("deep_link_url") or "",
             })
 
-        blocks += _render_network_offer_cards(render_offers, native_cards)
+        blocks += _render_network_offer_cards(render_offers, native_cards, section="sourcing_intel")
 
     return blocks
 
