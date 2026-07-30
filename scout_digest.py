@@ -1009,13 +1009,22 @@ def _resolve_payout(offer_id: str, offer: dict, payout_cache: dict) -> tuple[flo
     Resolve payout amount + normalized payout type for an offer.
     Prefers payout_cache (Impact API, more accurate) over the scraper-normalised
     offer fields — MaxBounty/FlexOffers aren't in payout_cache, so fall back
-    to the offer's own fields there.
+    to the offer's own fields there. Falls back further to the offer's raw
+    "payout"/"payout_type" fields for callers (e.g. sourcing-signal offers)
+    that haven't gone through offer_scraper's cleaning step and so never got
+    "_payout_num"/"_payout_type_norm" set.
     """
     payout_data = payout_cache.get(offer_id, {})
     payout = _parse_payout(payout_data.get("payout"))
     if payout == 0:
         payout = _parse_payout(offer.get("_payout_num"))
-    raw_payout_type = payout_data.get("payout_type", "") or offer.get("_payout_type_norm", "")
+    if payout == 0:
+        payout = _parse_payout(offer.get("payout"))
+    raw_payout_type = (
+        payout_data.get("payout_type", "")
+        or offer.get("_payout_type_norm", "")
+        or offer.get("payout_type", "")
+    )
     payout_type = _normalize_payout_type(raw_payout_type)
     return payout, payout_type
 
@@ -1320,7 +1329,7 @@ def _days_in_inventory(o: dict) -> str:
         return ""
 
 
-def _build_sourcing_intel_blocks(signals: dict, native_cards: bool = False) -> list:
+def _build_sourcing_intel_blocks(signals: dict, payout_cache: dict | None = None, native_cards: bool = False) -> list:
     """Build Block Kit offer cards for the winning sourcing signal. Returns [] if nothing fired.
 
     new_offers / seasonal → rich per-offer cards grouped by network, with image, normalized
@@ -1330,8 +1339,11 @@ def _build_sourcing_intel_blocks(signals: dict, native_cards: bool = False) -> l
 
     native_cards mirrors build_digest_blocks()'s flag — both call sites render through the
     shared _render_network_offer_cards() helper so native-vs-classic branching lives in one
-    place.
+    place. payout_cache is optional: _resolve_payout() falls back to the offer's own
+    _payout_num/_payout_type_norm (or raw payout/payout_type) fields when the offer
+    isn't in payout_cache.
     """
+    payout_cache = payout_cache or {}
     from collections import defaultdict
     from scout_agent import _network_portal_url as _portal_url  # local import avoids circular dep
 
@@ -1415,9 +1427,7 @@ def _build_sourcing_intel_blocks(signals: dict, native_cards: bool = False) -> l
             _desc_raw   = " ".join((o.get("description") or "").split())
             _desc_trunc = _desc_raw[:_ALT_SUMMARY_TRUNCATE_LEN].rsplit(" ", 1)[0] + "…" if len(_desc_raw) > _ALT_SUMMARY_TRUNCATE_LEN else _desc_raw
             summary     = o.get("mini_description") or _desc_trunc
-            payout_num  = _parse_payout(o.get("payout"))
-            # Fix: use _normalize_payout_type() not .upper() — converts "$ per lead" → "CPL" etc.
-            payout_type = _normalize_payout_type(o.get("payout_type") or "")
+            payout_num, payout_type = _resolve_payout(str(offer_id), o, payout_cache)
             payout_str  = _format_payout(payout_num, payout_type) if payout_num else "Rate TBD"
             geo         = o.get("geo") or o.get("country") or ""
             img_url     = resolve_icon_image(o, extra_candidates=(o.get("banner_url") or "",))
@@ -1763,7 +1773,8 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
         all_offers_flat = _load_offers()
         sourcing_signals = _run_sourcing_signals(all_offers_flat)
         sourcing_blocks  = _build_sourcing_intel_blocks(
-            sourcing_signals, native_cards=digest_cfg["native_cards_enabled"],
+            sourcing_signals, payout_cache=payout_cache,
+            native_cards=digest_cfg["native_cards_enabled"],
         )
         if sourcing_blocks:
             sourcing_intro = [
