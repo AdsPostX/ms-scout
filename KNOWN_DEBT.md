@@ -62,15 +62,19 @@ Fix: swap to `from scout_ch import _get_ch_client` + `ch = _get_ch_client()`, sa
 
 ## config/scout_thresholds.json — `native_cards_enabled` dark-launched, never flipped on
 
-PR #323 (`carousel/digest-native-cards`) shipped native Slack card/carousel rendering behind `digest.native_cards_enabled`, explicitly set to `false` by design ("classic rendering is untouched until explicitly flipped on"). No follow-up task was ever filed to turn it on — no env var exists either (`grep -rn "NATIVE_CARDS"` is empty), so the only toggle is this JSON value.
+**Stale as of 2026-07-29** — verified live in `config/scout_thresholds.json`: `native_cards_enabled` is now `true` and `offers_per_network` is `10`; both flags described below as unflipped have since been flipped on.
 
-`digest.offers_per_network` is also still `3`, not the intended `10` — same config block, same fix window.
+Original text for history: PR #323 (`carousel/digest-native-cards`) shipped native Slack card/carousel rendering behind `digest.native_cards_enabled`, explicitly set to `false` by design ("classic rendering is untouched until explicitly flipped on"). No follow-up task was ever filed to turn it on — no env var exists either (`grep -rn "NATIVE_CARDS"` is empty), so the only toggle is this JSON value.
 
-Fix: flip both values in `config/scout_thresholds.json` and watch the next live digest run before calling it done. Left as debt rather than fixed inline because flipping user-facing rendering behavior warrants its own small, watched PR — not bundled with an unrelated change.
+`digest.offers_per_network` was also still `3`, not the intended `10` — same config block, same fix window.
 
-## scout_digest.py:1381-1383 — `_build_sourcing_intel_blocks` hand-rolls payout resolution instead of `_resolve_payout()`
+Fix (superseded — both values are now flipped, see line 65): flip both values in `config/scout_thresholds.json` and watch the next live digest run before calling it done.
 
-PR #327/#328 consolidated the digest's other three payout-resolution call sites (`score_offer`, `build_why_text`, `build_digest_blocks`) onto the shared `_resolve_payout(offer_id, offer, payout_cache)` helper. `_build_sourcing_intel_blocks()` still calls `_parse_payout(o.get("payout"))` + `_normalize_payout_type(o.get("payout_type") or "")` directly instead.
+## scout_digest.py:1381-1383 — `_build_sourcing_intel_blocks` hand-rolls payout resolution instead of `_resolve_payout()` — RESOLVED
+
+**Resolved** by threading `payout_cache` into `_build_sourcing_intel_blocks()` and its call site, then swapping the hand-rolled `_parse_payout`/`_normalize_payout_type` pair for `_resolve_payout(offer_id, offer, payout_cache)`, same as `score_offer`/`build_why_text`/`build_digest_blocks`. Sourcing-signal offer dicts don't reliably carry the scraper-normalized `_payout_num`/`_payout_type_norm` fields (existing smoke tests construct them with only raw `payout`/`payout_type`), so `_resolve_payout()` itself was widened with a third fallback tier onto those raw fields — safe for the other three callers since it only engages when both `payout_cache` and `_payout_num` come up empty.
+
+Original text for history: PR #327/#328 consolidated the digest's other three payout-resolution call sites (`score_offer`, `build_why_text`, `build_digest_blocks`) onto the shared `_resolve_payout(offer_id, offer, payout_cache)` helper. `_build_sourcing_intel_blocks()` still calls `_parse_payout(o.get("payout"))` + `_normalize_payout_type(o.get("payout_type") or "")` directly instead.
 
 Not a drop-in swap: `_build_sourcing_intel_blocks(signals: dict)` has no `payout_cache` parameter in its signature, and its offer dicts (`net_offers`, sourcing-signal shape) use raw `payout`/`payout_type` keys — not the `_payout_num`/`_payout_type_norm` shape `_resolve_payout` expects from scraper-normalized offers. Converting it means either threading `payout_cache` through `_build_sourcing_intel_blocks` and its caller (`build_digest_blocks` → `sourcing_blocks = _build_sourcing_intel_blocks(sourcing_signals)`, line ~1718), or writing a cache-less variant — a real design decision, not a mechanical rename.
 
