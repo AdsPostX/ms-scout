@@ -4592,6 +4592,66 @@ def test_build_digest_blocks_native_cards_carousel():
     return True, "build_digest_blocks: native_cards=True renders a per-network carousel; default (False) path unaffected"
 
 
+@test("PR A — _build_sourcing_intel_blocks(native_cards=True) renders a carousel")
+def test_sourcing_intel_blocks_native_cards_carousel():
+    """_build_sourcing_intel_blocks must route through the shared _render_network_offer_cards
+    helper: native_cards=True renders carousel/card blocks, native_cards=False (default) stays
+    classic — same contract as build_digest_blocks()."""
+    import scout_digest
+
+    # Two offers on the same network: a single-offer network renders a bare card, not a
+    # carousel wrapper (spec-verified, not a bug) — use 2 to actually exercise the carousel path.
+    now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    offers = [
+        {
+            "offer_id": "901", "offer_name": "TestOffer", "advertiser": "TestAdv",
+            "payout": "$6.00", "payout_type": "CPL", "fit_tier": "PRIME",
+            "network": "maxbounty", "first_seen": now_iso,
+        },
+        {
+            "offer_id": "902", "offer_name": "TestOffer2", "advertiser": "TestAdv2",
+            "payout": "$4.00", "payout_type": "CPL", "fit_tier": "STRONG",
+            "network": "maxbounty", "first_seen": now_iso,
+        },
+    ]
+    signals = {"new_offers": offers, "seasonal": [], "payout_upgrades": []}
+
+    native_blocks = scout_digest._build_sourcing_intel_blocks(signals, native_cards=True)
+    carousels = [b for b in native_blocks if b.get("type") == "carousel"]
+    if not carousels:
+        return False, "Expected a carousel block when native_cards=True"
+
+    classic_blocks = scout_digest._build_sourcing_intel_blocks(signals, native_cards=False)
+    if any(b.get("type") == "carousel" for b in classic_blocks):
+        return False, "native_cards=False must stay classic — no carousel block should appear"
+    if not any(b.get("type") == "actions" for b in classic_blocks):
+        return False, "Classic renderer should still emit an actions block per offer when native_cards=False"
+    return True, "_build_sourcing_intel_blocks: native_cards=True renders a carousel; False stays classic"
+
+
+@test("PR A — native_cards branch lives only in _render_network_offer_cards")
+def test_native_cards_branch_single_location():
+    """build_digest_blocks() and _build_sourcing_intel_blocks() must not branch on native_cards
+    inline — both must delegate to the shared _render_network_offer_cards() helper so the
+    native-vs-classic decision lives in exactly one place."""
+    import inspect
+    import scout_digest
+
+    src_digest_blocks = inspect.getsource(scout_digest.build_digest_blocks)
+    src_sourcing      = inspect.getsource(scout_digest._build_sourcing_intel_blocks)
+    src_helper        = inspect.getsource(scout_digest._render_network_offer_cards)
+
+    if "_render_network_offer_cards(" not in src_digest_blocks:
+        return False, "build_digest_blocks() must call the shared _render_network_offer_cards helper"
+    if "_render_network_offer_cards(" not in src_sourcing:
+        return False, "_build_sourcing_intel_blocks() must call the shared _render_network_offer_cards helper"
+    if "if native_cards" in src_digest_blocks or "if native_cards" in src_sourcing:
+        return False, "native_cards must not be branched on inline outside _render_network_offer_cards"
+    if "if native_cards" not in src_helper:
+        return False, "_render_network_offer_cards must be the one place that branches on native_cards"
+    return True, "native_cards branching confirmed to live only in _render_network_offer_cards"
+
+
 @test("Phase 3A — _render_subheader returns correct structure and level")
 def test_render_subheader_structure():
     """_render_subheader returns a header dict with level defaulting to 2."""

@@ -718,7 +718,7 @@ def build_digest_blocks(
             "elements": [{"type": "mrkdwn", "text": f"_{screened} offers screened · top {len(scored_offers)} surfaced_"}],
         })
 
-        network_cards: list[dict] = []
+        render_offers: list[dict] = []
 
         for _score, offer in scored_offers:
             offer_id     = str(offer.get("offer_id", ""))
@@ -768,30 +768,23 @@ def build_digest_blocks(
             img_url    = (offer_images or {}).get(offer_id, "")
             portal_url = _portal_url(network, offer_id)
 
-            if native_cards:
-                network_cards.append(_build_offer_native_card(
-                    advertiser, offer_summary, payout_str, geo,
-                    why=why, action_value=action_value, offer_id=offer_id,
-                    network=network,
-                    img_url=img_url, network_portal_url=portal_url,
-                    fit_tier=offer.get("fit_tier", ""),
-                    rpm=_score,
-                    view_url=tracking_url,
-                ))
-            else:
-                blocks += _build_offer_card_blocks(
-                    advertiser, offer_summary, payout_str, geo,
-                    tier_badge="", img_url=img_url,
-                    why=why, action_value=action_value,
-                    network_portal_url=portal_url,
-                    fit_tier=offer.get("fit_tier", ""),
-                    rpm=_score,
-                    view_url=tracking_url,
-                )
+            render_offers.append({
+                "advertiser":         advertiser,
+                "offer_summary":      offer_summary,
+                "payout_str":         payout_str,
+                "geo":                geo,
+                "why":                why,
+                "action_value":       action_value,
+                "offer_id":           offer_id,
+                "network":            network,
+                "img_url":            img_url,
+                "network_portal_url": portal_url,
+                "fit_tier":           offer.get("fit_tier", ""),
+                "rpm":                _score,
+                "view_url":           tracking_url,
+            })
 
-        if native_cards and network_cards:
-            blocks += _carousel_block(network_cards)
-            blocks.append({"type": "divider"})
+        blocks += _render_network_offer_cards(render_offers, native_cards)
 
     return blocks
 
@@ -935,6 +928,45 @@ def _build_offer_native_card(
         hero_image_url=img_url if img_url.startswith("http") else "",
         actions=action_elements,
     )
+
+
+def _render_network_offer_cards(offers: list[dict], native_cards: bool) -> list[dict]:
+    """Render one network's offers as native carousel cards or classic section blocks.
+
+    Pure function — no side effects, no I/O. Shared by build_digest_blocks() and
+    _build_sourcing_intel_blocks() so both call sites branch on native_cards in
+    exactly one place. Each dict in `offers` must carry the fields consumed by
+    _build_offer_native_card / _build_offer_card_blocks: advertiser, offer_summary,
+    payout_str, geo, why, action_value, offer_id, network, img_url,
+    network_portal_url, fit_tier, rpm, view_url, and (classic-only) tier_badge.
+    """
+    if native_cards:
+        cards = [
+            _build_offer_native_card(
+                o["advertiser"], o["offer_summary"], o["payout_str"], o["geo"],
+                why=o["why"], action_value=o["action_value"], offer_id=o["offer_id"],
+                network=o.get("network", ""),
+                img_url=o.get("img_url", ""), network_portal_url=o.get("network_portal_url", ""),
+                fit_tier=o.get("fit_tier", ""), rpm=o.get("rpm", 0.0),
+                view_url=o.get("view_url", ""),
+            )
+            for o in offers
+        ]
+        if not cards:
+            return []
+        return _carousel_block(cards) + [{"type": "divider"}]
+
+    blocks: list[dict] = []
+    for o in offers:
+        blocks += _build_offer_card_blocks(
+            o["advertiser"], o["offer_summary"], o["payout_str"], o["geo"],
+            tier_badge=o.get("tier_badge", ""), img_url=o.get("img_url", ""),
+            why=o["why"], action_value=o["action_value"],
+            network_portal_url=o.get("network_portal_url", ""),
+            fit_tier=o.get("fit_tier", ""), rpm=o.get("rpm", 0.0),
+            view_url=o.get("view_url", ""),
+        )
+    return blocks
 
 
 # ── Sourcing intelligence signals ──────────────────────────────────────────────
@@ -1288,13 +1320,17 @@ def _days_in_inventory(o: dict) -> str:
         return ""
 
 
-def _build_sourcing_intel_blocks(signals: dict) -> list:
+def _build_sourcing_intel_blocks(signals: dict, native_cards: bool = False) -> list:
     """Build Block Kit offer cards for the winning sourcing signal. Returns [] if nothing fired.
 
     new_offers / seasonal → rich per-offer cards grouped by network, with image, normalized
     payout type, tier badge, mini_description, and Add-to-Draft / Skip buttons.
     payout_upgrades → plain mrkdwn text (different data shape; references running campaigns).
     Max 2 cards per network section to keep visual density appropriate.
+
+    native_cards mirrors build_digest_blocks()'s flag — both call sites render through the
+    shared _render_network_offer_cards() helper so native-vs-classic branching lives in one
+    place.
     """
     from collections import defaultdict
     from scout_agent import _network_portal_url as _portal_url  # local import avoids circular dep
@@ -1371,6 +1407,7 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
         })
 
         # ── Per-offer cards (max 2 per network section) ──────────────────────────
+        render_offers: list[dict] = []
         for o in net_offers[:2]:
             offer_id    = o.get("offer_id") or o.get("offer_name", "")
             offer_name  = _clean_offer_name(o.get("offer_name", ""))
@@ -1404,13 +1441,23 @@ def _build_sourcing_intel_blocks(signals: dict) -> list:
             }, separators=(",", ":"))
 
             portal_url = _portal_url(network, str(offer_id))
-            blocks    += _build_offer_card_blocks(
-                advertiser, summary, payout_str, geo,
-                tier_badge=tier_badge, img_url=img_url,
-                why=why, action_value=action_value,
-                network_portal_url=portal_url,
-                view_url=o.get("tracking_url") or o.get("deep_link_url") or "",
-            )
+            render_offers.append({
+                "advertiser":         advertiser,
+                "offer_summary":      summary,
+                "payout_str":         payout_str,
+                "geo":                geo,
+                "why":                why,
+                "action_value":       action_value,
+                "offer_id":           str(offer_id),
+                "network":            network,
+                "img_url":            img_url,
+                "network_portal_url": portal_url,
+                "tier_badge":         tier_badge,
+                "fit_tier":           tier,
+                "view_url":           o.get("tracking_url") or o.get("deep_link_url") or "",
+            })
+
+        blocks += _render_network_offer_cards(render_offers, native_cards)
 
     return blocks
 
@@ -1715,7 +1762,9 @@ def build_digest_payload(is_force: bool = False, skip_event_gate: bool = False) 
     try:
         all_offers_flat = _load_offers()
         sourcing_signals = _run_sourcing_signals(all_offers_flat)
-        sourcing_blocks  = _build_sourcing_intel_blocks(sourcing_signals)
+        sourcing_blocks  = _build_sourcing_intel_blocks(
+            sourcing_signals, native_cards=digest_cfg["native_cards_enabled"],
+        )
         if sourcing_blocks:
             sourcing_intro = [
                 {"type": "divider"},
