@@ -738,6 +738,150 @@ def test_score_offer_reads_config_floor():
         return False, str(e)
 
 
+@test("score_offer excludes an offer surfaced within the resurface cooldown window")
+def test_score_offer_excludes_within_resurface_cooldown():
+    """
+    PR B invariant: an offer shown recently (inside resurface_window_days) and
+    left unactioned must be excluded from score_offer's qualifying output — this
+    is the fix for #scout-offers reposting the same offers every digest cycle.
+    """
+    try:
+        import scout_agent
+        import scout_digest
+        from datetime import datetime, timedelta, timezone
+
+        offer = {
+            "offer_id": "test-cooldown-1",
+            "advertiser": "CooldownCo",
+            "network": "impact",
+            "category": "Retail",
+            "_payout_type_norm": "CPL",
+            "_payout_num": 5.0,
+            "tracking_url": "x",
+        }
+
+        orig_scout_score = scout_agent._scout_score
+        scout_agent._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
+
+        try:
+            digest_cfg = scout_digest._load_digest_config()
+            digest_cfg = {**digest_cfg, "resurface_window_days": 7}
+
+            recent_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+            state = {
+                "approved": {}, "rejected": {},
+                "surfaced": {"test-cooldown-1": {"last_shown_iso": recent_iso}},
+            }
+            result = scout_digest.score_offer(offer, {}, state, {}, digest_cfg=digest_cfg)
+            if result is not None:
+                return False, f"offer shown 1 day ago (window=7d) should be excluded, got {result}"
+
+            # Sanity: same offer with NO surfaced entry is NOT excluded
+            clean_state = {"approved": {}, "rejected": {}, "surfaced": {}}
+            control = scout_digest.score_offer(offer, {}, clean_state, {}, digest_cfg=digest_cfg)
+            if control is None:
+                return False, "control offer with no surfaced entry should score, got None"
+        finally:
+            scout_agent._scout_score = orig_scout_score
+
+        return True, f"cooldown suppresses recently-surfaced offer; control scored={control}"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("score_offer resurfaces a cooldown offer once the window elapses")
+def test_score_offer_resurfaces_after_cooldown_elapses():
+    """Offer surfaced 10 days ago with a 7-day window must score again (cooldown expired)."""
+    try:
+        import scout_agent
+        import scout_digest
+        from datetime import datetime, timedelta, timezone
+
+        offer = {
+            "offer_id": "test-cooldown-2",
+            "advertiser": "ExpiredCooldownCo",
+            "network": "impact",
+            "category": "Retail",
+            "_payout_type_norm": "CPL",
+            "_payout_num": 5.0,
+            "tracking_url": "x",
+        }
+
+        orig_scout_score = scout_agent._scout_score
+        scout_agent._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
+
+        try:
+            digest_cfg = scout_digest._load_digest_config()
+            digest_cfg = {**digest_cfg, "resurface_window_days": 7}
+
+            old_iso = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+            state = {
+                "approved": {}, "rejected": {},
+                "surfaced": {"test-cooldown-2": {"last_shown_iso": old_iso}},
+            }
+            result = scout_digest.score_offer(offer, {}, state, {}, digest_cfg=digest_cfg)
+            if result is None:
+                return False, "offer shown 10 days ago (window=7d) should resurface, got None"
+        finally:
+            scout_agent._scout_score = orig_scout_score
+
+        return True, f"cooldown expired, offer resurfaced: score={result}"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("score_offer lets an explicit rejection override the resurface cooldown")
+def test_score_offer_rejection_overrides_cooldown():
+    """
+    Human decision must always win over the cooldown. An offer that was surfaced
+    recently AND explicitly rejected (with no payout lift) stays excluded for the
+    rejection reason, not silently reclassified as a cooldown suppression —
+    verified here via reason_sink so the two code paths don't get confused.
+    """
+    try:
+        import scout_agent
+        import scout_digest
+        from datetime import datetime, timedelta, timezone
+
+        offer = {
+            "offer_id": "test-cooldown-3",
+            "advertiser": "RejectedCo",
+            "network": "impact",
+            "category": "Retail",
+            "_payout_type_norm": "CPL",
+            "_payout_num": 5.0,
+            "tracking_url": "x",
+        }
+
+        orig_scout_score = scout_agent._scout_score
+        scout_agent._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
+
+        try:
+            digest_cfg = scout_digest._load_digest_config()
+            digest_cfg = {**digest_cfg, "resurface_window_days": 7}
+
+            recent_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+            state = {
+                "approved": {},
+                "rejected": {"test-cooldown-3": {"payout_at_action": "5.0"}},
+                "surfaced": {"test-cooldown-3": {"last_shown_iso": recent_iso}},
+            }
+            reasons: dict = {}
+            result = scout_digest.score_offer(
+                offer, {}, state, {}, digest_cfg=digest_cfg, reason_sink=reasons,
+            )
+            if result is not None:
+                return False, f"rejected offer with no payout lift should be excluded, got {result}"
+            if reasons.get("rejected_no_lift") != 1:
+                return False, f"expected rejection gate (not cooldown) to fire, got reasons={reasons}"
+        finally:
+            scout_agent._scout_score = orig_scout_score
+
+        return True, "human rejection decision governs, cooldown gate correctly bypassed"
+    except Exception as e:
+        return False, str(e)
+
+
 @test("_load_digest_config coerces non-bool native_cards_enabled to False")
 def test_load_digest_config_coerces_non_bool_native_cards():
     """

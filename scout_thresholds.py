@@ -25,6 +25,7 @@ _SCOUT_THRESHOLDS_FALLBACK: dict = {
         "offers_per_network": 3,
         "max_per_category": 2,
         "max_per_payout_type": 2,
+        "resurface_window_days": 7,
     },
     "signals": {
         "fill_rate_min_sessions_7d": 2500,

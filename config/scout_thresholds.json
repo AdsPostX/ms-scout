@@ -6,7 +6,8 @@
     "offers_per_network": 10,
     "max_per_category": 2,
     "max_per_payout_type": 2,
-    "native_cards_enabled": true
+    "native_cards_enabled": true,
+    "resurface_window_days": 7
   },
   "signals": {
     "fill_rate_min_sessions_7d": 2500,
