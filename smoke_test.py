@@ -5032,6 +5032,8 @@ def test_alert_registry_post_state_survives_restart():
         ar._POST_STATE.clear()
         ar.set_post_state("test_alarm_restart", message_ts="123.456", channel="C123",
                            fired_at="2026-01-01T00:00:00+00:00")
+        ar.snooze_alert("test_alarm_restart", until_ts="2026-01-01T01:00:00+00:00", by_user="U_SNOOZE")
+        ar.acknowledge_alert("test_alarm_restart", by_user="U_ACK", at_ts="2026-01-01T02:00:00+00:00")
         assert "alert_post_state" in fake_disk, "set_post_state did not persist to pulse_state"
 
         ar._POST_STATE.clear()
@@ -5040,6 +5042,10 @@ def test_alert_registry_post_state_survives_restart():
         assert restored is not None, "post-state not restored after simulated restart"
         assert restored.message_ts == "123.456", f"expected message_ts=123.456, got {restored.message_ts}"
         assert restored.channel == "C123", f"expected channel=C123, got {restored.channel}"
+        assert restored.snooze_until == "2026-01-01T01:00:00+00:00", f"expected snooze_until restored, got {restored.snooze_until}"
+        assert restored.snoozed_by == "U_SNOOZE", f"expected snoozed_by=U_SNOOZE, got {restored.snoozed_by}"
+        assert restored.acknowledged_by == "U_ACK", f"expected acknowledged_by=U_ACK, got {restored.acknowledged_by}"
+        assert restored.acknowledged_at == "2026-01-01T02:00:00+00:00", f"expected acknowledged_at restored, got {restored.acknowledged_at}"
     finally:
         scout_state._load_pulse_state = orig_load
         scout_state._write_pulse_state_locked = orig_write_locked
