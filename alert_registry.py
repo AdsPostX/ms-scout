@@ -134,6 +134,58 @@ def _load_registry_from_state() -> None:
         log.exception("alert_registry: failed to restore state from pulse_state")
 
 
+def _persist_post_state() -> None:
+    """Persist current post-state to pulse_state.json for deploy-survivability.
+
+    Must be called while holding _POST_LOCK to prevent TOCTOU races on _POST_STATE.
+    The Redis path (when configured) handles its own persistence and this is a no-op.
+    Mirrors _persist_registry_state() — same file, same fail-open logging behavior.
+    """
+    try:
+        from scout_state import _update_pulse_state
+        _update_pulse_state("alert_post_state", {
+            name: {
+                "message_ts": ps.message_ts,
+                "channel": ps.channel,
+                "fired_at": ps.fired_at,
+                "snooze_until": ps.snooze_until,
+                "snoozed_by": ps.snoozed_by,
+                "acknowledged_by": ps.acknowledged_by,
+                "acknowledged_at": ps.acknowledged_at,
+            }
+            for name, ps in _POST_STATE.items()
+        })
+    except Exception:
+        log.exception("alert_registry: failed to persist post state")
+
+
+def _load_post_state_from_state() -> None:
+    """Restore post-state from pulse_state.json on startup after a deploy.
+
+    Safe without _POST_LOCK: called at module import time, before any monitor threads start.
+    """
+    try:
+        from scout_state import _load_pulse_state
+        stored = _load_pulse_state().get("alert_post_state", {})
+        for name, data in stored.items():
+            _POST_STATE[name] = AlertPostState(
+                alert_name=name,
+                message_ts=data["message_ts"],
+                channel=data["channel"],
+                fired_at=data["fired_at"],
+                snooze_until=data.get("snooze_until"),
+                snoozed_by=data.get("snoozed_by"),
+                acknowledged_by=data.get("acknowledged_by"),
+                acknowledged_at=data.get("acknowledged_at"),
+            )
+        if stored:
+            log.info("alert_registry: restored %d post-states from pulse_state", len(stored))
+    except json.JSONDecodeError:
+        raise
+    except Exception:
+        log.exception("alert_registry: failed to restore post state from pulse_state")
+
+
 # Lock ordering: _LOCK is always acquired before _PULSE_STATE_LOCK (inside
 # _persist_registry_state → _save_pulse_state). Never reverse this order.
 
@@ -267,6 +319,7 @@ def set_post_state(
         else:
             with _POST_LOCK:
                 _POST_STATE[alert_name] = entry
+                _persist_post_state()
     except Exception:
         log.exception("alert_registry.set_post_state failed (alert=%s)", alert_name)
 
@@ -317,6 +370,7 @@ def snooze_alert(alert_name: str, until_ts: str, by_user: str) -> None:
                     _POST_STATE[alert_name] = _dc_replace(
                         existing, snooze_until=until_ts, snoozed_by=by_user
                     )
+                    _persist_post_state()
     except Exception:
         log.exception("alert_registry.snooze_alert failed (alert=%s)", alert_name)
 
@@ -340,6 +394,7 @@ def clear_snooze(alert_name: str) -> None:
                     _POST_STATE[alert_name] = _dc_replace(
                         existing, snooze_until=None, snoozed_by=None
                     )
+                    _persist_post_state()
     except Exception:
         log.exception("alert_registry.clear_snooze failed (alert=%s)", alert_name)
 
@@ -363,6 +418,7 @@ def acknowledge_alert(alert_name: str, by_user: str, at_ts: str) -> None:
                     _POST_STATE[alert_name] = _dc_replace(
                         existing, acknowledged_by=by_user, acknowledged_at=at_ts
                     )
+                    _persist_post_state()
     except Exception:
         log.exception("alert_registry.acknowledge_alert failed (alert=%s)", alert_name)
 
@@ -370,3 +426,4 @@ def acknowledge_alert(alert_name: str, by_user: str, at_ts: str) -> None:
 # Restore registry state from pulse_state.json on module load (deploy-survivability).
 # Only applies to the in-memory fallback path; Redis handles its own persistence.
 _load_registry_from_state()
+_load_post_state_from_state()

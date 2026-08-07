@@ -5015,6 +5015,45 @@ def test_alert_registry_post_state_functions():
     return True, "alert_registry: all 5 post-state functions present"
 
 
+@test("alert_registry post-state survives a simulated restart via pulse_state.json")
+def test_alert_registry_post_state_survives_restart():
+    """set_post_state persists to pulse_state.json; reload restores it into a fresh _POST_STATE."""
+    import alert_registry as ar
+    import scout_state
+
+    orig_load = scout_state._load_pulse_state
+    orig_write_locked = scout_state._write_pulse_state_locked
+    fake_disk = {}
+    scout_state._load_pulse_state = lambda: json.loads(json.dumps(fake_disk))
+    scout_state._write_pulse_state_locked = lambda state: (fake_disk.clear(), fake_disk.update(json.loads(json.dumps(state))))
+
+    saved_post_state = dict(ar._POST_STATE)
+    try:
+        ar._POST_STATE.clear()
+        ar.set_post_state("test_alarm_restart", message_ts="123.456", channel="C123",
+                           fired_at="2026-01-01T00:00:00+00:00")
+        ar.snooze_alert("test_alarm_restart", until_ts="2026-01-01T01:00:00+00:00", by_user="U_SNOOZE")
+        ar.acknowledge_alert("test_alarm_restart", by_user="U_ACK", at_ts="2026-01-01T02:00:00+00:00")
+        assert "alert_post_state" in fake_disk, "set_post_state did not persist to pulse_state"
+
+        ar._POST_STATE.clear()
+        ar._load_post_state_from_state()
+        restored = ar.get_post_state("test_alarm_restart")
+        assert restored is not None, "post-state not restored after simulated restart"
+        assert restored.message_ts == "123.456", f"expected message_ts=123.456, got {restored.message_ts}"
+        assert restored.channel == "C123", f"expected channel=C123, got {restored.channel}"
+        assert restored.snooze_until == "2026-01-01T01:00:00+00:00", f"expected snooze_until restored, got {restored.snooze_until}"
+        assert restored.snoozed_by == "U_SNOOZE", f"expected snoozed_by=U_SNOOZE, got {restored.snoozed_by}"
+        assert restored.acknowledged_by == "U_ACK", f"expected acknowledged_by=U_ACK, got {restored.acknowledged_by}"
+        assert restored.acknowledged_at == "2026-01-01T02:00:00+00:00", f"expected acknowledged_at restored, got {restored.acknowledged_at}"
+    finally:
+        scout_state._load_pulse_state = orig_load
+        scout_state._write_pulse_state_locked = orig_write_locked
+        ar._POST_STATE.clear()
+        ar._POST_STATE.update(saved_post_state)
+    return True, "alert_registry: post-state persists across simulated restart via pulse_state.json"
+
+
 @test("Phase 12 — scout_handlers uses eyes reaction (not thinking_face)")
 def test_scout_handlers_eyes_reaction():
     """scout_handlers.py uses the eyes reaction in at least 4 places and contains no thinking_face reference."""
