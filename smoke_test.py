@@ -5022,10 +5022,10 @@ def test_alert_registry_post_state_survives_restart():
     import scout_state
 
     orig_load = scout_state._load_pulse_state
-    orig_save = scout_state._save_pulse_state
+    orig_write_locked = scout_state._write_pulse_state_locked
     fake_disk = {}
     scout_state._load_pulse_state = lambda: json.loads(json.dumps(fake_disk))
-    scout_state._save_pulse_state = lambda state: fake_disk.update(json.loads(json.dumps(state)))
+    scout_state._write_pulse_state_locked = lambda state: (fake_disk.clear(), fake_disk.update(json.loads(json.dumps(state))))
 
     saved_post_state = dict(ar._POST_STATE)
     try:
@@ -5042,7 +5042,7 @@ def test_alert_registry_post_state_survives_restart():
         assert restored.channel == "C123", f"expected channel=C123, got {restored.channel}"
     finally:
         scout_state._load_pulse_state = orig_load
-        scout_state._save_pulse_state = orig_save
+        scout_state._write_pulse_state_locked = orig_write_locked
         ar._POST_STATE.clear()
         ar._POST_STATE.update(saved_post_state)
     return True, "alert_registry: post-state persists across simulated restart via pulse_state.json"

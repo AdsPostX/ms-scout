@@ -142,9 +142,8 @@ def _persist_post_state() -> None:
     Mirrors _persist_registry_state() — same file, same fail-open logging behavior.
     """
     try:
-        from scout_state import _load_pulse_state, _save_pulse_state
-        state = _load_pulse_state()
-        state["alert_post_state"] = {
+        from scout_state import _update_pulse_state
+        _update_pulse_state("alert_post_state", {
             name: {
                 "message_ts": ps.message_ts,
                 "channel": ps.channel,
@@ -155,8 +154,7 @@ def _persist_post_state() -> None:
                 "acknowledged_at": ps.acknowledged_at,
             }
             for name, ps in _POST_STATE.items()
-        }
-        _save_pulse_state(state)
+        })
     except Exception:
         log.exception("alert_registry: failed to persist post state")
 
@@ -182,6 +180,8 @@ def _load_post_state_from_state() -> None:
             )
         if stored:
             log.info("alert_registry: restored %d post-states from pulse_state", len(stored))
+    except json.JSONDecodeError:
+        raise
     except Exception:
         log.exception("alert_registry: failed to restore post state from pulse_state")
 
