@@ -424,10 +424,29 @@ Not a big-bang rewrite — each phase ships independently, codebase stays green 
 2. ✅ **Shipped.** Deleted the 12 dead `scout_tools_offers.py` function copies, repointed
    the one test that exercised them. `/codex review` independently confirmed no other
    references exist.
-3. **Next up. Circular-import hoist.** Move `_get_anthropic_client` to
-   `scout/shared/anthropic_client.py` (not `offers/`/`monitoring/` — v2's hoist targets were
-   wrong) and `_scout_score`/`_network_portal_url` to `scout/offers/tools.py`. Not urgent
-   (confirmed dormant), but a prerequisite for the package move.
+3. ✅ **Shipped, scope corrected during execution.** Investigation before writing code found
+   the description above was imprecise: 11 of `scout_bot.py`'s 13 "circular" imports were
+   never actually circular — they were `scout_agent.py` re-exports of functions genuinely
+   defined in `scout_ch.py` (`_get_ch_client`, `_query_ghost_campaigns`,
+   `_query_intraday_revenue_total`, `_query_intraday_revenue_by_publisher`). Redirected to
+   import directly from `scout_ch`. The other 2 (`_get_anthropic_client`,
+   `_set_force_monitor_ctx`) are genuinely `scout_agent.py`-owned, but `scout_bot.py` already
+   guarantees `scout_agent` is fully loaded before reaching them (via `scout_handlers.py`'s
+   own top-level `from scout_agent import ask, _norm`) — safe to hoist to top-level with zero
+   new module needed. Same pattern in `scout_digest.py`: `_get_ch_client` redirected to
+   `scout_ch`; `_network_portal_url` relocated into `scout_tools_offers.py` (pure,
+   dependency-free, no reason to live in `scout_agent.py` rather than beside its sibling
+   canonical helpers) and imported directly. **Caught by the mandatory smoke-test run, not by
+   review:** an earlier version of this change also bound `_scout_score` at import time,
+   which silently broke 4 tests that monkeypatch `scout_agent._scout_score` directly — fixed
+   by keeping that one as a module-attribute lookup at call time
+   (`scout_agent._scout_score(...)`), not a bound name. **Deliberately not touched:**
+   `scout_agent.py`'s lazy `import scout_bot` (needs `scout_bot._SCRAPER_RUNNING`) and lazy
+   `import scout_digest`/`_DIGEST_NETWORKS` are genuinely necessary given real load order
+   (`scout_digest.py`'s own top-level `from scout_agent import _CFG` means `scout_agent`
+   can't safely top-level-import `scout_digest` without `_CFG` already existing) — hoisting
+   `_SCRAPER_RUNNING` to a neutral shared location remains real, deferred work, not done here.
+   `smoke_test.py`: 216/216 pass.
 4. **Structural output/config fixes.** `wrap_response()`-conditional `verified`/`source`
    validation — check `scout_response.py` for a revive-or-merge decision first (see
    Output/config above) — the MODAL/HOME pattern-taxonomy migration before `pattern=`
