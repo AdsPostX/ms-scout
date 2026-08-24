@@ -7,9 +7,22 @@ actually change, in what order, and why.
 
 **Status: Phases 1 and 2 are shipped** (this PR) — the docs truth pass and the 12
 dead-function deletion, both independently verified by an `/codex review` pass on this
-diff. Phases 3-7 (circular-import hoist, output/config structural fixes, package
-restructure, test migration, unified `Route` registry) are still pending approval — see
-Sequencing below.
+diff.
+
+**The remaining phases below (v3) were substantially revised after a `/codex consult`
+pass against this plan** — not a diff review this time, a review of the plan itself, with
+Codex reading the actual source files to check the plan's claims rather than trusting its
+prose. Unlike the Phase 1-2 diff review (4 minor corrections), this pass found the
+v2 Phase 3-7 design had real structural problems: a "unified `Route` registry"
+that conflated daemon threads with one-shot Slack actions, a package move that called
+itself "mechanical" while quietly requiring real code extraction, wrong hoist targets for
+shared infra, and no rollback story for a repo-wide import refactor. Two of Codex's most
+consequential claims were independently spot-checked against source before accepting them:
+`_INTERNAL_TOOLS` genuinely exists and filters `TOOLS` (`scout_agent.py:1703,1721`) — a
+registry can't just replace `TOOL_MAP` and ignore it — and the `scout_suggestion*`/
+`home_try_query*` prefix dispatch is real (`scout_handlers.py:2067,2073`). Both held up.
+Every finding got a verdict (agree/fix, and how) rather than blanket acceptance — 20 points
+in total, all landed in the sections below. The sections below are the corrected v3 design.
 
 ## Self-audit against `lenses.json` (v2 correction)
 
@@ -114,61 +127,86 @@ KNOWN_DEBT.md are careful, well-reasoned, and correctly scoped. The problem is s
 each fix solved its instance of a pattern without building the mechanism that would catch
 the *next* instance. That's the gap this design closes.
 
-## Target package structure
+## Target package structure (v3 — corrected after `/codex` plan review)
 
-Flat 28-file layout → packaged by **domain**, not by generic tech-tier. `scout_core/`
-already exists as the correct cross-repo shared boundary (`ms-scout` ↔ `ms-demand-feed`) —
-it is extended, not duplicated. Domain boundaries come from what's already real in the
-codebase: the `queries_*.py` split and `scout_core/contracts.py`'s named pipeline stages
-(scraped → normalized → digest candidate → queue draft → campaign request):
+A `/codex` consult pass reviewed Phases 3-7 against the actual source files (not just the
+plan's prose) and found the v2 package/registry design had real feasibility problems, not
+just wording issues. Full findings and per-point verdicts are the record of what changed;
+summary of what's different in v3:
+
+- **No `scout/slack/` catch-all.** Direct read confirmed `scout_state.py` is cross-domain
+  persistence infra ("All JSON state I/O for Scout" — its own docstring) and `scout_ch.py`
+  is explicitly "ClickHouse client infrastructure + backward-compat wrappers" (its own file
+  header) — neither is presentation code. Both were wrongly bucketed under `slack/` in v2.
+- **New `scout/shared/` bucket** for genuine cross-cutting infrastructure: the Anthropic
+  client singleton (`_get_anthropic_client` — belonged in neither `offers/` nor
+  `monitoring/`, the v2 hoist targets were wrong), `scout_ch.py`'s client construction
+  (`_get_ch_client`, `CHBusyError`), and `scout_state.py`. Domain-driven layouts always need
+  a shared-kernel bucket for things no single domain owns — v2 omitted it.
+- **`scout_tools_offers.py` is NOT uniformly canonical.** Phase 2 already proved canonicality
+  runs in different directions per function (5 functions: `scout_tools_offers.py` canonical,
+  `scout_agent.py` imports; the 12 just deleted: the reverse was true). Phase 5 now requires
+  a verification sub-step — map which file holds the live implementation, per function —
+  before writing `scout/offers/`, not an assumption baked into the plan.
+- **`notion.py`** moves near `scout/monitoring/` (pipeline health / Scout Demand Queue),
+  not `slack/` — it's workflow logic that happens to emit Slack-adjacent formatting.
 
 ```
 scout_core/        [UNCHANGED — cross-repo contract, ms-scout + ms-demand-feed]
   contracts.py, monitors.py, job_runs.py
 
 scout/
-  offers/         offer_scraper.py, scout_tools_offers.py (canonical — scout_agent.py
-                  imports from here, never redefines), the offer-shaped slice of
+  shared/         _get_anthropic_client (from scout_agent.py), scout_ch.py's client
+                  construction (_get_ch_client, CHBusyError — SQL stays in domain
+                  packages), scout_state.py — genuine cross-cutting infra, owned by no
+                  single domain
+  offers/         offer_scraper.py; canonical offer-tool implementations — WHICH file
+                  (scout_agent.py vs scout_tools_offers.py) is canonical per function
+                  gets verified at move time, not assumed; offer-shaped slice of
                   scout_types.py
-  publishers/     queries_publisher.py → fetch_*(ch, ...) — one convention, not two
-                  (scout_ch.py's duplicate _query_* implementations deleted)
-  campaigns/      queries_campaign.py → fetch_*(ch, ...), demand_feed_main.py's
-                  campaign-creation logic
+  publishers/     queries_publisher.py → fetch_*(ch, ...), its _query_* config wrapper
+                  moved in alongside it
+  campaigns/      queries_campaign.py → fetch_*(ch, ...); demand_feed_main.py's
+                  campaign-creation logic EXTRACTED here (a real refactor — see
+                  Sequencing 5b, not a mechanical move)
   revenue/        queries_revenue.py → fetch_*(ch, ...)
   monitoring/     queries_monitor.py → fetch_*(ch, ...), alert_registry.py,
-                  scout_thresholds.py (ThresholdManager — already the right pattern,
-                  kept as-is)
-  slack/          ui_kit.py, slack_safe.py, image_resolve.py, images.py, state.py,
-                  notion.py — cross-cutting presentation layer, used by every domain
-                  above but depends on none of them
-  agent/          agent.py (tool dispatch — imports downward into offers/publishers/
-                  campaigns/revenue/monitoring/slack; never lazily reaches into bot/digest)
+                  scout_thresholds.py (ThresholdManager — kept as-is), notion.py
+                  (pipeline/queue workflow, not presentation)
+  slack/          ui_kit.py, slack_safe.py, image_resolve.py, images.py — presentation
+                  only, nothing persistence-shaped
+  agent/          agent.py (tool dispatch — imports downward into shared/offers/
+                  publishers/campaigns/revenue/monitoring/slack; never lazily reaches
+                  into bot/digest)
   routing/        events.py (was scout_handlers.py), attachments.py
   entrypoint/     bot.py, demand_feed_main.py, digest.py
 tests/
-  test_offers/, test_publishers/, test_campaigns/, test_revenue/, test_monitoring/,
-  test_slack/, test_agent/, test_routing/, test_entrypoint/
+  test_shared/, test_offers/, test_publishers/, test_campaigns/, test_revenue/,
+  test_monitoring/, test_slack/, test_agent/, test_routing/, test_entrypoint/
   integration/    test_ask_tool_call.py, test_nl_routing.py (was nl_query_test.py)
 docs/
   ARCHITECTURE.md, ENGINEERING_STANDARDS.md, DEPLOY.md
   archive/        VAMSEE_AUDIT.md (superseded — see below)
 ```
 
-`scout_ch.py`'s `_query_*` wrappers are **kept, not deleted** — verification refuted the
-original "duplicate query layer" finding; they're the config-resolution boundary in front
-of each domain package's bare query function, a real and useful seam, not debt. They move
-into each domain package alongside the function they wrap (e.g. `_query_ghost_campaigns`
-moves into `scout/campaigns/` next to `fetch_ghost_campaigns`). `scout_types.py`'s actual
-contents still need one direct read before it's split across `offers/` vs. staying as a
-shared cross-domain module — flagging this as an open assumption rather than asserting it.
-
-The two circular-import cycles are resolved by construction: anything `scout_bot.py` or
-`scout_digest.py` currently reaches back into `scout_agent.py` for (e.g. `_scout_score`,
-`_network_portal_url`, `_get_anthropic_client`) gets hoisted into `scout/offers/` or
-`scout/monitoring/` depending on which domain it actually belongs to. `agent/` becomes a
+The two circular-import cycles are resolved by construction: `_get_anthropic_client` moves
+to `scout/shared/` (not `offers/` or `monitoring/` — v2's hoist targets were wrong, per the
+review), `_scout_score`/`_network_portal_url` move to `scout/offers/`. `agent/` becomes a
 true leaf-consumer, never a hub — and cross-repo-shared logic (the hourly monitor loop,
 job-run telemetry) stays in `scout_core/` rather than getting pulled into `scout/monitoring/`
 and orphaned from `ms-demand-feed`.
+
+**Cross-repo risk, named honestly:** `ms-demand-feed` is a separate repo this worktree
+cannot inspect. Before Phase 5 touches `demand_feed_main.py` or anything `scout_core/`
+exports, someone needs to check that repo for what it actually imports beyond
+`scout_core/` — an open external dependency this plan cannot verify from inside `ms-scout`
+alone.
+
+**Rollback strategy (new, was missing in v2):** Phase 5 ships backward-compat shim modules
+at every old top-level import path (e.g. `scout_ch.py` re-exporting from
+`scout.shared.clickhouse`) for at least one deploy cycle, so a Render rollback to the prior
+commit doesn't hit an `ImportError`, and any external script referencing an old path has a
+migration window instead of an atomic break.
 
 ## Naming conventions (applied during the move, not a separate pass)
 
@@ -190,70 +228,108 @@ and orphaned from `ms-demand-feed`.
 - `queries.py` (5-line re-export shim) — delete if nothing depends on the wildcard import
   (grep first), otherwise rename to `queries_compat.py` so its purpose is legible.
 
-## Unified routing architecture
+## Routing architecture (v3 — unified registry killed, per `/codex` review)
 
-Replace the seven independent mechanisms with one `Route` registry, decorator-based:
+v2 proposed a single `Route` object spanning all 8 dispatch mechanisms behind one decorator
+API. Review verdict: **wrong.** LLM tools, one-shot Slack block actions, slash commands, and
+scheduled daemon threads are different contracts — different lifetimes, different failure
+modes, different definitions of "complete." A tool call returns a value; a monitor is an
+infinite daemon factory that never returns. Forcing both behind `@route.monitor(...)` hides
+that difference instead of fixing it. This was the same category error `anti-AI.md`'s
+Generalizing Principle already caught once this session (the v1 generic-tech-tier package
+layout) — made again one layer up, at the routing level. Two further problems compounded it:
+`TOOL_MAP` is only half the LLM tool surface (`_INTERNAL_TOOLS` filters `TOOLS` at
+`scout_agent.py:1703,1721` — spot-checked directly, holds up — a registry that ignores it can
+silently desync visibility), and import-time decorator auto-registration would force eager
+cross-service imports, reintroducing the exact circular-import risk Phase 3 exists to remove
+(`demand_feed_main.py` must not eagerly load Slack-heavy bot modules).
 
-```python
-@route.tool(name="get_ghost_campaigns", intent_hints=[...])
-@route.block_action("scout_acknowledge")
-@route.slash_command("/scout-ghost", monitor="ghost")
-@route.monitor(name="ghost", schedule_minutes=5, post_channel="offers")
-@route.extractor(predicate=_is_pdf)
-def get_ghost_campaigns(...): ...
-```
+**Corrected design: separate, type-specific registries, unified later only if their
+contracts prove genuinely identical — not as a stated goal.**
 
-One object holds five parallel dicts (tools, block_actions, slash_commands, monitors,
-extractors), built from decorator registration at import time. Concretely this:
+- **`ToolRegistry`** (lives in `scout/agent/`) — one entry per tool capturing schema
+  (`TOOLS`), handler (`TOOL_MAP`), visibility (`_INTERNAL_TOOLS`), and intent hints as a
+  single object per tool, not a bare handler dict. `route.assert_all_tools_have_intent_hints()`
+  replaces the manual "SYSTEM_PROMPT needs a numbered line per tool" audit; the numbered list
+  itself can be *generated* from intent hints instead of hand-maintained prose.
+- **`BlockActionRegistry`** (lives in `scout/routing/`) — exact-key dict PLUS the existing
+  ordered prefix-predicate fallback (`scout_suggestion*`, `home_try_query*` — confirmed real
+  at `scout_handlers.py:2067,2073`, spot-checked directly). Its own
+  `assert_all_actions_handled()`.
+- **`SlashCommandRegistry`** (lives in `scout/routing/`) — internal consistency only (every
+  registered command has a local handler). Cannot and does not claim to verify the Slack app
+  manifest at api.slack.com/apps stays in sync — that's a manual step, already documented in
+  CLAUDE.md's Slash Commands table, not a new gap this creates.
+- **Two separate `MonitorRegistry` instances**, one per service (`scout_bot.py`'s force-run
+  path, `demand_feed_main.py`'s scheduled daemon list) — populated by explicit `.register()`
+  calls at each service's own natural import point, never by a cross-service auto-discovery
+  scan. They stay separate because a daemon factory and a one-shot force-run callable are not
+  the same primitive; collapsing them was v2's mistake.
+- **`ExtractorRegistry`** (lives in `scout/routing/attachments.py`) — the existing ordered
+  predicate-cascade shape, unchanged; it already works and isn't part of the problem.
 
-- Replaces the `TOOL_MAP` literal + the 5 post-hoc `TOOL_MAP["x"] = x` patches.
-- Replaces `_FORCE_MONITOR_FNS` (dict defined in `scout_handlers.py:168`, populated from
-  `scout_bot.py:2044-2050` — corrected location, verification caught the original report
-  attributing the dict itself to the wrong file) and `demand_feed_main.py`'s separate
-  `(daemon_fn, name)` tuple list (`demand_feed_main.py:690-698` — the actual scheduled-monitor
-  mechanism, not `scout_bot.py` as first reported) with one iteration over `route.monitors`
-  — collapsing two mechanisms that live in two different files/services into one.
-- Lets the SYSTEM_PROMPT's numbered routing list be *generated* from `intent_hints` instead
-  of hand-maintained prose — closes the "line missing for a tool" gap structurally.
-- Adds `route.assert_complete()` as a single smoke-test call replacing the scattered
-  per-table completeness tests — fails loudly if anything is registered in one place but
-  not wired to its Slack-facing counterpart. This is the direct fix for finding #4 above.
+Each registry gets its own simple, type-specific completeness check instead of one
+polymorphic `assert_complete()` trying to mean five different things.
 
-## Output/config: make policy structural
+## Output/config: make policy structural (v3 — rescoped per `/codex` review)
 
-- `wrap_response()`: make `pattern=` a required argument (or require an explicit
-  `wrap_response_unchecked()` call for the rare cases that don't have one) so omission is a
-  loud exception, not silent pass-through.
-- Add `verified: bool` (or `source: Literal["clickhouse","cache","partial"]`) as a required
-  field on `Card`. `wrap_response()` refuses to emit ANSWER/STATUS patterns when
-  `verified is False` unless the body text carries an explicit caveat marker. This is what
-  turns "Scout never surfaces unverified data silently" from a CLAUDE.md sentence into a
-  guarantee the code enforces the same way surface/pattern mismatch already is.
-- Route the remaining raw `blocks=[...]` sites in `scout_handlers.py` through `wrap_response`
-  — verified count: **13 raw sites vs. 10 `wrap_response()` calls in that file, 56% bypass**,
-  worse than the "roughly a third" first reported. Confirmed raw at queue-card post (line
-  639), most of the App Home modal states (1558, 1607, 1636, 1665, 1685, 1695 — one call in
-  that range, line 1648, already does go through `wrap_response`), self-QA runner (2919,
-  2960), plus 5 more sites (1388, 2209, 2294, 3276) the first pass didn't enumerate. Define
-  new MODAL/ephemeral ResponsePattern variants where needed rather than leaving these as
-  hand-built exceptions.
-- Consolidate `os.getenv()`/`os.environ` (223 occurrences across the repo) into one
-  `ScoutConfig` dataclass, constructor-validated like the existing `ThresholdManager` (which
-  is already the right pattern — copy it, don't reinvent it). Covers Redis, Notion,
-  ClickHouse, and campaign-webhook env vars that currently read ad hoc at 8+ call sites.
+v2 proposed a required `verified: bool` field on `Card` and a single global `ScoutConfig`.
+Review verdict: both too blunt.
 
-## Test architecture
+- **`Card.verified` — rejected as a `Card` field.** Loading states, modals, help cards, and
+  self-QA status aren't "verified/unverified data" responses; forcing a value onto every
+  `Card` construction creates either fake defaults or a bypass API nobody uses correctly.
+  **Corrected:** validation moves into `wrap_response()`, conditional on `pattern` — only
+  `ResponsePattern.ANSWER`/`STATUS` carrying a `facts` tuple derived from a live query
+  require a `verified`/`source` marker, passed as a `wrap_response()` kwarg, not a `Card`
+  field. Same conditional-validation shape `wrap_response()` already uses for surface/pattern
+  mismatch — extending an existing mechanism, not adding a new blanket requirement.
+- **Mandatory `pattern=` needs a migration model first, not a flag flip.** Sequence: (a)
+  enumerate the missing pattern/surface pairs for `Surface.MODAL`/`HOME`/ephemeral that the
+  current `ResponsePattern` enum doesn't cover, (b) migrate call sites to use them, (c) only
+  then make `pattern=` required. Doing (c) before (a)/(b) either breaks every raw call site at
+  once or forces meaningless patterns onto UI chrome that isn't a data response.
+- **The raw-`blocks=` count isn't proof of bypass on its own.** 13 raw sites vs. 10
+  `wrap_response()` calls in `scout_handlers.py` (56%) is a real number, but some of those 13
+  are legitimate modal scaffolding and loading placeholders, not policy-relevant data
+  responses. **Before migrating any of them**, classify each of the 13 individually: queue-card
+  post (line 639), App Home modal states (1558, 1607, 1636, 1665, 1685, 1695 — 1648 already
+  goes through `wrap_response`), self-QA runner (2919, 2960), plus 1388/2209/2294/3276 — is
+  this a real data response, or UI chrome that doesn't carry "verified/unverified" meaning?
+  Only the former gets migrated.
+- **`ScoutConfig` — rejected as one global dataclass.** Config dataclasses already exist,
+  scattered across `scout_bot.py`, `scout_handlers.py`, and `demand_feed_main.py` — the real
+  problem is fragmented *ownership*, not absence of config objects. A single cross-service
+  dataclass would recreate exactly the coupling `scout_core/`'s deliberate minimalism already
+  avoids between `ms-scout` and `ms-demand-feed`. **Corrected:** extend each existing
+  per-service config object with its own scattered `os.getenv()` reads, using
+  `ThresholdManager`'s pattern (constructor-validated, one load) — one config object per
+  service boundary, not one object spanning both.
 
-- Migrate `smoke_test.py`'s 220 tests to pytest, split into `tests/` mirroring the new
-  package layout — one file per module, so the current silent zero-coverage gap
-  (`queries_monitor`, `queries_publisher`, `demand_feed_main`, `scout_notion`,
-  `scout_images`, `scout_telemetry`) becomes visible instead of invisible.
+## Test architecture (v3 — sequencing and metric both corrected per `/codex` review)
+
+v2 sequenced test migration *after* the package move ("mirrors the fresh package layout from
+step 5"). Review verdict: backwards — that means the single biggest diff in the whole plan
+happens while only the 220-test monolith (with its own known blind spots) protects it, not a
+real per-module suite. **Corrected: write pytest coverage against the CURRENT flat-file
+locations first**, verify it passes, then the package move (step 5) becomes a mechanical
+import-path rename in the same PR as tests that already pass — the biggest diff is never
+left unprotected.
+
+- Migrate `smoke_test.py`'s 220 tests to pytest, organized by *current* module — one file per
+  module, so the current silent zero-coverage gap (`queries_monitor`, `queries_publisher`,
+  `demand_feed_main`, `scout_notion`, `scout_images`, `scout_telemetry`) becomes visible
+  instead of invisible, **before** any file moves.
 - Tag every test that hits live ClickHouse/Anthropic/Slack with `@pytest.mark.integration`
   (starting with `test_ask_tool_call`, which currently makes a live Anthropic + ClickHouse
   call inside the deploy gate). Render's redeploy check runs `pytest -m "not integration"`
   only — fast, deterministic, no API cost or flakiness in the gate.
-- Add a coverage-by-module CI check that fails if any `scout/**/*.py` file has zero test
-  references — same enforcement pattern as `route.assert_complete()`, applied to tests.
+- **Coverage metric corrected:** "zero test references" (a grep-based existence check) was
+  flagged as weak — it rewards a meaningless import, not real coverage. Use actual
+  `coverage.py` line/branch thresholds per package, or a small number of named contract tests
+  per module (e.g. "every `fetch_*`/`_query_*` function has at least one test that mocks `ch`
+  and asserts the SQL shape or return shape") — an honest floor, not a grep pretending to be
+  a real bar.
 
 ## Documentation set
 
@@ -289,28 +365,50 @@ codebase stays green throughout:
    `tests/test_demand_feed_http.py` (the only caller of that side) at `scout_agent.py`'s
    copies. `/codex review` independently confirmed the 12 copies are unreferenced anywhere
    else in the repo and that the retargeted tests cover the same 4 behaviors as before.
-3. **Next up.** Hoist the shared symbols out of the two dormant circular-import couplings —
-   move `_scout_score`/`_network_portal_url`/`_get_anthropic_client`-equivalent shared logic
-   into `scout/offers/` or `scout/monitoring/` so neither direction needs a function-local
-   import. Not urgent (verification confirmed nothing is broken today), but a prerequisite
-   for the package move — a real top-level package can't carry a dormant landmine that only
-   a lazy import defuses.
-4. **Structural output/config fixes** — `Card.verified`, mandatory `pattern=`, `ScoutConfig`
-   dataclass. Independent of the package move; moved earlier than originally sequenced
-   (was after step 5) so these behavior changes land against familiar file paths, and the
-   package move in step 5 stays a pure mechanical diff with zero logic changes bundled in.
-5. **Package restructure** (`scout/offers`, `scout/publishers`, `scout/campaigns`,
-   `scout/revenue`, `scout/monitoring`, `scout/slack`, `scout/agent`, `scout/routing`,
-   `scout/entrypoint`) — mechanical once 3 is done; biggest diff, do it alone, no logic
-   changes bundled in.
-6. **Test migration to pytest + module split** — moved ahead of the `Route` registry (was
-   after it) so real per-module coverage exists *before* the highest-behavior-risk change,
-   not after. Mirrors the fresh package layout from step 5.
-7. **Unified `Route` registry** — replaces TOOL_MAP/_BLOCK_ACTION_DISPATCH/_FORCE_MONITOR_FNS/
-   monitor-dispatch (split across `scout_handlers.py` and `demand_feed_main.py` — corrected
-   file attribution from the original verification pass) one mechanism at a time, each a
-   separate PR, highest-risk (the two-file monitor consolidation) last. Now backed by real
-   test coverage from step 6, not the 220-test monolith's blind spots.
+**Steps 3-7 below are v3 — re-sequenced after the `/codex` plan review found the v2 order
+left the biggest diff (the package move) untested and bundled a real refactor into what it
+called "mechanical."**
+
+3. **Circular-import hoist.** Move `_get_anthropic_client` to `scout/shared/` (not
+   `offers/`/`monitoring/` — v2's hoist targets were wrong per review) and
+   `_scout_score`/`_network_portal_url` to `scout/offers/`, so neither
+   `scout_agent.py`↔`scout_bot.py` nor `scout_agent.py`↔`scout_digest.py` needs a
+   function-local import. Not urgent (confirmed dormant, not live), but a prerequisite for
+   the package move.
+4. **Structural output/config fixes, rescoped.** `wrap_response()`-conditional
+   `verified`/`source` validation (not a `Card` field), the pattern-taxonomy migration for
+   MODAL/HOME/ephemeral before making `pattern=` required, per-service config objects (not
+   one global `ScoutConfig`) — see Output/config above for the corrected design. Independent
+   of the package move; lands against familiar file paths first.
+5. **Write pytest coverage against current file locations FIRST** (re-sequenced — was step
+   6, run after the package move; review found that backwards). One file per current module,
+   closing the zero-coverage gap named in Test Architecture, verified green before touching
+   any file paths.
+6. **Package restructure**, split in two because review found "mechanical" was hiding a real
+   refactor:
+   - **6a — pure moves.** Files that need zero logic changes (`queries_*.py` → their domain
+     packages, `scout_ui_kit.py`/`scout_slack_safe.py`/etc. → `scout/slack/`) — a mechanical
+     rename, done with the passing tests from step 5 updated to the new import paths in the
+     same PR, so coverage is never lost mid-move.
+   - **6b — real extraction.** `demand_feed_main.py`'s embedded campaign-creation and
+     revenue-tracking logic gets pulled into `scout/campaigns/` and `scout/revenue/` as an
+     actual refactor, its own PR, reviewed as a behavior change — not bundled with 6a.
+     `scout_tools_offers.py` vs. `scout_agent.py` canonicality gets verified per-function
+     before either file is moved (see Target package structure above).
+   - **Ships with backward-compat shim modules** at every old top-level import path for at
+     least one deploy cycle (new — v2 had no rollback story for a repo-wide import refactor).
+   - **Blocked on one external check:** whether `ms-demand-feed` imports anything from
+     `ms-scout` beyond `scout_core/` — cannot be verified from inside this repo, needs a
+     look at that repo before 6b executes.
+7. **Per-type dispatch registries**, one at a time, each its own PR — `ToolRegistry` first
+   (lowest cross-service risk), `BlockActionRegistry` and `SlashCommandRegistry` next, the
+   two `MonitorRegistry` instances last (spans `scout_handlers.py` and `demand_feed_main.py`
+   — corrected file attribution — the highest-risk, most cross-service-entangled one).
+   **No unified `Route` object** — v2's single registry conflated daemon threads with
+   one-shot Slack actions with LLM tools; killed per review, replaced with five
+   purpose-built registries that unify later only if their contracts prove genuinely
+   identical, not as a stated goal. Backed by real test coverage from step 5/6, not the
+   220-test monolith's blind spots.
 
 ## What this buys
 
