@@ -64,9 +64,12 @@ if "clickhouse_connect" not in sys.modules:
 if "queries" not in sys.modules:
     _stub_module("queries")
 
-# scout_types — just type aliases; stub FormattedOffer and Brief
+# scout_types — just type aliases; stub FormattedOffer, Brief, Offer.
+# Offer is needed because scout_agent.py now pulls in offer_scraper.py at
+# module level (via scout_tools_offers's canonical-function imports), and
+# offer_scraper.py imports scout_types.Offer.
 if "scout_types" not in sys.modules:
-    _stub_module("scout_types", FormattedOffer=dict, Brief=dict)
+    _stub_module("scout_types", FormattedOffer=dict, Brief=dict, Offer=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -257,11 +260,14 @@ class TestLoadOffers(unittest.TestCase):
     # T4: _load_offers() fetches from DEMAND_FEED_URL when env var is set
     # ------------------------------------------------------------------
     def test_load_offers_fetches_from_url_when_env_var_set(self):
-        """When DEMAND_FEED_URL is set, _load_offers() calls urllib.request.urlopen."""
-        import scout_tools_offers
+        """When DEMAND_FEED_URL is set, _load_offers() calls urllib.request.urlopen.
+
+        Retargeted from scout_tools_offers._load_offers (dead code, deleted —
+        scout_agent.py's copy is the only one TOOL_MAP ever calls; see
+        KNOWN_DEBT.md / DESIGN.md for the duplicate-function cleanup)."""
+        import scout_agent
 
         fake_url = "http://fake-demand-feed-host"
-        os.environ["DEMAND_FEED_URL"] = fake_url
 
         # Build a fake HTTP response object that urllib.request.urlopen returns
         fake_response = MagicMock()
@@ -269,10 +275,13 @@ class TestLoadOffers(unittest.TestCase):
         fake_response.__enter__ = lambda s: s
         fake_response.__exit__ = MagicMock(return_value=False)
 
-        # _DEMAND_FEED_URL is captured at module import — patch the constant directly
-        with patch.object(scout_tools_offers, "_DEMAND_FEED_URL", fake_url):
+        # _CFG is a frozen dataclass computed once at import — patch the whole
+        # object rather than an attribute (scout_agent._load_offers reads
+        # _CFG.demand_feed_url at call time, so this takes effect immediately).
+        fake_cfg = scout_agent._ScoutCfg(demand_feed_url=fake_url)
+        with patch.object(scout_agent, "_CFG", fake_cfg):
             with patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
-                result = scout_tools_offers._load_offers()
+                result = scout_agent._load_offers()
 
         # urlopen must have been called with the correct URL
         mock_urlopen.assert_called_once()
@@ -288,18 +297,17 @@ class TestLoadOffers(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_load_offers_falls_back_to_disk_when_url_unset(self):
         """When DEMAND_FEED_URL is absent, _load_offers() reads from SNAPSHOT_PATH."""
-        import scout_tools_offers
-
-        # DEMAND_FEED_URL must not be set (cleared in setUp)
-        self.assertNotIn("DEMAND_FEED_URL", os.environ)
+        import scout_agent
 
         # Write a fake offers file to the temp dir
         fake_snapshot = self.tmp / "offers_latest.json"
         fake_snapshot.write_text(json.dumps(_FAKE_OFFERS))
 
-        with patch("urllib.request.urlopen") as mock_urlopen, \
-             patch("scout_tools_offers.SNAPSHOT_PATH", fake_snapshot):
-            result = scout_tools_offers._load_offers()
+        fake_cfg = scout_agent._ScoutCfg(demand_feed_url="")
+        with patch.object(scout_agent, "_CFG", fake_cfg), \
+             patch("urllib.request.urlopen") as mock_urlopen, \
+             patch.object(scout_agent, "SNAPSHOT_PATH", fake_snapshot):
+            result = scout_agent._load_offers()
 
         # urllib must NOT have been called
         mock_urlopen.assert_not_called()
@@ -312,16 +320,16 @@ class TestLoadOffers(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_load_offers_falls_back_to_disk_when_http_fails(self):
         """When DEMAND_FEED_URL is set but the fetch raises, _load_offers() reads disk."""
-        import scout_tools_offers
-
-        os.environ["DEMAND_FEED_URL"] = "http://broken-host"
+        import scout_agent
 
         fake_snapshot = self.tmp / "offers_latest.json"
         fake_snapshot.write_text(json.dumps(_FAKE_OFFERS))
 
-        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")), \
-             patch("scout_tools_offers.SNAPSHOT_PATH", fake_snapshot):
-            result = scout_tools_offers._load_offers()
+        fake_cfg = scout_agent._ScoutCfg(demand_feed_url="http://broken-host")
+        with patch.object(scout_agent, "_CFG", fake_cfg), \
+             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")), \
+             patch.object(scout_agent, "SNAPSHOT_PATH", fake_snapshot):
+            result = scout_agent._load_offers()
 
         self.assertEqual(result, _FAKE_OFFERS)
 
@@ -330,11 +338,13 @@ class TestLoadOffers(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_load_offers_returns_empty_when_no_source(self):
         """When DEMAND_FEED_URL is unset and the disk snapshot is missing, return []."""
-        import scout_tools_offers
+        import scout_agent
 
         missing = self.tmp / "does_not_exist.json"
-        with patch("scout_tools_offers.SNAPSHOT_PATH", missing):
-            result = scout_tools_offers._load_offers()
+        fake_cfg = scout_agent._ScoutCfg(demand_feed_url="")
+        with patch.object(scout_agent, "_CFG", fake_cfg), \
+             patch.object(scout_agent, "SNAPSHOT_PATH", missing):
+            result = scout_agent._load_offers()
 
         self.assertEqual(result, [])
 
