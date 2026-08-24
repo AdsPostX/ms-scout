@@ -151,7 +151,7 @@ summary of what's different in v3:
 - **`notion.py`** moves near `scout/monitoring/` (pipeline health / Scout Demand Queue),
   not `slack/` — it's workflow logic that happens to emit Slack-adjacent formatting.
 
-```
+```text
 scout_core/        [UNCHANGED — cross-repo contract, ms-scout + ms-demand-feed]
   contracts.py, monitors.py, job_runs.py
 
@@ -160,9 +160,11 @@ scout/
                   construction (_get_ch_client, CHBusyError — SQL stays in domain
                   packages), scout_state.py — genuine cross-cutting infra, owned by no
                   single domain
-  offers/         offer_scraper.py; canonical offer-tool implementations — WHICH file
-                  (scout_agent.py vs scout_tools_offers.py) is canonical per function
-                  gets verified at move time, not assumed; offer-shaped slice of
+  offers/         offer_scraper.py; canonical offer-tool implementations — explicit
+                  move-or-merge step: for each function, `ast`-diff both copies at move
+                  time (same method Phase 2 used), keep whichever file is proven live by
+                  TOOL_MAP/import-site, delete the other's copy in the same commit as the
+                  move — never move both and decide later; offer-shaped slice of
                   scout_types.py
   publishers/     queries_publisher.py → fetch_*(ch, ...), its _query_* config wrapper
                   moved in alongside it
@@ -249,7 +251,7 @@ contracts prove genuinely identical — not as a stated goal.**
 
 - **`ToolRegistry`** (lives in `scout/agent/`) — one entry per tool capturing schema
   (`TOOLS`), handler (`TOOL_MAP`), visibility (`_INTERNAL_TOOLS`), and intent hints as a
-  single object per tool, not a bare handler dict. `route.assert_all_tools_have_intent_hints()`
+  single object per tool, not a bare handler dict. `ToolRegistry.assert_all_tools_have_intent_hints()`
   replaces the manual "SYSTEM_PROMPT needs a numbered line per tool" audit; the numbered list
   itself can be *generated* from intent hints instead of hand-maintained prose.
 - **`BlockActionRegistry`** (lives in `scout/routing/`) — exact-key dict PLUS the existing

@@ -2,7 +2,7 @@
 
 Resolved items moved out of `KNOWN_DEBT.md` once fixed. Each entry keeps its original resolution narrative.
 
-## scout_handlers.py — final response routing quadruplicated (DM path, channel path, `_handle_suggestion`)
+## scout_handlers.py — final response routing quadruplicated (DM path, channel path, `_handle_suggestion`, `_handle_home_try_query`)
 
 **Date:** not recorded in original entry.
 

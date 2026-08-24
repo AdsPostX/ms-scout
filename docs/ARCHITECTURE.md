@@ -62,12 +62,21 @@ severity:
 
 | Pattern | Surface | Severity | Max blocks | Buttons | When |
 |---|---|---|---|---|---|
-| `ALERT` | `MONITOR_ALARM` | WARN / CRITICAL | per budget | 0 | monitor alarm fires |
+| `ALERT` | `MONITOR_ALARM` | WARN / CRITICAL | per budget | 0-2† | monitor alarm fires |
 | `ANSWER` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO | per budget | ≤3 | ask() reply |
 | `STATUS` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO / WARN | per budget | ≤3 | `@Scout status` |
 | `CONFIRM` | `EPHEMERAL` | POSITIVE | per budget | 0 | action acknowledged |
 | `EMPTY` | `CHANNEL_ROOT` / `THREAD` / `DM` | INFO | per budget | 0 | no data found |
 | `ERROR` | `EPHEMERAL` | CRITICAL | per budget | 0 | ClickHouse failure |
+
+† CLAUDE.md's copy of this table says ALERT has 0 buttons — that's stale.
+`scout_bot.py`'s `_build_alert_response` (lines 723-726) adds `Acknowledge`/
+`Snooze` actions whenever `alert_name` is passed, before calling
+`wrap_response(..., pattern=ResponsePattern.ALERT)`, and `wrap_response()`
+does not reject it. The pattern/surface pairing is enforced structurally;
+the button count in this table is documentation only, not enforced by code —
+worth flagging to whoever owns CLAUDE.md, since the two docs now disagree
+and only one was corrected here (found via `/codex review`'s CodeRabbit pass).
 
 `wrap_response(card=..., surface=..., pattern=...)` enforces the
 surface/pattern pairing structurally: passing a mismatched combination (e.g.
