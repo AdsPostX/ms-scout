@@ -1,3 +1,5 @@
+> Archived — superseded by docs/ENGINEERING_STANDARDS.md. This file is a session log with an internal status contradiction (claims 100% complete while its own domain table shows 3/6 domains still queued) — kept for historical reference only, not as current documentation.
+
 # Scout — Engineering Audit
 
 **Goal:** Remove maintenance mode by ensuring every feature passes the engineering quality checks (five core patterns).
