@@ -199,3 +199,15 @@ def _get_risk_flag(advertiser: str, category: str, description: str) -> str:
     return ""
 
 
+def _network_portal_url(network: str, offer_id: str) -> str:
+    """Construct a direct link to the offer in the network's portal."""
+    n = network.lower()
+    if n == "maxbounty":
+        return ""  # URL structure changed post-mrge acquisition — use Offer ID for manual lookup
+    elif n == "impact":
+        return "https://app.impact.com"
+    elif n == "flexoffers" and offer_id:
+        return f"https://www.flexoffers.com/affiliate-programs/{offer_id}/"
+    return ""
+
+

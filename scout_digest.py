@@ -27,9 +27,12 @@ from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
+import scout_agent
 from scout_agent import _CFG
+from scout_ch import _get_ch_client
 from scout_image_resolve import resolve_icon_image
 from scout_log import log_event
+from scout_tools_offers import _network_portal_url as _portal_url
 from scout_ui_kit import _MAX_CAROUSEL_CARDS, _carousel_block, _slack_card_block, normalize_typography, sanitize_blocks
 
 load_dotenv()  # plist env vars (SCOUT_ENV, SCOUT_DIGEST_CHANNEL, etc.) take precedence over .env
@@ -567,8 +570,6 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
 
     force=True bypasses approved/rejected state so test runs always surface real cards.
     """
-    from scout_agent import _scout_score
-
     if digest_cfg is None:
         digest_cfg = _load_digest_config()
 
@@ -615,7 +616,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     if not enriched.get("_payout_num"):
         return _reject("no_payout")
 
-    rpm = _scout_score(enriched, benchmarks)
+    rpm = scout_agent._scout_score(enriched, benchmarks)
     if rpm <= 0:
         # _scout_score returns 0 for: payout==0 (caught above), high-friction risk
         # flag (B2B/Loan/Medical/Biz-opp/Insurance), or no benchmark match at any
@@ -663,8 +664,6 @@ def build_why_text(offer: dict, payout_num: float, payout_type: str, ms_campaign
       2. Category bench → "~$X est. RPM — [Cat] converts at Y% on MS"
       3. Type baseline  → "$X payout at baseline Z% CVR → ~$Y est. RPM"
     """
-    from scout_agent import _scout_score
-
     offer_id    = str(offer.get("offer_id", ""))
     category    = (offer.get("category") or "").strip()
     geo         = offer.get("geo", "")
@@ -678,7 +677,7 @@ def build_why_text(offer: dict, payout_num: float, payout_type: str, ms_campaign
 
     # Use the score already computed (includes context fit + conversion complexity)
     # so the displayed number matches what ranked it
-    display_rpm = adjusted_rpm if adjusted_rpm is not None else _scout_score(enriched, benchmarks)
+    display_rpm = adjusted_rpm if adjusted_rpm is not None else scout_agent._scout_score(enriched, benchmarks)
 
     parts = []
 
@@ -788,8 +787,6 @@ def build_digest_blocks(
     for o in all_offers:
         net = o.get("network", "")
         network_totals[net] = network_totals.get(net, 0) + 1
-
-    from scout_agent import _network_portal_url as _portal_url  # local import avoids circular dep
 
     # Render each network as its own section with a proper header block.
     # Uses module-level _DIGEST_NETWORKS — single source for the 9-network list.
@@ -1280,7 +1277,6 @@ def _sourcing_signal_payout_upgrades(offers: list) -> list:
         return []
 
     try:
-        from scout_agent import _get_ch_client
         ch = _get_ch_client()
     except Exception as e:
         log.warning(f"[sourcing] payout_upgrades: could not get CH client: {e}")
@@ -1469,7 +1465,6 @@ def _build_sourcing_intel_blocks(signals: dict, payout_cache: dict | None = None
     """
     payout_cache = payout_cache or {}
     from collections import defaultdict
-    from scout_agent import _network_portal_url as _portal_url  # local import avoids circular dep
 
     blocks: list = []
 

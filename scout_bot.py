@@ -44,6 +44,15 @@ from scout_handlers import (
     _set_bot_user_id, _set_thread_state, _set_force_monitor_fn,
     handle_event,
 )
+# scout_agent is already fully initialized by the time this module reaches these
+# imports (scout_handlers, imported above, does `from scout_agent import ...` at
+# its own top level first) — these were previously function-local "avoids circular
+# dep" imports that weren't actually load-bearing; consolidated here.
+from scout_ch import (
+    _get_ch_client, _query_ghost_campaigns,
+    _query_intraday_revenue_total, _query_intraday_revenue_by_publisher,
+)
+from scout_agent import _get_anthropic_client, _set_force_monitor_ctx
 
 load_dotenv()  # plist env vars (SCOUT_ENV, PULSE_CHANNEL, etc.) take precedence over .env
 
@@ -366,8 +375,7 @@ def _pulse_signal_velocity(ch, as_of_date: str | None = None) -> list:
                 log.warning(f"Pulse batch existing-advertisers fetch failed: {e}")
 
         def _hyp_and_gap(pub_id, pub_name, top_adv):
-            from scout_agent import _get_ch_client as _gcc
-            _ch = _gcc()
+            _ch = _get_ch_client()
             hyp = ""
             gaps = []
             if top_adv:
@@ -486,7 +494,6 @@ def _pulse_signal_ghost(ch, as_of_date: str | None = None) -> list:
         as_of_date = _resolve_ref_date(as_of_date)[0].isoformat()
     results = []
     try:
-        from scout_agent import _query_ghost_campaigns
         ghost_detail_rows = _query_ghost_campaigns(ch, as_of_date=as_of_date)
         by_adv: dict = {}
         for r in ghost_detail_rows:
@@ -899,7 +906,6 @@ def _check_campaign_health(adv_name: str, launched_at) -> dict | None:
     from datetime import datetime as _dt, timezone as _utc
 
     try:
-        from scout_agent import _get_ch_client
         ch = _get_ch_client()
         launched_str = launched_at.strftime("%Y-%m-%d %H:%M:%S")
         partition = launched_at.strftime("%Y%m")
@@ -1036,7 +1042,6 @@ def _run_watchdog_checks(web: WebClient, state: dict) -> None:
     # --- Source B: Platform-launched campaigns (not in Scout queue) ---
     # Query from_airbyte_publisher_campaigns for new entries in last 48h
     try:
-        from scout_agent import _get_ch_client
         ch = _get_ch_client()
         rows = ch.query("""
             SELECT DISTINCT c.adv_name, min(pc.created_at) AS first_seen
@@ -1122,7 +1127,6 @@ def _one_shot_monitor(web, channel: str, signal_fn, format_fn, thread_ts: str = 
     """Run a monitor signal query once and post the result in-thread immediately.
     Used by the force-trigger admin commands (@Scout force cap/velocity/ghost/fill).
     """
-    from scout_agent import _get_ch_client
     _ts = thread_ts or None
     ch = _get_ch_client()
     rows = signal_fn(ch)
@@ -1142,7 +1146,6 @@ def _one_shot_monitor(web, channel: str, signal_fn, format_fn, thread_ts: str = 
 
 def _run_revenue_check_once(web, channel: str, thread_ts: str = "") -> None:
     """Force-trigger the revenue tracker check once — bypasses time gate and daily state."""
-    from scout_agent import _get_ch_client, _query_intraday_revenue_total, _query_intraday_revenue_by_publisher
     _ts = thread_ts or None
     ch = _get_ch_client()
     try:
@@ -1330,7 +1333,6 @@ def _performance_recap(web: WebClient) -> None:
         try:
             time.sleep(86_400)
             from datetime import datetime, timezone
-            from scout_agent import _get_ch_client
             state   = _load_launched_offers()
             now     = datetime.now(timezone.utc)
             updated = False
@@ -1636,7 +1638,6 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         # a CH outage at deploy time stays invisible for that window. Run a
         # standalone CH ping NOW and post an immediate alert on failure.
         try:
-            from scout_agent import _get_ch_client
             ch = _get_ch_client()
             ch.query("SELECT 1")
             log.info("[smoke] startup CH ping ok")
@@ -1656,7 +1657,6 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         # deploy time would otherwise stay invisible until the first heartbeat
         # (~35 min). 1-token ping is cheap and only runs once at startup.
         try:
-            from scout_agent import _get_anthropic_client
             _anth_client = _get_anthropic_client(_BOT_CFG.anthropic_api_key)
             _anth_client.messages.create(
                 model="claude-haiku-4-5",
@@ -1681,7 +1681,7 @@ def _run_startup_smoke_test(web: WebClient) -> None:
         # has at least 100 non-null rows. Catches the categories-NULL class of
         # silent failure that bit us when Scout was reading a column with no data.
         try:
-            from scout_agent import _get_ch_client as _gcc
+            _gcc = _get_ch_client
             ch = _gcc()
             schema_result = _tm.validate_schema_deps(ch)
             if schema_result["ok"]:
@@ -1763,7 +1763,6 @@ def _run_health_heartbeat(web: WebClient) -> None:
             ch_ok = True
             ch_detail = "ok"
             try:
-                from scout_agent import _get_ch_client
                 ch = _get_ch_client()
                 ch.query("SELECT 1")
             except Exception as ch_err:
@@ -1776,7 +1775,6 @@ def _run_health_heartbeat(web: WebClient) -> None:
             anthropic_ok = True
             anthropic_detail = "ok"
             try:
-                from scout_agent import _get_anthropic_client
                 _anth_client = _get_anthropic_client(_BOT_CFG.anthropic_api_key)
                 _anth_client.messages.create(
                     model="claude-haiku-4-5",
@@ -2050,7 +2048,8 @@ def main():
     _set_force_monitor_fn("revenue",    lambda web, ch, t="": _run_revenue_check_once(web, ch, t))
     # PR-B: inject web + CH factory so the force_run_monitor agent tool can call
     # the same monitor lambdas registered above.
-    from scout_agent import _set_force_monitor_ctx as _set_fmc, _get_ch_client as _ch_factory
+    _set_fmc = _set_force_monitor_ctx
+    _ch_factory = _get_ch_client
     _set_fmc(web_client, _ch_factory)
     socket_client = SocketModeClient(app_token=_BOT_CFG.app_token, web_client=web_client)
     socket_client.socket_mode_request_listeners.append(handle_event)
