@@ -54,16 +54,6 @@ Status: blocked on `scoreboard_rollup()` returning the projection range. The ren
 
 Fix: swap to `from scout_ch import _get_ch_client` + `ch = _get_ch_client()`, same as `offer_scraper.py`. Left as debt rather than fixed inline because `scout_digest.py`'s dedup/scoring logic is sensitive (see `.claude/rules/scout_digest.md`) and this touches the same file for an unrelated reason — do it as its own small PR.
 
-## config/scout_thresholds.json — `native_cards_enabled` dark-launched, never flipped on
-
-**Stale as of 2026-07-29** — verified live in `config/scout_thresholds.json`: `native_cards_enabled` is now `true` and `offers_per_network` is `10`; both flags described below as unflipped have since been flipped on.
-
-Original text for history: PR #323 (`carousel/digest-native-cards`) shipped native Slack card/carousel rendering behind `digest.native_cards_enabled`, explicitly set to `false` by design ("classic rendering is untouched until explicitly flipped on"). No follow-up task was ever filed to turn it on — no env var exists either (`grep -rn "NATIVE_CARDS"` is empty), so the only toggle is this JSON value.
-
-`digest.offers_per_network` was also still `3`, not the intended `10` — same config block, same fix window.
-
-Fix (superseded — both values are now flipped, see above): flip both values in `config/scout_thresholds.json` and watch the next live digest run before calling it done.
-
 ## scout_bot.py:1661,1781 — raw `anthropic.Anthropic()` bypasses the scout_agent.py singleton
 
 Both call sites do `import anthropic as _anthropic; _anth_client = _anthropic.Anthropic()` inline instead of going through `scout_agent._get_anthropic_client()`. This PR (Anthropic-client-construction race fix) only hardened the singleton in `scout_agent.py` — these two are a separate, lower-traffic path (not gated by `_ASK_SEMAPHORE`) and each construction opens its own httpx session, same inefficiency the singleton was built to avoid.

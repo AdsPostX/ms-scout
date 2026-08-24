@@ -2,7 +2,7 @@
 
 **Last generated:** Auto-generated from `scout_agent.py` TOOL_MAP.
 **Regenerate:** Run `python3 scripts/generate_feature_map.py` when TOOL_MAP changes.
-**Status:** Audit complete (Engineering audit — see VAMSEE_AUDIT.md).
+**Status:** Audit complete (Engineering audit — see docs/ENGINEERING_STANDARDS.md, or docs/archive/VAMSEE_AUDIT.md for the original session log).
 
 ---
 
@@ -10,7 +10,7 @@
 
 - **Total Tools:** 43
 - **Domains:** 6
-- **Status:** Engineering audit complete (24/24 violations fixed, see VAMSEE_AUDIT.md) — all tools working
+- **Status:** Engineering audit complete (24/24 violations fixed, see docs/archive/VAMSEE_AUDIT.md) — all tools working
 - **Known gates (not audit failures):** demand_feed_main.py (5 TODOs, awaiting platform webhook URL), App Home projection range (blocked on upstream scoreboard_rollup())
 
 ---
@@ -102,7 +102,7 @@
 
 2. **After completing the engineering audit:**
    - Update the Status column above (Working/Deferred/In Maintenance)
-   - Log findings in VAMSEE_AUDIT.md
+   - Log findings in docs/ENGINEERING_STANDARDS.md (durable checks) or KNOWN_DEBT.md (open items)
 
 3. **To regenerate (one-liner):**
    ```bash

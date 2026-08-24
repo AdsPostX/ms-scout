@@ -3,8 +3,13 @@
 Six independent investigations (nomenclature, routing/dispatch, module dependency graph,
 documentation, test architecture, output/config discipline) ran in parallel against the
 current codebase. This document is the synthesis: what a staff/principal engineer would
-actually change, in what order, and why. No code has been touched yet — this is the design,
-pending approval to execute against `KNOWN_DEBT.md` and the active `PLAN.md` work.
+actually change, in what order, and why.
+
+**Status: Phases 1 and 2 are shipped** (this PR) — the docs truth pass and the 12
+dead-function deletion, both independently verified by an `/codex review` pass on this
+diff. Phases 3-7 (circular-import hoist, output/config structural fixes, package
+restructure, test migration, unified `Route` registry) are still pending approval — see
+Sequencing below.
 
 ## Self-audit against `lenses.json` (v2 correction)
 
@@ -254,16 +259,16 @@ extractors), built from decorator registration at import time. Concretely this:
 
 | File | Fate |
 |---|---|
-| `README.md` | Keep — already good. Add a pointer to `docs/DEPLOY.md`. |
+| `README.md` | Keep — already good. Add a pointer to `docs/DEPLOY.md` once that file exists (see below — not yet created). |
 | `CLAUDE.md` | Keep as agent-operating instructions — that's genuinely what it's for. |
-| `docs/ARCHITECTURE.md` | **New.** The missing "why" doc: service topology, concurrency model (semaphore, retry pools), why response patterns are enforced structurally, data flow. Pulls rationale currently scattered across `.claude/rules/*.md` scar tissue and `KNOWN_DEBT.md` narration into one durable reference. |
-| `docs/DEPLOY.md` | **New.** Extract README's Render section + env var table; add rollback/monitoring notes. |
-| `docs/ENGINEERING_STANDARDS.md` | **New.** The 5 engineering-quality checks from `VAMSEE_AUDIT.md` (invisible accumulators, no-op side-channels, repeated inline patterns, config objects, validate-at-construction) — the durable part of that file, kept; the session-log part, retired. |
+| `docs/ARCHITECTURE.md` | **Shipped.** The missing "why" doc: service topology, concurrency model (semaphore, retry pools), why response patterns are enforced structurally, data flow. Pulls rationale currently scattered across `.claude/rules/*.md` scar tissue and `KNOWN_DEBT.md` narration into one durable reference. |
+| `docs/DEPLOY.md` | **Still pending** — not created in Phase 1 (caught by `/codex review`: this table originally claimed it as shipped). Extract README's Render section + env var table; add rollback/monitoring notes. Do this as part of Phase 3 or its own small doc PR. |
+| `docs/ENGINEERING_STANDARDS.md` | **Shipped.** The 5 engineering-quality checks from `VAMSEE_AUDIT.md` (invisible accumulators, no-op side-channels, repeated inline patterns, config objects, validate-at-construction) — the durable part of that file, kept; the session-log part, retired. |
 | `FEATURES.md` | Keep, but CI-enforced as fully generated — fails if stale relative to the `Route` registry. |
-| `CHANGELOG.md` | **New.** RESOLVED entries move here from `KNOWN_DEBT.md`, dated by PR. |
-| `KNOWN_DEBT.md` | Keep, but prune to open items only — no more accumulated historical narrative. |
-| `VAMSEE_AUDIT.md` | Archive to `docs/archive/` — its durable content moves to `ENGINEERING_STANDARDS.md`; the self-contradictory status claim doesn't survive as root-level "documentation" under someone else's name. |
-| `PLAN.md` | Leave untouched — it's live, git-tracked work-in-progress (attachment ingestion), not scratch. |
+| `CHANGELOG.md` | **Shipped.** RESOLVED entries moved here from `KNOWN_DEBT.md`, dated by PR where recorded. |
+| `KNOWN_DEBT.md` | **Shipped** — pruned to open items only. |
+| `VAMSEE_AUDIT.md` | **Shipped** — archived to `docs/archive/`; durable content moved to `ENGINEERING_STANDARDS.md`. All root-level references to the old path (`CLAUDE.md`, `FEATURES.md`, `scripts/generate_feature_map.py`) updated too — caught by `/codex review`, not the original pass. |
+| `PLAN.md` | Left untouched — it's live, git-tracked work-in-progress (attachment ingestion), not scratch. |
 | `.claude/rules/*.md` | Keep as-is — correctly scoped to incident-anchored invariants, not architecture. |
 
 Also close the docstring gap on `scout_bot.py` (0/7 public functions documented) — it's the
@@ -274,30 +279,38 @@ file its own rules file flags as having the trickiest concurrency constraints in
 This is explicitly NOT a big-bang rewrite — each phase ships independently and the
 codebase stays green throughout:
 
-1. **Docs + naming truth pass** (no code moves): archive `VAMSEE_AUDIT.md`, write
-   `docs/ARCHITECTURE.md` and `docs/ENGINEERING_STANDARDS.md`, prune `KNOWN_DEBT.md`,
-   create `CHANGELOG.md`. Zero risk, immediate integrity payoff.
-2. **Delete the 12 dead `scout_tools_offers.py` function copies** and repoint
-   `tests/test_demand_feed_http.py` (currently the only caller of that side) at
-   `scout_agent.py`'s copies. Verification confirmed these are unreferenced by any live code
-   path — simpler and lower-risk than a behavior-reconciliation exercise, since there's no
-   live behavior on the `scout_tools_offers.py` side to reconcile.
-3. **Hoist the shared symbols out of the two dormant circular-import couplings** — move
-   `_scout_score`/`_network_portal_url`/`_get_anthropic_client`-equivalent shared logic into
-   `scout/offers/` or `scout/monitoring/` so neither direction needs a function-local import.
-   Not urgent (verification confirmed nothing is broken today), but a prerequisite for the
-   package move — a real top-level package can't carry a dormant landmine that only a lazy
-   import defuses.
+1. ✅ **Shipped.** Docs + naming truth pass (no code moves): archived `VAMSEE_AUDIT.md`,
+   wrote `docs/ARCHITECTURE.md` and `docs/ENGINEERING_STANDARDS.md`, pruned `KNOWN_DEBT.md`,
+   created `CHANGELOG.md`. Reviewed independently via `/codex review`, which caught 2 gaps
+   the original pass missed (stale `VAMSEE_AUDIT.md` references in `CLAUDE.md`/`FEATURES.md`/
+   `scripts/generate_feature_map.py`; a `KNOWN_DEBT.md` entry that was substantively resolved
+   but never moved to `CHANGELOG.md`) — both fixed in the same PR before merge.
+2. ✅ **Shipped.** Deleted the 12 dead `scout_tools_offers.py` function copies and repointed
+   `tests/test_demand_feed_http.py` (the only caller of that side) at `scout_agent.py`'s
+   copies. `/codex review` independently confirmed the 12 copies are unreferenced anywhere
+   else in the repo and that the retargeted tests cover the same 4 behaviors as before.
+3. **Next up.** Hoist the shared symbols out of the two dormant circular-import couplings —
+   move `_scout_score`/`_network_portal_url`/`_get_anthropic_client`-equivalent shared logic
+   into `scout/offers/` or `scout/monitoring/` so neither direction needs a function-local
+   import. Not urgent (verification confirmed nothing is broken today), but a prerequisite
+   for the package move — a real top-level package can't carry a dormant landmine that only
+   a lazy import defuses.
 4. **Structural output/config fixes** — `Card.verified`, mandatory `pattern=`, `ScoutConfig`
-   dataclass. Independent of the package move, can land in parallel with 2-3.
+   dataclass. Independent of the package move; moved earlier than originally sequenced
+   (was after step 5) so these behavior changes land against familiar file paths, and the
+   package move in step 5 stays a pure mechanical diff with zero logic changes bundled in.
 5. **Package restructure** (`scout/offers`, `scout/publishers`, `scout/campaigns`,
    `scout/revenue`, `scout/monitoring`, `scout/slack`, `scout/agent`, `scout/routing`,
    `scout/entrypoint`) — mechanical once 3 is done; biggest diff, do it alone, no logic
    changes bundled in.
-6. **Unified `Route` registry** — replaces TOOL_MAP/_BLOCK_ACTION_DISPATCH/_FORCE_MONITOR_FNS/
-   polling loop one mechanism at a time, each a separate PR, oldest/highest-risk last.
-7. **Test migration to pytest + module split** — can start anytime after step 5 gives the
-   package layout tests should mirror; independent of steps 4/6.
+6. **Test migration to pytest + module split** — moved ahead of the `Route` registry (was
+   after it) so real per-module coverage exists *before* the highest-behavior-risk change,
+   not after. Mirrors the fresh package layout from step 5.
+7. **Unified `Route` registry** — replaces TOOL_MAP/_BLOCK_ACTION_DISPATCH/_FORCE_MONITOR_FNS/
+   monitor-dispatch (split across `scout_handlers.py` and `demand_feed_main.py` — corrected
+   file attribution from the original verification pass) one mechanism at a time, each a
+   separate PR, highest-risk (the two-file monitor consolidation) last. Now backed by real
+   test coverage from step 6, not the 220-test monolith's blind spots.
 
 ## What this buys
 

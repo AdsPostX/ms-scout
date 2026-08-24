@@ -48,3 +48,13 @@ Original text for history: `scout_tools_offers.py` is live — `scout_agent.py:6
   Both agree on string/empty/None input. `scout_agent.py`'s version raised `AttributeError` on a truthy non-string input (e.g. an int payout-type code); `scout_tools_offers.py`'s coerced via `str()` first. No call site ever passed a non-string value, so this hadn't fired in prod — but it was a live landmine, not a cosmetic difference.
 
 `_dedupe_by_advertiser` was already correctly shared (imported, not duplicated) — this entry was only about the four functions above.
+
+## config/scout_thresholds.json — `native_cards_enabled` dark-launched, never flipped on
+
+**Date:** stale-as-of note dated 2026-07-29 in the original entry; no PR reference recorded.
+
+**Resolved** — verified live in `config/scout_thresholds.json`: `native_cards_enabled` is now `true` and `offers_per_network` is `10`; both flags described below as unflipped have since been flipped on.
+
+Original text for history: PR #323 (`carousel/digest-native-cards`) shipped native Slack card/carousel rendering behind `digest.native_cards_enabled`, explicitly set to `false` by design ("classic rendering is untouched until explicitly flipped on"). No follow-up task was ever filed to turn it on — no env var exists either (`grep -rn "NATIVE_CARDS"` is empty), so the only toggle is this JSON value.
+
+`digest.offers_per_network` was also still `3`, not the intended `10` — same config block, same fix window.
