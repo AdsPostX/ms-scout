@@ -2,6 +2,23 @@
 
 Resolved items moved out of `KNOWN_DEBT.md` once fixed. Each entry keeps its original resolution narrative.
 
+## scout_bot.py:1661,1781 — raw `anthropic.Anthropic()` bypasses the scout_agent.py singleton
+
+**Date:** not recorded when the fix actually landed; caught stale during PR #374's final
+pre-merge `/codex review` pass (this entry was still marked open debt after the fix had
+already shipped).
+
+**Resolved.** Both call sites now call `_get_anthropic_client(_BOT_CFG.anthropic_api_key)`
+(`scout_bot.py:1660`, `scout_bot.py:1778`), verified directly against the live file —
+confirmed not just by codex's claim but by reading both call sites.
+
+Original text for history: both call sites did `import anthropic as _anthropic;
+_anth_client = _anthropic.Anthropic()` inline instead of going through
+`scout_agent._get_anthropic_client()`. The Anthropic-client-construction race fix only
+hardened the singleton in `scout_agent.py` — these two were a separate, lower-traffic path
+(not gated by `_ASK_SEMAPHORE`) and each construction opened its own httpx session, same
+inefficiency the singleton was built to avoid.
+
 ## scout_handlers.py — final response routing quadruplicated (DM path, channel path, `_handle_suggestion`, `_handle_home_try_query`)
 
 **Date:** not recorded in original entry.
