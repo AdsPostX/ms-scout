@@ -25,7 +25,7 @@ Other files present but not primary entry points: `scout_bot.py`, `scout_ch.py`,
 ## Feature Surface & Audit
 
 **43 tools** across 6 domains. See [FEATURES.md](FEATURES.md) for the complete inventory, handler mapping, and status.
-Audit Status: Complete (engineering audit) — see [VAMSEE_AUDIT.md](VAMSEE_AUDIT.md) for findings.
+Audit Status: Complete (engineering audit) — see [docs/ENGINEERING_STANDARDS.md](docs/ENGINEERING_STANDARDS.md) for the durable checks, or [docs/archive/VAMSEE_AUDIT.md](docs/archive/VAMSEE_AUDIT.md) for the original session log.
 
 **To regenerate the feature map:** `python3 scripts/generate_feature_map.py` (auto-syncs TOOL_MAP changes).
 

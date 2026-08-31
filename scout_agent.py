@@ -63,7 +63,7 @@ load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 # own this wiring — scout_core stays unaware of offer_scraper to keep the
 # contracts layer import-cheap and dependency-free.
 from scout_core.contracts import set_geo_normalizer as _set_geo_normalizer
-from scout_tools_offers import _dedupe_by_advertiser, _norm, _scout_score, _format_offers, _get_risk_flag
+from scout_tools_offers import _dedupe_by_advertiser, _norm, _scout_score, _format_offers, _get_risk_flag, _network_portal_url
 from offer_scraper import normalize_geo as _normalize_geo
 from scout_thresholds import AmbiguousThresholdKey  # noqa: F401 — re-exported for existing callers
 _set_geo_normalizer(_normalize_geo)
@@ -2165,18 +2165,6 @@ def _format_payout(payout_num, payout_type_norm: str, raw_payout: str) -> str:
     elif "impression" in ptype or "cpm" in ptype:
         return f"${fmt} CPM"
     return f"${fmt}"
-
-
-def _network_portal_url(network: str, offer_id: str) -> str:
-    """Construct a direct link to the offer in the network's portal."""
-    n = network.lower()
-    if n == "maxbounty":
-        return ""  # URL structure changed post-mrge acquisition — use Offer ID for manual lookup
-    elif n == "impact":
-        return "https://app.impact.com"
-    elif n == "flexoffers" and offer_id:
-        return f"https://www.flexoffers.com/affiliate-programs/{offer_id}/"
-    return ""
 
 
 _TRACKING_DOMAINS = {
