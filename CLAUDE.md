@@ -148,7 +148,7 @@ Before ANY commit on Scout:
 3. **For scout_agent.py handler changes** — import check: `python3 -c "from scout_agent import TOOL_MAP; print('OK')"`.
 4. **Preview before PR** — for any web tool or demo, run a local server and screenshot via Claude Preview MCP before asking for review. No screenshot = no merge.
 
-**Never commit debug patches.** If a commit message starts with `debug(`, it must NOT merge to main. Diagnose locally, fix, then commit the fix only.
+**Debug-patch commits never merge to main** (global rule 8) — see PR Discipline below.
 
 ## SQL Hygiene
 
@@ -167,16 +167,12 @@ Before any change to a `queries_*.py` WHERE clause, JOIN type, or column referen
 
 ## PR Discipline
 
-**One PR = one concern.**
+One PR = one concern; debug-patch commits never merge to main (global rule 8).
 
 - New tool port → its own PR (separate from routing changes)
 - Routing/intent change → its own PR
 - Bug fix found while building a feature → separate commit, ideally separate PR
 - Config change → its own PR (never buried in a feature PR)
-
-**If the PR description contains "also" or "additionally" → split it.** If it breaks, do you want both things rolled back together? If no → split.
-
-**Debug patches never merge to main.** Surface the error locally, fix it, commit the fix only.
 
 ## Worktree Hygiene
 
