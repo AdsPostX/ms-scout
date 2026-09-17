@@ -257,6 +257,66 @@ def empty_offer() -> Offer:
     return {k: "" for k in OFFER_FIELDS}  # type: ignore[return-value]
 
 
+def build_offer(
+    *,
+    network: str,
+    offer_id: str,
+    advertiser: str,
+    title: str,
+    raw_payout: str,
+    description: str = "",
+    cta: str = "",
+    terms: str = "",
+    payout: str = "",
+    payout_type: str = "",
+    category: str = "",
+    geo_raw: str = "US",
+    os_raw: str = "All",
+    tracking_url: str = "",
+    preview_url: str = "",
+    thumbnail: str = "",
+    status: str = "Active",
+) -> dict:
+    """Assemble an Offer dict from already-extracted, per-network fields.
+
+    Only used by the multi-instance TUNE/Everflow fetchers, which shared this
+    dict-assembly tail almost verbatim (the source of a real copy-paste drift
+    bug — see the TUNE vs. Everflow `raw_payout` divergence below). This does
+    NOT extract fields out of a raw API response — each network's own
+    extraction logic (auth, pagination, response-shape parsing, and any
+    field computed differently per network, e.g. `raw_payout`) stays inline
+    in that network's fetch function and is passed in already-computed.
+    Do not extend this to the other 7 single-instance networks — each has
+    exactly one call site and there's no duplication there to remove.
+    """
+    o = empty_offer()
+    o["network"]            = network
+    o["offer_id"]           = offer_id
+    o["advertiser"]         = advertiser
+    o["title"]              = title
+    o["description"]        = (description or "")[:500]
+    o["mini_description"]   = (description or "")[:120]
+    o["cta"]                = cta
+    o["terms"]              = (terms or "")[:500]
+    o["payout"]             = payout
+    o["payout_type"]        = payout_type
+    o["_raw_payout"]        = raw_payout[:120]
+    o["currency"]           = "USD"
+    o["category"]           = category
+    o["geo"]                = normalize_geo(str(geo_raw))
+    o["geo_raw"]             = str(geo_raw)
+    o["os_targeting"]        = str(os_raw)
+    o["platform_targeting"]  = "All"
+    o["tracking_url"]        = tracking_url
+    o["preview_url"]         = preview_url or ""
+    o["icon_url"]            = thumbnail
+    o["hero_url"]            = thumbnail
+    o["banner_url"]          = thumbnail
+    o["status"]              = status
+    o["date_scraped"]        = datetime.today().strftime("%Y-%m-%d")
+    return o
+
+
 # ---------------------------------------------------------------------------
 # PAYOUT CACHE HELPERS
 # ---------------------------------------------------------------------------
@@ -2139,31 +2199,24 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
                 os_raw = ", ".join(os_raw)
             cta_text   = offer_obj.get("cta") or offer_obj.get("call_to_action") or ""
 
-            o = empty_offer()
-            o["network"]           = f"tune_{label}"
-            o["offer_id"]          = offer_id
-            o["advertiser"]        = adv_name
-            o["title"]             = name
-            o["description"]       = (desc or "")[:500]
-            o["mini_description"]  = (desc or "")[:120]
-            o["cta"]               = cta_text
-            o["terms"]             = (terms_text or "")[:500]
-            o["payout"]            = payout_str
-            o["payout_type"]       = ptype
-            o["_raw_payout"]       = raw_payout[:120]
-            o["currency"]          = "USD"
-            o["category"]          = category
-            o["geo"]               = normalize_geo(str(geo_raw))
-            o["geo_raw"]           = str(geo_raw)
-            o["os_targeting"]      = str(os_raw)
-            o["platform_targeting"] = "All"
-            o["tracking_url"]      = tracking
-            o["preview_url"]       = preview or ""
-            o["icon_url"]          = thumbnail
-            o["hero_url"]          = thumbnail
-            o["banner_url"]        = thumbnail
-            o["status"]            = "Active"
-            o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
+            o = build_offer(
+                network=f"tune_{label}",
+                offer_id=offer_id,
+                advertiser=adv_name,
+                title=name,
+                description=desc,
+                cta=cta_text,
+                terms=terms_text,
+                payout=payout_str,
+                payout_type=ptype,
+                raw_payout=raw_payout,
+                category=category,
+                geo_raw=geo_raw,
+                os_raw=os_raw,
+                tracking_url=tracking,
+                preview_url=preview,
+                thumbnail=thumbnail,
+            )
             offers.append(o)
 
         if len(records) < 500:
@@ -2273,31 +2326,24 @@ def fetch_everflow_instance(label: str, api_key: str, base_url: str) -> list:
                 os_raw = ", ".join(str(x) for x in os_raw)
             cta_text   = rec.get("cta") or rec.get("call_to_action") or ""
 
-            o = empty_offer()
-            o["network"]           = f"everflow_{label}"
-            o["offer_id"]          = offer_id
-            o["advertiser"]        = adv_name
-            o["title"]             = name
-            o["description"]       = (desc or "")[:500]
-            o["mini_description"]  = (desc or "")[:120]
-            o["cta"]               = cta_text
-            o["terms"]             = (terms_text or "")[:500]
-            o["payout"]            = payout_str
-            o["payout_type"]       = ptype
-            o["_raw_payout"]       = raw_payout[:120]
-            o["currency"]          = "USD"
-            o["category"]          = category
-            o["geo"]               = normalize_geo(str(geo_raw))
-            o["geo_raw"]           = str(geo_raw)
-            o["os_targeting"]      = str(os_raw)
-            o["platform_targeting"] = "All"
-            o["tracking_url"]      = tracking
-            o["preview_url"]       = preview or ""
-            o["icon_url"]          = thumbnail
-            o["hero_url"]          = thumbnail
-            o["banner_url"]        = thumbnail
-            o["status"]            = "Active"
-            o["date_scraped"]      = datetime.today().strftime("%Y-%m-%d")
+            o = build_offer(
+                network=f"everflow_{label}",
+                offer_id=offer_id,
+                advertiser=adv_name,
+                title=name,
+                description=desc,
+                cta=cta_text,
+                terms=terms_text,
+                payout=payout_str,
+                payout_type=ptype,
+                raw_payout=raw_payout,
+                category=category,
+                geo_raw=geo_raw,
+                os_raw=os_raw,
+                tracking_url=tracking,
+                preview_url=preview,
+                thumbnail=thumbnail,
+            )
             offers.append(o)
 
         if len(records) < 200:
