@@ -724,6 +724,19 @@ def main() -> None:
             time.sleep(3600)
 
 
+def _revenue_worsened_enough(
+    curr_pct: float, last_alerted_pct: Optional[float], refire_drop_pct: float,
+) -> bool:
+    """True when revenue has dropped at least `refire_drop_pct` further below
+    expected since the last alert, i.e. it's worth re-firing rather than
+    deduplicating. Extracted as a named, independently-testable pure function
+    from _revenue_tracker_daemon's inline dedup check ahead of moving that
+    daemon into scout/monitoring/daemons.py — same expression, no behavior
+    change: `curr_pct <= (last_alerted_pct or 0.0) - refire_drop_pct`.
+    """
+    return curr_pct <= (last_alerted_pct or 0.0) - refire_drop_pct
+
+
 def _revenue_tracker_daemon() -> None:
     """Demand-feed port of scout_bot._revenue_tracker.
 
@@ -870,7 +883,7 @@ def _revenue_tracker_daemon() -> None:
                     _last_alerted_pct = _load_revenue_alert_context()
                     if hourly_enabled and _last_alerted_pct is not None:
                         # Re-fire only if revenue has worsened by refire_drop_pct or more since last alert
-                        worsened_enough = curr_pct <= (_last_alerted_pct or 0.0) - refire_drop_pct
+                        worsened_enough = _revenue_worsened_enough(curr_pct, _last_alerted_pct, refire_drop_pct)
                         if not worsened_enough:
                             # deduplicate
                             log.info(
@@ -960,7 +973,34 @@ def _revenue_tracker_daemon() -> None:
 # cause a monitor to re-fire the same day after a deploy.  Lives in memory so
 # it resets on each process restart, but that's acceptable: deploy wipes are rare
 # and this complements (not replaces) the persistent state file.
+#
+# Shared across all 5 shadow-monitor daemon threads (velocity-down, ghost, fill,
+# cvr-anomaly, expiration) plus cap-monitor's shadow-fallback path — each thread
+# only ever reads/writes its own monitor_name key, so no lock is needed today,
+# but this invariant must be preserved (or replaced with real synchronization)
+# if this dict is ever restructured.
 _PROD_FIRED: dict[str, str] = {}
+
+
+def _is_shadow_tick(
+    in_shadow_window: bool,
+    shadow_already_fired: bool,
+    in_prod_window: bool,
+    prod_already_fired: bool,
+) -> bool:
+    """True when this tick's post should go to the shadow channel rather than
+    the real monitor channel. Extracted as a named, independently-testable pure
+    function from _run_shadow_monitor's inline decision ahead of moving that
+    daemon into scout/monitoring/daemons.py — same expression, no behavior
+    change: fire to shadow when shadow mode is on, hasn't already fired this
+    hour's shadow slot, AND either we're outside the real prod window or the
+    prod window already fired (so shadow never steals a genuine prod fire).
+    """
+    return (
+        in_shadow_window
+        and not shadow_already_fired
+        and (not in_prod_window or prod_already_fired)
+    )
 
 
 def _run_shadow_monitor(
@@ -1032,10 +1072,8 @@ def _run_shadow_monitor(
                         continue
 
                     results = raw_results or []
-                    is_shadow_tick = (
-                        in_shadow_window
-                        and not shadow_already_fired
-                        and (not in_prod_window or prod_already_fired)
+                    is_shadow_tick = _is_shadow_tick(
+                        in_shadow_window, shadow_already_fired, in_prod_window, prod_already_fired,
                     )
                     target_channel = shadow_channel if is_shadow_tick else channel
 
