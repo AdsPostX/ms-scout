@@ -1,10 +1,15 @@
 requests
 python-dotenv
 clickhouse-connect
-anthropic~=0.97
+anthropic==0.116.0
 slack-sdk~=3.43
 pytz
 # scout_attachments.py is imported transitively via scout_bot → scout_handlers.
 # Its top-level `import pandas as pd` crashes every monitor thread at startup
 # if pandas is absent. Pin matches requirements.txt to avoid version skew.
 pandas==2.3.3
+# anthropic pin matches requirements.txt for the same reason as pandas above:
+# demand_feed_main.py imports scout_bot → scout_agent, which does `import anthropic`
+# at module load — a version mismatch between the two services' pins is a real
+# skew risk even though this process never constructs an Anthropic client itself
+# (that only happens via scout_bot's own handler paths, not the scraper/daemons).
