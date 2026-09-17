@@ -16,7 +16,7 @@ scout_ui_kit.py        — Slack Block Kit patterns
 scout_handlers.py      — @Scout routing + handler dispatch
 scout_attachments.py   — file + Google Sheets ingest
 offer_scraper.py       — daily scrapes + payout parsing
-demand_feed_main.py    — MS Platform feed (has 5 MS_PLATFORM_TODO before live)
+demand_feed_main.py    — scraper scheduler + read-only offers/digest HTTP API
 smoke_test.py          — gate tests (run before every push)
 ```
 

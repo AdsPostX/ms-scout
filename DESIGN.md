@@ -231,8 +231,10 @@ scout/
                     v3 wrongly guessed this was slack/ presentation code)
   publishers/       queries.py (was queries_publisher.py) — fetch_*(ch, ...)
   campaigns/        queries.py (was queries_campaign.py) — fetch_*(ch, ...);
-                    demand_feed_main.py's campaign-creation logic EXTRACTED here (Phase 6b,
-                    a real refactor, not a mechanical move)
+                    [demand_feed_main.py's campaign-creation logic was DELETED, not moved
+                    here — see KNOWN_DEBT.md; it was built/tested but never called in
+                    production and permanently blocked on a platform-team webhook that
+                    never arrived. Phase 6b below no longer extracts it into this package.]
   revenue/          queries.py (was queries_revenue.py) — fetch_*(ch, ...)
   monitoring/       queries.py (was queries_monitor.py) — fetch_*(ch, ...); alerts.py (was
                     alert_registry.py — renamed, not "registry.py," to avoid misreading as
@@ -461,8 +463,9 @@ Not a big-bang rewrite — each phase ships independently, codebase stays green 
      → `shared/`, `alert_registry.py` → `monitoring/alerts.py`, `scout_notion.py` →
      `monitoring/notion.py`) — mechanical rename, done with step 5's passing tests updated
      to new import paths in the same PR.
-   - **6b — real extraction.** `demand_feed_main.py`'s embedded campaign-creation logic →
-     `scout/campaigns/`; its 6 monitor daemons + revenue-tracker + projection-autocheck →
+   - **6b — real extraction.** `demand_feed_main.py`'s embedded campaign-creation logic was
+     deleted rather than extracted (see KNOWN_DEBT.md) — nothing to move into `scout/campaigns/`
+     for this reason anymore. Its 6 monitor daemons + revenue-tracker + projection-autocheck →
      new `scout/monitoring/daemons.py` (see Service Topology — this is the module-boundary
      fix that addresses the coupling without standing up a third service). `scout_tools_offers.py`
      vs. `scout_agent.py` canonicality verified per-function before either moves — for each
