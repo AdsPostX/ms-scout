@@ -2000,7 +2000,7 @@ def test_first_seen_backfill_uses_last_verified_from_snapshot():
 
     old_verified = "2026-05-10T08:00:00+00:00"  # snapshot's last_verified — a few days ago
 
-    snapshot_path = pathlib.Path(offer_scraper.__file__).parent / "data" / "offers_latest.json"
+    snapshot_path = pathlib.Path(offer_scraper.__file__).resolve().parents[2] / "data" / "offers_latest.json"  # offer_scraper moved to scout/offers/scraper.py; data/ lives at the repo root, 3 dirs up
     orig_data = snapshot_path.read_text() if snapshot_path.exists() else None
 
     snapshot_fixture = json.dumps([{
@@ -2043,7 +2043,7 @@ def test_first_seen_immutable_when_already_set():
 
     original_first_seen = "2026-04-01T12:00:00+00:00"
 
-    snapshot_path = pathlib.Path(offer_scraper.__file__).parent / "data" / "offers_latest.json"
+    snapshot_path = pathlib.Path(offer_scraper.__file__).resolve().parents[2] / "data" / "offers_latest.json"  # offer_scraper moved to scout/offers/scraper.py; data/ lives at the repo root, 3 dirs up
     orig_data = snapshot_path.read_text() if snapshot_path.exists() else None
 
     snapshot_fixture = json.dumps([{
@@ -4016,12 +4016,11 @@ def test_module_size_within_ceiling():
     ceilings = {
         "scout_agent.py": 6650,  # was 6600; _get_benchmarks() two-lock fix needed headroom
         "queries.py":     2700,
-        "offer_scraper.py": 2700,  # was 2600; four merged PRs (telemetry raise, TUNE/Everflow
-        # dedup, normalize_status fix, matching-quality) landed in close succession and each
-        # added legitimate code -- offer_scraper.py itself is being moved to
-        # scout/offers/scraper.py in the very next PR in this batch, making this ceiling moot
-        # on this path shortly; bumping with headroom rather than extracting yet another
-        # module right before the file relocates.
+        # offer_scraper.py moved to scout/offers/scraper.py (offer_scraper.py is now a
+        # ~30-line backward-compat shim that should never grow -- see its own docstring).
+        # Ceiling follows the real file to its new path so this guard doesn't go silently
+        # inert against an empty shim.
+        "scout/offers/scraper.py": 2700,
     }
     violations = []
     counts = {}
@@ -5064,14 +5063,17 @@ def test_scout_handlers_eyes_reaction():
     return True, "scout_handlers: eyes reaction wired, thinking_face removed"
 
 
-@test("Phase 12 — demand_feed_main wires set_post_state after mark_firing")
+@test("Phase 12 — demand-feed daemons wire set_post_state after mark_firing")
 def test_demand_feed_set_post_state_wired():
-    """demand_feed_main.py calls set_post_state at both alert post sites."""
+    """The revenue-tracker and shadow-monitor daemons call set_post_state at
+    both alert post sites. Moved from scanning demand_feed_main.py to
+    scout/monitoring/daemons.py when these daemons were extracted there —
+    same check, new location."""
     import pathlib
-    src = pathlib.Path("demand_feed_main.py").read_text()
-    assert "set_post_state" in src, "set_post_state not found in demand_feed_main.py"
+    src = pathlib.Path("scout/monitoring/daemons.py").read_text()
+    assert "set_post_state" in src, "set_post_state not found in scout/monitoring/daemons.py"
     assert src.count("set_post_state") >= 2, "expected set_post_state at both mark_firing sites"
-    return True, "demand_feed_main: set_post_state wired at both alert post sites"
+    return True, "scout/monitoring/daemons.py: set_post_state wired at both alert post sites"
 
 
 @test("Phase 12 — scout_acknowledge in _BLOCK_ACTION_DISPATCH")
@@ -6903,6 +6905,261 @@ def test_write_notion_creates_new_offers():
         "(Not in System, Needs Review, or no _ms_status at all) and skips every "
         "offer already Live/In System/In System (Inactive) in MS"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Baseline coverage for demand_feed_main.py's 4 monitor-daemon systems, written
+# against their CURRENT location ahead of extracting them into
+# scout/monitoring/daemons.py (per DESIGN.md's stated precondition for that
+# move). These pin down today's actual behavior — bugs included, not fixed —
+# so the extraction can be verified byte-for-behavior-identical. See
+# KNOWN_DEBT.md for the bugs found during this pass that are deliberately not
+# fixed here (out of scope for a structural move).
+# ═══════════════════════════════════════════════════════════════════════════
+
+@test("demand_feed_main — _format_projection_autocheck_fire covers all status/branch combinations")
+def test_format_projection_autocheck_fire():
+    from demand_feed_main import _format_projection_autocheck_fire
+
+    # status="ok", no daemon comparison, no median, no range, no diagnostic (bare minimum).
+    text, blocks = _format_projection_autocheck_fire(
+        "2026-09-17T14", {"status": "ok", "today_revenue": 1000, "projected_full_day": 5000}, None, None, 100.0,
+    )
+    assert "Today so far: $1,000" in text and "Projected EOD: $5,000" in text
+    assert "Apples vs daemon raw" not in text and "Range:" not in text and "Signal:" not in text
+    assert blocks == [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+    # status="ok" with daemon comparison IN tolerance — no warning emoji.
+    text, _ = _format_projection_autocheck_fire(
+        "slot", {"status": "ok", "today_revenue": 1000, "projected_full_day": 5000}, 1050.0, 50.0, 100.0,
+    )
+    assert "within ±$100 tolerance" in text and "⚠️" not in text
+
+    # status="ok" with daemon comparison OUT of tolerance — warning emoji appended.
+    text, _ = _format_projection_autocheck_fire(
+        "slot", {"status": "ok", "today_revenue": 1000, "projected_full_day": 5000}, 1500.0, 500.0, 100.0,
+    )
+    assert "OUT OF ±$100 tolerance" in text and "⚠️" in text
+
+    # status="ok" with dow_median present — med_line included.
+    text, _ = _format_projection_autocheck_fire(
+        "slot", {"status": "ok", "today_revenue": 1000, "projected_full_day": 5000, "dow_median": 4800, "pct_of_expected": 104, "weekday": "Wed"}, None, None, 100.0,
+    )
+    assert "vs $4,800 Wed median (104%)" in text
+
+    # status="ok" with both projected_low/high present — Range line included.
+    text, _ = _format_projection_autocheck_fire(
+        "slot", {"status": "ok", "today_revenue": 1000, "projected_full_day": 5000, "projected_low": 4500, "projected_high": 5500}, None, None, 100.0,
+    )
+    assert "Range:  $4,500 - $5,500" in text
+    # Only ONE of the two present — Range line must NOT appear (uses truthy `and`).
+    text, _ = _format_projection_autocheck_fire(
+        "slot", {"status": "ok", "today_revenue": 1000, "projected_full_day": 5000, "projected_low": 4500}, None, None, 100.0,
+    )
+    assert "Range:" not in text
+
+    # Each known diagnostic value + an unknown one (falls through to raw value).
+    for diag, expected_substr in [
+        ("efficiency", "Efficiency signal"),
+        ("traffic", "Traffic signal"),
+        ("traffic_upside", "Upside signal"),
+        ("some_new_diagnostic", "some_new_diagnostic"),
+    ]:
+        text, _ = _format_projection_autocheck_fire(
+            "slot", {"status": "ok", "today_revenue": 1000, "projected_full_day": 5000, "diagnostic": diag}, None, None, 100.0,
+        )
+        assert expected_substr in text, f"diag={diag!r}: expected {expected_substr!r} in {text!r}"
+    # diagnostic == "on_track" must NOT add a Signal line (explicitly excluded).
+    text, _ = _format_projection_autocheck_fire(
+        "slot", {"status": "ok", "today_revenue": 1000, "projected_full_day": 5000, "diagnostic": "on_track"}, None, None, 100.0,
+    )
+    assert "Signal:" not in text
+
+    # status in the "formatted message" group.
+    for status in ("too_early", "insufficient_history", "unstable"):
+        text, _ = _format_projection_autocheck_fire("slot", {"status": status, "formatted": "custom msg"}, None, None, 100.0)
+        assert text == "[projection-autocheck] `slot` custom msg"
+        # No "formatted" key falls back to "status={status}".
+        text, _ = _format_projection_autocheck_fire("slot", {"status": status}, None, None, 100.0)
+        assert f"status={status}" in text
+
+    # status="error" (or anything else) — error branch.
+    text, _ = _format_projection_autocheck_fire("slot", {"status": "error", "error": "boom"}, None, None, 100.0)
+    assert "error: boom" in text
+    text, _ = _format_projection_autocheck_fire("slot", {"status": "error"}, None, None, 100.0)
+    assert "error: unknown" in text
+
+    return True, "_format_projection_autocheck_fire: all status branches, tolerance in/out, median/range/diagnostic combinations verified"
+
+
+@test("demand_feed_main — _format_projection_autocheck_eod covers all branch combinations")
+def test_format_projection_autocheck_eod():
+    from demand_feed_main import _format_projection_autocheck_eod
+
+    # No entries at all.
+    text, blocks = _format_projection_autocheck_eod("2026-09-17", [])
+    assert "No fires recorded today" in text
+    assert blocks == [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+    # Mixed ok/error entries, last_ok present, apples present.
+    entries = [
+        {"status": "ok", "projected_full_day": 5000, "dow_median": 4800, "pct_of_expected": 104, "delta_abs": 50.0},
+        {"status": "error"},
+        {"status": "ok", "projected_full_day": 5200, "dow_median": 4900, "pct_of_expected": 106, "delta_abs": 150.0},
+    ]
+    text, _ = _format_projection_autocheck_eod("2026-09-17", entries)
+    assert "Fires: 3 (ok=2, errors=1)" in text
+    assert "Last projection: $5,200 vs $4,900 median (106%)" in text  # last_ok = last item where status == "ok"
+    assert "Apples-vs-daemon Δ: min=$50 max=$150 (n=2)" in text
+
+    # last_ok present but projected_full_day/dow_median are falsy (0) — documents the
+    # existing display quirk (proj_s/med_s use truthy checks, so a real $0 value
+    # renders as "—" rather than "$0"). Not fixed here — behavior preserved as-is.
+    text, _ = _format_projection_autocheck_eod("2026-09-17", [{"status": "ok", "projected_full_day": 0, "dow_median": 0, "pct_of_expected": 0}])
+    assert "Last projection: — vs — median (0%)" in text, (
+        f"Expected the known $0-renders-as-'—' quirk to still be present, got: {text!r}"
+    )
+
+    # No ok entries at all — no "Last projection" line.
+    text, _ = _format_projection_autocheck_eod("2026-09-17", [{"status": "error"}])
+    assert "Last projection" not in text
+    assert "Apples-vs-daemon" not in text
+
+    return True, "_format_projection_autocheck_eod: empty/mixed entries, last_ok presence, apples, and the known $0-as-'—' quirk all verified"
+
+
+@test("demand_feed_main — _revenue_worsened_enough dedup math")
+def test_revenue_worsened_enough():
+    from demand_feed_main import _revenue_worsened_enough
+
+    # No prior alert pct (None) treated as 0.0 baseline — any positive drop worsens enough.
+    assert _revenue_worsened_enough(curr_pct=-5.0, last_alerted_pct=None, refire_drop_pct=5.0) is True
+    assert _revenue_worsened_enough(curr_pct=0.0, last_alerted_pct=None, refire_drop_pct=5.0) is False
+
+    # Real prior pct — must drop by at least refire_drop_pct to re-fire.
+    assert _revenue_worsened_enough(curr_pct=70.0, last_alerted_pct=80.0, refire_drop_pct=5.0) is True   # dropped 10
+    assert _revenue_worsened_enough(curr_pct=75.0, last_alerted_pct=80.0, refire_drop_pct=5.0) is True   # dropped exactly 5 (boundary, <=)
+    assert _revenue_worsened_enough(curr_pct=76.0, last_alerted_pct=80.0, refire_drop_pct=5.0) is False  # dropped only 4
+    assert _revenue_worsened_enough(curr_pct=85.0, last_alerted_pct=80.0, refire_drop_pct=5.0) is False  # improved, not worsened
+
+    return True, "_revenue_worsened_enough: None-baseline, boundary, and non-worsening cases all correct"
+
+
+@test("demand_feed_main — _is_shadow_tick decision table")
+def test_is_shadow_tick():
+    from demand_feed_main import _is_shadow_tick
+
+    # Shadow off entirely — never a shadow tick regardless of prod state.
+    assert _is_shadow_tick(False, False, True, False) is False
+    assert _is_shadow_tick(False, False, False, False) is False
+
+    # Shadow on, hasn't fired this hour, no prod window active at all — shadow tick.
+    assert _is_shadow_tick(True, False, False, False) is True
+
+    # Shadow on, hasn't fired, prod window IS active but hasn't fired yet —
+    # prod gets priority this tick, NOT a shadow tick.
+    assert _is_shadow_tick(True, False, True, False) is False
+
+    # Shadow on, hasn't fired, prod window active AND already fired —
+    # shadow can still take this tick (prod already got its fire).
+    assert _is_shadow_tick(True, False, True, True) is True
+
+    # Shadow on but already fired this hour's slot — never re-fire shadow same hour.
+    assert _is_shadow_tick(True, True, False, False) is False
+    assert _is_shadow_tick(True, True, True, True) is False
+
+    return True, "_is_shadow_tick: all 6 meaningful boolean combinations resolve correctly, including prod-priority-over-shadow"
+
+
+@test("demand_feed_main — _SHADOW_MONITOR_CONFIG entries all resolve to real, callable functions")
+def test_shadow_monitor_config_integrity():
+    """Mirrors exactly what _make_shadow_daemon's closure does at thread-start
+    (importlib.import_module + getattr for signal/format/load/save), without
+    entering any daemon's infinite loop — catches a monitor silently pointing
+    at a renamed/deleted function, which would otherwise only surface as a
+    crash-and-restart-loop in production logs."""
+    import importlib
+    from demand_feed_main import _SHADOW_MONITOR_CONFIG
+
+    required_keys = {"monitor_name", "config_key", "signal_module", "signal_fn", "format_module", "format_fn", "state_module", "load_fn", "save_fn"}
+    assert len(_SHADOW_MONITOR_CONFIG) == 5, f"Expected 5 shadow monitor configs, got {len(_SHADOW_MONITOR_CONFIG)}"
+
+    seen_monitor_names = set()
+    for cfg in _SHADOW_MONITOR_CONFIG:
+        missing = required_keys - set(cfg.keys())
+        assert not missing, f"Config {cfg.get('monitor_name', '?')!r} missing required keys: {missing}"
+        seen_monitor_names.add(cfg["monitor_name"])
+
+        sig_mod = importlib.import_module(cfg["signal_module"])
+        assert callable(getattr(sig_mod, cfg["signal_fn"], None)), (
+            f"{cfg['monitor_name']}: {cfg['signal_module']}.{cfg['signal_fn']} does not exist or is not callable"
+        )
+        fmt_mod = importlib.import_module(cfg["format_module"])
+        assert callable(getattr(fmt_mod, cfg["format_fn"], None)), (
+            f"{cfg['monitor_name']}: {cfg['format_module']}.{cfg['format_fn']} does not exist or is not callable"
+        )
+        state_mod = importlib.import_module(cfg["state_module"])
+        assert callable(getattr(state_mod, cfg["load_fn"], None)), (
+            f"{cfg['monitor_name']}: {cfg['state_module']}.{cfg['load_fn']} does not exist or is not callable"
+        )
+        assert callable(getattr(state_mod, cfg["save_fn"], None)), (
+            f"{cfg['monitor_name']}: {cfg['state_module']}.{cfg['save_fn']} does not exist or is not callable"
+        )
+        if cfg.get("signal_filter"):
+            assert callable(cfg["signal_filter"])
+
+    assert seen_monitor_names == {
+        "velocity-down-monitor", "ghost-monitor", "fill-monitor", "cvr-anomaly-monitor", "expiration-monitor",
+    }, f"Unexpected monitor_name set: {seen_monitor_names}"
+
+    return True, "All 5 _SHADOW_MONITOR_CONFIG entries resolve to real, callable signal/format/load/save functions"
+
+
+@test("demand_feed_main — _cap_monitor_daemon dispatches to the hourly engine by default, shadow engine when disabled")
+def test_cap_monitor_daemon_dispatch():
+    """cap_monitor_hourly_enabled defaults to True (unlike every shadow monitor's
+    own *_monitor_enabled, which defaults False) — this test pins that default
+    plus the escalation_pct/hourly_start/hourly_end defaults (5/9/17), and
+    confirms the dispatch actually branches on this key without entering
+    either engine's real infinite loop.
+
+    Patches scout.monitoring.daemons (not demand_feed_main) — that's where
+    _cap_monitor_daemon is actually defined post-extraction, so that's where
+    its bare-name lookups of _run_hourly_with_web/_run_shadow_monitor resolve
+    from. demand_feed_main._cap_monitor_daemon is the same function object
+    (imported), so calling it either way exercises identical code."""
+    from unittest.mock import patch
+    import demand_feed_main
+    from scout.monitoring import daemons as scout_daemons
+    import scout_thresholds
+
+    # Default config (no "signals" overrides at all) — must dispatch to the
+    # hourly engine with its documented default parameters.
+    with patch.object(scout_thresholds._manager, "load", return_value={"signals": {}}):
+        with patch.object(scout_daemons, "_run_hourly_with_web") as mock_hourly:
+            with patch.object(scout_daemons, "_run_shadow_monitor") as mock_shadow:
+                demand_feed_main._cap_monitor_daemon()
+    assert mock_shadow.call_count == 0, "Default config must NOT dispatch to the shadow engine"
+    assert mock_hourly.call_count == 1, "Default config must dispatch to the hourly engine exactly once"
+    _, kwargs = mock_hourly.call_args
+    assert kwargs["alert_name"] == "cap_alert"
+    assert kwargs["escalation_pct"] == 5.0
+    assert kwargs["hourly_start"] == 9
+    assert kwargs["hourly_end"] == 17
+
+    # cap_monitor_hourly_enabled=False — must dispatch to the shadow engine instead,
+    # with the fixed monitor_name/config_key this daemon always uses.
+    with patch.object(scout_thresholds._manager, "load", return_value={"signals": {"cap_monitor_hourly_enabled": False}}):
+        with patch.object(scout_daemons, "_run_hourly_with_web") as mock_hourly:
+            with patch.object(scout_daemons, "_run_shadow_monitor") as mock_shadow:
+                demand_feed_main._cap_monitor_daemon()
+    assert mock_hourly.call_count == 0, "hourly_enabled=False must NOT dispatch to the hourly engine"
+    assert mock_shadow.call_count == 1, "hourly_enabled=False must dispatch to the shadow engine exactly once"
+    _, kwargs = mock_shadow.call_args
+    assert kwargs["monitor_name"] == "cap-monitor"
+    assert kwargs["config_key"] == "cap"
+
+    return True, "_cap_monitor_daemon: dispatches hourly by default (with correct 5/9/17 defaults) or shadow when explicitly disabled"
 
 
 if __name__ == "__main__":
