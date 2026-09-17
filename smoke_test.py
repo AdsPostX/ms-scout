@@ -4016,12 +4016,11 @@ def test_module_size_within_ceiling():
     ceilings = {
         "scout_agent.py": 6650,  # was 6600; _get_benchmarks() two-lock fix needed headroom
         "queries.py":     2700,
-        "offer_scraper.py": 2700,  # was 2600; four merged PRs (telemetry raise, TUNE/Everflow
-        # dedup, normalize_status fix, matching-quality) landed in close succession and each
-        # added legitimate code -- offer_scraper.py itself is being moved to
-        # scout/offers/scraper.py in the very next PR in this batch, making this ceiling moot
-        # on this path shortly; bumping with headroom rather than extracting yet another
-        # module right before the file relocates.
+        # offer_scraper.py moved to scout/offers/scraper.py (offer_scraper.py is now a
+        # ~30-line backward-compat shim that should never grow -- see its own docstring).
+        # Ceiling follows the real file to its new path so this guard doesn't go silently
+        # inert against an empty shim.
+        "scout/offers/scraper.py": 2700,
     }
     violations = []
     counts = {}

@@ -2417,20 +2417,20 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 return "█" * filled + "░" * (width - filled)
 
             # Mirrors smoke_test.py ceilings — keep in sync if gates change.
-            _CEILINGS = {"scout_agent.py": 6650, "queries.py": 2700, "offer_scraper.py": 2700}
+            _CEILINGS = {"scout_agent.py": 6650, "queries.py": 2700, "scout/offers/scraper.py": 2700}
 
             modules = [
-                ("scout_agent.py",   _count_lines("scout_agent.py")),
-                ("queries.py",       _count_lines("queries.py")),
-                ("offer_scraper.py", _count_lines("offer_scraper.py")),
+                ("scout_agent.py",          _count_lines("scout_agent.py")),
+                ("queries.py",              _count_lines("queries.py")),
+                ("scout/offers/scraper.py", _count_lines("scout/offers/scraper.py")),
             ]
 
             bar_lines = []
             for name, count in modules:
                 ceil = _CEILINGS.get(name, 9999)
                 bar  = _fill_bar(count, ceil)
-                # Fixed-width name column (17 chars)
-                bar_lines.append(f"`{name:<17}` {bar}  {count:,}/{ceil:,}")
+                # Fixed-width name column (24 chars — widest is "scout/offers/scraper.py")
+                bar_lines.append(f"`{name:<24}` {bar}  {count:,}/{ceil:,}")
 
             # Parse deferred items from smoke_test.py
             deferred: list[str] = []
