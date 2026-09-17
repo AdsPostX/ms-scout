@@ -6979,7 +6979,7 @@ def test_format_projection_autocheck_fire():
     # status in the "formatted message" group.
     for status in ("too_early", "insufficient_history", "unstable"):
         text, _ = _format_projection_autocheck_fire("slot", {"status": status, "formatted": "custom msg"}, None, None, 100.0)
-        assert text == f"[projection-autocheck] `slot` custom msg"
+        assert text == "[projection-autocheck] `slot` custom msg"
         # No "formatted" key falls back to "status={status}".
         text, _ = _format_projection_autocheck_fire("slot", {"status": status}, None, None, 100.0)
         assert f"status={status}" in text
