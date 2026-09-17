@@ -964,10 +964,19 @@ def parse_payout(raw_payout: str, raw_type: str) -> "PayoutResult":
 
 def normalize_status(raw: str) -> str:
     s = raw.lower().strip()
-    if any(x in s for x in ["active", "approved", "live"]):
-        return "Active"
+    # Order matters: "inactive" contains "active" as a substring, so the
+    # Expired-tier keywords must be checked BEFORE the Active-tier ones, or
+    # every "inactive"/"Inactive" raw status silently misclassifies as
+    # Active and never gets dropped by clean_offers()'s Expired filter. This
+    # is the same bug class fixed in match_ms_status()'s "active" in status
+    # check — verified here too: Impact's raw ContractStatus and MaxBounty's
+    # affiliate_campaign_status/status fields pass through unfiltered (no
+    # upstream API request param restricts them to "active" only), so a
+    # literal "Inactive" from either network was reaching this function.
     if any(x in s for x in ["expir", "inactive", "deactivat", "ended"]):
         return "Expired"
+    if any(x in s for x in ["active", "approved", "live"]):
+        return "Active"
     if any(x in s for x in ["pending", "approv", "review", "required"]):
         return "Pending Approval"
     return "Unknown"

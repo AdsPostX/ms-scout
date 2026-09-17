@@ -6275,6 +6275,48 @@ def test_offer_scraper_total_failure_raises():
     )
 
 
+@test("offer_scraper — normalize_status checks Expired keywords before Active (inactive-contains-active regression guard)")
+def test_normalize_status_inactive_not_active():
+    """'inactive' contains 'active' as a substring — if the Active-tier keyword
+    check ever runs before the Expired-tier one, every raw 'Inactive' status
+    misclassifies as Active and clean_offers() never drops it. Impact's raw
+    ContractStatus and MaxBounty's affiliate_campaign_status/status fields pass
+    through unfiltered (no upstream API request param restricts them to
+    active-only), so this is a real, reachable input, not a hypothetical."""
+    from offer_scraper import normalize_status
+
+    # The actual bug case: must be Expired, not Active.
+    assert normalize_status("inactive") == "Expired", (
+        f"'inactive' must normalize to Expired (it contains 'active' as a substring — "
+        f"a naive check-Active-first implementation misclassifies this), got {normalize_status('inactive')!r}"
+    )
+    assert normalize_status("Inactive") == "Expired"
+    assert normalize_status("INACTIVE") == "Expired"
+    assert normalize_status("Contract Inactive") == "Expired"  # Impact's ContractStatus shape
+
+    # Must not regress the legitimate Active-tier cases that share no substring collision.
+    assert normalize_status("active") == "Active"
+    assert normalize_status("Active") == "Active"
+    assert normalize_status("Contract Active") == "Active"
+    assert normalize_status("live") == "Active"
+
+    # "approved" is fully contained in tier-3's "approv" keyword too — must still resolve
+    # to Active (tier-1 wins), not Pending Approval, confirming the reorder didn't disturb
+    # this other pre-existing precedence.
+    assert normalize_status("Approved") == "Active"
+
+    # Other Expired-tier keywords, unaffected by the reorder.
+    assert normalize_status("expired") == "Expired"
+    assert normalize_status("Ended") == "Expired"
+    assert normalize_status("Deactivated") == "Expired"
+
+    # Pending-tier, unaffected.
+    assert normalize_status("Pending Approval") == "Pending Approval"
+    assert normalize_status("Review Required") == "Pending Approval"
+
+    return True, "normalize_status: 'inactive' correctly resolves to Expired (not Active), no regression on Active/Approved/Pending cases"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
