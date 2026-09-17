@@ -6209,6 +6209,26 @@ def test_offer_scraper_total_failure_raises():
         result = osc.fetch_tune_all()
         assert len(result) == 1, f"Expected the surviving instance's 1 offer despite the other failing, got {result!r}"
 
+    # --- TUNE: CodeRabbit-flagged edge case: one instance fails, but the OTHER instance
+    # is healthy and simply has zero live offers right now (a legitimate empty result, not
+    # a failure). An earlier version of this fix tracked "any_success" via `all_offers`
+    # being non-empty, which conflated "the healthy instance returned zero offers" with
+    # "no instance actually succeeded" -- wrongly raising a total-failure error even though
+    # one instance was genuinely fine. Must NOT raise here. ---
+    def _fake_tune_instance_empty_but_healthy(label, nid, key, url):
+        if label == "bad":
+            raise RuntimeError("this one instance is down")
+        return []  # "good" instance: reached, parsed fine, just zero offers today
+
+    with patch.object(osc, "TUNE_INSTANCES", [
+        ("bad", "1", "k", "https://bad.example"),
+        ("good", "2", "k", "https://good.example"),
+    ]), patch.object(osc, "fetch_tune_instance", side_effect=_fake_tune_instance_empty_but_healthy):
+        result = osc.fetch_tune_all()
+        assert result == [], (
+            f"Expected [] (the healthy instance's legitimately-empty result), not a raise, got {result!r}"
+        )
+
     # --- Everflow: a real 401 from the actual per-instance HTTP call must propagate all
     # the way up through fetch_everflow_instance() -> fetch_everflow_all() (same real-path
     # gap as TUNE above). ---
@@ -6228,6 +6248,22 @@ def test_offer_scraper_total_failure_raises():
             return False, "fetch_everflow_all() should have raised when its only instance failed, but returned normally"
         except RuntimeError:
             pass
+
+    # --- Everflow: same CodeRabbit-flagged edge case as TUNE above -- one instance fails,
+    # the other is healthy but legitimately empty. Must NOT raise. ---
+    def _fake_everflow_instance_empty_but_healthy(label, key, url):
+        if label == "bad":
+            raise RuntimeError("this one instance is down")
+        return []
+
+    with patch.object(osc, "EVERFLOW_INSTANCES", [
+        ("bad", "k", "https://bad.example"),
+        ("good", "k", "https://good.example"),
+    ]), patch.object(osc, "fetch_everflow_instance", side_effect=_fake_everflow_instance_empty_but_healthy):
+        result = osc.fetch_everflow_all()
+        assert result == [], (
+            f"Expected [] (the healthy instance's legitimately-empty result), not a raise, got {result!r}"
+        )
 
     # --- MaxBounty: no credentials configured is a legitimate skip, must NOT raise ---
     with patch.object(osc, "MAXBOUNTY_EMAIL", ""), patch.object(osc, "MAXBOUNTY_PASSWORD", ""):

@@ -2171,16 +2171,21 @@ def fetch_tune_all() -> list:
         return []
     all_offers = []
     errors = []
+    any_success = False
     for label, nid, key, url in TUNE_INSTANCES:
         try:
             all_offers.extend(fetch_tune_instance(label, nid, key, url))
+            any_success = True
         except Exception as e:
             log.error(f"TUNE/{label}: unhandled error — {e}")
             errors.append(f"{label}: {e}")
-    if not all_offers and errors:
+    if not any_success and errors:
         # Every configured instance failed — this is a real outage, not a
         # legitimately-empty result. Raise so update_network_status reports
         # success=False instead of silently claiming a clean 0-offer scrape.
+        # Tracked via any_success rather than "not all_offers" — a healthy
+        # instance that legitimately has zero live offers right now must not
+        # be conflated with a failed instance just because both contribute 0.
         raise RuntimeError(f"TUNE: all {len(errors)} instance(s) failed — {'; '.join(errors)}")
     return all_offers
 
@@ -2300,16 +2305,21 @@ def fetch_everflow_all() -> list:
         return []
     all_offers = []
     errors = []
+    any_success = False
     for label, key, url in EVERFLOW_INSTANCES:
         try:
             all_offers.extend(fetch_everflow_instance(label, key, url))
+            any_success = True
         except Exception as e:
             log.error(f"Everflow/{label}: unhandled error — {e}")
             errors.append(f"{label}: {e}")
-    if not all_offers and errors:
+    if not any_success and errors:
         # Every configured instance failed — this is a real outage, not a
         # legitimately-empty result. Raise so update_network_status reports
         # success=False instead of silently claiming a clean 0-offer scrape.
+        # Tracked via any_success rather than "not all_offers" — a healthy
+        # instance that legitimately has zero live offers right now must not
+        # be conflated with a failed instance just because both contribute 0.
         raise RuntimeError(f"Everflow: all {len(errors)} instance(s) failed — {'; '.join(errors)}")
     return all_offers
 
