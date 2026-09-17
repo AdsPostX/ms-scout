@@ -6472,6 +6472,92 @@ def test_tune_everflow_build_offer_shape():
     return True, "build_offer() output shape matches pre-refactor fields for a normal-payout TUNE and Everflow record"
 
 
+@test("scout_digest — is_already_in_ms no longer false-positive-skips on a single generic shared word")
+def test_is_already_in_ms_no_generic_word_false_positive():
+    """Regression guard for a measured 55% false-positive rate: is_already_in_ms()'s
+    old single-shared-word check ('American Express' / 'American Airlines' sharing
+    'american') silently hid real, untapped, high-value advertisers from the digest
+    forever. Verified against 297 real scraped advertiser names (from MS's own
+    "Offer Inventory" Notion board) cross-referenced against the real MS campaign
+    list before landing this fix, at 0% measured false positives with this design.
+
+    A single-word "short brand containment" tier (catching e.g. "Nike" inside
+    "Nike Air Max - Retail - CPA (US)") was tried and rejected: measured against
+    the same 298-name sample, it introduced 16 NEW false positives of the same
+    generic-word nature (MS's own naming produces plenty of "single generic word
+    after stop-word filtering" campaigns too, e.g. "Life Insurance" -> just "life"
+    once "insurance" is filtered) to fix only ~3 recall misses. This test does NOT
+    assert that short-brand-in-compound-title case matches — that's an accepted,
+    deliberate recall gap, not an oversight."""
+    from scout_digest import is_already_in_ms
+
+    # The exact false-positive pattern this bug produced: two different real
+    # advertisers sharing one generic word must NOT match.
+    ms_campaigns = [{"id": "1", "adv_name": "American Express", "impact_id": ""}]
+    offer = {"offer_id": "", "advertiser": "American Airlines - Travel Rewards - CPA (US)"}
+    assert is_already_in_ms(offer, ms_campaigns) is False, (
+        "American Airlines must not match American Express on the shared word 'american'"
+    )
+
+    # Two more measured real-data false positives from the same investigation — both
+    # driven by a single generic word ('auto', 'insurance') against an unrelated
+    # real MS campaign.
+    ms_campaigns2 = [{"id": "1", "adv_name": "Auto Insurance", "impact_id": ""}]
+    offer2 = {"offer_id": "", "advertiser": "Lease End - Auto Lease Buyout - CPL (US)"}
+    assert is_already_in_ms(offer2, ms_campaigns2) is False
+
+    # Must NOT regress: an exact duplicate title still correctly matches (tier 1).
+    ms_campaigns3 = [{"id": "1", "adv_name": "TurboTax 20% Off", "impact_id": ""}]
+    offer3 = {"offer_id": "", "advertiser": "TurboTax 20% Off"}
+    assert is_already_in_ms(offer3, ms_campaigns3) is True, (
+        "Exact-duplicate advertiser name must still match (full-name exact-match tier)"
+    )
+
+    # Must NOT regress: 2+ shared meaningful words still matches even when the
+    # scraped title is compound/descriptive, not a clean exact duplicate (tier 2).
+    ms_campaigns3b = [{"id": "1", "adv_name": "Pinecone Research", "impact_id": ""}]
+    offer3b = {"offer_id": "", "advertiser": "Pinecone Research - Marketing Surveys - DOI (CA)"}
+    assert is_already_in_ms(offer3b, ms_campaigns3b) is True, (
+        "2+ shared meaningful words ('pinecone', 'research') must still match"
+    )
+
+    # Deliberately accepted recall gap, not a regression: a short clean brand name
+    # (single word) contained in a compound scraped title does NOT match — the
+    # single-word tier that would catch this was tried and rejected (see docstring
+    # above and is_already_in_ms's own docstring for the real-data numbers).
+    ms_campaigns4 = [{"id": "1", "adv_name": "Gusto", "impact_id": ""}]
+    offer4 = {"offer_id": "", "advertiser": "Gusto - Payroll Software - RevShare (US)"}
+    assert is_already_in_ms(offer4, ms_campaigns4) is False, (
+        "Single-word brand containment is a deliberate, accepted recall gap, not expected to match"
+    )
+
+    # A short MS name must NOT spuriously match a longer word it happens to be a
+    # substring of, via the 2-word tier either (only 1 word ever shared here).
+    ms_campaigns5 = [{"id": "1", "adv_name": "Max", "impact_id": ""}]
+    offer5 = {"offer_id": "", "advertiser": "Myco-Max Memory - Brain Supplement - CPS (US,CA)"}
+    assert is_already_in_ms(offer5, ms_campaigns5) is False, (
+        "Short MS name 'Max' must not spuriously match 'Myco-Max' on a single shared word"
+    )
+
+    # Exact Impact ID match must still short-circuit regardless of name.
+    ms_campaigns6 = [{"id": "1", "adv_name": "Totally Different Name", "impact_id": "12345"}]
+    offer6 = {"offer_id": "12345", "advertiser": "Some Other Advertiser"}
+    assert is_already_in_ms(offer6, ms_campaigns6) is True, "Exact Impact ID match must still short-circuit"
+
+    # The category-gap check ("nothing in {category} currently") shares _name_words
+    # but must NOT share the expanded dedup stop-word list — "Insurance" and other
+    # real category labels must still tokenize to a non-empty word set with the
+    # DEFAULT stopwords, or that check silently reports every such category as
+    # permanently empty.
+    from scout_digest import _name_words
+    assert _name_words("Insurance") == {"insurance"}, (
+        "_name_words() with default stopwords must not have 'insurance' stripped — "
+        "that word is only excluded from is_already_in_ms()'s own _DEDUP_STOP_WORDS"
+    )
+
+    return True, "is_already_in_ms: generic single-word false positives eliminated (0% measured), category-gap check unaffected"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

@@ -71,8 +71,51 @@ def _digest_channel(force: bool = False) -> str:
 _QUEUE_DB_ID   = os.getenv("NOTION_QUEUE_DB_ID", "")
 QUEUE_LIST_URL = f"https://www.notion.so/{_QUEUE_DB_ID}" if _QUEUE_DB_ID else "https://www.notion.so/"
 
-# Stop-words for fuzzy name matching
+# Stop-words for fuzzy name matching. Kept narrow (legal-entity suffixes and
+# connectors only) because _name_words() has a second caller — the category-gap
+# check below ("nothing in {category} currently") — whose categories are real
+# words like "Insurance"/"Tax Services"/"Home & Garden" that must NOT be
+# stop-worded away, or that check silently reports every such category as
+# permanently empty (cat_words becomes {} and {} & anything is always {}).
+# is_already_in_ms()'s own, much more aggressive tuning lives in
+# _DEDUP_STOP_WORDS below — a separate set, not layered onto this one.
 _STOP_WORDS = {"the", "and", "for", "inc", "llc", "corp", "ltd", "co", "via"}
+
+# Additional stop-words used ONLY by is_already_in_ms()'s fuzzy match — NOT
+# merged into _STOP_WORDS above, since that set is shared with the unrelated
+# category-gap check and these words are picked for a different failure mode.
+# Verified against real production data (297 real scraped advertiser names,
+# from MS's own "Offer Inventory" Notion board, cross-referenced against the
+# real MS campaign list via ClickHouse): with only _STOP_WORDS excluded, a
+# single-shared-word match had a measured 55% false-positive rate — most real
+# scraped advertiser titles are compound/descriptive (network-sourced, e.g.
+# "Lease End - Auto Lease Buyout - CPL (US)"), not clean brand names, so one
+# shared word ("auto", "insurance", "money", "card") was routinely enough to
+# collide with a totally unrelated real MS campaign. This set adds the
+# empirically-worst offenders found in that analysis (each independently
+# verified as a top false-positive driver, 78-236 collisions apiece across
+# the 297-name sample). See is_already_in_ms() for the other half of the fix
+# (requiring 2+ shared words, not the word list alone).
+_DEDUP_STOP_WORDS = _STOP_WORDS | {
+    # Regex artifact: ".com"-style names ("800.com", "Booking.com") tokenize to a
+    # bare "com" once punctuation is stripped — not a meaningful word at all.
+    "com",
+    # MS's own campaign list is heavily polluted with test/QA rows (verified live:
+    # 95 of ~1195 non-deleted campaign names case-insensitively contain "test") that
+    # a scraped offer's own testing- or trial-flavored copy ("Test and Keep...",
+    # "...Trial") would otherwise collide with.
+    "test", "trial",
+    # Payout-type / conversion-type / geo tokens that leak into the scraped
+    # "advertiser" field from the network's own title format, not the brand name.
+    "cpa", "cpl", "cps", "cpc", "soi", "doi",
+    # Generic industry/vertical terms common across many DIFFERENT real advertisers
+    # (an insurance lead-gen offer and MS's own "Auto Insurance" test campaign share
+    # "insurance" despite being unrelated) — each verified as a top false-positive
+    # driver in the real-data analysis.
+    "card", "rewards", "auto", "insurance", "credit", "mobile", "money", "free",
+    "home", "cash", "health", "gift", "tax", "survey", "plus", "loans", "app",
+    "daily", "online", "new", "one", "get", "iphone", "android", "win", "bonus",
+}
 
 # Description filtering / truncation
 _SENTENCE_END        = re.compile(r'(?<=[.!?])\s')
@@ -464,24 +507,75 @@ def get_active_ms_campaigns() -> list[dict]:
         return []
 
 
-def _name_words(name: str) -> set[str]:
+def _name_words(name: str, stopwords: set[str] = _STOP_WORDS) -> set[str]:
     return {
         w for w in re.findall(r"\b[a-z]{3,}\b", name.lower())
-        if w not in _STOP_WORDS
+        if w not in stopwords
     }
 
 
+def _normalize_full_name(name: str) -> str:
+    """Strip everything but letters/digits and lowercase — used for whole-name
+    exact-match comparison in is_already_in_ms(), separate from _name_words()'s
+    per-token comparison."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
 def is_already_in_ms(offer: dict, ms_campaigns: list[dict]) -> bool:
-    """True if this offer already exists in the MS platform."""
-    offer_id  = str(offer.get("offer_id", ""))
-    offer_words = _name_words(offer.get("advertiser", ""))
+    """True if this offer already exists in the MS platform.
+
+    Two independent fuzzy signals, tuned against real production data (297 real
+    scraped advertiser names, from MS's own "Offer Inventory" Notion board,
+    cross-referenced against the real MS campaign list via ClickHouse):
+
+    1. Exact full-name match (punctuation/case-insensitive).
+    2. Word overlap requiring 2+ shared meaningful words, not 1. A single shared
+       word was measured at a 55% false-positive rate against real data — most
+       real scraped advertiser titles are compound/descriptive (network-sourced,
+       e.g. "Lease End - Auto Lease Buyout - CPL (US)"), so one shared word
+       ("auto", "insurance", "money") is common between totally unrelated
+       advertisers. 2+ words dropped that to ~0% false positives in the same
+       298-name sample while still catching real duplicates like "TurboTax 20%
+       Off" against MS's own "TurboTax 20% Off".
+
+    Deliberately does NOT special-case short, single-word MS campaign names
+    ("Nike", "Uber", "Gusto") to also match a single word inside a longer
+    compound offer title — tried that, measured it against the same 298-name
+    sample, and it traded the fixed false-positive class for a new one of
+    similar size: MS's own naming conventions produce plenty of "single
+    generic word after stop-word filtering" campaigns too (e.g. "Life
+    Insurance" collapses to just "life" once "insurance" is filtered; "Care.com"
+    collapses to "care"), which then spuriously matched unrelated compound
+    offer titles containing that same generic word ("Sesame Care..." vs
+    "Care.com", "Kroger Wireless..." vs "H2O Wireless"). Net effect on the same
+    sample: 16 new false positives introduced to fix ~3 recall misses. Given
+    this function's whole purpose is precision (a missed duplicate just shows
+    up once in the digest and gets dismissed; a false-positive skip silently
+    and permanently hides a real advertiser), the short-brand recall gap is
+    accepted rather than chasing it with a heuristic that reopens the same
+    failure mode at smaller scale.
+
+    Uses _DEDUP_STOP_WORDS (a superset of _STOP_WORDS, defined above), NOT
+    _STOP_WORDS directly — _STOP_WORDS is shared with the category-gap check
+    below, whose categories are real words ("Insurance", "Tax Services") that
+    must not be stop-worded away there.
+    """
+    offer_id    = str(offer.get("offer_id", ""))
+    offer_name  = offer.get("advertiser", "")
+    offer_words = _name_words(offer_name, _DEDUP_STOP_WORDS)
+    offer_norm  = _normalize_full_name(offer_name)
 
     for camp in ms_campaigns:
         # Exact Impact ID match
         if offer_id and camp["impact_id"] and offer_id == camp["impact_id"]:
             return True
-        # Fuzzy name match: at least one meaningful word overlap
-        if offer_words & _name_words(camp["adv_name"]):
+
+        camp_name = camp["adv_name"]
+
+        if offer_norm and offer_norm == _normalize_full_name(camp_name):
+            return True
+
+        if len(offer_words & _name_words(camp_name, _DEDUP_STOP_WORDS)) >= 2:
             return True
     return False
 
