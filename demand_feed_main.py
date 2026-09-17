@@ -25,7 +25,6 @@ import pathlib
 import socketserver
 import threading
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Optional
@@ -59,7 +58,6 @@ from scout_bot import _env_int as _shared_env_int
 
 _SCRAPER_STATE = _DATA_DIR / "scraper_state.json"
 _OFFERS_FILE   = _DATA_DIR / "offers_latest.json"
-_QUEUE_FILE    = _DATA_DIR / "queue.json"
 
 # 06:00 CT in UTC offset hours (CST = UTC-6, CDT = UTC-5).
 # zoneinfo handles DST automatically; fall back to a month-based approximation
@@ -108,9 +106,6 @@ class _FeedConfig:
     slack_alert_channel: str = "#scout-offers"
     scout_qa_channel: str = "#sidd-qa"
     demand_feed_port: int = 8080
-    campaign_create_webhook_url: str = ""
-    campaign_create_api_key: str = ""
-    campaign_create_dry_run: bool = True
     scout_env: str = "development"
     revenue_ops_channel: str = "C0AQEECF800"
     revenue_tracker_enabled: bool = False
@@ -136,9 +131,6 @@ class _FeedConfig:
             slack_alert_channel=os.getenv("SLACK_ALERT_CHANNEL", "#scout-offers"),
             scout_qa_channel=os.getenv("SCOUT_QA_CHANNEL", "#sidd-qa"),
             demand_feed_port=_env_int("DEMAND_FEED_PORT", 8080),
-            campaign_create_webhook_url=os.getenv("CAMPAIGN_CREATE_WEBHOOK_URL", "").strip(),
-            campaign_create_api_key=os.getenv("CAMPAIGN_CREATE_API_KEY", "").strip(),
-            campaign_create_dry_run=_env_bool("CAMPAIGN_CREATE_DRY_RUN", default=True),
             scout_env=os.getenv("SCOUT_ENV", "development"),
             revenue_ops_channel=os.getenv("REVENUE_OPS_CHANNEL", _hq),
             revenue_tracker_enabled=os.getenv("REVENUE_TRACKER_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
@@ -296,44 +288,9 @@ class _OffersHandler(http.server.BaseHTTPRequestHandler):
             _write_json(self, 200, payload)
             return
 
-        if self.path == "/queue/config":
-            _handle_queue_config(self)
-            return
-
-        if self.path == "/queue/pending":
-            drafts = _load_queue()
-            pending = [d for d in drafts.values()
-                       if d.get("approval", {}).get("state") == "pending"]
-            _write_json(self, 200, {"drafts": pending, "count": len(pending)})
-            return
-
-        if self.path.startswith("/queue/"):
-            # GET /queue/<draft_id>
-            draft_id = self.path[len("/queue/"):]
-            if draft_id:
-                drafts = _load_queue()
-                draft = drafts.get(draft_id)
-                if draft is None:
-                    _write_json(self, 404, {"error": f"draft not found: {draft_id}"})
-                else:
-                    _write_json(self, 200, draft)
-                return
-
         self.send_error(404)
 
     def do_POST(self):
-        if self.path == "/queue/draft":
-            _handle_queue_create_draft(self)
-            return
-        if self.path == "/queue/approve":
-            _handle_queue_approve(self)
-            return
-        if self.path == "/queue/reject":
-            _handle_queue_reject(self)
-            return
-        if self.path == "/campaigns/create":
-            _handle_campaigns_create(self)
-            return
         self.send_error(404)
 
     def log_message(self, *args):  # suppress request logs
@@ -697,14 +654,6 @@ def main() -> None:
     ]:
         threading.Thread(target=_monitor_fn, daemon=True, name=_monitor_name).start()
     log.info("[demand-feed] hourly-shadow monitors started (SCOUT_HOURLY_SHADOW_ENABLED gates shadow ticks only — prod-window firing always active)")
-    _wh  = _FEED_CFG.campaign_create_webhook_url
-    _dry = _FEED_CFG.campaign_create_dry_run
-    _cc_mode = "live" if (_wh and not _dry) else "dry_run"
-    log.info(
-        "[demand-feed] campaign-creation mode=%s webhook_url_set=%s "
-        "(MS_PLATFORM_TODO: set CAMPAIGN_CREATE_WEBHOOK_URL + CAMPAIGN_CREATE_DRY_RUN=false to go live)",
-        _cc_mode, bool(_wh),
-    )
     log.info("[demand-feed] starting")
 
     while True:
@@ -1311,376 +1260,6 @@ def _cap_monitor_daemon() -> None:
             signal_fn=_pulse_signal_cap, format_fn=_format_cap_alert,
             load_state_fn=_load_cap_alert_state, save_state_fn=_save_cap_alert_date,
         )
-
-
-# ── Queue storage ─────────────────────────────────────────────────────────────
-# Persists QueueDraft rows to data/queue.json on Render disk.
-# Atomic writes via a .tmp rename so a crash mid-write never corrupts state.
-# Concurrency: the HTTP server runs in a single-threaded socketserver loop
-# (socketserver.TCPServer defaults to non-threaded), so no lock is needed here.
-# If the server is ever switched to ThreadingTCPServer, add threading.Lock().
-
-_QUEUE_LOCK = threading.Lock()
-
-
-def _load_queue() -> dict:
-    """Return {draft_id: draft_dict} from queue.json, or {} on any error."""
-    try:
-        return json.loads(_QUEUE_FILE.read_text()).get("drafts", {})
-    except Exception as e:
-        log.warning(f"Could not load demand queue from {_QUEUE_FILE}: {e}")
-        return {}
-
-
-def _save_queue(drafts: dict) -> None:
-    """Atomically persist the drafts dict to queue.json."""
-    tmp = _QUEUE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"drafts": drafts}, indent=2))
-    tmp.replace(_QUEUE_FILE)
-
-
-def _read_body(handler: http.server.BaseHTTPRequestHandler) -> Optional[dict]:
-    """Read and parse JSON body from a request. Returns None on bad input."""
-    try:
-        length = int(handler.headers.get("Content-Length", 0))
-        if length <= 0:
-            return {}
-        raw = handler.rfile.read(length)
-        return json.loads(raw)
-    except Exception:
-        return None
-
-
-
-# ── MS Platform integration — env vars needed before going live ────────────────
-#
-# MS_PLATFORM_TODO: Platform team must provide the following before flipping live:
-#
-#   CAMPAIGN_CREATE_WEBHOOK_URL
-#       POST endpoint on MS Platform that accepts a CampaignRequest JSON body.
-#       Shape posted (see _fire_campaign_creation):
-#         {
-#           "draft_id":    "<uuid>",
-#           "offer":       { network, offer_id, advertiser, title, payout_num, ... },
-#           "ai_copy":     { headline, description, cta_yes, cta_no, ... },
-#           "approver":    "sidd",
-#           "approved_at": "2026-05-24T14:00:00+00:00",
-#           "dry_run":     false
-#         }
-#       Expected success response: any 2xx, body is relayed back to caller as-is.
-#       Leave unset → dry_run mode (default, safe for staging).
-#
-#   CAMPAIGN_CREATE_API_KEY
-#       Bearer token sent as Authorization: Bearer <token>.
-#       Leave unset → no auth header (dev / local only).
-#
-#   CAMPAIGN_CREATE_DRY_RUN
-#       "true" (default) → log + return preview, no HTTP call.
-#       Set "false" AND set WEBHOOK_URL to go live.
-#       GET /queue/config shows current state without exposing secrets.
-#
-# Flip order once platform team provides the endpoint:
-#   1. Set CAMPAIGN_CREATE_WEBHOOK_URL in Render
-#   2. Set CAMPAIGN_CREATE_API_KEY in Render  (if platform requires auth)
-#   3. Keep CAMPAIGN_CREATE_DRY_RUN=true — test one approve, check /queue/config
-#   4. Verify the "would_send" payload in the dry_run response looks right
-#   5. Set CAMPAIGN_CREATE_DRY_RUN=false → live
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def _fire_campaign_creation(draft: dict) -> dict:
-    """Hand a QueueDraft to the MS Platform campaign creation webhook.
-
-    Safe-by-default: returns {"status": "dry_run"} when
-    CAMPAIGN_CREATE_DRY_RUN=true (the default) or when
-    CAMPAIGN_CREATE_WEBHOOK_URL is not set. In dry-run mode the full payload
-    that *would* be sent is included as "would_send" for review
-    before flipping live.
-
-    Auth: if CAMPAIGN_CREATE_API_KEY is set, it is sent as
-    "Authorization: Bearer <key>".  Uses stdlib urllib — no extra dep.
-
-    See the MS_PLATFORM_TODO block above for flip-live instructions.
-    """
-    webhook_url = _FEED_CFG.campaign_create_webhook_url
-    api_key     = _FEED_CFG.campaign_create_api_key
-    dry_run     = _FEED_CFG.campaign_create_dry_run
-
-    # Build the CampaignRequest payload regardless — used for both dry_run
-    # preview and the real POST so there's one source of truth.
-    payload: dict = {
-        "draft_id":    draft.get("draft_id"),
-        "offer":       draft.get("offer", {}),
-        "ai_copy":     draft.get("ai_copy", {}),
-        "approver":    draft.get("approval", {}).get("approver", ""),
-        "approved_at": draft.get("approval", {}).get("approved_at", ""),
-        "dry_run":     False,
-    }
-
-    if dry_run or not webhook_url:
-        mode = (
-            "CAMPAIGN_CREATE_DRY_RUN=true"
-            if dry_run
-            else "CAMPAIGN_CREATE_WEBHOOK_URL not set"
-        )
-        log.info(
-            "[queue] dry_run campaign creation (%s) draft_id=%s offer=%s/%s",
-            mode,
-            draft.get("draft_id"),
-            draft.get("offer", {}).get("network"),
-            draft.get("offer", {}).get("offer_id"),
-        )
-        # MS_PLATFORM_TODO: review "would_send" in the response, then flip live.
-        return {
-            "status":    "dry_run",
-            "draft_id":  draft.get("draft_id"),
-            "mode":      mode,
-            "would_send": payload,
-        }
-
-    import urllib.request as _ur
-    import urllib.error as _ue
-
-    try:
-        body_bytes = json.dumps(payload).encode()
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        req = _ur.Request(webhook_url, data=body_bytes, headers=headers, method="POST")
-        with _ur.urlopen(req, timeout=10) as resp:
-            try:
-                resp_body = json.loads(resp.read() or b"{}")
-            except Exception:
-                resp_body = {}
-            log.info(
-                "[queue] campaign creation fired draft_id=%s → HTTP %s",
-                draft.get("draft_id"), resp.status,
-            )
-            return {
-                "status":            "fired",
-                "draft_id":          draft.get("draft_id"),
-                "platform_status":   resp.status,
-                "platform_response": resp_body,
-            }
-    except _ue.HTTPError as exc:
-        log.error("[queue] campaign creation webhook HTTP %s: %s", exc.code, exc)
-        return {"status": "error", "error": f"HTTP {exc.code}", "draft_id": draft.get("draft_id")}
-    except Exception as exc:
-        log.error("[queue] campaign creation webhook failed: %s", exc)
-        return {"status": "error", "error": str(exc), "draft_id": draft.get("draft_id")}
-
-
-# ── Queue HTTP endpoints ───────────────────────────────────────────────────────
-# Wired into _OffersHandler.do_POST / do_GET below.
-# GET  /queue/config          → platform integration status (no secrets)
-# GET  /queue/pending         → drafts awaiting approval
-# GET  /queue/<id>            → single draft by id
-# POST /queue/draft           → create new draft
-# POST /queue/approve         → approve + fire campaign creation
-# POST /queue/reject          → reject draft
-# POST /campaigns/create      → fire campaign from approved draft directly
-
-def _handle_queue_config(handler: http.server.BaseHTTPRequestHandler) -> None:
-    """GET /queue/config — returns current MS Platform integration status.
-
-    No secrets are exposed — only booleans for set/unset and the current mode.
-    The platform team can hit this endpoint to verify the connection is
-    configured before flipping CAMPAIGN_CREATE_DRY_RUN=false.
-
-    Example response:
-        {
-          "campaign_creation": {
-            "mode": "dry_run",
-            "webhook_url_set": false,
-            "api_key_set": false,
-            "dry_run_flag": true
-          },
-          "queue_depth": { "pending": 3, "approved": 1, "rejected": 0 }
-        }
-    """
-    webhook_url = _FEED_CFG.campaign_create_webhook_url
-    api_key     = _FEED_CFG.campaign_create_api_key
-    dry_run     = _FEED_CFG.campaign_create_dry_run
-    live        = bool(webhook_url) and not dry_run
-
-    drafts = _load_queue()
-    depth: dict = {"pending": 0, "approved": 0, "rejected": 0}
-    for d in drafts.values():
-        state = d.get("approval", {}).get("state", "pending")
-        if state in depth:
-            depth[state] += 1
-
-    _write_json(handler, 200, {
-        "campaign_creation": {
-            # MS_PLATFORM_TODO: mode should read "live" before launch.
-            "mode":            "live" if live else "dry_run",
-            "webhook_url_set": bool(webhook_url),
-            "api_key_set":     bool(api_key),
-            "dry_run_flag":    dry_run,
-        },
-        "queue_depth": depth,
-    })
-
-
-def _handle_queue_create_draft(handler: http.server.BaseHTTPRequestHandler) -> None:
-    """POST /queue/draft — create a new QueueDraft from offer JSON + optional copy."""
-    body = _read_body(handler)
-    if body is None:
-        _write_json(handler, 400, {"error": "invalid JSON body"})
-        return
-
-    offer_dict = body.get("offer")
-    if not offer_dict or not isinstance(offer_dict, dict):
-        _write_json(handler, 400, {"error": "missing required field: offer"})
-        return
-
-    # Require at minimum network + offer_id so the draft is addressable.
-    if not offer_dict.get("network") or not offer_dict.get("offer_id"):
-        _write_json(handler, 400, {"error": "offer must include network and offer_id"})
-        return
-
-    draft_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    draft = {
-        "draft_id": draft_id,
-        "offer": offer_dict,
-        "ai_copy": body.get("ai_copy") or {},
-        "estimated_rpm": body.get("estimated_rpm"),
-        "perf_ctx": body.get("perf_ctx") or "",
-        "risk_flag": body.get("risk_flag") or "",
-        "approval": {
-            "state": "pending",
-            "approver": "",
-            "approved_at": None,
-            "note": "",
-        },
-        "created_at": now,
-    }
-
-    with _QUEUE_LOCK:
-        drafts = _load_queue()
-        drafts[draft_id] = draft
-        _save_queue(drafts)
-
-    log.info("[queue] created draft_id=%s offer=%s/%s",
-             draft_id, offer_dict.get("network"), offer_dict.get("offer_id"))
-    _write_json(handler, 201, {"draft_id": draft_id, "status": "pending", "created_at": now})
-
-
-def _handle_queue_approve(handler: http.server.BaseHTTPRequestHandler) -> None:
-    """POST /queue/approve — approve a pending draft; fires campaign creation."""
-    body = _read_body(handler)
-    if body is None:
-        _write_json(handler, 400, {"error": "invalid JSON body"})
-        return
-
-    draft_id = (body.get("draft_id") or "").strip()
-    approver = (body.get("approver") or "").strip()
-    if not draft_id:
-        _write_json(handler, 400, {"error": "missing required field: draft_id"})
-        return
-    if not approver:
-        _write_json(handler, 400, {"error": "missing required field: approver"})
-        return
-
-    now = datetime.now(timezone.utc).isoformat()
-
-    with _QUEUE_LOCK:
-        drafts = _load_queue()
-        draft = drafts.get(draft_id)
-        if draft is None:
-            _write_json(handler, 404, {"error": f"draft not found: {draft_id}"})
-            return
-
-        current_state = draft.get("approval", {}).get("state", "pending")
-        if current_state == "approved":
-            _write_json(handler, 409, {"error": "draft already approved"})
-            return
-        if current_state == "rejected":
-            _write_json(handler, 409, {"error": "draft is rejected; create a new draft"})
-            return
-
-        draft["approval"]["state"] = "approved"
-        draft["approval"]["approver"] = approver
-        draft["approval"]["approved_at"] = now
-        draft["approval"]["note"] = body.get("note") or ""
-        drafts[draft_id] = draft
-        _save_queue(drafts)
-
-    log.info("[queue] approved draft_id=%s by %s", draft_id, approver)
-
-    campaign_result = _fire_campaign_creation(draft)
-    _write_json(handler, 200, {
-        "draft_id": draft_id,
-        "status": "approved",
-        "approved_at": now,
-        "campaign": campaign_result,
-    })
-
-
-def _handle_queue_reject(handler: http.server.BaseHTTPRequestHandler) -> None:
-    """POST /queue/reject — reject a pending draft."""
-    body = _read_body(handler)
-    if body is None:
-        _write_json(handler, 400, {"error": "invalid JSON body"})
-        return
-
-    draft_id = (body.get("draft_id") or "").strip()
-    approver = (body.get("approver") or "").strip()
-    if not draft_id:
-        _write_json(handler, 400, {"error": "missing required field: draft_id"})
-        return
-
-    now = datetime.now(timezone.utc).isoformat()
-
-    with _QUEUE_LOCK:
-        drafts = _load_queue()
-        draft = drafts.get(draft_id)
-        if draft is None:
-            _write_json(handler, 404, {"error": f"draft not found: {draft_id}"})
-            return
-
-        current_state = draft.get("approval", {}).get("state", "pending")
-        if current_state == "rejected":
-            _write_json(handler, 409, {"error": "draft already rejected"})
-            return
-
-        draft["approval"]["state"] = "rejected"
-        draft["approval"]["approver"] = approver
-        draft["approval"]["approved_at"] = now
-        draft["approval"]["note"] = body.get("note") or ""
-        drafts[draft_id] = draft
-        _save_queue(drafts)
-
-    log.info("[queue] rejected draft_id=%s by %s", draft_id, approver or "(anonymous)")
-    _write_json(handler, 200, {"draft_id": draft_id, "status": "rejected", "rejected_at": now})
-
-
-def _handle_campaigns_create(handler: http.server.BaseHTTPRequestHandler) -> None:
-    """POST /campaigns/create — fire a campaign from an approved draft.
-
-    Callers may use this directly (platform page, Slack /scout queue launch)
-    instead of going through POST /queue/approve. If draft_id is provided and
-    the draft is in the queue, it is marked approved before firing.
-    """
-    body = _read_body(handler)
-    if body is None:
-        _write_json(handler, 400, {"error": "invalid JSON body"})
-        return
-
-    draft_id = (body.get("draft_id") or "").strip()
-
-    with _QUEUE_LOCK:
-        drafts = _load_queue()
-        draft = drafts.get(draft_id) if draft_id else None
-
-    if draft_id and draft is None:
-        _write_json(handler, 404, {"error": f"draft not found: {draft_id}"})
-        return
-
-    target = draft if draft is not None else body
-    result = _fire_campaign_creation(target)
-    _write_json(handler, 200 if result.get("status") != "error" else 502, result)
 
 
 if __name__ == "__main__":

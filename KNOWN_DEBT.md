@@ -16,31 +16,39 @@ Lowering the retry cap further is a bandaid — it shrinks the window, not the c
 
 Fix: introduce a small dedicated executor for outbound Slack calls in event-handler paths, migrate `scout_bot.py`'s `web.chat_postMessage`/`chat_update` call sites onto it, add a smoke test that simulates worker saturation. Left as debt rather than fixed inline because it's a concurrency-architecture change (new executor + call-site migration across the file), not a mechanical fix, and #329/#330 are still open — do it as its own PR once both merge.
 
-## demand_feed_main.py — MS Platform Feed (NOT live)
+## demand_feed_main.py — MS Platform campaign creation (removed, not just deferred)
 
-5 MS_PLATFORM_TODO items must be resolved before flipping live. Contact the platform team for the webhook endpoint.
+The `/queue/draft`, `/queue/approve`, `/queue/reject`, `/campaigns/create` REST API and its
+backing `_fire_campaign_creation()`/`_handle_queue_*` handlers were **deleted** from
+`demand_feed_main.py` — they were fully built and tested against mocks but nothing in
+`ms-scout` ever called them in production, and they were permanently blocked on
+`CAMPAIGN_CREATE_WEBHOOK_URL`, a URL the platform team never provided. Keeping ~400 lines
+of unreachable code + its own test file wasn't earning its keep.
 
-**Required env vars (set in Render):**
+**Rebuild contract, preserved for when the platform team actually delivers the webhook:**
 
 | Env var | Description |
 |---|---|
-| `CAMPAIGN_CREATE_WEBHOOK_URL` | POST endpoint on MS Platform accepting a `CampaignRequest` JSON body. Leave unset → dry_run mode (safe default). |
-| `CAMPAIGN_CREATE_API_KEY` | Bearer token sent as `Authorization: Bearer <token>`. Leave unset → no auth header (dev/local only). |
-| `CAMPAIGN_CREATE_DRY_RUN` | `"true"` (default) → log + return preview, no HTTP call. Set `"false"` AND set WEBHOOK_URL to go live. |
+| `CAMPAIGN_CREATE_WEBHOOK_URL` | POST endpoint on MS Platform accepting a `CampaignRequest` JSON body. |
+| `CAMPAIGN_CREATE_API_KEY` | Bearer token sent as `Authorization: Bearer <token>`. |
+| `CAMPAIGN_CREATE_DRY_RUN` | Safe default `"true"` → log + return preview, no HTTP call. |
 
-**Flip-live checklist (in order):**
-- [ ] Get `CAMPAIGN_CREATE_WEBHOOK_URL` from platform team — confirm POST shape matches `_fire_campaign_creation` payload (`draft_id`, `offer`, `ai_copy`, `approver`, `approved_at`, `dry_run`)
-- [ ] Set `CAMPAIGN_CREATE_WEBHOOK_URL` in Render
-- [ ] Set `CAMPAIGN_CREATE_API_KEY` in Render (if platform requires auth)
-- [ ] Keep `CAMPAIGN_CREATE_DRY_RUN=true` — test one approve, inspect `would_send` in the dry_run response
-- [ ] Confirm `GET /queue/config` shows `mode: dry_run`, `webhook_url_set: true`
-- [ ] Set `CAMPAIGN_CREATE_DRY_RUN=false` → live. `/queue/config` should show `mode: live`.
+**Payload shape the webhook must accept** (was `_fire_campaign_creation`'s POST body):
+```json
+{
+  "draft_id": "<uuid>",
+  "offer": { "network": "...", "offer_id": "...", "advertiser": "...", "title": "...", "payout_num": 0 },
+  "ai_copy": { "headline": "...", "description": "...", "cta_yes": "...", "cta_no": "..." },
+  "approver": "sidd",
+  "approved_at": "2026-05-24T14:00:00+00:00",
+  "dry_run": false
+}
+```
 
-**Where the TODOs live in the file:**
-- Line 623: startup log warns about missing env vars
-- Lines 1217–1247: full env var spec + flip-live instructions block
-- Line 1293: `_fire_campaign_creation()` dry_run return — review `would_send` before flipping
-- Line 1375: `/queue/config` handler — mode should read `"live"` before launch
+**If the webhook ever materializes**: this needs re-implementing against the demand-feed's
+current structure, not just re-enabling old code — decide at that point whether "Approve" in
+Slack should call it directly, or whether it stays gated behind the existing Notion-queue
+human-ticket flow (`scout_notion.py`) as an automation layered underneath it, not a replacement.
 
 ## App Home Scoreboard (scout_ui_kit.py)
 

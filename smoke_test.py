@@ -4080,11 +4080,6 @@ def test_alert_registry_redis():
     pass
 
 
-# DEFERRED: MS platform campaign creation | GATE: Platform team delivers CAMPAIGN_CREATE_WEBHOOK_URL + API key | CHECK-IN: 2026-06-21 | KILL-IF-UNMET: flip todos to BLOCKED
-def test_ms_platform_campaign_creation():
-    pass
-
-
 @test("parse_payout — idempotent + explicit state")
 def test_parse_payout_idempotent():
     try:
