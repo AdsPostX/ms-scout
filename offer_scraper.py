@@ -702,6 +702,10 @@ def fetch_maxbounty() -> list:
     Auth: POST /authentication → mb-api-token (expires every 2 hours)
     Campaigns: GET /campaigns/{list} with x-access-token header
     """
+    if not MAXBOUNTY_EMAIL or not MAXBOUNTY_PASSWORD:
+        log.warning("MaxBounty: MAXBOUNTY_EMAIL or MAXBOUNTY_PASSWORD not set — skipping")
+        return []
+
     BASE = _NETWORK_ENDPOINTS["maxbounty"]["base"]
 
     # Step 1: Authenticate
@@ -719,14 +723,14 @@ def fetch_maxbounty() -> list:
         log.error(f"MaxBounty: auth failed — {e}")
         _log_network_issue("network_auth_failed", "MaxBounty auth failed",
                            "maxbounty", error=str(e))
-        return []
+        raise RuntimeError(f"MaxBounty: auth failed — {e}") from e
 
     token = auth_data.get("mb-api-token", "")
     if not token:
         log.error(f"MaxBounty: no token in auth response — {auth_data}")
         _log_network_issue("network_auth_failed", "MaxBounty auth response missing token",
                            "maxbounty")
-        return []
+        raise RuntimeError("MaxBounty: no token in auth response")
 
     headers = {"x-access-token": token}
 
@@ -1938,17 +1942,17 @@ def fetch_awin() -> list:
             )
             if resp.status_code == 401:
                 log.warning("Awin: 401 — check AWIN_API_KEY")
-                return []
+                raise RuntimeError("Awin: 401 — check AWIN_API_KEY")
             if not resp.ok:
                 log.warning(f"Awin: {resp.status_code} — {resp.text[:200]}")
-                return []
-        except Exception as e:
+                raise RuntimeError(f"Awin: {resp.status_code} — {resp.text[:200]}")
+        except requests.RequestException as e:
             log.warning(f"Awin: request failed — {e}")
-            return []
+            raise RuntimeError(f"Awin: request failed — {e}") from e
 
         data = _safe_json(resp, "Awin")
         if data is _JSON_PARSE_FAILED:
-            return []
+            raise RuntimeError("Awin: response JSON parse failed")
 
         if isinstance(data, dict):
             programmes = data.get("programmes") or data.get("data") or []
@@ -2049,24 +2053,24 @@ def fetch_tune_instance(label: str, network_id: str, api_key: str, base_url: str
             )
             if resp.status_code in (401, 403):
                 log.warning(f"TUNE/{label}: {resp.status_code} — check credentials")
-                break
+                raise RuntimeError(f"TUNE/{label}: {resp.status_code} — check credentials")
             if not resp.ok:
                 log.warning(f"TUNE/{label}: {resp.status_code} — {resp.text[:200]}")
-                break
-        except Exception as e:
+                raise RuntimeError(f"TUNE/{label}: {resp.status_code} — {resp.text[:200]}")
+        except requests.RequestException as e:
             log.warning(f"TUNE/{label}: request error — {e}")
-            break
+            raise RuntimeError(f"TUNE/{label}: request error — {e}") from e
 
         data = _safe_json(resp, f"TUNE/{label}")
         if data is _JSON_PARSE_FAILED:
-            break
+            raise RuntimeError(f"TUNE/{label}: response JSON parse failed")
 
         # HasOffers V3 response: {request:{}, response:{status:1, data:{count:N, data:{id: {Offer:{...}}, ...}}}}
         resp_body = data.get("response", data)
         if resp_body.get("status") == -1:
             errs = resp_body.get("errors", [])
             log.warning(f"TUNE/{label}: API error — {errs}")
-            break
+            raise RuntimeError(f"TUNE/{label}: API error — {errs}")
         inner  = resp_body.get("data", {})
         # data.data is a dict keyed by offer_id in HasOffers V3
         raw    = inner.get("data", {}) if isinstance(inner, dict) else {}
@@ -2166,11 +2170,18 @@ def fetch_tune_all() -> list:
     if not TUNE_INSTANCES:
         return []
     all_offers = []
+    errors = []
     for label, nid, key, url in TUNE_INSTANCES:
         try:
             all_offers.extend(fetch_tune_instance(label, nid, key, url))
         except Exception as e:
             log.error(f"TUNE/{label}: unhandled error — {e}")
+            errors.append(f"{label}: {e}")
+    if not all_offers and errors:
+        # Every configured instance failed — this is a real outage, not a
+        # legitimately-empty result. Raise so update_network_status reports
+        # success=False instead of silently claiming a clean 0-offer scrape.
+        raise RuntimeError(f"TUNE: all {len(errors)} instance(s) failed — {'; '.join(errors)}")
     return all_offers
 
 
@@ -2202,17 +2213,17 @@ def fetch_everflow_instance(label: str, api_key: str, base_url: str) -> list:
             )
             if resp.status_code in (401, 403):
                 log.warning(f"Everflow/{label}: {resp.status_code} — check API key")
-                break
+                raise RuntimeError(f"Everflow/{label}: {resp.status_code} — check API key")
             if not resp.ok:
                 log.warning(f"Everflow/{label}: {resp.status_code} — {resp.text[:200]}")
-                break
-        except Exception as e:
+                raise RuntimeError(f"Everflow/{label}: {resp.status_code} — {resp.text[:200]}")
+        except requests.RequestException as e:
             log.warning(f"Everflow/{label}: request error — {e}")
-            break
+            raise RuntimeError(f"Everflow/{label}: request error — {e}") from e
 
         data = _safe_json(resp, f"Everflow/{label}")
         if data is _JSON_PARSE_FAILED:
-            break
+            raise RuntimeError(f"Everflow/{label}: response JSON parse failed")
 
         records = data.get("offers") or data.get("data") or (data if isinstance(data, list) else [])
         if not records:
@@ -2288,11 +2299,18 @@ def fetch_everflow_all() -> list:
     if not EVERFLOW_INSTANCES:
         return []
     all_offers = []
+    errors = []
     for label, key, url in EVERFLOW_INSTANCES:
         try:
             all_offers.extend(fetch_everflow_instance(label, key, url))
         except Exception as e:
             log.error(f"Everflow/{label}: unhandled error — {e}")
+            errors.append(f"{label}: {e}")
+    if not all_offers and errors:
+        # Every configured instance failed — this is a real outage, not a
+        # legitimately-empty result. Raise so update_network_status reports
+        # success=False instead of silently claiming a clean 0-offer scrape.
+        raise RuntimeError(f"Everflow: all {len(errors)} instance(s) failed — {'; '.join(errors)}")
     return all_offers
 
 

@@ -6127,6 +6127,123 @@ def test_offer_scraper_safe_json():
     return True, "_safe_json: returns parsed JSON on success (None passthrough for null body), sentinel + labeled warning on failure"
 
 
+@test("offer_scraper — total network failure raises instead of silently reporting a clean 0-offer scrape")
+def test_offer_scraper_total_failure_raises():
+    """PR fix for a real CodeRabbit-flagged bug: run_headless()/main() call
+    update_network_status(success=True, offer_count=len(offers)) right after fn(),
+    with no exception to catch, whenever fn() swallows its own errors and returns [].
+    Awin, MaxBounty, TUNE, and Everflow all used to do exactly that on auth/network
+    failure -- silently telling job_runs telemetry the scrape was healthy. Each must
+    now raise when every attempt at fetching genuinely failed, so the caller's
+    try/except correctly reports success=False. A legitimately-empty result (no
+    creds configured, or the account/instance truly has zero live offers) must NOT
+    raise -- only an actual failure should."""
+    import requests
+    from unittest.mock import patch, MagicMock
+    import offer_scraper as osc
+
+    # --- Awin: a 401 must raise, not return [] ---
+    fake_401 = MagicMock(status_code=401, ok=False, text="unauthorized")
+    with patch.object(osc, "AWIN_API_KEY", "fake-key"), \
+         patch.object(osc, "AWIN_PUBLISHER_ID", "fake-pub"), \
+         patch("offer_scraper.requests.get", return_value=fake_401):
+        try:
+            osc.fetch_awin()
+            return False, "fetch_awin() should have raised on a 401 response, but returned normally"
+        except RuntimeError:
+            pass
+
+    # --- Awin: no API key configured is a legitimate skip, must NOT raise ---
+    with patch.object(osc, "AWIN_API_KEY", ""), patch.object(osc, "AWIN_PUBLISHER_ID", ""):
+        result = osc.fetch_awin()
+        assert result == [], f"fetch_awin() with no credentials should return [] quietly, got {result!r}"
+
+    # --- MaxBounty: auth request failing (with credentials configured) must raise ---
+    with patch.object(osc, "MAXBOUNTY_EMAIL", "fake@example.com"), \
+         patch.object(osc, "MAXBOUNTY_PASSWORD", "fake-password"), \
+         patch("offer_scraper.requests.post", side_effect=requests.RequestException("boom")):
+        try:
+            osc.fetch_maxbounty()
+            return False, "fetch_maxbounty() should have raised when auth failed, but returned normally"
+        except RuntimeError:
+            pass
+
+    # --- TUNE: a real 401 from the actual per-instance HTTP call must propagate all the
+    # way up through fetch_tune_instance() -> fetch_tune_all(), not just through a mocked
+    # fetch_tune_instance(). fetch_tune_instance() used to swallow this with a bare
+    # `break`, which meant fetch_tune_all()'s own error-tracking never actually fired in
+    # production (only against a test that mocked the inner function away). ---
+    fake_401 = MagicMock(status_code=401, ok=False, text="unauthorized")
+    with patch.object(osc, "TUNE_INSTANCES", [("acme", "123", "key", "https://acme.example")]), \
+         patch("offer_scraper.requests.get", return_value=fake_401):
+        try:
+            osc.fetch_tune_all()
+            return False, "fetch_tune_all() should have raised on a real 401 from fetch_tune_instance(), but returned normally"
+        except RuntimeError:
+            pass
+
+    # --- TUNE: every configured instance failing (wrapper-level aggregation) must raise ---
+    with patch.object(osc, "TUNE_INSTANCES", [("acme", "123", "key", "https://acme.example")]), \
+         patch.object(osc, "fetch_tune_instance", side_effect=RuntimeError("network down")):
+        try:
+            osc.fetch_tune_all()
+            return False, "fetch_tune_all() should have raised when its only instance failed, but returned normally"
+        except RuntimeError:
+            pass
+
+    # --- TUNE: no instances configured is a legitimate skip, must NOT raise ---
+    with patch.object(osc, "TUNE_INSTANCES", []):
+        result = osc.fetch_tune_all()
+        assert result == [], f"fetch_tune_all() with no configured instances should return [] quietly, got {result!r}"
+
+    # --- TUNE: one instance failing while another succeeds is a partial success, must NOT raise ---
+    def _fake_tune_instance(label, nid, key, url):
+        if label == "bad":
+            raise RuntimeError("this one instance is down")
+        return [{"network": "tune", "offer_id": "1"}]
+
+    with patch.object(osc, "TUNE_INSTANCES", [
+        ("bad", "1", "k", "https://bad.example"),
+        ("good", "2", "k", "https://good.example"),
+    ]), patch.object(osc, "fetch_tune_instance", side_effect=_fake_tune_instance):
+        result = osc.fetch_tune_all()
+        assert len(result) == 1, f"Expected the surviving instance's 1 offer despite the other failing, got {result!r}"
+
+    # --- Everflow: a real 401 from the actual per-instance HTTP call must propagate all
+    # the way up through fetch_everflow_instance() -> fetch_everflow_all() (same real-path
+    # gap as TUNE above). ---
+    with patch.object(osc, "EVERFLOW_INSTANCES", [("acme", "key", "https://acme.example")]), \
+         patch("offer_scraper.requests.get", return_value=fake_401):
+        try:
+            osc.fetch_everflow_all()
+            return False, "fetch_everflow_all() should have raised on a real 401 from fetch_everflow_instance(), but returned normally"
+        except RuntimeError:
+            pass
+
+    # --- Everflow: every configured instance failing (wrapper-level aggregation) must raise ---
+    with patch.object(osc, "EVERFLOW_INSTANCES", [("acme", "key", "https://acme.example")]), \
+         patch.object(osc, "fetch_everflow_instance", side_effect=RuntimeError("network down")):
+        try:
+            osc.fetch_everflow_all()
+            return False, "fetch_everflow_all() should have raised when its only instance failed, but returned normally"
+        except RuntimeError:
+            pass
+
+    # --- MaxBounty: no credentials configured is a legitimate skip, must NOT raise ---
+    with patch.object(osc, "MAXBOUNTY_EMAIL", ""), patch.object(osc, "MAXBOUNTY_PASSWORD", ""):
+        result = osc.fetch_maxbounty()
+        assert result == [], f"fetch_maxbounty() with no credentials should return [] quietly, got {result!r}"
+
+    return True, (
+        "fetch_awin/fetch_maxbounty/fetch_tune_all/fetch_everflow_all raise on total "
+        "failure — including a real 401 surfacing through the actual per-instance HTTP "
+        "call for TUNE/Everflow, not just a mocked inner function — so "
+        "update_network_status reports success=False, while staying silent on a "
+        "legitimate not-configured skip and preserving partial results when only some "
+        "instances fail"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
