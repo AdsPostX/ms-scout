@@ -572,7 +572,7 @@ def is_already_in_ms(offer: dict, ms_campaigns: list[dict]) -> bool:
 
         camp_name = camp["adv_name"]
 
-        if offer_norm == _normalize_full_name(camp_name):
+        if offer_norm and offer_norm == _normalize_full_name(camp_name):
             return True
 
         if len(offer_words & _name_words(camp_name, _DEDUP_STOP_WORDS)) >= 2:
