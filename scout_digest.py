@@ -936,6 +936,14 @@ def build_digest_blocks(
                 first_sent = category
             offer_summary = first_sent[:_SUMMARY_TRUNCATE_LEN].rsplit(" ", 1)[0] + "…" if len(first_sent) > _SUMMARY_TRUNCATE_LEN else first_sent
 
+            # Surface a name-string-only match as unverified — display-only addition,
+            # does not touch scoring/selection/dedup above. _ms_status/ms_match_confidence
+            # come from offer_scraper.py's clean_offers(), already present on every offer
+            # in offers_latest.json by the time it reaches this loop.
+            if offer.get("_ms_status") == "Needs Review":
+                _review_note = "⚠️ Needs Review - advertiser match unverified, not confirmed already in MS platform"
+                offer_summary = f"{_review_note}. {offer_summary}" if offer_summary else _review_note
+
             why = build_why_text(offer, payout_num, payout_type, ms_campaigns, benchmarks, adjusted_rpm=_score)
 
             # Action value — minimal payload so we stay well under Slack's 2000-char

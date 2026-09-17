@@ -6558,6 +6558,248 @@ def test_is_already_in_ms_no_generic_word_false_positive():
     return True, "is_already_in_ms: generic single-word false positives eliminated (0% measured), category-gap check unaffected"
 
 
+@test("offer_scraper — match_ms_status resolves exact (Impact/CJ), mapped, and fuzzy tiers with correct confidence")
+def test_match_ms_status_confidence_tiers():
+    """Verifies the whole tier ladder added for matching-quality: Impact exact-ID match
+    (unchanged, unscoped), CJ exact-ID match (new, scoped to _cj_advertiser_id), a
+    human-curated mapping-table override, and a fuzzy name match that must be downgraded
+    to 'Needs Review' rather than asserted Live/In System — plus 'Not in System' staying
+    untouched when nothing matches at all (not a risky positive claim)."""
+    from offer_scraper import match_ms_status
+
+    live_entry     = {"adv_name": "Acme Corp",    "status": "active", "is_live": True}
+    inactive_entry = {"adv_name": "Old Advertiser", "status": "inactive", "is_live": False}
+    mapped_entry   = {"adv_name": "Weird DBA Name", "status": "active", "is_live": True}
+    fuzzy_entry    = {"adv_name": "Some Brand Inc", "status": "active", "is_live": True}
+
+    ms_index = {
+        "by_impact_id":        {"12345": live_entry},
+        "by_cj_advertiser_id":  {"9999": inactive_entry},
+        "by_mapping":           {("rakuten", "unmatchable brand"): mapped_entry},
+        "by_name":              {"some brand": fuzzy_entry},
+    }
+
+    # Impact exact match — unchanged behavior, confidence "exact"
+    status, name, confidence = match_ms_status(
+        {"network": "impact", "offer_id": "12345", "advertiser": "Acme Corp"}, ms_index
+    )
+    assert (status, confidence) == ("Live", "exact"), f"Impact exact match: got {(status, confidence)!r}"
+
+    # CJ exact match via the new _cj_advertiser_id field — confidence "exact", inactive status.
+    # Regression guard: match["status"] is literally "inactive" (a real, verified-live CH
+    # value) — a substring check ("active" in status) would misclassify this as "In System"
+    # since "inactive" contains "active"; the fix uses exact equality instead.
+    status, name, confidence = match_ms_status(
+        {"network": "cj", "_cj_advertiser_id": "9999", "advertiser": "Whatever Name"}, ms_index
+    )
+    assert (status, confidence) == ("In System (Inactive)", "exact"), (
+        f"CJ exact match with status='inactive' must be 'In System (Inactive)', not misread "
+        f"as 'In System' via substring match — got {(status, confidence)!r}"
+    )
+
+    # Mapping-table override — a network/advertiser combo that would otherwise be
+    # unmatchable (no exact ID, and "unmatchable brand" isn't in by_name) resolves via
+    # the human-curated mapping, confidence "mapped", NOT downgraded to Needs Review.
+    status, name, confidence = match_ms_status(
+        {"network": "rakuten", "advertiser": "Unmatchable Brand"}, ms_index
+    )
+    assert (status, confidence) == ("Live", "mapped"), f"Mapping override: got {(status, confidence)!r}"
+
+    # Fuzzy name match — matches by_name, but confidence "fuzzy" must downgrade an
+    # otherwise-"Live" status to "Needs Review" instead of silently asserting it.
+    status, name, confidence = match_ms_status(
+        {"network": "flexoffers", "advertiser": "Some Brand Inc"}, ms_index
+    )
+    assert (status, confidence) == ("Needs Review", "fuzzy"), (
+        f"Fuzzy match must downgrade to Needs Review, got {(status, confidence)!r}"
+    )
+
+    # No match at all — "Not in System" is a safe default, NOT downgraded (nothing to
+    # downgrade — it was never a risky positive claim in the first place).
+    status, name, confidence = match_ms_status(
+        {"network": "awin", "advertiser": "Totally Unknown Advertiser Co"}, ms_index
+    )
+    assert (status, confidence) == ("Not in System", ""), f"No match: got {(status, confidence)!r}"
+
+    return True, "match_ms_status: Impact/CJ exact, mapping override, and fuzzy-to-Needs-Review tiers all resolve correctly"
+
+
+@test("scout_digest — Needs Review offers get a visible unverified-match marker on their card")
+def test_digest_needs_review_marker():
+    """build_digest_blocks() must surface offer['_ms_status'] == 'Needs Review' (set by
+    offer_scraper.py's match_ms_status when the only match found was a fuzzy name guess)
+    as visible text on the card — a human deciding what to integrate needs to see this
+    is unverified, not just have it silently baked into a status field they may not read.
+    A normal offer (no _ms_status, or a status other than Needs Review) must NOT get the
+    marker — this is additive to the specific case, not a change to every card's text."""
+    import datetime as _datetime
+    import scout_digest
+
+    run_date = _datetime.date.today().isoformat()
+
+    # "maxbounty" used (not e.g. "rakuten") because build_digest_blocks only renders
+    # networks in _get_active_networks()'s result, which falls back to a fixed 4-network
+    # list (impact/maxbounty/flexoffers/cj) when data/offers_latest.json doesn't exist —
+    # as in this test environment.
+    offers_by_network = {
+        "maxbounty": [
+            (10.0, {
+                "offer_id": "1", "advertiser": "Needs Review Co", "network": "maxbounty",
+                "category": "Finance", "geo": "US", "payout": "5.00", "payout_type": "CPL",
+                "tracking_url": "", "description": "Great offer for reviewers.",
+                "fit_tier": "PRIME", "_ms_status": "Needs Review",
+            }),
+            (9.0, {
+                "offer_id": "2", "advertiser": "Confirmed Co", "network": "maxbounty",
+                "category": "Finance", "geo": "US", "payout": "5.00", "payout_type": "CPL",
+                "tracking_url": "", "description": "Another fine offer here.",
+                "fit_tier": "PRIME", "_ms_status": "Not in System",
+            }),
+        ]
+    }
+
+    blocks = scout_digest.build_digest_blocks(offers_by_network, {}, [], {}, run_date)
+    all_text = json.dumps(blocks)
+
+    assert "Needs Review" in all_text and "unverified" in all_text, (
+        "Expected the Needs Review marker text to appear somewhere in the rendered blocks "
+        "for the offer with _ms_status == 'Needs Review'"
+    )
+    # Confirm it's scoped to the flagged offer, not blanket-applied to every card: the
+    # Confirmed Co offer's own summary text must not carry the marker. Positively assert
+    # the filter actually found Confirmed Co's block first — otherwise a wrong block-shape
+    # assumption would make the "no marker" check below pass vacuously without testing
+    # anything.
+    confirmed_blocks = [
+        b for b in blocks
+        if b.get("type") == "section" and any("Confirmed Co" in f.get("text", "") for f in b.get("fields", []))
+    ]
+    assert confirmed_blocks, (
+        "Expected to find Confirmed Co's own card block in the rendered output — "
+        "if this is empty, the block-shape assumption below is untested, not passing"
+    )
+    confirmed_block_text = json.dumps(confirmed_blocks)
+    assert "Needs Review" not in confirmed_block_text, (
+        "Needs Review marker leaked onto an offer whose _ms_status isn't Needs Review"
+    )
+
+    return True, "Needs Review offers get a visible unverified-match marker; unaffected offers don't"
+
+
+@test("scout_match_mapping — fetch_match_mapping_table fails open on missing config and on Notion errors")
+def test_fetch_match_mapping_table_fails_open():
+    """This function sits in the hot path of every scheduled scrape (via
+    offer_scraper.fetch_ms_campaign_index) — a Notion outage or missing setup must never
+    turn into a scrape failure. Both cases must return {} so match_ms_status falls through
+    to exact/fuzzy matching exactly as if no mapping table existed."""
+    import os as _os
+    from unittest.mock import patch
+    import scout_match_mapping
+
+    # Case 1: MS_MATCH_MAPPING_DB_ID not set at all — must short-circuit to {} without
+    # making any HTTP request.
+    with patch.dict(_os.environ, {}, clear=False):
+        _os.environ.pop("MS_MATCH_MAPPING_DB_ID", None)
+        with patch.object(scout_match_mapping.requests, "post", side_effect=AssertionError("must not call Notion when DB ID unset")):
+            result = scout_match_mapping.fetch_match_mapping_table("fake-token", {})
+    assert result == {}, f"Expected {{}} when MS_MATCH_MAPPING_DB_ID unset, got {result!r}"
+
+    # Case 2: DB ID is set but Notion request itself fails — must catch and return {},
+    # not raise, and not propagate the exception up into fetch_ms_campaign_index.
+    with patch.dict(_os.environ, {"MS_MATCH_MAPPING_DB_ID": "fake-db-id"}):
+        with patch.object(scout_match_mapping.requests, "post", side_effect=ConnectionError("simulated Notion outage")):
+            result = scout_match_mapping.fetch_match_mapping_table("fake-token", {})
+    assert result == {}, f"Expected {{}} on Notion request failure, got {result!r}"
+
+    # Case 3: no NOTION_TOKEN — must short-circuit to {} without making any HTTP request,
+    # even if MS_MATCH_MAPPING_DB_ID happens to be set.
+    with patch.dict(_os.environ, {"MS_MATCH_MAPPING_DB_ID": "fake-db-id"}):
+        with patch.object(scout_match_mapping.requests, "post", side_effect=AssertionError("must not call Notion when token unset")):
+            result = scout_match_mapping.fetch_match_mapping_table("", {})
+    assert result == {}, f"Expected {{}} when notion_token is empty, got {result!r}"
+
+    # Case 4: valid response — resolves a mapping row against the passed-in
+    # by_campaign_id dict and normalizes the advertiser key the same way fuzzy matching does.
+    class _FakeMappingResp:
+        ok = True
+        def json(self):
+            return {
+                "results": [{
+                    "properties": {
+                        "Network":         {"select": {"name": "rakuten"}},
+                        "Advertiser Key":  {"rich_text": [{"plain_text": "Weird DBA Inc."}]},
+                        "MS Campaign ID":  {"number": 42},
+                    }
+                }],
+                "has_more": False,
+            }
+    with patch.dict(_os.environ, {"MS_MATCH_MAPPING_DB_ID": "fake-db-id"}):
+        with patch.object(scout_match_mapping.requests, "post", return_value=_FakeMappingResp()):
+            result = scout_match_mapping.fetch_match_mapping_table(
+                "fake-token", {"42": {"adv_name": "Weird DBA", "status": "active", "is_live": True}}
+            )
+    assert ("rakuten", "weird dba") in result, f"Expected normalized ('rakuten', 'weird dba') key, got keys: {list(result.keys())!r}"
+    assert result[("rakuten", "weird dba")]["adv_name"] == "Weird DBA"
+
+    # Case 5: multi-page response — exercises has_more/next_cursor, previously untested.
+    # Each page must be requested with the prior page's next_cursor as start_cursor, and
+    # rows from BOTH pages must end up in the final merged mapping dict.
+    _pages = [
+        {
+            "results": [{
+                "properties": {
+                    "Network":        {"select": {"name": "rakuten"}},
+                    "Advertiser Key": {"rich_text": [{"plain_text": "Page One Advertiser"}]},
+                    "MS Campaign ID": {"number": 1},
+                }
+            }],
+            "has_more": True,
+            "next_cursor": "cursor-page-2",
+        },
+        {
+            "results": [{
+                "properties": {
+                    "Network":        {"select": {"name": "awin"}},
+                    "Advertiser Key": {"rich_text": [{"plain_text": "Page Two Advertiser"}]},
+                    "MS Campaign ID": {"number": 2},
+                }
+            }],
+            "has_more": False,
+        },
+    ]
+    _calls: list = []
+
+    class _FakePagedResp:
+        def __init__(self, page_data):
+            self.ok = True
+            self._page_data = page_data
+        def json(self):
+            return self._page_data
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        _calls.append(dict(json or {}))
+        page_index = len(_calls) - 1
+        return _FakePagedResp(_pages[page_index])
+
+    by_campaign_id = {
+        "1": {"adv_name": "Page One Adv", "status": "active", "is_live": True},
+        "2": {"adv_name": "Page Two Adv", "status": "active", "is_live": True},
+    }
+    with patch.dict(_os.environ, {"MS_MATCH_MAPPING_DB_ID": "fake-db-id"}):
+        with patch.object(scout_match_mapping.requests, "post", side_effect=_fake_post):
+            result = scout_match_mapping.fetch_match_mapping_table("fake-token", by_campaign_id)
+
+    assert len(_calls) == 2, f"Expected exactly 2 paginated requests, got {len(_calls)}"
+    assert "start_cursor" not in _calls[0], f"First request must not send a cursor, got body: {_calls[0]!r}"
+    assert _calls[1].get("start_cursor") == "cursor-page-2", (
+        f"Second request must send the first page's next_cursor as start_cursor, got: {_calls[1]!r}"
+    )
+    assert ("rakuten", "page one advertiser") in result, f"Missing page-1 row, got keys: {list(result.keys())!r}"
+    assert ("awin", "page two advertiser") in result, f"Missing page-2 row, got keys: {list(result.keys())!r}"
+
+    return True, "fetch_match_mapping_table: fails open on missing config and Notion errors, resolves valid rows correctly, paginates correctly across multiple pages"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

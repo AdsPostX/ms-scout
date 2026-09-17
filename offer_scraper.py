@@ -31,6 +31,7 @@ from typing import Optional
 from scout_types import Offer  # type: ignore[import]  # noqa: F401
 from scout_log import log_event
 from scout_core.job_runs import update_network_status
+from scout_match_mapping import fetch_match_mapping_table
 
 
 @dataclass
@@ -1048,31 +1049,62 @@ def normalize_status(raw: str) -> str:
 
 def fetch_ms_campaign_index() -> dict:
     """
-    Query ClickHouse for all MS internal campaigns and return two lookup dicts:
-      - by_impact_id: {impact_campaign_id_str: {adv_name, status, is_live}}
-      - by_name:      {normalized_adv_name:     {adv_name, status, is_live}}
+    Query ClickHouse for all MS internal campaigns and return the lookup dicts used by
+    match_ms_status():
+      - by_impact_id:        {impact_campaign_id_str: {adv_name, status, is_live}}
+      - by_cj_advertiser_id: {cj_advertiser_id_str:    {adv_name, status, is_live}}
+      - by_campaign_id:      {str(campaign_id):        {adv_name, status, is_live}}
+      - by_name:             {normalized_adv_name:      {adv_name, status, is_live}}
+      - by_mapping:          {(network, normalized_adv_name): {adv_name, status, is_live}}
 
-    Impact campaign IDs are stored in from_airbyte_campaigns.internal_network_name.
+    Impact campaign IDs are stored in from_airbyte_campaigns.internal_network_name —
+    unscoped by source network, matching this index's pre-existing production behavior
+    (only ever consulted when offer.network == "impact", so this was never a live bug).
+
+    CJ advertiser IDs are ALSO stored in internal_network_name (verified live via
+    ClickHouse MCP: e.g. TurboTax's many distinct CJ offers all share one
+    internal_network_name value, matching CJ's per-advertiser — not per-link — ID).
+    This index is scoped to from_airbyte_networks.slug == "commission-junction" since
+    it's new code with no reason to skip the network scoping Impact's index predates.
+
+    Rakuten and Awin were audited the same way and do NOT get an exact-ID index:
+    Rakuten's internal_network_name is a free-typed, inconsistently-formatted mix of
+    "MID - LinkID" and bare LinkID; Awin's is almost never populated. Both stay on
+    fuzzy/mapping-table matching only.
+
+    by_mapping is a human-curated (network, advertiser) -> MS campaign override, read
+    from a Notion database (see scout_match_mapping.fetch_match_mapping_table) — resolved against
+    by_campaign_id here so the mapping table only has to store a campaign id, not a
+    full duplicate of this query's output.
+
     is_live = True when a publisher_campaign row exists with is_active=True.
 
     Returns empty dicts (graceful degradation) if CH credentials are missing or query fails.
     """
     from scout_ch import _ch_credentials_configured, _get_ch_client
 
+    _empty = {
+        "by_impact_id": {}, "by_cj_advertiser_id": {}, "by_campaign_id": {},
+        "by_name": {}, "by_mapping": {},
+    }
+
     if not _ch_credentials_configured():
         log.warning("ClickHouse credentials not configured — skipping MS campaign matching")
-        return {"by_impact_id": {}, "by_name": {}}
+        return dict(_empty)
 
     try:
         client = _get_ch_client()
 
         query = """
             SELECT
-                trim(c.internal_network_name) AS impact_id,
+                c.id                           AS campaign_id,
+                trim(c.internal_network_name)  AS internal_network_name,
+                n.slug                         AS network_slug,
                 c.adv_name,
-                trim(c.status)                AS status,
-                (pc.campaign_id IS NOT NULL)  AS is_live
+                trim(c.status)                 AS status,
+                (pc.campaign_id IS NOT NULL)   AS is_live
             FROM default.from_airbyte_campaigns AS c
+            LEFT JOIN default.from_airbyte_networks AS n ON c.network_id = n.id
             LEFT JOIN (
                 SELECT DISTINCT campaign_id
                 FROM default.from_airbyte_publisher_campaigns
@@ -1083,20 +1115,25 @@ def fetch_ms_campaign_index() -> dict:
         result = client.query(query)
 
         by_impact_id = {}
+        by_cj_advertiser_id = {}
+        by_campaign_id = {}
         by_name = {}
         _strip_re = re.compile(r"[^a-z0-9 ]")
 
         for row in result.result_rows:
-            impact_id, adv_name, status, is_live = row
+            campaign_id, internal_network_name, network_slug, adv_name, status, is_live = row
             entry = {
                 "adv_name": adv_name or "",
                 "status":   status or "",
                 "is_live":  bool(is_live),
             }
-            # ID-based index (for Impact exact match)
-            if impact_id:
-                by_impact_id[impact_id] = entry
-            # Name-based index (for FlexOffers/MaxBounty fuzzy match)
+            if campaign_id is not None:
+                by_campaign_id[str(campaign_id)] = entry
+            if internal_network_name:
+                # Impact exact match — unscoped, matches pre-existing production behavior.
+                by_impact_id[internal_network_name] = entry
+                if network_slug == "commission-junction":
+                    by_cj_advertiser_id[internal_network_name] = entry
             if adv_name:
                 norm = _strip_re.sub("", adv_name.lower()).strip()
                 # Strip common suffixes that vary across networks
@@ -1106,53 +1143,100 @@ def fetch_ms_campaign_index() -> dict:
                 if norm:
                     by_name[norm] = entry
 
-        log.info(f"MS campaign index: {len(by_impact_id)} Impact matches, {len(by_name)} name entries")
-        return {"by_impact_id": by_impact_id, "by_name": by_name}
+        by_mapping = fetch_match_mapping_table(NOTION_TOKEN, by_campaign_id)
+
+        log.info(
+            f"MS campaign index: {len(by_impact_id)} Impact, {len(by_cj_advertiser_id)} CJ, "
+            f"{len(by_name)} name entries, {len(by_mapping)} manual mapping overrides"
+        )
+        return {
+            "by_impact_id": by_impact_id,
+            "by_cj_advertiser_id": by_cj_advertiser_id,
+            "by_campaign_id": by_campaign_id,
+            "by_name": by_name,
+            "by_mapping": by_mapping,
+        }
 
     except Exception as e:
         log.warning(f"ClickHouse query failed — skipping MS campaign matching: {e}")
-        return {"by_impact_id": {}, "by_name": {}}
+        return dict(_empty)
 
 
 def match_ms_status(offer: dict, ms_index: dict) -> tuple:
     """
     Match an offer against the MS campaign index.
-    Returns (ms_status, ms_internal_name) where ms_status is one of:
+    Returns (ms_status, ms_internal_name, ms_match_confidence) where ms_status is one of:
       "Live"                — in MS system, active, deployed to publishers
       "In System"           — in MS system, active, but not currently deployed
       "In System (Inactive)"— in MS system but campaign is inactive
-      "Not in System"       — no match found
+      "Needs Review"        — a match was found, but ONLY via fuzzy advertiser-name string
+                               matching (no verified network ID, no human-confirmed mapping)
+                               — that assertion isn't earned by a name-string guess
+      "Not in System"       — no match found at all (not a risky positive claim — unaffected)
+
+    ms_match_confidence is one of "exact" (Impact/CJ network ID), "mapped" (human-curated
+    override), "fuzzy" (name string only), or "" (no match).
     """
-    by_impact_id = ms_index.get("by_impact_id", {})
-    by_name      = ms_index.get("by_name", {})
+    by_impact_id       = ms_index.get("by_impact_id", {})
+    by_cj_advertiser_id = ms_index.get("by_cj_advertiser_id", {})
+    by_mapping          = ms_index.get("by_mapping", {})
+    by_name             = ms_index.get("by_name", {})
 
     match = None
+    confidence = ""
 
     if offer.get("network") == "impact":
         match = by_impact_id.get(str(offer.get("offer_id", "")))
+        if match is not None:
+            confidence = "exact"
+
+    if match is None and offer.get("network") == "cj":
+        match = by_cj_advertiser_id.get(str(offer.get("_cj_advertiser_id", "")))
+        if match is not None:
+            confidence = "exact"
+
+    # Normalize advertiser name the same way we built by_name/by_mapping
+    raw_name = offer.get("advertiser", "")
+    norm = re.sub(r"[^a-z0-9 ]", "", raw_name.lower()).strip()
+    for suffix in [" inc", " llc", " ltd", " corp", " com", " us"]:
+        if norm.endswith(suffix):
+            norm = norm[:-len(suffix)].strip()
+
+    if match is None and by_mapping:
+        match = by_mapping.get((offer.get("network", ""), norm))
+        if match is not None:
+            confidence = "mapped"
 
     if match is None and by_name:
-        # Normalize advertiser name the same way we built the index
-        raw_name = offer.get("advertiser", "")
-        norm = re.sub(r"[^a-z0-9 ]", "", raw_name.lower()).strip()
-        for suffix in [" inc", " llc", " ltd", " corp", " com", " us"]:
-            if norm.endswith(suffix):
-                norm = norm[:-len(suffix)].strip()
         match = by_name.get(norm)
+        if match is not None:
+            confidence = "fuzzy"
 
     if match is None:
-        return "Not in System", None
+        return "Not in System", None, ""
 
-    status   = match["status"].lower()
+    status   = match["status"].strip().lower()
     is_live  = match["is_live"]
     adv_name = match["adv_name"]
 
-    if "active" in status and is_live:
-        return "Live", adv_name
-    elif "active" in status:
-        return "In System", adv_name
+    # Exact equality, not substring — verified live via ClickHouse MCP that
+    # from_airbyte_campaigns.status only ever holds "active", "inactive", "pending",
+    # or "paused". The prior `"active" in status` check silently misclassified every
+    # genuinely "inactive" campaign as "In System" instead of "In System (Inactive)",
+    # since "inactive" contains "active" as a substring.
+    if status == "active" and is_live:
+        ms_status = "Live"
+    elif status == "active":
+        ms_status = "In System"
     else:
-        return "In System (Inactive)", adv_name
+        ms_status = "In System (Inactive)"
+
+    if confidence == "fuzzy":
+        # A name-string guess doesn't earn the right to assert this offer is already
+        # deployed/in-system — surface it for a human to confirm instead.
+        ms_status = "Needs Review"
+
+    return ms_status, adv_name, confidence
 
 
 # Canonical category labels (from normalize_categories) that historically convert
@@ -1256,7 +1340,7 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
         payout_result = parse_payout(
             str(o.get("payout", "")), str(o.get("payout_type", ""))
         )
-        ms_status, ms_internal_name = match_ms_status(o, ms_index)
+        ms_status, ms_internal_name, ms_match_confidence = match_ms_status(o, ms_index)
         normalized = {
             **o,
             "status":            status,
@@ -1270,6 +1354,7 @@ def clean_offers(offers: list, ms_index: dict = None) -> list:
             "_unique_key":       f"{o['network']}:{o['offer_id']}",
             "_ms_status":        ms_status,
             "_ms_internal_name": ms_internal_name or "",
+            "ms_match_confidence": ms_match_confidence,
         }
         normalized["fit_tier"]      = _compute_fit_tier(normalized)
         _now_utc = datetime.now(timezone.utc)
@@ -1339,6 +1424,13 @@ def _notion_properties(o: dict, is_new: bool = False) -> dict:
     ms_name = o.get("_ms_internal_name", "")
     if ms_name:
         props["MS Internal Name"] = {"rich_text": [{"text": {"content": ms_name[:200]}}]}
+    # Match Confidence — surfaces whether MS Status came from a verified network ID
+    # ("exact"), a human-curated override ("mapped"), or a name-string guess ("fuzzy")
+    # that MS Status "Needs Review" already reflects — this makes the "fuzzy" case
+    # visible even to someone only skimming the board, not just reading the status.
+    match_confidence = o.get("ms_match_confidence", "")
+    if match_confidence:
+        props["Match Confidence"] = {"select": {"name": match_confidence}}
     # Outreach Status — only set on new pages to preserve manual team edits
     if is_new:
         props["Outreach Status"] = {"select": {"name": "Not Reviewed"}}
@@ -1432,7 +1524,7 @@ def write_notion(offers: list):
     log.info(f"Notion: {len(existing)} existing pages found")
 
     # 2. Upsert each offer
-    created = updated = errors = 0
+    created = updated = errors = skipped = 0
     for o in offers:
         ukey = o.get("_unique_key", "")
         try:
@@ -1450,7 +1542,20 @@ def write_notion(offers: list):
                 else:
                     log.warning(f"Notion update failed [{ukey}]: {r.status_code}")
                     errors += 1
-            else:
+            elif o.get("_ms_status") in ("Live", "In System", "In System (Inactive)"):
+                # Curated inventory board, not a full mirror: don't create a NEW page for
+                # something already confirmed in the MS platform — that's not "untapped
+                # inventory" per the job-to-be-done. Existing pages still get updated
+                # above regardless of status, so nothing already on the board goes stale.
+                # `continue` here deliberately skips the rate-limit sleep below (no Notion
+                # call was made, so there's nothing to rate-limit) — but still counts
+                # toward the progress log so "N/len(offers) processed" stays accurate,
+                # since large feeds can be majority-skipped once well-established.
+                skipped += 1
+                n = created + updated + errors + skipped
+                if n % 50 == 0:
+                    log.info(f"Notion: {n}/{len(offers)} processed ({created} created, {updated} updated, {skipped} skipped, {errors} errors)...")
+                continue
                 # Create new page — set Outreach Status to "Not Reviewed"
                 props = _notion_properties(o, is_new=True)
                 r = requests.post(
@@ -1470,11 +1575,11 @@ def write_notion(offers: list):
         time.sleep(0.4)  # stay safely under 3 req/sec rate limit
 
         # Progress log every 50 offers so the terminal doesn't look stuck
-        n = created + updated + errors
+        n = created + updated + errors + skipped
         if n % 50 == 0:
-            log.info(f"Notion: {n}/{len(offers)} processed ({created} created, {updated} updated, {errors} errors)...")
+            log.info(f"Notion: {n}/{len(offers)} processed ({created} created, {updated} updated, {skipped} skipped, {errors} errors)...")
 
-    log.info(f"Notion: {created} created, {updated} updated, {errors} errors")
+    log.info(f"Notion: {created} created, {updated} updated, {skipped} skipped (already in MS platform), {errors} errors")
 
 
 
@@ -1675,6 +1780,12 @@ def fetch_cj() -> list:
             o["network"]           = "cj"
             o["offer_id"]          = link_id
             o["advertiser"]        = adv_name
+            # CJ's own advertiser ID (already fetched above for CA-geo-tagging) — verified
+            # live against MS's ClickHouse campaigns table that this is the same ID stored
+            # in internal_network_name for CJ-sourced campaigns (one advertiser, many links,
+            # one shared internal_network_name), so it's usable for exact-ID matching in
+            # fetch_ms_campaign_index()/match_ms_status(), same tier as Impact's offer_id.
+            o["_cj_advertiser_id"] = adv_id
             o["title"]             = link_name or adv_name
             o["description"]       = description
             o["mini_description"]  = description[:120]
