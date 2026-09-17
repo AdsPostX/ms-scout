@@ -6431,6 +6431,10 @@ def test_tune_everflow_build_offer_shape():
     assert o["title"] == "Normal Offer"
     assert o["_raw_payout"] == "$5.50 CPL"
     assert o["category"] == "Shopping"
+    assert o["geo"] == "US Only", f"Expected normalize_geo('US') == 'US Only', got {o['geo']!r}"
+    assert o["tracking_url"] == "https://nid.api.hasoffers.com/aff_c?offer_id=2&aff_id=nid", (
+        f"TUNE's own tracking-URL format must survive build_offer(), got {o['tracking_url']!r}"
+    )
     assert o["os_targeting"] == "iOS"
     assert o["status"] == "Active"
     assert o["date_scraped"], "date_scraped must be populated"
@@ -6457,6 +6461,10 @@ def test_tune_everflow_build_offer_shape():
     assert o2["title"] == "Normal Offer"
     assert o2["_raw_payout"] == "$5.50 CPL"
     assert o2["category"] == "Shopping"
+    assert o2["geo"] == "US Only", f"Expected normalize_geo('US') default == 'US Only', got {o2['geo']!r}"
+    assert o2["tracking_url"] == "https://track.example.com/2", (
+        f"Everflow's own tracking_url field must survive build_offer(), got {o2['tracking_url']!r}"
+    )
     assert o2["os_targeting"] == "iOS"
     assert o2["status"] == "Active"
     assert o2["date_scraped"], "date_scraped must be populated"
