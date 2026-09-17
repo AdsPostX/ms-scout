@@ -2000,7 +2000,7 @@ def test_first_seen_backfill_uses_last_verified_from_snapshot():
 
     old_verified = "2026-05-10T08:00:00+00:00"  # snapshot's last_verified — a few days ago
 
-    snapshot_path = pathlib.Path(offer_scraper.__file__).parent / "data" / "offers_latest.json"
+    snapshot_path = pathlib.Path(offer_scraper.__file__).resolve().parents[2] / "data" / "offers_latest.json"  # offer_scraper moved to scout/offers/scraper.py; data/ lives at the repo root, 3 dirs up
     orig_data = snapshot_path.read_text() if snapshot_path.exists() else None
 
     snapshot_fixture = json.dumps([{
@@ -2043,7 +2043,7 @@ def test_first_seen_immutable_when_already_set():
 
     original_first_seen = "2026-04-01T12:00:00+00:00"
 
-    snapshot_path = pathlib.Path(offer_scraper.__file__).parent / "data" / "offers_latest.json"
+    snapshot_path = pathlib.Path(offer_scraper.__file__).resolve().parents[2] / "data" / "offers_latest.json"  # offer_scraper moved to scout/offers/scraper.py; data/ lives at the repo root, 3 dirs up
     orig_data = snapshot_path.read_text() if snapshot_path.exists() else None
 
     snapshot_fixture = json.dumps([{
@@ -5064,14 +5064,17 @@ def test_scout_handlers_eyes_reaction():
     return True, "scout_handlers: eyes reaction wired, thinking_face removed"
 
 
-@test("Phase 12 — demand_feed_main wires set_post_state after mark_firing")
+@test("Phase 12 — demand-feed daemons wire set_post_state after mark_firing")
 def test_demand_feed_set_post_state_wired():
-    """demand_feed_main.py calls set_post_state at both alert post sites."""
+    """The revenue-tracker and shadow-monitor daemons call set_post_state at
+    both alert post sites. Moved from scanning demand_feed_main.py to
+    scout/monitoring/daemons.py when these daemons were extracted there —
+    same check, new location."""
     import pathlib
-    src = pathlib.Path("demand_feed_main.py").read_text()
-    assert "set_post_state" in src, "set_post_state not found in demand_feed_main.py"
+    src = pathlib.Path("scout/monitoring/daemons.py").read_text()
+    assert "set_post_state" in src, "set_post_state not found in scout/monitoring/daemons.py"
     assert src.count("set_post_state") >= 2, "expected set_post_state at both mark_firing sites"
-    return True, "demand_feed_main: set_post_state wired at both alert post sites"
+    return True, "scout/monitoring/daemons.py: set_post_state wired at both alert post sites"
 
 
 @test("Phase 12 — scout_acknowledge in _BLOCK_ACTION_DISPATCH")
@@ -7119,16 +7122,23 @@ def test_cap_monitor_daemon_dispatch():
     own *_monitor_enabled, which defaults False) — this test pins that default
     plus the escalation_pct/hourly_start/hourly_end defaults (5/9/17), and
     confirms the dispatch actually branches on this key without entering
-    either engine's real infinite loop."""
+    either engine's real infinite loop.
+
+    Patches scout.monitoring.daemons (not demand_feed_main) — that's where
+    _cap_monitor_daemon is actually defined post-extraction, so that's where
+    its bare-name lookups of _run_hourly_with_web/_run_shadow_monitor resolve
+    from. demand_feed_main._cap_monitor_daemon is the same function object
+    (imported), so calling it either way exercises identical code."""
     from unittest.mock import patch
     import demand_feed_main
+    from scout.monitoring import daemons as scout_daemons
     import scout_thresholds
 
     # Default config (no "signals" overrides at all) — must dispatch to the
     # hourly engine with its documented default parameters.
     with patch.object(scout_thresholds._manager, "load", return_value={"signals": {}}):
-        with patch.object(demand_feed_main, "_run_hourly_with_web") as mock_hourly:
-            with patch.object(demand_feed_main, "_run_shadow_monitor") as mock_shadow:
+        with patch.object(scout_daemons, "_run_hourly_with_web") as mock_hourly:
+            with patch.object(scout_daemons, "_run_shadow_monitor") as mock_shadow:
                 demand_feed_main._cap_monitor_daemon()
     assert mock_shadow.call_count == 0, "Default config must NOT dispatch to the shadow engine"
     assert mock_hourly.call_count == 1, "Default config must dispatch to the hourly engine exactly once"
@@ -7141,8 +7151,8 @@ def test_cap_monitor_daemon_dispatch():
     # cap_monitor_hourly_enabled=False — must dispatch to the shadow engine instead,
     # with the fixed monitor_name/config_key this daemon always uses.
     with patch.object(scout_thresholds._manager, "load", return_value={"signals": {"cap_monitor_hourly_enabled": False}}):
-        with patch.object(demand_feed_main, "_run_hourly_with_web") as mock_hourly:
-            with patch.object(demand_feed_main, "_run_shadow_monitor") as mock_shadow:
+        with patch.object(scout_daemons, "_run_hourly_with_web") as mock_hourly:
+            with patch.object(scout_daemons, "_run_shadow_monitor") as mock_shadow:
                 demand_feed_main._cap_monitor_daemon()
     assert mock_hourly.call_count == 0, "hourly_enabled=False must NOT dispatch to the hourly engine"
     assert mock_shadow.call_count == 1, "hourly_enabled=False must dispatch to the shadow engine exactly once"
