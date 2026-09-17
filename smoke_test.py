@@ -6317,6 +6317,161 @@ def test_normalize_status_inactive_not_active():
     return True, "normalize_status: 'inactive' correctly resolves to Expired (not Active), no regression on Active/Approved/Pending cases"
 
 
+class _FakeHTTPResp:
+    """Minimal requests.Response stand-in for fetch_tune_instance/fetch_everflow_instance."""
+    def __init__(self, json_result, status_code=200, ok=True, text=""):
+        self._json_result = json_result
+        self.status_code = status_code
+        self.ok = ok
+        self.text = text
+
+    def json(self):
+        return self._json_result
+
+
+@test("offer_scraper — build_offer() shared normalizer preserves TUNE's and Everflow's diverging $0-payout behavior")
+def test_tune_everflow_zero_payout_divergence():
+    """fetch_tune_instance and fetch_everflow_instance were de-duplicated onto a shared
+    build_offer() factory (PR: TUNE/Everflow normalization dedup). That refactor's whole
+    risk surface is collapsing a REAL behavioral divergence the two networks had: TUNE
+    renders a literal "0" payout as "$0 CPA" (offer_scraper.py's raw_payout computation
+    has no zero-guard), while Everflow explicitly special-cases payout_str in ("0", "0.0")
+    to render "Commission varies" instead. build_offer() takes raw_payout as a pre-computed
+    argument specifically so this divergence survives the shared dict-assembly tail — this
+    test would fail if a future change accidentally folds raw_payout computation into the
+    shared factory and unifies the two networks' behavior."""
+    from unittest.mock import patch
+    import offer_scraper
+
+    tune_page = {
+        "response": {
+            "status": 1,
+            "data": {
+                "data": {
+                    "1": {
+                        "Offer": {
+                            "id": "1", "name": "Zero Payout Offer", "description": "d",
+                            "payout_type": "cpa", "default_payout": "0",
+                        },
+                        "Advertiser": {"company": "Acme"},
+                        "Category": {"1": {"name": "Finance"}},
+                    }
+                }
+            },
+        }
+    }
+    with patch.object(offer_scraper.requests, "get", return_value=_FakeHTTPResp(tune_page)):
+        tune_offers = offer_scraper.fetch_tune_instance("testlabel", "testnid", "testkey", "https://testnid.api.hasoffers.com")
+    assert len(tune_offers) == 1, f"Expected 1 TUNE offer, got {len(tune_offers)}"
+    assert tune_offers[0]["_raw_payout"] == "$0 CPA", (
+        f"TUNE $0 payout must render as '$0 CPA' (no zero-guard), got {tune_offers[0]['_raw_payout']!r}"
+    )
+
+    everflow_page = {
+        "offers": [
+            {
+                "id": "1", "name": "Zero Payout Offer", "description": "d",
+                "payout_type": "cpa", "default_payout": "0",
+                "advertiser": {"name": "Acme"},
+                "categories": [{"name": "Finance"}],
+                "tracking_url": "https://track.example.com/1",
+            }
+        ]
+    }
+    with patch.object(offer_scraper.requests, "get", return_value=_FakeHTTPResp(everflow_page)):
+        everflow_offers = offer_scraper.fetch_everflow_instance("testlabel", "testkey", "https://testlabel.everflowclient.io")
+    assert len(everflow_offers) == 1, f"Expected 1 Everflow offer, got {len(everflow_offers)}"
+    assert everflow_offers[0]["_raw_payout"] == "Commission varies", (
+        f"Everflow $0 payout must render as 'Commission varies' (explicit zero-guard), got {everflow_offers[0]['_raw_payout']!r}"
+    )
+
+    # Same input shape, same shared build_offer() factory, deliberately different output —
+    # if these ever match, the factory swallowed the divergence.
+    assert tune_offers[0]["_raw_payout"] != everflow_offers[0]["_raw_payout"], (
+        "TUNE and Everflow $0-payout rendering collapsed to the same value — "
+        "build_offer() likely absorbed raw_payout computation instead of taking it as an argument"
+    )
+    return True, "TUNE '$0 CPA' vs. Everflow 'Commission varies' divergence preserved through build_offer()"
+
+
+@test("offer_scraper — build_offer() output shape matches the pre-refactor field set for TUNE and Everflow")
+def test_tune_everflow_build_offer_shape():
+    """Beyond the payout-divergence case above, confirm the shared factory still populates
+    every field the old inline dict-assembly set (network, offer_id, advertiser, title,
+    tracking_url, category, geo, os_targeting, status, date_scraped) for a normal,
+    non-zero-payout record on both networks."""
+    from unittest.mock import patch
+    import offer_scraper
+
+    tune_page = {
+        "response": {
+            "status": 1,
+            "data": {
+                "data": {
+                    "2": {
+                        "Offer": {
+                            "id": "2", "name": "Normal Offer", "description": "d",
+                            "payout_type": "cpl", "default_payout": "5.50",
+                            "countries": "US", "mobile_device_targeting": "iOS",
+                        },
+                        "Advertiser": {"company": "Beta Corp"},
+                        "Category": {"1": {"name": "Shopping"}},
+                    }
+                }
+            },
+        }
+    }
+    with patch.object(offer_scraper.requests, "get", return_value=_FakeHTTPResp(tune_page)):
+        tune_offers = offer_scraper.fetch_tune_instance("lbl", "nid", "key", "https://nid.api.hasoffers.com")
+    assert len(tune_offers) == 1
+    o = tune_offers[0]
+    assert o["network"] == "tune_lbl"
+    assert o["offer_id"] == "2"
+    assert o["advertiser"] == "Beta Corp"
+    assert o["title"] == "Normal Offer"
+    assert o["_raw_payout"] == "$5.50 CPL"
+    assert o["category"] == "Shopping"
+    assert o["geo"] == "US Only", f"Expected normalize_geo('US') == 'US Only', got {o['geo']!r}"
+    assert o["tracking_url"] == "https://nid.api.hasoffers.com/aff_c?offer_id=2&aff_id=nid", (
+        f"TUNE's own tracking-URL format must survive build_offer(), got {o['tracking_url']!r}"
+    )
+    assert o["os_targeting"] == "iOS"
+    assert o["status"] == "Active"
+    assert o["date_scraped"], "date_scraped must be populated"
+
+    everflow_page = {
+        "offers": [
+            {
+                "id": "2", "name": "Normal Offer", "description": "d",
+                "payout_type": "cpl", "default_payout": "5.50",
+                "advertiser": {"name": "Beta Corp"},
+                "categories": [{"name": "Shopping"}],
+                "tracking_url": "https://track.example.com/2",
+                "os_targeting": "iOS",
+            }
+        ]
+    }
+    with patch.object(offer_scraper.requests, "get", return_value=_FakeHTTPResp(everflow_page)):
+        everflow_offers = offer_scraper.fetch_everflow_instance("lbl", "key", "https://lbl.everflowclient.io")
+    assert len(everflow_offers) == 1
+    o2 = everflow_offers[0]
+    assert o2["network"] == "everflow_lbl"
+    assert o2["offer_id"] == "2"
+    assert o2["advertiser"] == "Beta Corp"
+    assert o2["title"] == "Normal Offer"
+    assert o2["_raw_payout"] == "$5.50 CPL"
+    assert o2["category"] == "Shopping"
+    assert o2["geo"] == "US Only", f"Expected normalize_geo('US') default == 'US Only', got {o2['geo']!r}"
+    assert o2["tracking_url"] == "https://track.example.com/2", (
+        f"Everflow's own tracking_url field must survive build_offer(), got {o2['tracking_url']!r}"
+    )
+    assert o2["os_targeting"] == "iOS"
+    assert o2["status"] == "Active"
+    assert o2["date_scraped"], "date_scraped must be populated"
+
+    return True, "build_offer() output shape matches pre-refactor fields for a normal-payout TUNE and Everflow record"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")
