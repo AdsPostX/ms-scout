@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from scout_types import Offer  # type: ignore[import]  # noqa: F401
 from scout_log import log_event
+from scout_core.job_runs import update_network_status
 
 
 @dataclass
@@ -2328,9 +2329,12 @@ def run_headless(post_digest: bool = True) -> None:
     all_offers = []
     for name, fn in NETWORK_MAP.items():
         try:
-            all_offers.extend(fn())
+            offers = fn()
+            all_offers.extend(offers)
+            update_network_status(name, success=True, offer_count=len(offers))
         except Exception as e:
             log.error(f"[scraper] {name}: failed — {e}")
+            update_network_status(name, success=False, error=str(e))
 
     log.info(f"[scraper] Total offers collected: {len(all_offers)}")
     ms_index = fetch_ms_campaign_index()
@@ -2399,8 +2403,10 @@ def main():
         try:
             offers = NETWORK_MAP[name]()
             all_offers.extend(offers)
+            update_network_status(name, success=True, offer_count=len(offers))
         except Exception as e:
             log.error(f"{name}: failed — {e}")
+            update_network_status(name, success=False, error=str(e))
             continue
 
     log.info(f"Total offers collected: {len(all_offers)}")
