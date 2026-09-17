@@ -72,6 +72,7 @@ class Offer(TypedDict, total=False):
     _payout_type_norm: str
     _raw_payout: str
     _scout_score: Optional[float]
+    ms_match_confidence: str  # "exact" | "mapped" | "fuzzy" | "" (no match — _ms_status "Not in System")
 
 
 # ── FormattedOffer ─────────────────────────────────────────────────────────────

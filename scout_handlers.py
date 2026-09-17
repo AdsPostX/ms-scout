@@ -2417,7 +2417,7 @@ def _handle_slash_command(req: SocketModeRequest, web: WebClient) -> None:
                 return "█" * filled + "░" * (width - filled)
 
             # Mirrors smoke_test.py ceilings — keep in sync if gates change.
-            _CEILINGS = {"scout_agent.py": 6650, "queries.py": 2700, "offer_scraper.py": 2600}
+            _CEILINGS = {"scout_agent.py": 6650, "queries.py": 2700, "offer_scraper.py": 2700}
 
             modules = [
                 ("scout_agent.py",   _count_lines("scout_agent.py")),

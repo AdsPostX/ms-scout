@@ -61,3 +61,41 @@ Status: blocked on `scoreboard_rollup()` returning the projection range. The ren
 `get_active_ms_campaigns()` builds its own `clickhouse_connect.get_client()` instead of going through `scout_ch._get_ch_client()`, so it isn't covered by `_CH_CONNECT_TIMEOUT_S` / `_CH_SEND_RECEIVE_TIMEOUT_S`. The equivalent bypass in `offer_scraper.py` was fixed as part of PR #316 (ask-timeout-resource-contention) because it's reachable from the interactive `ask()` path via the `run_offer_scraper` tool; this one is only ever called from the scheduled digest pipeline, not through `_ASK_SEMAPHORE`, so a hang here can't outlast a live `ask()` call the way the offer_scraper one could.
 
 Fix: swap to `from scout_ch import _get_ch_client` + `ch = _get_ch_client()`, same as `offer_scraper.py`. Left as debt rather than fixed inline because `scout_digest.py`'s dedup/scoring logic is sensitive (see `.claude/rules/scout_digest.md`) and this touches the same file for an unrelated reason — do it as its own small PR.
+
+## MS_MATCH_MAPPING_DB_ID — human-curated matching overrides (setup required)
+
+`scout_match_mapping.py`'s `fetch_match_mapping_table()` reads a Notion database of confirmed
+`(network, advertiser) → MS campaign ID` overrides, used to permanently fix a fuzzy-match
+mistake instead of re-guessing it on every scrape. It fails open (empty dict) until this is
+set up — no behavior change until then.
+
+**Setup:**
+1. Create a Notion database with three properties:
+   - `Network` (select) — e.g. `rakuten`, `awin`, `flexoffers`
+   - `Advertiser Key` (rich_text) — the advertiser name as it appears in the offer (normalized
+     the same way as fuzzy matching: lowercased, non-alphanumeric stripped, common suffixes
+     — ` inc`/` llc`/` ltd`/` corp`/` com`/` us` — dropped)
+   - `MS Campaign ID` (number) — the `from_airbyte_campaigns.id` this advertiser actually
+     corresponds to
+2. Set `NOTION_TOKEN` (already used elsewhere) and `MS_MATCH_MAPPING_DB_ID` (new) in Render.
+3. Add a row every time a human confirms or corrects a "Needs Review" offer in the digest
+   or Notion inventory board — this is the durable fix, not a one-time cleanup.
+
+## `is_already_in_ms()` fuzzy match (scout_digest.py) is riskier than offer_scraper.py's — flagged, not fixed here
+
+While auditing matching quality for `offer_scraper.py`'s `match_ms_status()` (see the
+`ms_match_confidence`/"Needs Review" work above), found that `scout_digest.py` has its own,
+completely independent matching function — `is_already_in_ms()` (line 474) — used only to
+decide whether to skip an offer from the digest entirely (not rendered anywhere, not scored).
+Its fuzzy path is "at least one meaningful word overlap" between advertiser name word sets
+(`_name_words()`), which is **looser** than `offer_scraper.py`'s normalized-full-string match
+— e.g. "American Express" and "American Airlines" would both match on the shared word
+"american" and silently skip a real, unrelated advertiser from ever appearing in the digest.
+
+Not fixed as part of this pass: `.claude/rules/scout_digest.md` already flags this file's
+matching-adjacent logic ("payout type normalization here intentionally diverges from
+offer_scraper.py — do not unify without a separate investigation") as needing its own look
+before merging with anything else, and a skip-from-digest bug has a different risk profile
+(an advertiser silently never gets offered, vs. offer_scraper.py's risk of a wrong label on
+an offer a human is actively looking at) — worth its own investigation into how often this
+false-positive shape actually fires in practice before deciding on a fix.
