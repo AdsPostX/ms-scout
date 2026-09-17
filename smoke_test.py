@@ -4080,14 +4080,6 @@ def test_alert_registry_redis():
     pass
 
 
-# REMOVED: MS platform campaign creation (/queue/*, /campaigns/create) was deleted
-# from demand_feed_main.py — built, tested, never called in production, blocked
-# indefinitely on a CAMPAIGN_CREATE_WEBHOOK_URL the platform team never delivered.
-# Contract preserved in KNOWN_DEBT.md for a fast rebuild if that changes.
-def test_ms_platform_campaign_creation():
-    pass
-
-
 @test("parse_payout — idempotent + explicit state")
 def test_parse_payout_idempotent():
     try:
