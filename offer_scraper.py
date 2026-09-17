@@ -1556,6 +1556,7 @@ def write_notion(offers: list):
                 if n % 50 == 0:
                     log.info(f"Notion: {n}/{len(offers)} processed ({created} created, {updated} updated, {skipped} skipped, {errors} errors)...")
                 continue
+            else:
                 # Create new page — set Outreach Status to "Not Reviewed"
                 props = _notion_properties(o, is_new=True)
                 r = requests.post(

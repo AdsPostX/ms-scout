@@ -6800,6 +6800,106 @@ def test_fetch_match_mapping_table_fails_open():
     return True, "fetch_match_mapping_table: fails open on missing config and Notion errors, resolves valid rows correctly, paginates correctly across multiple pages"
 
 
+@test("scout_match_mapping — pagination stops instead of looping forever when next_cursor is missing")
+def test_fetch_match_mapping_table_missing_cursor_stops():
+    """CodeRabbit-flagged edge case: if Notion ever returned has_more=true without a
+    next_cursor (not expected per Notion's docs, but not contractually impossible),
+    the old code would set cursor=None and re-request page 1 forever since `if cursor:`
+    is falsy — an infinite loop hanging the scraper run. Must instead log and stop,
+    returning whatever was resolved from the pages seen so far (fail open, matching this
+    module's whole design philosophy)."""
+    import os as _os
+    from unittest.mock import patch
+    import scout_match_mapping
+
+    class _FakeResp:
+        ok = True
+        def json(self):
+            return {"results": [], "has_more": True}  # has_more, but no next_cursor at all
+
+    calls = []
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(1)
+        if len(calls) > 3:
+            raise AssertionError("pagination did not stop — looped past the missing-cursor page")
+        return _FakeResp()
+
+    with patch.dict(_os.environ, {"MS_MATCH_MAPPING_DB_ID": "fake-db-id"}):
+        with patch.object(scout_match_mapping.requests, "post", side_effect=_fake_post):
+            result = scout_match_mapping.fetch_match_mapping_table("fake-token", {})
+
+    assert len(calls) == 1, f"Expected exactly 1 request before stopping on missing cursor, got {len(calls)}"
+    assert result == {}, f"Expected {{}} when pagination stops early with no rows resolved, got {result!r}"
+    return True, "fetch_match_mapping_table stops pagination (doesn't hang) when has_more=true but next_cursor is missing"
+
+
+@test("offer_scraper — write_notion actually creates new, untapped offers instead of silently dropping them")
+def test_write_notion_creates_new_offers():
+    """Regression guard for a real CodeRabbit-flagged bug: a stray `continue` inside the
+    'skip offers already Live/In System' elif branch left the 'create new Notion page'
+    code sitting unindented right after it as dead code that could never execute —
+    meaning genuinely new offers (not already in Notion, not already Live/In System in
+    MS) were silently never created. Confirms: a brand-new offer hits POST /pages, an
+    offer already Live in MS is skipped (no POST), and an offer already in Notion hits
+    PATCH instead of POST."""
+    from unittest.mock import patch, MagicMock
+    import offer_scraper as osc
+
+    class _FakeOkResp:
+        ok = True
+        status_code = 200
+        def json(self):
+            return {"results": [], "has_more": False}
+
+    post_calls = []
+    patch_calls = []
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        if url.endswith("/query"):
+            return _FakeOkResp()  # empty existing-page index
+        post_calls.append(url)
+        return _FakeOkResp()
+
+    def _fake_patch(url, headers=None, json=None, timeout=None):
+        patch_calls.append(url)
+        return _FakeOkResp()
+
+    # Covers the full _ms_status matrix match_ms_status() can actually return, not just
+    # one representative "should create" and one "should skip" value — a future edit to
+    # the skip-tuple in write_notion() should be caught here, not just by a code read.
+    offers = [
+        {"_unique_key": "brand-new-offer",          "_ms_status": "Not in System"},
+        {"_unique_key": "needs-review-offer",       "_ms_status": "Needs Review"},
+        {"_unique_key": "no-status-key-offer"},  # _ms_status absent entirely
+        {"_unique_key": "already-live-offer",       "_ms_status": "Live"},
+        {"_unique_key": "already-in-system-offer",  "_ms_status": "In System"},
+        {"_unique_key": "already-inactive-offer",   "_ms_status": "In System (Inactive)"},
+    ]
+
+    with patch.object(osc, "NOTION_TOKEN", "fake-token"), \
+         patch.object(osc, "NOTION_DB_ID", "fake-db-id"), \
+         patch.object(osc, "_notion_properties", return_value={}), \
+         patch.object(osc, "time") as fake_time, \
+         patch.object(osc, "requests") as fake_requests:
+        fake_time.sleep = lambda *a, **k: None
+        fake_requests.post.side_effect = _fake_post
+        fake_requests.patch.side_effect = _fake_patch
+        osc.write_notion(offers)
+
+    assert len(post_calls) == 3, (
+        f"Expected exactly 3 POST /pages calls (Not in System, Needs Review, and no "
+        f"_ms_status key at all should all create), got {len(post_calls)}: {post_calls!r}"
+    )
+    assert all(u.endswith("/pages") for u in post_calls), f"Expected every create call to hit /pages, got {post_calls!r}"
+    assert not patch_calls, f"None of these offers were already in Notion — expected no PATCH calls, got {patch_calls!r}"
+
+    return True, (
+        "write_notion creates a new page for every genuinely new/untapped offer "
+        "(Not in System, Needs Review, or no _ms_status at all) and skips every "
+        "offer already Live/In System/In System (Inactive) in MS"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout smoke tests")
     parser.add_argument("--slack", action="store_true", help="Post results to #scout-qa")

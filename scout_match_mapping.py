@@ -90,6 +90,13 @@ def fetch_match_mapping_table(notion_token: str, by_campaign_id: dict) -> dict:
             if not data.get("has_more"):
                 break
             cursor = data.get("next_cursor")
+            if not cursor:
+                # Notion contractually always pairs has_more=true with a next_cursor,
+                # but if that ever isn't true, omitting start_cursor on the next
+                # request would silently re-fetch page 1 forever. Fail open instead
+                # of hanging the scraper run.
+                log.warning("match-mapping: has_more=true but next_cursor missing — stopping pagination early")
+                break
     except Exception as e:
         log.warning(f"match-mapping: request error — falling through to exact/fuzzy matching: {e}")
         return {}
