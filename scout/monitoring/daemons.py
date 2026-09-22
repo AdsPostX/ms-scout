@@ -406,7 +406,7 @@ def _revenue_tracker_daemon() -> None:
 
     while True:  # outer restart wrapper — self-heals any unhandled crash
         try:
-            from scout_bot import _format_revenue_alert
+            from scout_core.alert_formatting import _format_revenue_alert
             import time as _time
             import pytz
             from datetime import datetime as _dt
@@ -921,7 +921,7 @@ def _cap_monitor_daemon() -> None:
         _load_cap_alert_slot, _save_cap_alert_slot,
         _load_cap_alert_context, _save_cap_alert_context,
     )
-    from scout_bot import _pulse_signal_cap, _format_cap_alert
+    from scout_core.alert_formatting import _pulse_signal_cap, _format_cap_alert
     from scout_thresholds import _manager as _tm
 
     sig = _tm.load().get("signals", {})

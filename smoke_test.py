@@ -691,7 +691,7 @@ def test_score_offer_reads_config_floor():
     pass/fail outcome.
     """
     try:
-        import scout_agent
+        import scout_tools_offers
         import scout_digest
 
         # An offer that scores around ~$25 RPM (typical CPL with avg CVR)
@@ -707,9 +707,8 @@ def test_score_offer_reads_config_floor():
         # Stub _scout_score so this test doesn't depend on benchmarks
         orig_scout_score = None
         try:
-            import scout_agent as _sa
-            orig_scout_score = _sa._scout_score
-            _sa._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
+            orig_scout_score = scout_tools_offers._scout_score
+            scout_tools_offers._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
         except Exception:
             pass
 
@@ -731,7 +730,7 @@ def test_score_offer_reads_config_floor():
         finally:
             _st._manager._thresholds_cache = original
             if orig_scout_score is not None:
-                scout_agent._scout_score = orig_scout_score
+                scout_tools_offers._scout_score = orig_scout_score
 
         return True, f"config drives behavior; low_floor={low_floor}, high_floor={high_floor}"
     except Exception as e:
@@ -746,7 +745,7 @@ def test_score_offer_excludes_within_resurface_cooldown():
     is the fix for #scout-offers reposting the same offers every digest cycle.
     """
     try:
-        import scout_agent
+        import scout_tools_offers
         import scout_digest
         from datetime import datetime, timedelta, timezone
 
@@ -760,8 +759,8 @@ def test_score_offer_excludes_within_resurface_cooldown():
             "tracking_url": "x",
         }
 
-        orig_scout_score = scout_agent._scout_score
-        scout_agent._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
+        orig_scout_score = scout_tools_offers._scout_score
+        scout_tools_offers._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
 
         try:
             digest_cfg = scout_digest._load_digest_config()
@@ -782,7 +781,7 @@ def test_score_offer_excludes_within_resurface_cooldown():
             if control is None:
                 return False, "control offer with no surfaced entry should score, got None"
         finally:
-            scout_agent._scout_score = orig_scout_score
+            scout_tools_offers._scout_score = orig_scout_score
 
         return True, f"cooldown suppresses recently-surfaced offer; control scored={control}"
     except Exception as e:
@@ -793,7 +792,7 @@ def test_score_offer_excludes_within_resurface_cooldown():
 def test_score_offer_resurfaces_after_cooldown_elapses():
     """Offer surfaced 10 days ago with a 7-day window must score again (cooldown expired)."""
     try:
-        import scout_agent
+        import scout_tools_offers
         import scout_digest
         from datetime import datetime, timedelta, timezone
 
@@ -807,8 +806,8 @@ def test_score_offer_resurfaces_after_cooldown_elapses():
             "tracking_url": "x",
         }
 
-        orig_scout_score = scout_agent._scout_score
-        scout_agent._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
+        orig_scout_score = scout_tools_offers._scout_score
+        scout_tools_offers._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
 
         try:
             digest_cfg = scout_digest._load_digest_config()
@@ -823,7 +822,7 @@ def test_score_offer_resurfaces_after_cooldown_elapses():
             if result is None:
                 return False, "offer shown 10 days ago (window=7d) should resurface, got None"
         finally:
-            scout_agent._scout_score = orig_scout_score
+            scout_tools_offers._scout_score = orig_scout_score
 
         return True, f"cooldown expired, offer resurfaced: score={result}"
     except Exception as e:
@@ -839,7 +838,7 @@ def test_score_offer_rejection_overrides_cooldown():
     verified here via reason_sink so the two code paths don't get confused.
     """
     try:
-        import scout_agent
+        import scout_tools_offers
         import scout_digest
         from datetime import datetime, timedelta, timezone
 
@@ -853,8 +852,8 @@ def test_score_offer_rejection_overrides_cooldown():
             "tracking_url": "x",
         }
 
-        orig_scout_score = scout_agent._scout_score
-        scout_agent._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
+        orig_scout_score = scout_tools_offers._scout_score
+        scout_tools_offers._scout_score = lambda offer, benchmarks: 25.0  # type: ignore
 
         try:
             digest_cfg = scout_digest._load_digest_config()
@@ -875,7 +874,7 @@ def test_score_offer_rejection_overrides_cooldown():
             if reasons.get("rejected_no_lift") != 1:
                 return False, f"expected rejection gate (not cooldown) to fire, got reasons={reasons}"
         finally:
-            scout_agent._scout_score = orig_scout_score
+            scout_tools_offers._scout_score = orig_scout_score
 
         return True, "human rejection decision governs, cooldown gate correctly bypassed"
     except Exception as e:
@@ -1246,6 +1245,7 @@ def test_signal_thresholds_from_config():
     """
     try:
         import scout_bot
+        import scout_core.alert_formatting as _alert_fmt
         import scout_thresholds as _st
         sig = _st._manager.load().get("signals", {})
         checks = [
@@ -1253,7 +1253,7 @@ def test_signal_thresholds_from_config():
             ("_GHOST_RECENCY_HOURS",          scout_bot._GHOST_RECENCY_HOURS,          int(sig.get("ghost_recency_hours", 48))),
             ("_VELOCITY_DOWN_THRESHOLD_PCT",  scout_bot._VELOCITY_DOWN_THRESHOLD_PCT,  float(sig.get("velocity_down_threshold_pct", -40))),
             ("_VELOCITY_UP_THRESHOLD_PCT",    scout_bot._VELOCITY_UP_THRESHOLD_PCT,    float(sig.get("velocity_up_threshold_pct", 20))),
-            ("_CAP_ALERT_PCT",               scout_bot._CAP_ALERT_PCT,               float(sig.get("cap_alert_pct", 90))),
+            ("_CAP_ALERT_PCT",               _alert_fmt._CAP_ALERT_PCT,              float(sig.get("cap_alert_pct", 90))),
         ]
         mismatches = [f"{name}: bot={bot_val} config={cfg_val}" for name, bot_val, cfg_val in checks if bot_val != cfg_val]
         if mismatches:
