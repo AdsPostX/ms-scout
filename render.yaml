@@ -84,9 +84,11 @@ services:
     envVars:
       - key: DEMAND_FEED_PORT
         value: "8080"
-      # Monitor routing — shadow/QA mode posts to #sidd-qa
+      # Monitor routing — shadow/QA mode posts to #sidd-qa. Off: shadow ticks
+      # repost the same signal every hour 24/7 with in-memory dedup only
+      # (see KNOWN_DEBT.md). Prod-window firing is unaffected by this flag.
       - key: SCOUT_HOURLY_SHADOW_ENABLED
-        value: "true"
+        value: "false"
       - key: SCOUT_SHADOW_CHANNEL
         value: C0AQEECF800   # #sidd-qa
       # Revenue tracker — enabled
