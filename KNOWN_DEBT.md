@@ -2,6 +2,12 @@
 
 Open debt only — resolved items move to CHANGELOG.md when fixed.
 
+## Shadow monitor ticks repost identical content hourly (disabled, not fixed)
+
+`_run_shadow_monitor` (`scout/monitoring/daemons.py:652`) runs shadow ticks 24/7 when `SCOUT_HOURLY_SHADOW_ENABLED` is on. There is no business-hours gate at :694. Its only dedup is an in-memory `last_shadow_slot` hour key (:700-701), which a restart or the crash-restart wrapper loses. Shadow ticks also skip snooze (:759, "shadow ticks always post") and never call `save_state_fn`, `mark_firing`, or `set_post_state`. So the Ack/Snooze buttons on shadow posts have no post state behind them, and the same velocity/CVR signal reposted to #sidd-qa (C0AQEECF800) every hour.
+
+Disabled via `SCOUT_HOURLY_SHADOW_ENABLED=false` in `render.yaml`. The 9am CT prod-window fire is unaffected. Fix before re-enabling: gate shadow ticks to business hours, dedup on a content fingerprint persisted to disk or Redis rather than the hour slot, and route shadow posts through the same snooze and post-state path as prod.
+
 ## _BoundedRateLimitRetryHandler duplicated in scout_bot.py and scout_handlers.py
 
 Same 15-line class exists verbatim in both files (`scout_handlers.py` from PR #329, `scout_bot.py` from PR #330) — each module constructs its own `WebClient` and needed the same uncapped-retry-sleep fix. Not unified at the time because `scout_slack_safe.py` (the module both files already share for `guard_web_client`) is scoped to response-emission invariants, not HTTP retry behavior, and unifying via `scout_handlers.py` would have required editing a file that was part of the still-open #329.
