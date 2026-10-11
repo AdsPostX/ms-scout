@@ -1,10 +1,10 @@
 # Scout — MCP Integrations
 
-## ClickHouse (`mcp__mcp-clickhouse__`)
+## ClickHouse (`mcp__ClickHouse_Analytics__MomentScience___` — the MomentScience ClickHouse extension; the generic `mcp-clickhouse` server was removed as a duplicate of the same cluster)
 **Status:** Active  
 **Use for:** Ad-hoc queries, schema exploration, verifying SQL shape before writing handler code.  
 **Key tables:** `ms_events.conversions`, `ms_events.clicks`, `from_airbyte_campaigns`  
-**Pattern:** `run_query` → verify shape (column names, types, row grain) → write query fn in `queries_*.py`  
+**Pattern:** `clickhouse_query` → verify shape (column names, types, row grain) → write query fn in `queries_*.py`  
 **Note:** Run the raw query here first before touching any handler. Most bugs are data bugs.
 
 ## Slack (`mcp__18ab42c2-6196-4409-a18c-7eb96900aafe__`)
