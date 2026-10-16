@@ -1214,63 +1214,6 @@ def _run_revenue_check_once(web, channel: str, thread_ts: str = "") -> None:
 
 
 
-def _check_stale_queue(web: WebClient) -> None:
-    """
-    Daily background check: any offer approved 7+ days ago with status 'queued'
-    (never went live) gets a Slack nudge in the original approval thread.
-
-    Runs every 24h via a daemon thread started in main(). Silent on failures
-    so a bad entry never crashes the bot.
-    """
-    STALE_DAYS = 7
-    while True:
-        try:
-            time.sleep(86_400)  # 24 hours
-            from datetime import datetime, timezone
-            state = _load_launched_offers()
-            now = datetime.now(timezone.utc)
-            for advertiser, entry in state.items():
-                if entry.get("status") != "queued":
-                    continue
-                approved_at_str = entry.get("approved_at", "")
-                if not approved_at_str:
-                    continue
-                try:
-                    approved_at = datetime.fromisoformat(approved_at_str).replace(tzinfo=timezone.utc)
-                except ValueError:
-                    continue
-                age_days = (now - approved_at).days
-                if age_days < STALE_DAYS:
-                    continue
-
-                thread_url = entry.get("thread_url", "")
-                payout     = entry.get("payout", "")
-                network    = entry.get("network", "")
-
-                # Find the original approval channel + thread from the URL
-                # thread_url format: https://momentscience.slack.com/archives/C.../p...
-                import re as _re
-                m = _re.search(r'/archives/([A-Z0-9]+)/p(\d+)', thread_url)
-                if not m:
-                    log.debug(f"Stale queue: can't parse thread URL for {advertiser}")
-                    continue
-
-                channel   = m.group(1)
-                ts_raw    = m.group(2)
-                thread_ts = f"{ts_raw[:10]}.{ts_raw[10:]}"
-
-                msg = (
-                    f":hourglass: *{advertiser}* has been in the queue for *{age_days} days* "
-                    f"({payout} · {network}) with no impressions detected.\n"
-                    f"Still in progress? Reply to confirm — or Reject to free the slot."
-                )
-                web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
-                log.info(f"Stale queue nudge sent for {advertiser} ({age_days} days)")
-
-        except Exception as e:
-            log.error(f"[stale_queue] cycle failed, will retry in 24h: {e}", exc_info=True)
-
-
 def _find_campaign_for_offer(ch, adv_name: str, approved_at: str) -> list:
     """
     Find campaign IDs in from_airbyte_campaigns that started within 30 days after
@@ -2063,7 +2006,6 @@ def main():
     threading.Thread(target=_run_startup_smoke_test, args=(web_client,), daemon=True, name="smoke-test").start()
 
     # Required long-running daemons (registered via _start_daemon)
-    _start_daemon(_check_stale_queue,     name="stale-queue-checker", args=(web_client,))
     _start_daemon(_performance_recap,     name="perf-recap",          args=(web_client,))
     _start_daemon(_cleanup_state,         name="state-cleanup")
     _start_daemon(_digest_poster,         name="digest-poster",         args=(web_client,))
