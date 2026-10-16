@@ -57,16 +57,8 @@ from scout_images import (  # noqa: F401 — backward compat re-exports
 
 load_dotenv()  # plist env vars (SCOUT_ENV, etc.) take precedence over .env
 
-# Register the canonical geo normalizer with scout_core.contracts so any
-# NormalizedOffer.normalize_geo(...) call resolves to the same implementation
-# offer_scraper uses for Notion writes. Producers (this module + demand_feed_main)
-# own this wiring — scout_core stays unaware of offer_scraper to keep the
-# contracts layer import-cheap and dependency-free.
-from scout_core.contracts import set_geo_normalizer as _set_geo_normalizer
 from scout_tools_offers import _dedupe_by_advertiser, _norm, _scout_score, _format_offers, _get_risk_flag, _network_portal_url
-from offer_scraper import normalize_geo as _normalize_geo
 from scout_thresholds import AmbiguousThresholdKey  # noqa: F401 — re-exported for existing callers
-_set_geo_normalizer(_normalize_geo)
 
 log = logging.getLogger("scout_agent")
 
@@ -299,30 +291,7 @@ class NetworkCredentialConfig:
 _NETWORK_CRED_CONFIG = NetworkCredentialConfig.from_env()
 
 
-@dataclass(frozen=True)
-class _ScoutCfg:
-    demand_feed_url: str
-    anthropic_api_key: str = ""
-
-    @classmethod
-    def from_env(cls) -> "_ScoutCfg":
-        raw = os.getenv("DEMAND_FEED_URL", "").rstrip("/")
-        url = ""
-        if raw:
-            try:
-                parsed = urllib.parse.urlparse(raw)
-                if parsed.scheme in ("http", "https") and parsed.hostname:
-                    url = raw
-                else:
-                    log.warning("DEMAND_FEED_URL missing valid scheme or hostname — using disk")
-            except Exception:
-                log.warning("DEMAND_FEED_URL could not be parsed — using disk")
-        return cls(
-            demand_feed_url=url,
-            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
-        )
-
-_CFG = _ScoutCfg.from_env()
+from scout_core.config import _ScoutCfg, _CFG  # noqa: E402 — kept importable as scout_agent._ScoutCfg/_CFG for existing callers/tests
 
 
 def _is_admin(user_id: str) -> bool:

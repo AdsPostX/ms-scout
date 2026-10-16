@@ -56,7 +56,7 @@ from scout.offers.scraper import normalize_geo as _normalize_geo
 _set_geo_normalizer(_normalize_geo)
 
 import alert_registry
-from scout_bot import _env_int as _shared_env_int
+from scout_core.env import env_int as _shared_env_int
 
 # Monitor daemons (revenue-tracker, projection-autocheck, the 5-signal shadow
 # monitor factory, cap-monitor) live in scout/monitoring/daemons.py — extracted

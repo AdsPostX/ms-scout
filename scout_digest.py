@@ -27,11 +27,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
-import scout_agent
-from scout_agent import _CFG
+from scout_core.config import _CFG
 from scout_ch import _get_ch_client
 from scout_image_resolve import resolve_icon_image
 from scout_log import log_event
+import scout_tools_offers
 from scout_tools_offers import _network_portal_url as _portal_url
 from scout_ui_kit import _MAX_CAROUSEL_CARDS, _carousel_block, _slack_card_block, normalize_typography, sanitize_blocks
 
@@ -710,7 +710,7 @@ def score_offer(offer: dict, payout_cache: dict, state: dict, benchmarks: dict, 
     if not enriched.get("_payout_num"):
         return _reject("no_payout")
 
-    rpm = scout_agent._scout_score(enriched, benchmarks)
+    rpm = scout_tools_offers._scout_score(enriched, benchmarks)
     if rpm <= 0:
         # _scout_score returns 0 for: payout==0 (caught above), high-friction risk
         # flag (B2B/Loan/Medical/Biz-opp/Insurance), or no benchmark match at any
@@ -771,7 +771,7 @@ def build_why_text(offer: dict, payout_num: float, payout_type: str, ms_campaign
 
     # Use the score already computed (includes context fit + conversion complexity)
     # so the displayed number matches what ranked it
-    display_rpm = adjusted_rpm if adjusted_rpm is not None else scout_agent._scout_score(enriched, benchmarks)
+    display_rpm = adjusted_rpm if adjusted_rpm is not None else scout_tools_offers._scout_score(enriched, benchmarks)
 
     parts = []
 
