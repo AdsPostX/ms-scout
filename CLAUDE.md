@@ -139,6 +139,9 @@ Registered at api.slack.com/apps — each must be added to the Slack app manifes
 
 All `/scout-cap/vel/ghost/fill` commands route to `_FORCE_MONITOR_FNS` — same path as `@Scout force <signal>`. Requires the demand-feed service running with monitors initialized.
 
+## Engineering Lenses
+Before building or debugging anything, during every diff, and before closing any significant PR, read `~/.claude/coding.md` (Karpathy Lens + Surgical Changes Lens + Vamsee Lens).
+
 ## Pre-Commit Checklist (non-negotiable)
 
 Before ANY commit on Scout:
