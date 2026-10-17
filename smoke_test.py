@@ -1431,6 +1431,271 @@ def test_intraday_revenue_by_publisher_query_exists():
     return True, "_query_intraday_revenue_by_publisher callable"
 
 
+@test("_validate_sql_query catches fan-out joins and unpruned created_at filters (PR #357 shape)")
+def test_validate_sql_query_fanout_and_yyyymm():
+    try:
+        from scout_agent import _validate_sql_query
+
+        # Real fixed shape: publisher_health_ad_metrics (queries_publisher.py) —
+        # inline derived-subquery style, each fact table pre-aggregated with its
+        # own GROUP BY before the join. Should NOT trigger the fan-out warning.
+        fixed_publisher_health = """
+        SELECT
+            s.placement,
+            sum(i.impr_n) AS impressions,
+            coalesce(sum(cd.conv_n), 0) AS conversions
+        FROM (
+            SELECT session_id, campaign_id, count() AS impr_n
+            FROM adpx_impressions_details
+            PREWHERE pid = {pid_str: String}
+                AND toYYYYMM(created_at) >= {partition: UInt32}
+            WHERE created_at >= today() - {days: UInt32}
+            GROUP BY session_id, campaign_id
+        ) i
+        JOIN (
+            SELECT session_id, placement
+            FROM adpx_sdk_sessions
+            PREWHERE user_id = {pid: UInt64}
+                AND toYYYYMM(created_at) >= {partition: UInt32}
+            WHERE created_at >= today() - {days: UInt32}
+        ) s ON s.session_id = i.session_id
+        LEFT JOIN (
+            SELECT session_id, campaign_id,
+                   count() AS conv_n,
+                   sum(toFloat64OrNull(revenue)) AS revenue
+            FROM adpx_conversionsdetails
+            PREWHERE user_id = {pid: UInt64}
+                AND toYYYYMM(created_at) >= {extended_partition: UInt32}
+            GROUP BY session_id, campaign_id
+        ) cd ON cd.session_id = i.session_id AND cd.campaign_id = i.campaign_id
+        GROUP BY s.placement
+        LIMIT 1000
+        """
+        warnings = _validate_sql_query(fixed_publisher_health)
+        fanout_hits = [w for w in warnings if "fan-out" in w]
+        if fanout_hits:
+            return False, f"false positive fan-out warning on fixed publisher_health_ad_metrics shape: {fanout_hits}"
+        yyyymm_hits = [w for w in warnings if "toYYYYMM" in w]
+        if yyyymm_hits:
+            return False, f"false positive toYYYYMM warning on fixed publisher_health_ad_metrics shape: {yyyymm_hits}"
+
+        # Real fixed shape: get_advertiser_revenue_projection._fetch_baseline
+        # (scout_agent.py) — WITH-CTE style, same pre-aggregation pattern.
+        fixed_fetch_baseline = """
+        WITH impr AS (
+            SELECT campaign_id, count() AS impr_n
+            FROM adpx_impressions_details
+            PREWHERE toYYYYMM(created_at) >= {partition: UInt32}
+            WHERE created_at >= today() - {days: UInt32}
+            GROUP BY campaign_id
+        ),
+        conv AS (
+            SELECT campaign_id, count() AS conv_n, sum(toFloat64OrNull(revenue)) AS revenue
+            FROM adpx_conversionsdetails
+            PREWHERE toYYYYMM(created_at) >= {partition: UInt32}
+            GROUP BY campaign_id
+        )
+        SELECT impr.campaign_id, impr.impr_n, conv.conv_n, conv.revenue
+        FROM impr
+        LEFT JOIN conv ON conv.campaign_id = impr.campaign_id
+        LIMIT 1000
+        """
+        warnings = _validate_sql_query(fixed_fetch_baseline)
+        fanout_hits = [w for w in warnings if "fan-out" in w]
+        if fanout_hits:
+            return False, f"false positive fan-out warning on fixed _fetch_baseline shape: {fanout_hits}"
+        yyyymm_hits = [w for w in warnings if "toYYYYMM" in w]
+        if yyyymm_hits:
+            return False, f"false positive toYYYYMM warning on fixed _fetch_baseline shape: {yyyymm_hits}"
+
+        # Reconstructed pre-fix buggy shape: two raw event-grain fact tables
+        # joined directly with no pre-aggregation — the actual PR #357 bug shape.
+        buggy_fanout = """
+        SELECT i.campaign_id, count(i.session_id) AS impressions, count(cd.session_id) AS conversions
+        FROM adpx_impressions_details i
+        LEFT JOIN adpx_conversionsdetails cd ON cd.session_id = i.session_id
+        WHERE i.created_at >= today() - 7
+        LIMIT 1000
+        """
+        warnings = _validate_sql_query(buggy_fanout)
+        if not any("fan-out" in w for w in warnings):
+            return False, f"fan-out warning not raised on reconstructed buggy join shape: {warnings}"
+
+        # Bare created_at filter without toYYYYMM() wrap — skips partition pruning.
+        bare_created_at = """
+        SELECT count() FROM adpx_conversionsdetails
+        PREWHERE user_id = 1
+        WHERE created_at >= today() - 7
+        LIMIT 1000
+        """
+        warnings = _validate_sql_query(bare_created_at)
+        if not any("toYYYYMM" in w for w in warnings):
+            return False, f"toYYYYMM warning not raised on bare created_at filter: {warnings}"
+
+        # Clean single-table query — no fact-table join, no date filter concern.
+        clean_query = "SELECT count() FROM adpx_sdk_sessions PREWHERE toYYYYMM(created_at) >= 202601 WHERE created_at >= today() - 7 LIMIT 1000"
+        warnings = _validate_sql_query(clean_query)
+        if warnings:
+            return False, f"unexpected warnings on clean single-table query: {warnings}"
+
+        return True, "fan-out + toYYYYMM heuristics: no false positives on fixed PR #357 shapes, catch buggy fan-out and unpruned created_at"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_validate_sql_query scopes toYYYYMM checks per-table, doesn't leak a CTE's filter to a sibling table (CodeRabbit PR #359)")
+def test_validate_sql_query_cross_cte_scoping():
+    try:
+        from scout_agent import _validate_sql_query, _fact_table_fanout_warnings
+        import scout_agent
+
+        # One large table correctly filtered with toYYYYMM(created_at) inside its
+        # own CTE; a second large table referenced at the top level with only a
+        # bare created_at filter. The correct CTE's filter must NOT mask the
+        # missing toYYYYMM wrap on the second table.
+        cross_cte = """
+        WITH sessions AS (
+            SELECT session_id, count() AS n
+            FROM adpx_sdk_sessions
+            PREWHERE toYYYYMM(created_at) = toYYYYMM(now())
+            GROUP BY session_id
+        )
+        SELECT s.session_id, i.impression_id
+        FROM sessions s
+        JOIN adpx_impressions_details i ON s.session_id = i.session_id
+        WHERE i.created_at >= now() - INTERVAL 1 DAY
+        LIMIT 100
+        """
+        warnings = _validate_sql_query(cross_cte)
+        if not any("toYYYYMM" in w and "adpx_impressions_details" in w for w in warnings):
+            return False, f"expected toYYYYMM warning on adpx_impressions_details, leaked from sibling CTE: {warnings}"
+        if any("adpx_sdk_sessions" in w for w in warnings):
+            return False, f"adpx_sdk_sessions is correctly filtered in its own CTE, should not warn: {warnings}"
+
+        # A plain function call at the top level, e.g. toYYYYMM(created_at) inside
+        # a top-level WHERE, must NOT be masked out by the CTE-scoping logic —
+        # only parens containing a SELECT (real subqueries/CTEs) get masked.
+        top_level_yyyymm = """
+        SELECT c.campaign_id, k.campaign_id
+        FROM adpx_conversionsdetails c
+        JOIN adpx_tracked_clicks k ON c.campaign_id = k.campaign_id
+        WHERE toYYYYMM(c.created_at) = toYYYYMM(now())
+        LIMIT 100
+        """
+        warnings = _validate_sql_query(top_level_yyyymm)
+        if any("toYYYYMM" in w for w in warnings):
+            return False, f"toYYYYMM() at the top level was incorrectly masked as if inside a CTE: {warnings}"
+
+        # A SQL string _fact_table_fanout_warnings can't parse must surface a
+        # non-silent sentinel warning, not an empty list (CodeRabbit finding:
+        # bare `except Exception: return []` hid parse failures as "clean").
+        orig_paren_scopes = scout_agent._paren_scopes
+        try:
+            scout_agent._paren_scopes = lambda sql: (_ for _ in ()).throw(ValueError("forced parse failure"))
+            forced = _fact_table_fanout_warnings("SELECT 1 FROM adpx_conversionsdetails")
+            if not forced or "unavailable" not in forced[0]:
+                return False, f"expected non-empty sentinel warning on parse failure, got: {forced}"
+        finally:
+            scout_agent._paren_scopes = orig_paren_scopes
+
+        return True, "toYYYYMM checks are scope-aware (no cross-CTE leakage), top-level function calls unaffected, parse failures surface a sentinel warning"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_fact_table_fanout_warnings catches fact tables joined then grouped in the same scope (CodeRabbit PR #359)")
+def test_fanout_detects_same_scope_post_join_aggregation():
+    try:
+        from scout_agent import _fact_table_fanout_warnings
+
+        # Both fact tables joined directly inside one CTE, GROUP BY only at the
+        # end — the join already ran at full event grain before the group-by.
+        buggy_same_scope = """
+        WITH joined AS (
+            SELECT c.campaign_id, count() AS n
+            FROM adpx_conversionsdetails c
+            JOIN adpx_tracked_clicks k ON c.click_id = k.click_id
+            GROUP BY c.campaign_id
+        )
+        SELECT * FROM joined LIMIT 100
+        """
+        warnings = _fact_table_fanout_warnings(buggy_same_scope)
+        if not any("fan-out" in w for w in warnings):
+            return False, f"expected fan-out warning for same-scope join-then-group, got: {warnings}"
+
+        # Each fact table pre-aggregated in its own CTE before the parent join —
+        # no fan-out.
+        fixed_separate_ctes = """
+        WITH c AS (
+            SELECT campaign_id, count() AS n FROM adpx_conversionsdetails GROUP BY campaign_id
+        ), k AS (
+            SELECT campaign_id, count() AS n FROM adpx_tracked_clicks GROUP BY campaign_id
+        )
+        SELECT c.campaign_id FROM c JOIN k ON c.campaign_id = k.campaign_id LIMIT 100
+        """
+        warnings = _fact_table_fanout_warnings(fixed_separate_ctes)
+        if warnings:
+            return False, f"expected no fan-out warning for pre-aggregated CTEs, got: {warnings}"
+
+        return True, "same-scope post-join GROUP BY no longer counts as pre-aggregation; separate-CTE pre-aggregation still clears"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("_validate_sql_query surfaces a sentinel warning (not a raise or silent skip) on malformed parens (CodeRabbit PR #359)")
+def test_validate_sql_query_malformed_parens_sentinel():
+    try:
+        from scout_agent import _validate_sql_query
+
+        unclosed = "SELECT * FROM adpx_conversionsdetails WHERE (a = 1 LIMIT 100"
+        warnings = _validate_sql_query(unclosed)
+        if not any("could not parse parentheses" in w for w in warnings):
+            return False, f"expected 'could not parse parentheses' sentinel for unclosed paren, got: {warnings}"
+
+        stray_close = "SELECT * FROM adpx_conversionsdetails WHERE a = 1) LIMIT 100"
+        warnings = _validate_sql_query(stray_close)
+        if not any("could not parse parentheses" in w for w in warnings):
+            return False, f"expected 'could not parse parentheses' sentinel for stray ')', got: {warnings}"
+
+        return True, "_validate_sql_query never raises on malformed parens and surfaces an explicit sentinel warning instead of silently skipping scope-aware checks"
+    except Exception as e:
+        return False, str(e)
+
+
+@test("run_sql_query surfaces _validate_sql_query warnings in data_quality, not just server logs (CodeRabbit PR #359)")
+def test_run_sql_query_surfaces_validation_warnings():
+    try:
+        import scout_agent
+        stub_warnings = ["missing PREWHERE on large table: adpx_conversionsdetails"]
+        orig_validate = scout_agent._validate_sql_query
+        orig_get_ch = scout_agent._get_ch_client
+
+        class _FakeResult:
+            result_rows = [("acme", 42)]
+            column_names = ["name", "value"]
+
+        class _FakeClient:
+            def query(self, sql, settings=None):
+                return _FakeResult()
+
+        try:
+            scout_agent._validate_sql_query = lambda sql: list(stub_warnings)
+            scout_agent._get_ch_client = lambda: _FakeClient()
+            result = scout_agent.run_sql_query("SELECT name, value FROM adpx_conversionsdetails")
+        finally:
+            scout_agent._validate_sql_query = orig_validate
+            scout_agent._get_ch_client = orig_get_ch
+
+        dq = result.get("data_quality", {})
+        if dq.get("warnings") != stub_warnings:
+            return False, f"expected data_quality['warnings'] == {stub_warnings}, got: {dq.get('warnings')}"
+        if "1 validation warning" not in dq.get("note", ""):
+            return False, f"expected note to mention warning count, got: {dq.get('note')}"
+        return True, "run_sql_query wires _validate_sql_query warnings into the returned data_quality block"
+    except Exception as e:
+        return False, str(e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_tests(quiet: bool = False) -> tuple[list[dict], int]:

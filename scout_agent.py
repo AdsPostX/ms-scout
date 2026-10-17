@@ -3831,36 +3831,219 @@ _LARGE_TABLES = (
     "adpx_conversionsdetails",
 )
 
+# Event-grain fact tables that can carry multiple rows per (session_id, campaign_id).
+# Joining two of these directly — without pre-aggregating each side to one row per
+# join key first, in its own CTE or derived subquery — fans out and inflates
+# sums/counts. This is the bug class fixed in PR #357 (publisher_health_ad_metrics,
+# get_advertiser_revenue_projection._fetch_baseline).
+_FACT_TABLES = (
+    "adpx_conversionsdetails",
+    "adpx_impressions_details",
+    "adpx_tracked_clicks",
+)
+
+
+def _paren_scopes(sql: str) -> tuple:
+    """
+    Paren-depth scan shared by every scope-aware SQL heuristic below. Returns
+    (enclosing_start, enclosing_end, n): enclosing_start[i] is the index of the
+    '(' innermost-enclosing position i (None if top-level), enclosing_end maps
+    an open-paren index to its matching close, n is len(sql).
+
+    Depth tracking only, not a full parser — real queries here (CTE or
+    inline-derived-subquery style) parse correctly. Raises ValueError on
+    malformed parens (stray ')' or unclosed '(') — never return a scope result
+    for SQL that couldn't be scoped (CodeRabbit, PR #359).
+    """
+    n = len(sql)
+    stack: list = []
+    enclosing_start = [None] * n
+    enclosing_end: dict = {}
+    for idx, ch in enumerate(sql):
+        if ch == "(":
+            enclosing_start[idx] = stack[-1] if stack else None
+            stack.append(idx)
+        elif ch == ")":
+            if not stack:
+                raise ValueError(f"unmatched ')' at position {idx}")
+            open_idx = stack.pop()
+            enclosing_start[idx] = open_idx
+            enclosing_end[open_idx] = idx
+        else:
+            enclosing_start[idx] = stack[-1] if stack else None
+    if stack:
+        raise ValueError(f"unclosed '(' at position {stack[0]}")
+    return enclosing_start, enclosing_end, n
+
+
+def _scope_span(pos: int, enclosing_start: list, enclosing_end: dict, n: int):
+    """Innermost enclosing (start, end) span for `pos`, per `_paren_scopes`.
+
+    Returns None when `pos` is top-level (not inside any CTE/derived subquery).
+    """
+    open_idx = enclosing_start[pos]
+    if open_idx is None:
+        return None
+    return open_idx, enclosing_end.get(open_idx, n)
+
+
+def _fact_table_fanout_warnings(sql: str) -> list:
+    """
+    Heuristic fan-out detector. For each reference to a table in _FACT_TABLES,
+    finds its innermost enclosing parenthesized scope (CTE body or inline
+    derived subquery). "Pre-aggregated" requires BOTH (a) that scope has a
+    GROUP BY, AND (b) no *other* distinct fact table is referenced directly in
+    that same scope — a scope's GROUP BY only proves rows were reduced AFTER
+    joins ran inside it, so two fact tables joined then grouped in one scope
+    still fanned out at full event grain first (CodeRabbit, PR #359).
+
+    A reference with no enclosing scope is always "unaggregated". Warns when 2+
+    distinct fact tables have unaggregated references. Unparseable SQL means
+    "unchecked", not "no fan-out" — returns a sentinel warning instead.
+    """
+    warnings: list = []
+    try:
+        sql_upper = sql.upper()
+        enclosing_start, enclosing_end, n = _paren_scopes(sql)
+
+        # scope -> set of distinct fact tables referenced directly within it
+        # (None key = top-level, i.e. not inside any CTE/derived subquery).
+        scope_tables: dict = {}
+        table_scope_refs: dict = {t: [] for t in _FACT_TABLES}
+        for table in _FACT_TABLES:
+            for m in re.finditer(r"\b" + table.upper() + r"\b", sql_upper):
+                span = _scope_span(m.start(), enclosing_start, enclosing_end, n)
+                table_scope_refs[table].append(span)
+                scope_tables.setdefault(span, set()).add(table)
+
+        unaggregated: set = set()
+        for table in _FACT_TABLES:
+            for span in table_scope_refs[table]:
+                if span is None:
+                    unaggregated.add(table)
+                    continue
+                if len(scope_tables[span]) > 1:
+                    # a distinct fact table shares this scope — any GROUP BY here runs after that join.
+                    unaggregated.add(table)
+                    continue
+                open_idx, close_idx = span
+                if "GROUP BY" not in sql_upper[open_idx:close_idx]:
+                    unaggregated.add(table)
+
+        distinct_unaggregated = sorted(unaggregated)
+        if len(distinct_unaggregated) >= 2:
+            warnings.append(
+                f"possible fan-out: {', '.join(distinct_unaggregated)} joined without "
+                "each side pre-aggregated (GROUP BY on the join key in its own CTE or "
+                "derived subquery) before the join — see PR #357"
+            )
+    except Exception as e:
+        log.warning("fan-out check failed to parse SQL, treating as unchecked: %s", e)
+        return [f"fan-out check unavailable — SQL failed to parse for join analysis ({e})"]
+
+    return warnings
+
 
 def _validate_sql_query(sql: str) -> list:
     """
     Lightweight safety validator for run_sql_query.
 
     Returns a list of warning strings (empty = clean). NEVER blocks execution —
-    callers should log the warnings but proceed. Heuristics:
-      - References a large table without PREWHERE → warn
-      - References a large table without any created_at filter → warn
-      - Lacks any LIMIT clause → warn
+    callers log the warnings but proceed. Heuristics:
+      - Large table without PREWHERE → warn
+      - Large table without any created_at filter → warn
+      - created_at filtered without a toYYYYMM(created_at) partition-pruning
+        wrap → warn (all 4 _LARGE_TABLES are partitioned by toYYYYMM(created_at))
+      - 2+ event-grain fact tables joined without pre-aggregating each side
+        first → warn (see _fact_table_fanout_warnings, PR #357)
+      - No LIMIT clause → warn
+
+    PREWHERE/created_at/toYYYYMM checks are scope-aware: each table reference is
+    checked within its own innermost enclosing CTE/derived subquery — a
+    toYYYYMM(created_at) filter in one CTE doesn't clear a missing filter on a
+    different large table elsewhere in the query (CodeRabbit, PR #359).
     """
     warnings: list = []
     if not sql or not isinstance(sql, str):
         return warnings
 
     sql_upper = sql.upper()
-    has_prewhere = bool(re.search(r"\bPREWHERE\b", sql_upper))
-    # Only treat created_at as a date filter when it appears in a PREWHERE/WHERE
-    # clause — references in SELECT columns or ORDER BY don't filter rows.
-    has_created_at = bool(
-        re.search(r"\b(?:PREWHERE|WHERE)\b[\s\S]*?\bCREATED_AT\b", sql_upper)
-    )
     has_limit = bool(re.search(r"\bLIMIT\b", sql_upper))
 
+    try:
+        enclosing_start, enclosing_end, n = _paren_scopes(sql)
+    except Exception as e:
+        # Malformed parens — never block execution, but say explicitly that
+        # scope-aware checks were skipped rather than silently reporting clean.
+        log.warning("SQL validator: could not parse parens, scope-aware checks skipped: %s", e)
+        warnings.append(f"SQL validator could not parse parentheses — PREWHERE/date-filter checks skipped ({e})")
+        warnings.extend(_fact_table_fanout_warnings(sql))
+        if not has_limit:
+            warnings.append("no LIMIT clause")
+        return warnings
+
+    # Top-level table refs check against top-level clauses only, not a sibling
+    # CTE's filters. Mask only top-level parens that are a subquery/CTE body
+    # (contain SELECT) — a bare toYYYYMM(created_at) call in a top-level WHERE
+    # must stay unmasked.
+    depth1_spans = [
+        (open_idx, enclosing_end[open_idx])
+        for open_idx in enclosing_end
+        if enclosing_start[open_idx] is None
+    ]
+    mask_chars = [False] * n
+    for open_idx, close_idx in depth1_spans:
+        if re.search(r"\bSELECT\b", sql_upper[open_idx:close_idx]):
+            for i in range(open_idx, close_idx + 1):
+                mask_chars[i] = True
+    top_level_text = "".join(
+        " " if mask_chars[i] else c for i, c in enumerate(sql_upper)
+    )
+
+    table_warnings: list = []
     for table in _LARGE_TABLES:
-        if re.search(r"\b" + re.escape(table) + r"\b", sql, re.IGNORECASE):
+        seen_scopes = set()
+        for m in re.finditer(r"\b" + re.escape(table) + r"\b", sql, re.IGNORECASE):
+            span = _scope_span(m.start(), enclosing_start, enclosing_end, n)
+            scope = span if span is not None else (0, n)
+            if scope in seen_scopes:
+                continue
+            seen_scopes.add(scope)
+
+            scope_text = sql_upper[scope[0]:scope[1]] if span is not None else top_level_text
+            has_prewhere = bool(re.search(r"\bPREWHERE\b", scope_text))
+            # Only treat created_at as a date filter when it appears in a
+            # PREWHERE/WHERE clause — references in SELECT columns or ORDER BY
+            # don't filter rows.
+            has_created_at = bool(
+                re.search(r"\b(?:PREWHERE|WHERE)\b[\s\S]*?\bCREATED_AT\b", scope_text)
+            )
+            has_yyyymm_filter = bool(
+                re.search(
+                    r"\b(?:PREWHERE|WHERE)\b[\s\S]*?TOYYYYMM\s*\(\s*[\w.]*CREATED_AT",
+                    scope_text,
+                )
+            )
+
             if not has_prewhere:
-                warnings.append(f"missing PREWHERE on large table: {table}")
+                table_warnings.append(f"missing PREWHERE on large table: {table}")
             if not has_created_at:
-                warnings.append(f"no date filter on large table: {table}")
+                table_warnings.append(f"no date filter on large table: {table}")
+            elif not has_yyyymm_filter:
+                table_warnings.append(
+                    f"created_at filtered without toYYYYMM() wrap on large table: "
+                    f"{table} — skips partition pruning, scans every month"
+                )
+
+    # Same table can be unfiltered in more than one scope — dedupe identical
+    # messages (the text doesn't name the scope) while preserving first-seen order.
+    seen_msgs = set()
+    for w in table_warnings:
+        if w not in seen_msgs:
+            seen_msgs.add(w)
+            warnings.append(w)
+
+    warnings.extend(_fact_table_fanout_warnings(sql))
 
     if not has_limit:
         warnings.append("no LIMIT clause")
@@ -3966,9 +4149,11 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
             "sql": sql_stripped,
         }
 
-    # Safety gate — log warnings for queries hitting large tables without filters.
-    # Logs only — does NOT block execution.
-    for _warning in _validate_sql_query(sql_stripped):
+    # Safety gate — never blocks execution. Warnings are logged for ops AND
+    # surfaced in the response's data_quality block below — Scout never
+    # surfaces unverified data silently (see CLAUDE.md).
+    sql_warnings = _validate_sql_query(sql_stripped)
+    for _warning in sql_warnings:
         log.warning("sql_query safety: %s", _warning)
 
     # Inject LIMIT if not present
@@ -4009,6 +4194,17 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
         if col_names:
             rows_as_dicts, col_names = _filter_non_id_columns(rows_as_dicts, col_names)
 
+        data_quality = {
+            "tier": "free_form",
+            "note": f"Live query — {len(rows_as_dicts)} rows.",
+        }
+        if sql_warnings:
+            data_quality["warnings"] = sql_warnings
+            data_quality["note"] += (
+                f" ⚠ {len(sql_warnings)} validation warning(s) — see 'warnings' "
+                "(query still ran; results may be unfiltered/fanned-out)."
+            )
+
         return {
             "description": description,
             "sql_run": sql_stripped,
@@ -4017,10 +4213,7 @@ def run_sql_query(sql: str, description: str = "", max_rows: int = 500) -> dict:
             "truncation_note": f"Results limited to {max_rows} rows. Add LIMIT to your query to control this." if truncated else None,
             "columns": col_names,
             "rows": rows_as_dicts,
-            "data_quality": {
-                "tier": "free_form",
-                "note": f"Live query — {len(rows_as_dicts)} rows.",
-            },
+            "data_quality": data_quality,
         }
     except Exception as e:
         err = str(e)
